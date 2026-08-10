@@ -24,5 +24,7 @@ perf.data.old
 # .idea/
 # .vscode/
 
-# Own notes
+# Local stuff
 NOTES/
+experiments/
+experiments-compiled/
