@@ -27,6 +27,6 @@ perf.data.old
 # Local stuff
 NOTES/
 experiments/
-bin/exp/
+bin/
 tmp/
 repos/
