@@ -14,7 +14,7 @@
 #include <sys/mount.h>
 #include <sys/wait.h>
 
-
+// error enums for child process stages
 enum child_stage {
     STAGE_UNSHARE,
     STAGE_SETGROUPS,
@@ -26,6 +26,7 @@ enum child_stage {
     STAGE_COUNT
 };
 
+// string representations of the child process stage errors enum
 static const char *stage_names[] = {
     "unshare",
     "setgroups",
@@ -39,7 +40,7 @@ static const char *stage_names[] = {
 _Static_assert(sizeof stage_names / sizeof stage_names[0] == STAGE_COUNT, "stage_names out of sync with enum child_stage");
 
 /*
- * error struct for child to notify the parent what failed
+ * error struct for child to notify the parent what failed.
  *
 */
 struct child_err {
@@ -58,7 +59,7 @@ int mkdir_p(const char *path, mode_t mode) {
     }
 
     // Copy the string for inplace modification;
-    // Don't alter the original, passed string
+    // Don't alter the original, passed string.
     char path_c[PATH_MAX];
     if (strlen(path) >= sizeof path_c) {
         errno = ENAMETOOLONG;
@@ -66,7 +67,7 @@ int mkdir_p(const char *path, mode_t mode) {
     }
     strcpy(path_c, path);
 
-    // Eliminate the trailing slashes, replace with nullterm
+    // Eliminate the trailing slashes, replace with nullterm.
     size_t idx = strlen(path_c) - 1;
     while (idx > 0 && path_c[idx] == '/') {
         path_c[idx--] = '\0';
@@ -95,7 +96,7 @@ int mkdir_p(const char *path, mode_t mode) {
 
 /*
  *  Helper func for failing child gracefully;
- *  Notifies the parent about the fail mode
+ *  Notifies the parent about the fail mode.
 */
 _Noreturn void child_fail(int errfd, enum child_stage stage, int err) {
     struct child_err e = { stage, err };
@@ -108,7 +109,7 @@ _Noreturn void child_fail(int errfd, enum child_stage stage, int err) {
 
 /*
  *  Child process branch after the fork;
- *  unshares, writes deny setgroups, maps uid & gid, mounts the overlay and execls. 
+ *  unshares, writes deny setgroups, maps uid & gid, mounts the overlay and execls.
  * 
 */
 _Noreturn void child_main(const char *curr_sesh_dir, int errfd, uid_t uid, gid_t gid) {
@@ -119,7 +120,7 @@ _Noreturn void child_main(const char *curr_sesh_dir, int errfd, uid_t uid, gid_t
 
     int fd = open("/proc/self/setgroups", O_WRONLY);
     if (fd == -1) {
-        if (errno != ENOENT) {
+        if (errno == ENOENT) {
             fprintf(stderr, "warn: setgroups not supported, continuing\n");
         } else {
             child_fail(errfd, STAGE_SETGROUPS, errno);
@@ -199,7 +200,9 @@ _Noreturn void child_main(const char *curr_sesh_dir, int errfd, uid_t uid, gid_t
 }
 
 /*
- *  Parent process branch after the fork
+ *  Parent process branch after the fork;
+ *  Awaits read buffer from child, decodes and prints error if present.
+ *  Also awaits waitpid(), checks status and reports back accordingly.
  *
 */
 int parent_main(int errfd, pid_t pid) {
@@ -245,7 +248,7 @@ int parent_main(int errfd, pid_t pid) {
 
 int main(void) {
     // Get XDG_STATE_HOME env var; If not present, default to HOME;
-    // Construct belay's session dirs there
+    // Construct belay's session dirs there.
     const char *state_dir = getenv("XDG_STATE_HOME");
     char fallback_buf[PATH_MAX];
     if (!state_dir || state_dir[0] != '/') {
@@ -284,7 +287,7 @@ int main(void) {
     }
     
     // Generate the current session dir name, timestamp + random suffix;
-    // Ensures human-readable sorting and collision-free naming
+    // Ensures human-readable sorting and collision-free naming.
     char ts[32];
     time_t now = time(NULL);
     n = strftime(ts, sizeof ts, "%Y%m%d-%H%M%S", localtime(&now));
@@ -319,17 +322,22 @@ int main(void) {
         }
     }
 
-    // Save the OS-level user and group ids
+    // Save the OS-level user and group ids;
+    // Captured before unshare to record the original uid/gid instead of the in-ns ones.
     const uid_t uid = getuid();
     const gid_t gid = getgid();
 
-    // Piping for setup comms between the parent and the child process after forking
+    // Piping for setup comms between the parent and the child process after forking;
+    // Either child reports an error, or empty + EOF on success.
     int fd[2];
     if (pipe2(fd, O_CLOEXEC) == -1) {
         perror("pipe2");
         return 1;
     }
 
+    // fork() before the unshare is deliberate;
+    // It's supposed to keep the parent as a supervisor, so something can monitor the child setup,
+    // and later allow major belay capabilities.
     pid_t pid = fork();
     if (pid == -1) {
         perror("fork");
@@ -340,7 +348,7 @@ int main(void) {
         close(fd[0]);
         child_main(curr_sesh_dir, fd[1], uid, gid);
     } else {
-        close(fd[1]);
+        close(fd[1]); // MUST BE CLOSED, otherwise waits indefinitely for EOF - a deadlock scenario.
         return parent_main(fd[0], pid);
     }
 
