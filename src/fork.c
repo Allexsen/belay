@@ -13,6 +13,7 @@
 #include <sched.h>
 #include <sys/mount.h>
 #include <sys/wait.h>
+#include <sys/syscall.h>
 
 // error enums for child process stages
 enum child_stage {
@@ -22,6 +23,8 @@ enum child_stage {
     STAGE_GID_MAP,
     STAGE_MOUNT_PRIVATE,
     STAGE_MOUNT_OVERLAY,
+    STAGE_PIVOT,
+    STAGE_REMOUNT_PROC,
     STAGE_EXEC,
     STAGE_COUNT
 };
@@ -34,6 +37,8 @@ static const char *stage_names[] = {
     "gid_map",
     "mount_private",
     "mount_overlay",
+    "pivot_root",
+    "remount",
     "exec"
 };
 
@@ -47,6 +52,14 @@ struct child_err {
     enum child_stage stage; // which step failed
     int err; // captured errno
 };
+
+/*
+ *  minimalistic static wrapper for pivot_root syscall;
+ *  
+*/
+static int pivot_root(const char *new_root, const char *put_old) {
+    return (int)syscall(SYS_pivot_root, new_root, put_old);
+}
 
 /* 
  *  mkdir_p(const char*, mode_t) takes a fs path,
@@ -178,6 +191,24 @@ _Noreturn void child_main(const char *curr_sesh_dir, int errfd, uid_t uid, gid_t
         child_fail(errfd, STAGE_MOUNT_PRIVATE, errno);
     }
 
+    /*
+     *  BLOCKED 2026-09-01: this single-overlay design cannot reach v0.1.
+     *  `lowerdir=/` is refused by overlayfs -- bare EINVAL here, and
+     *  "overlayfs: failed to clone lowerpath" in dmesg. Verified NOT caused by
+     *  upper's location (tmpfs upper on its own mount fails the same) nor by uid
+     *  mapping (identity map and map-root both fail). binpash/try hit this too
+     *  and says so at try:145.
+     *
+     *  Replacement is one overlay per top-level directory of /, each with its own
+     *  upper/<name> and work/<name>, mounted onto temproot/<name>; pivot_root then
+     *  targets temproot. Enumerate / at runtime (opendir/readdir), never a
+     *  hardcoded list. Symlinked top-level entries (/bin, /lib) get recreated as
+     *  symlinks, not overlaid. /proc /dev /sys are skipped here -- STAGE_REMOUNT_PROC.
+     *  Design + eliminated alternatives: NOTES/BELAY_REFERENCE.md, "Per-directory overlays".
+     *
+     *  Until that lands, lowerdir stays a single directory so the fork still runs
+     *  end to end and pivot_root remains exercisable.
+     */
     char opts[PATH_MAX + 64];
     char merged_path[PATH_MAX];
 
@@ -195,6 +226,28 @@ _Noreturn void child_main(const char *curr_sesh_dir, int errfd, uid_t uid, gid_t
         child_fail(errfd, STAGE_MOUNT_OVERLAY, errno);
     }
 
+    if (chdir(merged_path) == -1) {
+        child_fail(errfd, STAGE_PIVOT, errno);
+    }
+
+    if (pivot_root(".", ".") == -1) {
+        child_fail(errfd, STAGE_PIVOT, errno);
+    }
+
+    if (umount2(".", MNT_DETACH) == -1) {
+        child_fail(errfd, STAGE_PIVOT, errno);
+    }
+
+    if (chdir("/") == -1) {
+        child_fail(errfd, STAGE_PIVOT, errno);
+    }
+
+    /*  
+     *  TODO(fork): move to $SHELL instead of hardcoding bash before public release.
+     *  argv[0] must NOT be a leading '-': it's a login shell, which re-reads profile scripts;
+     *  belay wants non-login. Fallback chain == getpwuid(getuid)) -> pw_shell, then hardcoding /bin/sh.
+     * 
+    */
     execl("/bin/bash", "bash", (char *)NULL);
     child_fail(errfd, STAGE_EXEC, errno);
 }
