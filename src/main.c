@@ -14,9 +14,9 @@ int main (int argc, char *argv[]) {
         return 1;
     }
 
-    int rc = forkp(curr_sesh_dir);
-    if (rc != 0)
-        return rc;
+    int rcode = forkp(curr_sesh_dir);
+    if (rcode != 0)
+        return rcode;
 
     return 0;
 }

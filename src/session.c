@@ -85,7 +85,7 @@ int construct_sesh_dir(char *out, size_t outsz) {
  *  work/ - clean dir required by kernel for mounting operations.
 */
 int create_sesh_layout(const char *curr_sesh_dir) {
-    const char *dirs[] = {"upper", "work", "temproot"};
+    const char *dirs[] = {SESH_UPPER, SESH_WORK, SESH_TEMPROOT};
     for (size_t i=0; i < sizeof dirs / sizeof dirs[0]; i++) {
         char path_abs[PATH_MAX];
         int wrsz = snprintf(path_abs, sizeof path_abs, "%s/%s", curr_sesh_dir, dirs[i]);
@@ -99,6 +99,42 @@ int create_sesh_layout(const char *curr_sesh_dir) {
             perror(path_abs);
             return -1;
         }
+    }
+
+    return 0;
+}
+
+/*
+ * Joins the session path and the layout subdir.
+ *
+*/
+int sesh_layout_path(char *out, size_t outsz, const char *sesh_dir, const char *subdir) {
+    int wrsz = snprintf(out, outsz, "%s/%s", sesh_dir, subdir);
+    if (wrsz < 0) {
+        return -1;
+    }
+
+    if (wrsz >= (int)outsz) {
+        errno = ENAMETOOLONG;
+        return -1;
+    }
+
+    return 0;
+}
+
+/*
+ * Joins the session path into the layout subdir into the actual entry dir.
+ *
+*/
+int sesh_entry_path(char *out, size_t outsz, const char *sesh_dir, const char *subdir, const char *entrydir) {
+    int wrsz = snprintf(out, outsz, "%s/%s/%s", sesh_dir, subdir, entrydir);
+    if (wrsz < 0) {
+        return -1;
+    }
+    
+    if (wrsz >= (int)outsz) {
+        errno = ENAMETOOLONG;
+        return -1;
     }
 
     return 0;

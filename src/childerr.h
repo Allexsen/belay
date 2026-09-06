@@ -23,5 +23,5 @@ struct child_err {
     int err; // captured errno
 };
 
-_Noreturn void child_fail(int, enum child_stage, int);
+_Noreturn void child_fail(int errfd, enum child_stage stage, int err);
 const char *stage_name(enum child_stage stage);

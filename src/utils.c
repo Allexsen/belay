@@ -53,3 +53,16 @@ int mkdir_p(const char *path, mode_t mode) {
 
     return 0;
 }
+
+/*
+ *  Check if the list contains the given entry.
+ *
+*/
+int contains(const char *list[], size_t len, const char *entry) {
+    for (size_t i = 0; i < len; i++) {
+        if (strcmp(entry, list[i]) == 0)
+            return 1;
+    }
+
+    return 0;
+}

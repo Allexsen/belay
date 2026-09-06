@@ -2,6 +2,7 @@
 #include "fork.h"
 #include "childerr.h"
 #include "rootfs.h"
+#include "session.h"
 
 #include <unistd.h>
 #include <limits.h>
@@ -91,39 +92,17 @@ _Noreturn void child_main(const char *curr_sesh_dir, int errfd, uid_t uid, gid_t
         child_fail(errfd, STAGE_MOUNT_PRIVATE, errno);
     }
 
-    /*
-     *  BLOCKED 2026-09-01: this single-overlay design cannot reach v0.1.
-     *  `lowerdir=/` is refused by overlayfs -- bare EINVAL here, and
-     *  "overlayfs: failed to clone lowerpath" in dmesg. Verified NOT caused by
-     *  upper's location (tmpfs upper on its own mount fails the same) nor by uid
-     *  mapping (identity map and map-root both fail). binpash/try hit this too
-     *  and says so at try:145.
-     *
-     *  Replacement is one overlay per top-level directory of /, each with its own
-     *  upper/<name> and work/<name>, mounted onto temproot/<name>; pivot_root then
-     *  targets temproot. Enumerate / at runtime (opendir/readdir), never a
-     *  hardcoded list. Symlinked top-level entries (/bin, /lib) get recreated as
-     *  symlinks, not overlaid. /proc /dev /sys are skipped here -- STAGE_REMOUNT_PROC.
-     *  Design + eliminated alternatives: NOTES/BELAY_REFERENCE.md, "Per-directory overlays".
-     *
-     *  Until that lands, lowerdir stays a single directory so the fork still runs
-     *  end to end and pivot_root remains exercisable.
-     */
-    char opts[PATH_MAX + 64];
-    char merged_path[PATH_MAX];
-
-    wrsz = snprintf(merged_path, sizeof merged_path, "%s/merged", curr_sesh_dir);
-    if (wrsz >= (int)sizeof merged_path) {
-        child_fail(errfd, STAGE_MOUNT_OVERLAY, 0);
-    }
-
-    wrsz = snprintf(opts, sizeof opts, "userxattr,lowerdir=%s/lower,upperdir=%s/upper,workdir=%s/work", curr_sesh_dir, curr_sesh_dir, curr_sesh_dir);
-    if (wrsz >= (int)sizeof opts) {
-        child_fail(errfd, STAGE_MOUNT_OVERLAY, 0);
-    }
-
-    if (mount("overlay", merged_path, "overlay", 0, opts) == -1) {
+    if (construct_temproot(curr_sesh_dir) == -1) {
         child_fail(errfd, STAGE_MOUNT_OVERLAY, errno);
+    }
+
+    char temproot_path[PATH_MAX];
+    if (sesh_layout_path(temproot_path, sizeof temproot_path, curr_sesh_dir, SESH_TEMPROOT) == -1) {
+        child_fail(errfd, STAGE_PIVOT, errno);
+    }
+
+    if (switch_root(temproot_path) == -1) {
+        child_fail(errfd, STAGE_PIVOT, errno);
     }
 
     /*  
@@ -151,7 +130,7 @@ int parent_main(int errfd, pid_t pid) {
         setup_failed = 1;
         if (readsz == (ssize_t)sizeof e) {
             const char *stg_name = stage_name(e.stage);
-            fprintf(stderr, "child process failed: %s\n", stage_name);
+            fprintf(stderr, "child process failed: %s\n", stg_name);
             if (e.err != 0) {
                 fprintf(stderr, "errno: %s\n", strerror(e.err));
             }
