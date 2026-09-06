@@ -1,23 +1,24 @@
 CC	= gcc
 CFLAGS	= -Wall -Wextra -std=c11 -Isrc -MMD -MP
 BIN	= bin/belay
+BUILD	= build
 SRC	= $(wildcard src/*.c)
-OBJ	= $(SRC:.c=.o)
+OBJ	= $(SRC:src/%.c=$(BUILD)/%.o)
 
 .PHONY: all clean
 
 all: $(BIN)
 
 $(BIN): $(OBJ) | bin
-		$(CC) -o $@ $(OBJ)
+	$(CC) -o $@ $(OBJ)
 
-src/%.o: src/%.c
-		$(CC) $(CFLAGS) -c $< -o $@
+$(BUILD)/%.o: src/%.c | $(BUILD)
+	$(CC) $(CFLAGS) -c $< -o $@
 
-bin:
-	mkdir -p bin
+$(BUILD) bin:
+	mkdir -p $@
 
 clean:
-	rm -f $(OBJ) $(OBJ:.o=.d) $(BIN)
+	rm -rf $(BUILD) $(BIN)
 
 -include $(OBJ:.o=.d)
