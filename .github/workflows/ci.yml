@@ -1,0 +1,59 @@
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+# BELAY_DESIGN.md §9.1 test matrix. All jobs gate every PR and every push to
+# main. macOS runs `make test` rather than `make check` because it covers the
+# portable engine only (checkpoint, diff, interpreters); everything in src/ is
+# currently Linux-specific (unshare, mount, pivot_root). It becomes
+# `make check` once M1 splits the portable units out.
+jobs:
+  build-linux-x86_64:
+    name: linux-x86_64
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - run: uname -m
+      - name: build + test
+        run: make check
+
+  build-linux-arm64:
+    name: linux-arm64
+    runs-on: ubuntu-24.04-arm
+    steps:
+      - uses: actions/checkout@v4
+      - run: uname -m
+      - name: build + test
+        run: make check
+
+  test-macos:
+    name: macos-portable
+    runs-on: macos-14
+    steps:
+      - uses: actions/checkout@v4
+      - run: uname -m
+      - name: test
+        run: make test
+
+  dco:
+    name: dco
+    runs-on: ubuntu-24.04
+    # §4.5: Apache-2.0 + DCO sign-off, enforced from 2026-10-20 forward.
+    # Comparing base..head means pre-cutoff commits are never examined, so the
+    # no-backfill decision is structural rather than a hardcoded date.
+    if: github.event_name == 'pull_request'
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: check Signed-off-by on new commits
+        env:
+          BASE: ${{ github.event.pull_request.base.sha }}
+          HEAD: ${{ github.event.pull_request.head.sha }}
+        run: ./scripts/check-dco.sh "$BASE" "$HEAD"
