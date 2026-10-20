@@ -47,7 +47,7 @@ SAN_FLAGS	= -fsanitize=address,undefined -fno-omit-frame-pointer -g -O1
 SAN_BUILD	= $(BUILD)/san
 SAN_TEST_BIN	= $(TEST_SRC:test/%.c=$(SAN_BUILD)/test/%)
 
-.PHONY: all clean test check check-san fuzz platform
+.PHONY: all clean test check check-san fuzz bench platform
 
 all: $(BIN)
 
@@ -108,6 +108,17 @@ FUZZ_SECS	?= 30
 $(BUILD)/fuzz/%: test/fuzz/%.c $(CORE_SRC)
 	@mkdir -p $(dir $@)
 	$(CC) -fsanitize=fuzzer,address,undefined -g -O1 $(INC) -o $@ $< $(CORE_SRC)
+
+# Baseline timing (§10: measured, never a target). Not part of `check`.
+BENCH_SRC	= $(wildcard bench/*.c)
+BENCH_BIN	= $(BENCH_SRC:bench/%.c=$(BUILD)/bench/%)
+
+$(BUILD)/bench/%: bench/%.c $(CORE_OBJ)
+	@mkdir -p $(dir $@)
+	$(CC) $(CFLAGS) $(WARN) $(INC) -MMD -MP -o $@ $< $(CORE_OBJ)
+
+bench: $(BENCH_BIN)
+	@echo "built: $(BENCH_BIN)"
 
 fuzz: $(FUZZ_BIN)
 	@for f in $(FUZZ_BIN); do \
