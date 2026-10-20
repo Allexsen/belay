@@ -61,6 +61,17 @@ jobs:
       - name: asan + ubsan
         run: make check-san
 
+  fuzz:
+    name: fuzz
+    runs-on: ubuntu-24.04
+    # §0.4c: fuzz targets for the path utilities and (from phase 2.3) the
+    # manifest reader -- the two places untrusted input meets parsing.
+    # Short runs gate PRs; they are regression checks, not a fuzzing campaign.
+    steps:
+      - uses: actions/checkout@v5
+      - name: fuzz (clang/libFuzzer)
+        run: make fuzz CC=clang FUZZ_SECS=30
+
   dco:
     name: dco
     runs-on: ubuntu-24.04

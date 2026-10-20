@@ -47,7 +47,7 @@ SAN_FLAGS	= -fsanitize=address,undefined -fno-omit-frame-pointer -g -O1
 SAN_BUILD	= $(BUILD)/san
 SAN_TEST_BIN	= $(TEST_SRC:test/%.c=$(SAN_BUILD)/test/%)
 
-.PHONY: all clean test check check-san core platform
+.PHONY: all clean test check check-san fuzz platform
 
 all: $(BIN)
 
@@ -98,6 +98,22 @@ check-san: $(SAN_TEST_BIN)
 	exit $$fail
 
 check: all test
+
+# Fuzz targets (§0.4c). libFuzzer needs clang; `make fuzz CC=clang`.
+# FUZZ_SECS bounds each target so CI stays fast.
+FUZZ_SRC	= $(wildcard test/fuzz/fuzz_*.c)
+FUZZ_BIN	= $(FUZZ_SRC:test/fuzz/%.c=$(BUILD)/fuzz/%)
+FUZZ_SECS	?= 30
+
+$(BUILD)/fuzz/%: test/fuzz/%.c $(CORE_SRC)
+	@mkdir -p $(dir $@)
+	$(CC) -fsanitize=fuzzer,address,undefined -g -O1 $(INC) -o $@ $< $(CORE_SRC)
+
+fuzz: $(FUZZ_BIN)
+	@for f in $(FUZZ_BIN); do \
+		echo "== $$f ($(FUZZ_SECS)s)"; \
+		$$f -max_total_time=$(FUZZ_SECS) -print_final_stats=1 || exit 1; \
+	done
 
 bin:
 	mkdir -p $@
