@@ -18,7 +18,7 @@ jobs:
     name: linux-x86_64
     runs-on: ubuntu-24.04
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
       - run: uname -m
       - name: build + test
         run: make check
@@ -27,7 +27,7 @@ jobs:
     name: linux-arm64
     runs-on: ubuntu-24.04-arm
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
       - run: uname -m
       - name: build + test
         run: make check
@@ -36,7 +36,7 @@ jobs:
     name: macos-portable
     runs-on: macos-14
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
       - run: uname -m
       - name: test
         run: make test
@@ -49,7 +49,7 @@ jobs:
     # no-backfill decision is structural rather than a hardcoded date.
     if: github.event_name == 'pull_request'
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
         with:
           fetch-depth: 0
       - name: check Signed-off-by on new commits
