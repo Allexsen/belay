@@ -79,11 +79,11 @@ TEST(utf8_rejects_malformed) {
     ASSERT_FALSE(belay_utf8_valid("\xed\xa0\x80", 3));         /* surrogate D800 */
     ASSERT_FALSE(belay_utf8_valid("\xed\xbf\xbf", 3));         /* surrogate DFFF */
     ASSERT_FALSE(belay_utf8_valid("\xf4\x90\x80\x80", 4));     /* > U+10FFFF */
-    ASSERT_FALSE(belay_utf8_valid("\xf8\x88\x80\x80\x80", 5)); /* 5-byte form */
+    ASSERT_FALSE(belay_utf8_valid("\xf8" "\x88" "\x80" "\x80" "\x80", 5)); /* 5-byte form */
     ASSERT_FALSE(belay_utf8_valid("\xc2", 1));                 /* truncated */
     ASSERT_FALSE(belay_utf8_valid("\xe2\x82", 2));             /* truncated */
     ASSERT_FALSE(belay_utf8_valid("\xf0\x9f\x92", 3));         /* truncated */
-    ASSERT_FALSE(belay_utf8_valid("a\xffb", 3));
+    ASSERT_FALSE(belay_utf8_valid("a\xff" "b", 3));
 }
 
 /* A NUL is valid UTF-8 and valid in a JSON string, but never valid in a path.
