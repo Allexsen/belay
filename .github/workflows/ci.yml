@@ -9,10 +9,9 @@ permissions:
   contents: read
 
 # BELAY_DESIGN.md §9.1 test matrix. All jobs gate every PR and every push to
-# main. macOS runs `make test` rather than `make check` because it covers the
-# portable engine only (checkpoint, diff, interpreters); everything in src/ is
-# currently Linux-specific (unshare, mount, pivot_root). It becomes
-# `make check` once M1 splits the portable units out.
+# main, and every platform runs the full `make check`. The Linux-only session
+# tree is excluded off Linux by uname -s in the Makefile; main.c's session
+# calls are behind #ifdef __linux__.
 jobs:
   build-linux-x86_64:
     name: linux-x86_64
@@ -44,8 +43,12 @@ jobs:
       - run: uname -m
       - name: platform summary
         run: make platform
-      - name: test
-        run: make test
+      # §9.1: macOS gates the portable engine (capture/A, diff/, interp/).
+      # The Linux-only session tree is excluded by uname -s, and main.c's
+      # session calls sit behind #ifdef __linux__, so the full `make check`
+      # builds, links and tests here.
+      - name: build + test
+        run: make check
 
   sanitizers:
     name: asan-ubsan
