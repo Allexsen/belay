@@ -20,6 +20,8 @@ jobs:
     steps:
       - uses: actions/checkout@v5
       - run: uname -m
+      - name: platform summary
+        run: make platform
       - name: build + test
         run: make check
 
@@ -29,6 +31,8 @@ jobs:
     steps:
       - uses: actions/checkout@v5
       - run: uname -m
+      - name: platform summary
+        run: make platform
       - name: build + test
         run: make check
 
@@ -38,8 +42,35 @@ jobs:
     steps:
       - uses: actions/checkout@v5
       - run: uname -m
+      - name: platform summary
+        run: make platform
       - name: test
         run: make test
+
+  sanitizers:
+    name: asan-ubsan
+    runs-on: ubuntu-24.04
+    # §0.4c: ASan + UBSan gate every PR. Fuzz targets for the path utilities
+    # and the manifest reader are added by the phases that create them
+    # (M1 phase 0.3 and phase 2.3); test/fuzz/ exists for them to land in.
+    steps:
+      - uses: actions/checkout@v5
+      - run: uname -m
+      - name: platform summary
+        run: make platform
+      - name: asan + ubsan
+        run: make check-san
+
+  fuzz:
+    name: fuzz
+    runs-on: ubuntu-24.04
+    # §0.4c: fuzz targets for the path utilities and (from phase 2.3) the
+    # manifest reader -- the two places untrusted input meets parsing.
+    # Short runs gate PRs; they are regression checks, not a fuzzing campaign.
+    steps:
+      - uses: actions/checkout@v5
+      - name: fuzz (clang/libFuzzer)
+        run: make fuzz CC=clang FUZZ_SECS=30
 
   dco:
     name: dco

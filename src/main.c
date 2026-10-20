@@ -1,6 +1,6 @@
 #define _GNU_SOURCE
-#include "session.h"
-#include "fork.h"
+#include "session/session.h"
+#include "session/fork.h"
 
 #include <limits.h>
 
