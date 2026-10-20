@@ -66,6 +66,18 @@ struct belay_entry {
     char     stored_hex[65];
 
     bool     is_mount;                  /* dev differs from scope root; not descended */
+
+    /*
+     *  Set when belay could not enumerate or read this entry: an unreadable
+     *  directory (EACCES on opendir) or an unreadable file. The subtree below
+     *  an unreadable directory is ABSENT from the manifest, so `diff` must
+     *  report it as "contents unknown" and never as "unchanged".
+     *
+     *  Without this flag an unreadable directory is byte-identical to an empty
+     *  one, which would make diff claim nothing changed about files it never
+     *  saw -- the false-negative class §5.3 rules worst.
+     */
+    bool     unreadable;
 };
 
 struct belay_manifest_opts {

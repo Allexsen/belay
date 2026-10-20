@@ -68,6 +68,7 @@ of tree size.
 | `target_outside_scope` | bool | `lnk`, advisory | `true` when the target resolves lexically outside the scope. **Advisory only** — never drives a decision (§5.1.1). |
 | `stored` | string | when content was copied | the `store/` key, which is the content's sha256 |
 | `mount` | bool | `dir`, at a boundary | `true`. `dev` differs from the scope root's; belay recorded the mount point and did **not** descend (§5.1.1). |
+| `unreadable` | bool | when enumeration or reading failed | `true`. belay could not read this entry: an unreadable directory, or a file it could not open. **For a directory, the entire subtree below it is ABSENT from the manifest.** `diff` MUST report such a subtree as *contents unknown* and never as *unchanged*. Without this field an unreadable directory is byte-identical to an empty one. |
 
 Unknown fields MUST be ignored by a reader, so the format can grow.
 
@@ -82,6 +83,11 @@ POSIX paths are **bytes**, not text. They may contain anything except `/` and NU
   NUL; the reader holds a length, so the check belongs there.
 
 Sorting is on the **raw path bytes** either way, so an entry's encoding does not affect its position.
+
+**Entry paths are relative to the scope root and must stay inside it.** A reader MUST reject an
+absolute path and any path containing a `..` component. M1 only reads, but the moment anything
+restores from a manifest an accepted `../../etc/passwd` is an arbitrary write. This is the same
+hidden-traversal risk the NUL rule above exists to prevent.
 
 ## What is deliberately not recorded
 

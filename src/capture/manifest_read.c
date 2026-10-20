@@ -239,6 +239,29 @@ static int parse_entry(const char *line, struct belay_entry *e) {
     }
     if (reject_nul(e->path, e->path_len, "path") == -1) return -1;
 
+    /*
+     *  Entry paths are relative to the scope root and must stay inside it.
+     *  Rejecting ".." and absolute paths here is defence in depth: M1 only
+     *  reads, but the moment anything restores from a manifest, an accepted
+     *  "../../etc/passwd" is an arbitrary write. Found by independent review
+     *  (§0.4b) -- and the same hidden-".." risk the NUL rule exists to stop.
+     */
+    if (e->path[0] == '/') {
+        belay_err_set(BELAY_ERR_CORRUPT, 0, "manifest: entry path is absolute");
+        return -1;
+    }
+    for (size_t i = 0; i < e->path_len; i++) {
+        if (e->path[i] != '.') continue;
+        const bool at_start = (i == 0) || (e->path[i - 1] == '/');
+        if (!at_start) continue;
+        if (i + 1 < e->path_len && e->path[i + 1] == '.' &&
+            (i + 2 == e->path_len || e->path[i + 2] == '/')) {
+            belay_err_set(BELAY_ERR_CORRUPT, 0,
+                          "manifest: entry path contains a \"..\" component");
+            return -1;
+        }
+    }
+
     const char *p = find_key(line, "type");
     if (p == NULL) {
         belay_err_set(BELAY_ERR_CORRUPT, 0, "manifest: entry has no type");
@@ -363,6 +386,7 @@ static int parse_entry(const char *line, struct belay_entry *e) {
 
     e->target_outside_scope = (strstr(line, "\"target_outside_scope\":true") != NULL);
     e->is_mount             = (strstr(line, "\"mount\":true") != NULL);
+    e->unreadable           = (strstr(line, "\"unreadable\":true") != NULL);
 
     p = find_key(line, "stored");
     if (p != NULL) {

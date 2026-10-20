@@ -87,6 +87,7 @@ struct found {
     bool   unverified;
     bool   mount;
     bool   outside;
+    bool   unreadable;
     bool   seen;
     uint64_t nlink;
     uint32_t mode;
@@ -157,6 +158,7 @@ static int load(const char *mpath) {
         e->unverified = jbool(line, "unverified");
         e->mount      = jbool(line, "mount");
         e->outside    = jbool(line, "target_outside_scope");
+        e->unreadable = jbool(line, "unreadable");
         e->nlink      = jnum(line, "nlink");
         e->mode       = (uint32_t)jnum(line, "mode");
         e->seen       = true;
@@ -527,6 +529,93 @@ TEST(header_records_version_and_scope) {
     fx_rm("h");
 }
 
+/*
+ *  Found by independent review (§0.4b): an unreadable directory was silently
+ *  omitted with rc=0 and no flag, so diff would report "unchanged" about files
+ *  it never saw. The flag is what makes the omission visible.
+ */
+TEST(unreadable_directory_is_flagged_not_silently_omitted) {
+    fx_mkdir("locked");
+    fx_write("locked/hidden1", "secret", 6);
+    fx_write("locked/hidden2", "secret", 6);
+
+    char p[8192];
+    snprintf(p, sizeof p, "%s/locked", g_root);
+    if (chmod(p, 0000) != 0) return;   /* environment will not allow it */
+
+    size_t n = 0;
+    const int rc = run_check(NULL, &n);
+
+    /* Restore before asserting, so a failure does not leave an unreadable
+     * directory behind for the teardown. */
+    chmod(p, 0755);
+
+    ASSERT_EQ_INT(0, rc);
+
+    struct found *d = get("locked");
+    ASSERT_TRUE(d != NULL);
+    if (d) {
+        ASSERT_EQ_STR("dir", d->type);
+        /* The subtree is absent, so the flag is the only thing standing
+         * between diff and a false "unchanged". */
+        ASSERT_TRUE(d->unreadable);
+    }
+    ASSERT_TRUE(get("locked/hidden1") == NULL);
+
+    fx_rm("locked/hidden1"); fx_rm("locked/hidden2"); fx_rm("locked");
+}
+
+/* The specific indistinguishability the review demonstrated: before the fix,
+ * an unreadable directory with contents was byte-identical to an empty one. */
+TEST(unreadable_and_empty_directories_are_distinguishable) {
+    fx_mkdir("has_content");
+    fx_write("has_content/f", "x", 1);
+    fx_mkdir("truly_empty");
+
+    char p[8192];
+    snprintf(p, sizeof p, "%s/has_content", g_root);
+    if (chmod(p, 0000) != 0) return;
+
+    size_t n = 0;
+    const int rc = run_check(NULL, &n);
+    chmod(p, 0755);
+    ASSERT_EQ_INT(0, rc);
+
+    struct found *locked = get("has_content");
+    struct found *empty  = get("truly_empty");
+    ASSERT_TRUE(locked != NULL);
+    ASSERT_TRUE(empty != NULL);
+    if (locked && empty) {
+        ASSERT_TRUE(locked->unreadable);
+        ASSERT_FALSE(empty->unreadable);
+    }
+
+    fx_rm("has_content/f"); fx_rm("has_content"); fx_rm("truly_empty");
+}
+
+/* An unreadable file keeps its metadata and gains both flags: unverified
+ * because there is no hash, unreadable because the absence is not a choice. */
+TEST(unreadable_file_is_flagged) {
+    fx_write("noread", "data", 4);
+    char p[8192];
+    snprintf(p, sizeof p, "%s/noread", g_root);
+    if (chmod(p, 0000) != 0) return;
+
+    size_t n = 0;
+    const int rc = run_check(NULL, &n);
+    chmod(p, 0644);
+    ASSERT_EQ_INT(0, rc);
+
+    struct found *f = get("noread");
+    ASSERT_TRUE(f != NULL);
+    if (f) {
+        ASSERT_TRUE(f->unreadable);
+        ASSERT_EQ_STR("", f->sha256);
+    }
+
+    fx_rm("noread");
+}
+
 int main(void) {
     fx_init();
 
@@ -547,6 +636,9 @@ int main(void) {
     RUN(rejects_dotdot_scope_before_touching_fs);
     RUN(rejects_nonexistent_scope);
     RUN(header_records_version_and_scope);
+    RUN(unreadable_directory_is_flagged_not_silently_omitted);
+    RUN(unreadable_and_empty_directories_are_distinguishable);
+    RUN(unreadable_file_is_flagged);
 
     fx_cleanup();
     return belay_test_report();

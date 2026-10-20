@@ -139,6 +139,8 @@ struct walk_ctx {
     const struct belay_manifest_opts *opts;
     uint64_t root_dev;
     const char *scope;
+    size_t n_vanished;   /* entries that disappeared mid-walk (a real race) */
+    size_t n_unreadable; /* entries flagged unreadable */
 };
 
 /*
@@ -173,8 +175,9 @@ static int visit(int parent_fd, const char *name, char *rel, size_t relsz,
         /* A file that vanished between readdir and fstatat is a race, not a
          * failure: the tree genuinely changed under us. Skip it rather than
          * abort the whole walk, which would make check unusable on a live
-         * tree. Reported as a skip count by the caller. */
-        if (errno == ENOENT) return 0;
+         * tree -- but count it, so the caller can report that the manifest is
+         * not a complete picture. */
+        if (errno == ENOENT) { wc->n_vanished++; return 0; }
         belay_err_set(BELAY_ERR_IO, errno, "manifest: fstatat %s", rel);
         return -1;
     }
@@ -247,9 +250,11 @@ static int visit(int parent_fd, const char *name, char *rel, size_t relsz,
             if (errno == ENOENT) return 0;
             if (errno == EACCES || errno == EPERM || errno == ELOOP) {
                 /* Unreadable or swapped for a link: record the metadata that
-                 * fstatat already gave us, without a hash. Silently skipping
-                 * would be a capture hole. */
+                 * fstatat already gave us, without a hash, and mark it so diff
+                 * cannot read the absence of a hash as "unchanged". */
                 e.unverified = true;
+                e.unreadable = true;
+                wc->n_unreadable++;
             } else {
                 belay_err_set(BELAY_ERR_IO, errno, "manifest: openat %s", rel);
                 return -1;
@@ -272,6 +277,7 @@ static int visit(int parent_fd, const char *name, char *rel, size_t relsz,
     if (e.type == BELAY_T_DIR && crossed) e.is_mount = true;
 
     if (collect_push(wc->out, &e) == -1) return -1;
+    const size_t idx = wc->out->n - 1;
 
     if (e.type == BELAY_T_DIR && !crossed) {
         if (depth >= MAX_DEPTH) {
@@ -284,8 +290,24 @@ static int visit(int parent_fd, const char *name, char *rel, size_t relsz,
         const int cfd = openat(parent_fd, name,
                                O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC);
         if (cfd == -1) {
-            if (errno == ENOENT || errno == ELOOP || errno == ENOTDIR) return 0;
-            if (errno == EACCES || errno == EPERM) return 0;  /* recorded, not descended */
+            if (errno == ENOENT) { wc->n_vanished++; return 0; }
+            if (errno == ELOOP || errno == ENOTDIR) {
+                /* Replaced by a symlink or a non-directory between the fstatat
+                 * and this open. The entry is already recorded with its old
+                 * type; mark it so the inconsistency is visible. */
+                wc->out->v[idx].unreadable = true;
+                wc->n_unreadable++;
+                return 0;
+            }
+            if (errno == EACCES || errno == EPERM) {
+                /* THE SUBTREE IS ABSENT FROM THE MANIFEST. Flagging is
+                 * mandatory: without it this is byte-identical to an empty
+                 * directory, and diff would report "unchanged" about files it
+                 * never saw. Found by independent review (§0.4b). */
+                wc->out->v[idx].unreadable = true;
+                wc->n_unreadable++;
+                return 0;
+            }
             belay_err_set(BELAY_ERR_IO, errno, "manifest: openat dir %s", rel);
             return -1;
         }
@@ -385,6 +407,7 @@ static int emit(FILE *f, const struct belay_entry *e) {
 
     if (e->has_stored && fprintf(f, ",\"stored\":\"%s\"", e->stored_hex) < 0) goto io;
     if (e->is_mount && fprintf(f, ",\"mount\":true") < 0) goto io;
+    if (e->unreadable && fprintf(f, ",\"unreadable\":true") < 0) goto io;
 
     if (fputs("}\n", f) == EOF) goto io;
     return 0;
@@ -431,7 +454,7 @@ int belay_manifest_write(const char *out_path, const char *scope,
     }
 
     struct collect c = { NULL, 0, 0 };
-    struct walk_ctx wc = { &c, opts, (uint64_t)rst.st_dev, real };
+    struct walk_ctx wc = { &c, opts, (uint64_t)rst.st_dev, real, 0, 0 };
 
     char rel[4096];
     rel[0] = '\0';
