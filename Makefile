@@ -20,6 +20,8 @@ BIN	= bin/belay
 UNAME_S	:= $(shell uname -s)
 
 CORE_SRC	= $(wildcard src/util/*.c src/capture/*.c src/diff/*.c src/interp/*.c)
+CORE_OBJ	= $(CORE_SRC:src/%.c=$(BUILD)/%.o)
+SAN_CORE_OBJ	= $(CORE_SRC:src/%.c=$(SAN_BUILD)/%.o)
 SESSION_SRC	= $(wildcard src/session/*.c)
 TOP_SRC		= $(wildcard src/*.c)
 
@@ -63,13 +65,17 @@ $(BUILD)/%.o: src/%.c
 	@mkdir -p $(dir $@)
 	$(CC) $(CFLAGS) $(WARN) $(INC) -MMD -MP -c $< -o $@
 
-$(BUILD)/test/%: test/%.c
+$(BUILD)/test/%: test/%.c $(CORE_OBJ)
 	@mkdir -p $(dir $@)
-	$(CC) $(CFLAGS) $(WARN) $(INC) -Itest -MMD -MP -o $@ $<
+	$(CC) $(CFLAGS) $(WARN) $(INC) -Itest -MMD -MP -o $@ $< $(CORE_OBJ)
 
-$(SAN_BUILD)/test/%: test/%.c
+$(SAN_BUILD)/%.o: src/%.c
 	@mkdir -p $(dir $@)
-	$(CC) $(SAN_FLAGS) $(WARN) $(INC) -Itest -MMD -MP -o $@ $<
+	$(CC) $(SAN_FLAGS) $(WARN) $(INC) -MMD -MP -c $< -o $@
+
+$(SAN_BUILD)/test/%: test/%.c $(SAN_CORE_OBJ)
+	@mkdir -p $(dir $@)
+	$(CC) $(SAN_FLAGS) $(WARN) $(INC) -Itest -MMD -MP -o $@ $< $(SAN_CORE_OBJ)
 
 test: $(TEST_BIN)
 	@fail=0; \
