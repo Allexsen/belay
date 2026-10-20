@@ -9,6 +9,7 @@
  *  where a real filesystem fixture exists.
  */
 #include "belay_test.h"
+#include <stdio.h>
 #include "belay/path.h"
 #include "belay/error.h"
 
@@ -154,6 +155,65 @@ TEST(within_errors_on_null_or_empty) {
     belay_err_clear();
 }
 
+/* Found by independent review: "." is the cwd and contains every relative
+ * path. normalize() maps every cwd spelling to ".", and `within` previously
+ * treated that as a literal directory named "." and rejected everything
+ * inside the scope it had just been given. */
+TEST(within_handles_dot_as_scope) {
+    ASSERT_EQ_INT(1, belay_path_within_lexical(".", "a"));
+    ASSERT_EQ_INT(1, belay_path_within_lexical(".", "./a"));
+    ASSERT_EQ_INT(1, belay_path_within_lexical(".", "a/b"));
+    ASSERT_EQ_INT(1, belay_path_within_lexical("./", "x/y"));
+    ASSERT_EQ_INT(1, belay_path_within_lexical("././", "f.txt"));
+    ASSERT_EQ_INT(1, belay_path_within_lexical(".", "."));
+    /* The asymmetry must hold: the cwd is not inside a subdirectory. */
+    ASSERT_EQ_INT(0, belay_path_within_lexical("a", "."));
+    /* And a "." root still cannot swallow an absolute path. */
+    ASSERT_EQ_INT(-1, belay_path_within_lexical(".", "/abs"));
+    belay_err_clear();
+}
+
+/* Pins the documented embedded-NUL contract so the header, the implementation
+ * and the fuzz target cannot drift apart again. The API takes a C string with
+ * no length, so a NUL ends the path and later bytes -- including ".." -- are
+ * never examined. Unreachable from argv; callers holding a length own the check. */
+TEST(embedded_nul_truncates_per_documented_contract) {
+    char out[256];
+    ASSERT_EQ_INT(0, belay_path_normalize(out, sizeof out, "/a/b\0/../../etc/passwd"));
+    ASSERT_EQ_STR("/a/b", out);
+    ASSERT_EQ_INT(0, belay_path_normalize(out, sizeof out, "ok\0/.."));
+    ASSERT_EQ_STR("ok", out);
+    ASSERT_EQ_INT(1, belay_path_within_lexical("/safe", "/safe\0/../../etc/shadow"));
+}
+
+/* `within` uses internal 4096-byte buffers. Over-long input must fail closed
+ * with -1, never return a wrong 0 or 1. The cap is an implementation detail,
+ * so this test guards a future change to heap or PATH_MAX-sized buffers. */
+TEST(within_fails_closed_on_overlong_input) {
+    char big[8192];
+    big[0] = '/';
+    for (size_t i = 1; i < sizeof big - 1; i++) big[i] = 'a';
+    big[sizeof big - 1] = '\0';
+
+    ASSERT_EQ_INT(-1, belay_path_within_lexical("/a", big));
+    ASSERT_EQ_INT(BELAY_ERR_RANGE, belay_err_code());
+    ASSERT_EQ_INT(-1, belay_path_within_lexical(big, "/a"));
+    belay_err_clear();
+}
+
+/* Semantic properties, not just "did not crash". A path normalizing
+ * successfully is always within itself, and always contains its own children. */
+TEST(within_semantic_invariants) {
+    const char *paths[] = { "/", "/a", "/a/b", "a", "a/b", ".", "/x/y/z" };
+    for (size_t i = 0; i < sizeof paths / sizeof paths[0]; i++) {
+        ASSERT_EQ_INT(1, belay_path_within_lexical(paths[i], paths[i]));
+
+        char child[4096];
+        snprintf(child, sizeof child, "%s/child", paths[i]);
+        ASSERT_EQ_INT(1, belay_path_within_lexical(paths[i], child));
+    }
+}
+
 int main(void) {
     RUN(normalize_collapses_separators_and_dots);
     RUN(normalize_preserves_absoluteness);
@@ -171,5 +231,9 @@ int main(void) {
     RUN(within_errors_on_dotdot_in_either_argument);
     RUN(within_errors_on_mixed_absoluteness);
     RUN(within_errors_on_null_or_empty);
+    RUN(within_handles_dot_as_scope);
+    RUN(embedded_nul_truncates_per_documented_contract);
+    RUN(within_fails_closed_on_overlong_input);
+    RUN(within_semantic_invariants);
     return belay_test_report();
 }

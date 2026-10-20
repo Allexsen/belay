@@ -31,8 +31,14 @@
  *  ".." must resolve it against the real filesystem itself.
  *
  *  Returns 0 on success, -1 on failure with belay_err_* set:
- *    BELAY_ERR_INVALID  empty input, a ".." component, or an embedded NUL
+ *    BELAY_ERR_INVALID  empty input or a ".." component
  *    BELAY_ERR_RANGE    result does not fit in `outsz`
+ *
+ *  Takes a NUL-terminated string and has no length parameter, so an embedded
+ *  NUL simply ends the path -- bytes after it are never examined, including a
+ *  ".." that follows one. Callers that hold a length (a scope read from a file
+ *  or an environment buffer rather than argv) must reject interior NULs
+ *  themselves before calling. Scope arguments from argv cannot contain NUL.
  *
  *  `out` is NUL-terminated on success and left unspecified on failure.
  *  Byte-transparent: path bytes are not assumed to be UTF-8.

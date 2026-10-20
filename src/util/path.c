@@ -125,6 +125,13 @@ int belay_path_within_lexical(const char *root, const char *path) {
     const size_t rlen = strlen(nroot);
     const size_t plen = strlen(npath);
 
+    /* "." is the cwd, which contains every relative path. normalize() maps
+     * every cwd spelling ("." "./" "././") to ".", so without this a scope of
+     * "." -- the most natural way to spell "this directory" -- would reject
+     * every file inside it. Mirrors the absolute case below. Must precede the
+     * plen < rlen test so short paths do not fall through first. */
+    if (rlen == 1 && nroot[0] == '.') return 1;
+
     if (plen < rlen) return 0;
     if (memcmp(npath, nroot, rlen) != 0) return 0;
     if (plen == rlen) return 1;                 /* identical */
