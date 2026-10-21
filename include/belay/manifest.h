@@ -67,6 +67,18 @@ struct belay_entry {
 
     bool     is_mount;                  /* dev differs from scope root; not descended */
 
+    /* Device number, for blk and chr entries only. Without it a device node
+     * replaced by another with the same mode and owner differs only in
+     * ino/ctime, and an overlayfs whiteout (char 0,0) is indistinguishable
+     * from a real device. */
+    bool     has_rdev;
+    uint64_t rdev;
+
+    /* The file changed while it was being hashed (size, mtime or ctime moved,
+     * or the inode opened was not the one stat'ed). No hash is recorded:
+     * the bytes read describe no state the file was ever in. Also unverified. */
+    bool     unstable;
+
     /*
      *  Set when belay could not enumerate or read this entry: an unreadable
      *  directory (EACCES on opendir) or an unreadable file. The subtree below
@@ -84,20 +96,37 @@ struct belay_manifest_opts {
     uint64_t hash_max_bytes;
     uint64_t store_max_bytes;
     const char *store_dir;              /* NULL disables content storage */
+
+    /*
+     *  Memory budget for the writer's sort buffer. 0 selects the default
+     *  (4 MiB). Values below the minimum (one maximal entry, ~70 KB) are
+     *  raised to it. Peak writer memory is roughly this plus ~1 MiB of merge
+     *  cursors, independent of how many entries the scope holds.
+     */
+    size_t   run_bytes;
+};
+
+/* What one write observed. Also recorded in the manifest's trailer line. */
+struct belay_manifest_stats {
+    size_t entries;     /* entries written, including the scope root "." */
+    size_t vanished;    /* disappeared between readdir and stat/open: the walk
+                           saw a tree that was changing under it */
+    size_t unreadable;  /* entries flagged unreadable */
+    size_t unstable;    /* regular files that changed while being hashed */
 };
 
 /*
  *  Walks `scope` and writes a manifest to `out_path`.
  *
  *  Entries are emitted sorted by raw path bytes. Returns 0 on success, -1 with
- *  belay_err_* set. On failure `out_path` may exist partially written; callers
- *  treat a failed check as having produced no manifest.
+ *  belay_err_* set. The output is written to a temporary name and renamed
+ *  into place, so on failure nothing is left at `out_path`.
  *
- *  `*n_entries` receives the count written.
+ *  `*stats`, if non-NULL, receives what the walk observed.
  */
 int belay_manifest_write(const char *out_path, const char *scope,
                          const struct belay_manifest_opts *opts,
-                         size_t *n_entries);
+                         struct belay_manifest_stats *stats);
 
 /*
  *  Streaming reader. `fn` is called once per entry, in file order; a non-zero
@@ -110,5 +139,44 @@ int belay_manifest_write(const char *out_path, const char *scope,
 typedef int (*belay_entry_fn)(const struct belay_entry *e, void *ctx);
 
 int belay_manifest_read(const char *path, belay_entry_fn fn, void *ctx);
+
+/*
+ *  Pull interface. A diff advances two manifests side by side; with callbacks
+ *  alone one of them would have to be held in memory.
+ *
+ *    belay_manifest_open   reads and validates the header. 0 / -1.
+ *    belay_manifest_next   1 = an entry was stored in *e, 0 = clean end of
+ *                          manifest, -1 = error. Errors are sticky.
+ *    belay_manifest_close  always safe, including on NULL.
+ *
+ *  The same validation applies as for belay_manifest_read.
+ */
+struct belay_manifest_reader;
+
+/* The manifest's header line. Available as soon as open succeeds. */
+struct belay_manifest_header {
+    uint64_t version;
+    int64_t  created_ns;
+    char     scope[4096];       /* the resolved scope root, NUL-terminated */
+    uint64_t hash_max_bytes;
+    uint64_t store_max_bytes;
+};
+
+/*
+ *  A comparator MUST check that two manifests describe the same scope before
+ *  pairing their entries: relative paths from different roots line up by
+ *  name and would otherwise compare as "unchanged".
+ */
+const struct belay_manifest_header *
+belay_manifest_header(const struct belay_manifest_reader *r);
+
+/* The trailer's counts. Valid only after belay_manifest_next has returned 0;
+ * NULL before that. */
+const struct belay_manifest_stats *
+belay_manifest_trailer(const struct belay_manifest_reader *r);
+
+int  belay_manifest_open(const char *path, struct belay_manifest_reader **out);
+int  belay_manifest_next(struct belay_manifest_reader *r, struct belay_entry *e);
+void belay_manifest_close(struct belay_manifest_reader *r);
 
 #endif /* BELAY_MANIFEST_H */

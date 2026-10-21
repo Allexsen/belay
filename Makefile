@@ -39,6 +39,16 @@ OBJ	= $(SRC:src/%.c=$(BUILD)/%.o)
 # One binary per test/test_*.c. The harness is header-only, so each test
 # links only the units it exercises.
 TEST_SRC	= $(wildcard test/test_*.c)
+
+# Race tests interpose libc calls with GNU ld's --wrap so each race fires at
+# an exact point instead of by luck. --wrap is a GNU linker feature, so these
+# are built only on Linux, where the paths they test live anyway.
+# __readlinkat_chk: with _FORTIFY_SOURCE (on by default at -O1+ on Ubuntu)
+# the compiler emits the checked variant, which --wrap=readlinkat would miss.
+RACE_WRAP	= -Wl,--wrap=openat,--wrap=readlinkat,--wrap=__readlinkat_chk,--wrap=readdir
+ifneq ($(UNAME_S),Linux)
+TEST_SRC	:= $(filter-out test/test_races_linux.c,$(TEST_SRC))
+endif
 TEST_BIN	= $(TEST_SRC:test/%.c=$(BUILD)/test/%)
 
 # Sanitizer builds (§0.4c). Separate object dir so a sanitized object is
@@ -67,7 +77,7 @@ $(BUILD)/%.o: src/%.c
 
 $(BUILD)/test/%: test/%.c $(CORE_OBJ)
 	@mkdir -p $(dir $@)
-	$(CC) $(CFLAGS) $(WARN) $(INC) -Itest -MMD -MP -o $@ $< $(CORE_OBJ)
+	$(CC) $(CFLAGS) $(WARN) $(INC) -Itest -MMD -MP -o $@ $< $(CORE_OBJ) $(TEST_LDFLAGS)
 
 $(SAN_BUILD)/%.o: src/%.c
 	@mkdir -p $(dir $@)
@@ -75,7 +85,9 @@ $(SAN_BUILD)/%.o: src/%.c
 
 $(SAN_BUILD)/test/%: test/%.c $(SAN_CORE_OBJ)
 	@mkdir -p $(dir $@)
-	$(CC) $(SAN_FLAGS) $(WARN) $(INC) -Itest -MMD -MP -o $@ $< $(SAN_CORE_OBJ)
+	$(CC) $(SAN_FLAGS) $(WARN) $(INC) -Itest -MMD -MP -o $@ $< $(SAN_CORE_OBJ) $(TEST_LDFLAGS)
+
+$(BUILD)/test/test_races_linux $(SAN_BUILD)/test/test_races_linux: TEST_LDFLAGS = $(RACE_WRAP)
 
 test: $(TEST_BIN)
 	@fail=0; \

@@ -45,6 +45,17 @@ static int check_entry(const struct belay_entry *e, void *ctx) {
         }
     }
 
+    /* rdev exactly on device nodes; unstable implies unverified. */
+    if (e->has_rdev != (e->type == BELAY_T_BLK || e->type == BELAY_T_CHR)) abort();
+    if (e->unstable && !e->unverified) abort();
+
+    /* Canonical paths only: no empty, "." or ".." component except a lone ".". */
+    if (!(e->path_len == 1 && e->path[0] == '.')) {
+        if (e->path[0] == '/' || e->path[e->path_len - 1] == '/') abort();
+        for (size_t i = 0; i + 1 < e->path_len; i++)
+            if (e->path[i] == '/' && e->path[i + 1] == '/') abort();
+    }
+
     /* Only symlinks carry targets, and a symlink must carry one. */
     if ((e->type == BELAY_T_LNK) != e->has_link_target) abort();
 
