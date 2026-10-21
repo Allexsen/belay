@@ -15,6 +15,7 @@
 #include "belay/manifest.h"
 #include "belay/error.h"
 #include "belay/hash.h"
+#include "belay/store.h"
 
 #include <errno.h>
 #include <fcntl.h>
@@ -934,6 +935,160 @@ TEST(sweep_trailer_and_stats_report_unreadable) {
     fx_rm("tr/locked"); fx_rm("tr");
 }
 
+/* ===== Content store, as driven by the writer (step 2.4) ===== */
+
+static char g_store[512];
+
+/* Runs a check over `scope_rel` with content storage on. */
+static int run_check_store(const char *scope_rel, uint64_t store_max) {
+    char scope[8192], mpath[512];
+    snprintf(scope, sizeof scope, "%s/%s", g_root, scope_rel);
+    snprintf(mpath, sizeof mpath, "/tmp/belay_ms_%d.ndjson", (int)getpid());
+    snprintf(g_store, sizeof g_store, "/tmp/belay_ms_store_%d", (int)getpid());
+    struct belay_manifest_opts o = {
+        .hash_max_bytes = BELAY_HASH_MAX_BYTES_DEFAULT,
+        .store_max_bytes = store_max,
+        .store_dir = g_store,
+    };
+    struct belay_manifest_stats st;
+    if (belay_manifest_write(mpath, scope, &o, &st) == -1) return -1;
+    return load(mpath);
+}
+
+static bool stored(const char *line_path) {
+    /* g_found does not keep the stored key; re-scan the manifest line. */
+    char mpath[512], line[65536], pat[4200];
+    snprintf(mpath, sizeof mpath, "/tmp/belay_ms_%d.ndjson", (int)getpid());
+    snprintf(pat, sizeof pat, "{\"path\":\"%s\",", line_path);
+    FILE *f = fopen(mpath, "rb");
+    bool hit = false;
+    while (f && fgets(line, sizeof line, f) != NULL)
+        if (strncmp(line, pat, strlen(pat)) == 0) hit = strstr(line, "\"stored\":\"") != NULL;
+    if (f) fclose(f);
+    return hit;
+}
+
+static int store_tmp_count(void) {
+    char cmd[700];
+    snprintf(cmd, sizeof cmd, "ls -a '%s' 2>/dev/null | grep -c '^\\.tmp-' > /tmp/belay_tmpc_%d",
+             g_store, (int)getpid());
+    if (system(cmd) == -1) return -1;
+    char p[64];
+    snprintf(p, sizeof p, "/tmp/belay_tmpc_%d", (int)getpid());
+    FILE *f = fopen(p, "rb");
+    int n = -1;
+    if (f) { if (fscanf(f, "%d", &n) != 1) n = -1; fclose(f); }
+    unlink(p);
+    return n;
+}
+
+TEST(store_keeps_small_text_and_skips_binary) {
+    fx_mkdir("st");
+    fx_write("st/note.txt", "plain text\n", 11);
+    fx_write("st/blob.bin", "bin\0ary", 7);
+    fx_write("st/twin_a.txt", "same", 4);
+    fx_write("st/twin_b.txt", "same", 4);
+    fx_symlink("note.txt", "st/link");
+
+    ASSERT_EQ_INT(0, run_check_store("st", BELAY_STORE_MAX_BYTES_DEFAULT));
+    ASSERT_TRUE(stored("note.txt"));
+    ASSERT_FALSE(stored("blob.bin"));       /* NUL in the first 8000 bytes */
+    ASSERT_TRUE(stored("twin_a.txt"));
+    ASSERT_TRUE(stored("twin_b.txt"));
+    ASSERT_FALSE(stored("link"));           /* symlinks are never opened */
+
+    /* The object holds exactly the file's bytes and verifies. */
+    struct found *n = get("note.txt");
+    ASSERT_TRUE(n != NULL);
+    if (n) {
+        struct belay_store *s = NULL;
+        ASSERT_EQ_INT(0, belay_store_open(g_store, &s));
+        ASSERT_EQ_INT(1, belay_store_verify(s, n->sha256));
+        belay_store_close(s);
+    }
+    /* Identical content is one object. */
+    struct found *a = get("twin_a.txt"), *b = get("twin_b.txt");
+    ASSERT_TRUE(a && b && strcmp(a->sha256, b->sha256) == 0);
+    ASSERT_EQ_INT(0, store_tmp_count());    /* the binary's aborted copy is gone */
+
+    fx_rm("st/note.txt"); fx_rm("st/blob.bin"); fx_rm("st/twin_a.txt");
+    fx_rm("st/twin_b.txt"); fx_rm("st/link"); fx_rm("st");
+}
+
+/* Claimed files override the size threshold in both directions. */
+TEST(store_follows_interpreter_claims_not_just_size) {
+    fx_mkdir("cl");
+    fx_mkdir("cl/numpy-2.1.0.dist-info");
+    fx_mkdir("cl/var"); fx_mkdir("cl/var/lib"); fx_mkdir("cl/var/lib/dpkg");
+    fx_mkdir("cl/repo"); fx_mkdir("cl/repo/.git");
+
+    static char big[4096];
+    memset(big, 'r', sizeof big);
+    fx_write("cl/numpy-2.1.0.dist-info/RECORD", big, sizeof big);   /* > threshold, claimed */
+    fx_write("cl/var/lib/dpkg/status", big, sizeof big);            /* > threshold, claimed */
+    fx_write("cl/plain_big.txt", big, sizeof big);                  /* > threshold, unclaimed */
+    fx_write("cl/repo/.git/index", "DIRC", 4);                      /* small, hash-only claim */
+    fx_write("cl/repo/.git/HEAD", "ref: refs/heads/main\n", 21);    /* small, claimed */
+
+    ASSERT_EQ_INT(0, run_check_store("cl", 1024));                  /* threshold 1 KiB */
+    ASSERT_TRUE(stored("numpy-2.1.0.dist-info/RECORD"));
+    ASSERT_TRUE(stored("var/lib/dpkg/status"));
+    ASSERT_FALSE(stored("plain_big.txt"));
+    ASSERT_FALSE(stored("repo/.git/index"));
+    ASSERT_TRUE(stored("repo/.git/HEAD"));
+
+    struct found *ix = get("repo/.git/index");
+    ASSERT_TRUE(ix != NULL && ix->sha256[0] != '\0');   /* hashed, just not kept */
+
+    char cmd[8300];
+    snprintf(cmd, sizeof cmd, "rm -rf '%s/cl'", g_root);
+    if (system(cmd) != 0) { /* best effort */ }
+}
+
+/* A file that changes while being read is recorded unstable and its staged
+ * copy discarded: the store must never hold bytes that match no state of the
+ * file. Asserted as an invariant over several racing runs. */
+TEST(store_discards_copies_of_unstable_files) {
+    fx_mkdir("race");
+    char fpath[8192];
+    snprintf(fpath, sizeof fpath, "%s/race/f", g_root);
+    FILE *f = fopen(fpath, "wb");
+    if (!f) return;
+    static char chunk[65536];
+    memset(chunk, 'a', sizeof chunk);
+    for (int i = 0; i < 200; i++) fwrite(chunk, 1, sizeof chunk, f);  /* ~13 MB */
+    fclose(f);
+
+    const pid_t pid = fork();
+    if (pid == 0) {
+        FILE *a = fopen(fpath, "ab");
+        if (a == NULL) _exit(0);
+        static char x[4096];
+        memset(x, 'x', sizeof x);
+        for (int i = 0; i < 2500; i++) { fwrite(x, 1, sizeof x, a); fflush(a); usleep(400); }
+        fclose(a);
+        _exit(0);
+    }
+    for (int run = 0; run < 5; run++) {
+        if (run_check_store("race", 64u * 1024u * 1024u) != 0) { BELAY_FAIL("run %d", run); break; }
+        struct found *e = get("f");
+        if (e == NULL) continue;
+        if (e->sha256[0] == '\0') {
+            ASSERT_FALSE(stored("f"));
+        } else if (stored("f")) {
+            struct belay_store *s = NULL;
+            ASSERT_EQ_INT(0, belay_store_open(g_store, &s));
+            ASSERT_EQ_INT(1, belay_store_verify(s, e->sha256));
+            belay_store_close(s);
+        }
+        ASSERT_EQ_INT(0, store_tmp_count());
+    }
+    int status;
+    waitpid(pid, &status, 0);
+    unlink(fpath);
+    fx_rm("race");
+}
+
 int main(void) {
     fx_init();
 
@@ -964,7 +1119,16 @@ int main(void) {
     RUN(sweep_hash_always_matches_recorded_size_under_concurrent_append);
     RUN(sweep_device_nodes_record_rdev);
     RUN(sweep_trailer_and_stats_report_unreadable);
+    RUN(store_keeps_small_text_and_skips_binary);
+    RUN(store_follows_interpreter_claims_not_just_size);
+    RUN(store_discards_copies_of_unstable_files);
 
     fx_cleanup();
+    {
+        char cmd[700];
+        snprintf(cmd, sizeof cmd, "rm -rf '/tmp/belay_ms_store_%d' /tmp/belay_ms_%d.ndjson",
+                 (int)getpid(), (int)getpid());
+        if (system(cmd) != 0) { /* best effort */ }
+    }
     return belay_test_report();
 }

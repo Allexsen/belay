@@ -32,8 +32,10 @@
 #include "belay/manifest.h"
 #include "belay/error.h"
 #include "belay/hash.h"
+#include "belay/interp.h"
 #include "belay/json.h"
 #include "belay/path.h"
+#include "belay/store.h"
 
 #include <dirent.h>
 #include <errno.h>
@@ -54,6 +56,8 @@
 #define LINE_CAP   (64u * 1024u)       /* one serialized entry; worst case < 50 KB */
 #define RUN_BYTES  (4u * 1024u * 1024u)
 #define FANIN      16
+#define SNIFF_BYTES 8000u              /* git's binary heuristic: a NUL in the
+                                          first 8000 bytes means not text */
 
 /* ------------------------------------------------------------------------ */
 /* Serialization                                                             */
@@ -395,6 +399,10 @@ struct walk_ctx {
     size_t n_vanished;
     size_t n_unreadable;
     size_t n_unstable;
+
+    struct belay_store *store;  /* NULL when content storage is off */
+    char  *abs;                 /* scope + "/" + rel, for interpreter claims */
+    size_t scope_len;
 };
 
 static enum belay_entry_type type_of(mode_t m) {
@@ -409,10 +417,15 @@ static enum belay_entry_type type_of(mode_t m) {
 
 /* Hashes by fd: no path is re-resolved, so there is no window between the
  * open and the read. */
-static int hash_fd(int fd, unsigned char *buf, char hex_out[65], uint64_t *nread) {
+/* Hashes by fd, and when `tx` is non-NULL stages the same bytes into the
+ * store in the same pass: what is stored is exactly what was hashed. `*binary`
+ * reports a NUL within the first SNIFF_BYTES. */
+static int hash_fd(int fd, unsigned char *buf, char hex_out[65], uint64_t *nread,
+                   struct belay_store_tx *tx, bool *binary) {
     struct belay_sha256 c;
     belay_sha256_init(&c);
     *nread = 0;
+    *binary = false;
     for (;;) {
         const ssize_t n = read(fd, buf, READ_CHUNK);
         if (n == 0) break;
@@ -421,7 +434,13 @@ static int hash_fd(int fd, unsigned char *buf, char hex_out[65], uint64_t *nread
             belay_err_set(BELAY_ERR_IO, errno, "hash: read failed");
             return -1;
         }
+        if (*nread < SNIFF_BYTES) {
+            const size_t span = (size_t)n < SNIFF_BYTES - *nread ? (size_t)n
+                                                                 : (size_t)(SNIFF_BYTES - *nread);
+            if (memchr(buf, '\0', span) != NULL) *binary = true;
+        }
         belay_sha256_update(&c, buf, (size_t)n);
+        if (tx != NULL && belay_store_write(tx, buf, (size_t)n) == -1) return -1;
         *nread += (uint64_t)n;
     }
     uint8_t d[BELAY_SHA256_DIGEST_LEN];
@@ -608,13 +627,39 @@ static int visit(int parent_fd, const char *name, char *rel, size_t relsz,
             } else if (e->size > wc->opts->hash_max_bytes) {
                 e->unverified = true;
             } else {
+                /* What must be kept: an interpreter's claim overrides the
+                 * size threshold (stored whatever its size) or forbids storing
+                 * (hash only); unclaimed files are kept if small and text. */
+                struct belay_claim claim = { BELAY_INTERP_BINARY, BELAY_KEEP_DEFAULT };
+                if (wc->store != NULL) {
+                    const size_t sep = wc->scope_len > 1 ? 1 : 0;
+                    if (wc->scope_len + sep + rel_len < PATH_MAX * 2) {
+                        if (sep) wc->abs[wc->scope_len] = '/';
+                        memcpy(wc->abs + wc->scope_len + sep, rel, rel_len);
+                        belay_interp_classify(wc->abs, wc->scope_len + sep + rel_len, &claim);
+                    }
+                }
+                const bool want = wc->store != NULL && claim.keep != BELAY_KEEP_HASH &&
+                                  (claim.keep == BELAY_KEEP_STORE ||
+                                   e->size <= wc->opts->store_max_bytes);
+
+                struct belay_store_tx tx;
+                if (want && belay_store_begin(wc->store, &tx) == -1) {
+                    close(fd);
+                    return -1;
+                }
+
                 uint64_t nread = 0;
-                if (hash_fd(fd, wc->readbuf, e->sha256_hex, &nread) == -1) {
+                bool binary = false;
+                if (hash_fd(fd, wc->readbuf, e->sha256_hex, &nread,
+                            want ? &tx : NULL, &binary) == -1) {
+                    if (want) belay_store_abort(&tx);
                     close(fd);
                     return -1;
                 }
                 if (fstat(fd, &after) == -1) {
                     belay_err_set(BELAY_ERR_IO, errno, "manifest: fstat %s", rel);
+                    if (want) belay_store_abort(&tx);
                     close(fd);
                     return -1;
                 }
@@ -625,7 +670,23 @@ static int visit(int parent_fd, const char *name, char *rel, size_t relsz,
                                     (uint64_t)before.st_size == e->size;
                 if (stable) {
                     e->has_hash = true;
+                    /* Unclaimed binary content is not kept: the text
+                     * interpreter could not use it. Claimed content is kept
+                     * whatever it is. */
+                    const bool keep = want && !(claim.keep == BELAY_KEEP_DEFAULT && binary);
+                    if (keep) {
+                        if (belay_store_commit(&tx, e->sha256_hex) == -1) {
+                            close(fd);
+                            return -1;
+                        }
+                        e->has_stored = true;
+                        memcpy(e->stored_hex, e->sha256_hex, sizeof e->stored_hex);
+                    } else if (want) {
+                        belay_store_abort(&tx);
+                    }
                 } else {
+                    /* The staged copy matches no state of the file either. */
+                    if (want) belay_store_abort(&tx);
                     e->sha256_hex[0] = '\0';
                     e->unverified = true;
                     e->unstable = true;
@@ -811,6 +872,17 @@ int belay_manifest_write(const char *out_path, const char *scope,
     wc->root_dev = (uint64_t)rst.st_dev;
     wc->scope = real;
     wc->spill = &sp;
+    wc->scope_len = strlen(real);
+
+    if (opts->store_dir != NULL) {
+        wc->abs = malloc(PATH_MAX * 2);
+        if (wc->abs == NULL) {
+            belay_err_set(BELAY_ERR_NOMEM, 0, "manifest: out of memory");
+            goto cleanup;
+        }
+        memcpy(wc->abs, real, wc->scope_len);
+        if (belay_store_open(opts->store_dir, &wc->store) == -1) goto cleanup;
+    }
 
     /* The scope root itself is an entry, path ".". Without it a chmod or
      * chown on the root is invisible: verified, the manifest body was
@@ -908,6 +980,8 @@ cleanup:
     if (wc != NULL) {
         free(wc->line);
         free(wc->readbuf);
+        free(wc->abs);
+        belay_store_close(wc->store);
     }
     free(wc);
     free(rel);

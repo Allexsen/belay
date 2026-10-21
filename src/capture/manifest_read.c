@@ -529,6 +529,12 @@ static int parse_entry(const char *line, struct belay_entry *e) {
             return -1;
         }
         e->has_stored = true;
+        /* The store is content-addressed by the same digest, so a stored key
+         * that differs from sha256 points at some other file's content. */
+        if (!e->has_hash || strcmp(e->stored_hex, e->sha256_hex) != 0) {
+            belay_err_set(BELAY_ERR_CORRUPT, 0, "manifest: stored key does not match sha256");
+            return -1;
+        }
     }
 
     return 0;
