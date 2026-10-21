@@ -39,9 +39,10 @@ int main(int argc, char **argv) {
 
     struct belay_manifest_opts o = { .hash_max_bytes = BELAY_HASH_MAX_BYTES_DEFAULT, .store_max_bytes = BELAY_STORE_MAX_BYTES_DEFAULT };
 
-    size_t n = 0;
+    struct belay_manifest_stats st;
     const double t0 = now_s();
-    const int rc = belay_manifest_write(mpath, scope, &o, &n);
+    const int rc = belay_manifest_write(mpath, scope, &o, &st);
+    const size_t n = st.entries;
     const double t1 = now_s();
 
     if (rc == -1) {

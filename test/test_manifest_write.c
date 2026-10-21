@@ -14,6 +14,7 @@
 #include "belay_test.h"
 #include "belay/manifest.h"
 #include "belay/error.h"
+#include "belay/hash.h"
 
 #include <errno.h>
 #include <fcntl.h>
@@ -21,6 +22,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <sys/stat.h>
+#include <sys/wait.h>
 #include <time.h>
 #include <unistd.h>
 
@@ -91,12 +93,14 @@ struct found {
     bool   seen;
     uint64_t nlink;
     uint32_t mode;
+    uint64_t size;
 };
 
 #define MAX_FOUND 256
 static struct found g_found[MAX_FOUND];
 static size_t g_nfound;
 static char g_header[65600];
+static char g_trailer[65600];
 
 /* Deliberately a crude line scanner rather than the real reader: the writer's
  * tests must not depend on the reader being correct, or a bug in one could
@@ -133,6 +137,7 @@ static uint64_t jnum(const char *line, const char *key) {
 static int load(const char *mpath) {
     g_nfound = 0;
     g_header[0] = '\0';
+    g_trailer[0] = '\0';
 
     FILE *f = fopen(mpath, "rb");
     if (f == NULL) return -1;
@@ -143,6 +148,10 @@ static int load(const char *mpath) {
         if (first) {
             snprintf(g_header, sizeof g_header, "%s", line);
             first = false;
+            continue;
+        }
+        if (strstr(line, "\"belay_manifest_end\":") != NULL) {
+            snprintf(g_trailer, sizeof g_trailer, "%s", line);
             continue;
         }
         if (g_nfound >= MAX_FOUND) break;
@@ -161,6 +170,7 @@ static int load(const char *mpath) {
         e->unreadable = jbool(line, "unreadable");
         e->nlink      = jnum(line, "nlink");
         e->mode       = (uint32_t)jnum(line, "mode");
+        e->size       = jnum(line, "size");
         e->seen       = true;
         g_nfound++;
     }
@@ -181,7 +191,9 @@ static int run_check(const char *scope_rel, size_t *n) {
     snprintf(mpath, sizeof mpath, "/tmp/belay_m_%d.ndjson", (int)getpid());
 
     struct belay_manifest_opts o = { .hash_max_bytes = BELAY_HASH_MAX_BYTES_DEFAULT, .store_max_bytes = BELAY_STORE_MAX_BYTES_DEFAULT };
-    if (belay_manifest_write(mpath, scope, &o, n) == -1) return -1;
+    struct belay_manifest_stats st;
+    if (belay_manifest_write(mpath, scope, &o, &st) == -1) return -1;
+    if (n != NULL) *n = st.entries;
     return load(mpath);
 }
 
@@ -434,8 +446,8 @@ TEST(oversized_file_is_unverified_not_skipped) {
     snprintf(scope, sizeof scope, "%s", g_root);
 
     struct belay_manifest_opts o = { .hash_max_bytes = 4, .store_max_bytes = BELAY_STORE_MAX_BYTES_DEFAULT };
-    size_t n = 0;
-    ASSERT_EQ_INT(0, belay_manifest_write(mpath, scope, &o, &n));
+    struct belay_manifest_stats ost;
+    ASSERT_EQ_INT(0, belay_manifest_write(mpath, scope, &o, &ost));
     ASSERT_EQ_INT(0, load(mpath));
 
     struct found *f = get("big");
@@ -667,9 +679,12 @@ TEST(spilled_output_is_identical_to_in_memory_output) {
     tiny.run_bytes = 1;                          /* clamped to the minimum */
 
     size_t n_mem = 0, n_spill = 0;
-    ASSERT_EQ_INT(0, belay_manifest_write(m_mem, scope, &big, &n_mem));
-    ASSERT_EQ_INT(0, belay_manifest_write(m_spill, scope, &tiny, &n_spill));
-    ASSERT_EQ_INT(5100, (int)n_mem);
+    struct belay_manifest_stats s_mem, s_spill;
+    ASSERT_EQ_INT(0, belay_manifest_write(m_mem, scope, &big, &s_mem));
+    ASSERT_EQ_INT(0, belay_manifest_write(m_spill, scope, &tiny, &s_spill));
+    n_mem = s_mem.entries;
+    n_spill = s_spill.entries;
+    ASSERT_EQ_INT(5101, (int)n_mem);   /* 5,100 entries plus the root "." */
     ASSERT_EQ_INT((int)n_mem, (int)n_spill);
 
     size_t la = 0, lb = 0;
@@ -693,6 +708,7 @@ TEST(spilled_output_is_identical_to_in_memory_output) {
         size_t lines = 0;
         while (fgets(line, sizeof line, sf) != NULL) {
             if (lines++ == 0) continue;            /* header */
+            if (strstr(line, "belay_manifest_end") != NULL) continue;
             if (jstr(line, "path", cur, sizeof cur) == NULL) {
                 BELAY_FAIL("line %zu has no path", lines);
                 break;
@@ -730,6 +746,194 @@ TEST(failed_write_leaves_no_partial_manifest) {
     ASSERT_TRUE(access(mpath, F_OK) != 0);
 }
 
+/* ===== Defect-class sweep, writer side ===== */
+
+/* W4. The scope root is entry ".". Before, `chmod 700` on the root left the
+ * manifest body byte-identical. */
+TEST(sweep_scope_root_is_recorded) {
+    char root[8192];
+    snprintf(root, sizeof root, "%s/rootcase", g_root);
+    mkdir(root, 0755);
+    size_t n = 0;
+    ASSERT_EQ_INT(0, run_check("rootcase", &n));
+    struct found *r1 = get(".");
+    ASSERT_TRUE(r1 != NULL);
+    const uint32_t mode_before = r1 ? r1->mode : 0;
+    if (r1) ASSERT_EQ_STR("dir", r1->type);
+
+    chmod(root, 0700);
+    ASSERT_EQ_INT(0, run_check("rootcase", &n));
+    chmod(root, 0755);
+    struct found *r2 = get(".");
+    ASSERT_TRUE(r2 != NULL);
+    if (r2) {
+        ASSERT_EQ_INT(0700, (int)(r2->mode & 07777));
+        ASSERT_TRUE(r2->mode != mode_before);
+    }
+    rmdir(root);
+}
+
+/* W8. Relative link targets are analysed too. Before, only absolute targets
+ * were, so "../../etc" carried no annotation at all. Advisory only. */
+TEST(sweep_relative_symlink_escape_is_annotated) {
+    fx_mkdir("lk");
+    fx_symlink("../../etc", "lk/esc");          /* lk -> scope root -> above it */
+    fx_symlink("../sibling", "lk/inside");      /* lk/.. is the scope root: inside */
+    fx_symlink("a/../../..", "lk/sneaky");      /* climbs out through a component */
+    fx_symlink("x/y", "lk/down");
+
+    size_t n = 0;
+    ASSERT_EQ_INT(0, run_check(NULL, &n));
+    struct found *e;
+    e = get("lk/esc");    ASSERT_TRUE(e && e->outside);
+    e = get("lk/inside"); ASSERT_TRUE(e && !e->outside);
+    e = get("lk/sneaky"); ASSERT_TRUE(e && e->outside);
+    e = get("lk/down");   ASSERT_TRUE(e && !e->outside);
+
+    fx_rm("lk/esc"); fx_rm("lk/inside"); fx_rm("lk/sneaky"); fx_rm("lk/down"); fx_rm("lk");
+}
+
+/*
+ *  W5. A recorded (size, sha256) pair must describe one real state of the
+ *  file. Before the fix, a file appended to during `check` was recorded with a
+ *  hash covering more bytes than its recorded size, 5 runs out of 5.
+ *
+ *  The race decides WHICH branch runs (stable hash vs unstable flag), so this
+ *  test asserts the invariant that must hold either way, rather than a
+ *  particular outcome. It cannot pass by luck: an inconsistent pair fails it
+ *  whenever the race is hit.
+ */
+TEST(sweep_hash_always_matches_recorded_size_under_concurrent_append) {
+    fx_mkdir("grow");
+    char fpath[8192];
+    snprintf(fpath, sizeof fpath, "%s/grow/log", g_root);
+    {
+        FILE *f = fopen(fpath, "wb");
+        ASSERT_TRUE(f != NULL);
+        if (!f) return;
+        static char chunk[65536];
+        memset(chunk, 'a', sizeof chunk);
+        for (int i = 0; i < 300; i++) fwrite(chunk, 1, sizeof chunk, f);  /* ~19 MB */
+        fclose(f);
+    }
+
+    const pid_t pid = fork();
+    if (pid == 0) {
+        /* Child: append for ~1.5 s, rate-limited to stay under the hash cap. */
+        FILE *f = fopen(fpath, "ab");
+        if (f == NULL) _exit(0);
+        static char x[4096];
+        memset(x, 'x', sizeof x);
+        for (int i = 0; i < 3000; i++) {
+            fwrite(x, 1, sizeof x, f);
+            fflush(f);
+            usleep(500);
+        }
+        fclose(f);
+        _exit(0);
+    }
+
+    size_t unstable_seen = 0, hashed_seen = 0;
+    for (int run = 0; run < 6; run++) {
+        size_t n = 0;
+        if (run_check("grow", &n) != 0) { BELAY_FAIL("check failed on run %d", run); break; }
+        struct found *e = get("log");
+        if (e == NULL) { BELAY_FAIL("log missing on run %d", run); break; }
+        if (e->sha256[0] == '\0') {
+            ASSERT_TRUE(e->unverified);
+            unstable_seen++;
+            continue;
+        }
+        hashed_seen++;
+        /* Recompute sha256 of the first `size` bytes; it must equal the
+         * recorded hash. Appends only add bytes, so those bytes are fixed. */
+        FILE *f = fopen(fpath, "rb");
+        if (f == NULL) continue;
+        struct belay_sha256 c;
+        belay_sha256_init(&c);
+        static unsigned char buf[65536];
+        uint64_t left = e->size;
+        while (left > 0) {
+            const size_t want = left < sizeof buf ? (size_t)left : sizeof buf;
+            const size_t got = fread(buf, 1, want, f);
+            if (got == 0) break;
+            belay_sha256_update(&c, buf, got);
+            left -= got;
+        }
+        fclose(f);
+        uint8_t d[32];
+        char hex[65];
+        belay_sha256_final(&c, d);
+        belay_hex_encode(hex, d, sizeof d);
+        ASSERT_EQ_STR(e->sha256, hex);
+    }
+    int status;
+    waitpid(pid, &status, 0);
+    ASSERT_TRUE(unstable_seen + hashed_seen == 6);
+
+    unlink(fpath);
+    fx_rm("grow");
+}
+
+/* W3. Device nodes carry rdev. Creating one needs privilege, so this reads the
+ * real /dev/null, which exists on Linux and macOS alike. */
+TEST(sweep_device_nodes_record_rdev) {
+    char mpath[512];
+    snprintf(mpath, sizeof mpath, "/tmp/belay_dev_%d.ndjson", (int)getpid());
+    struct belay_manifest_opts o = {
+        .hash_max_bytes = BELAY_HASH_MAX_BYTES_DEFAULT,
+        .store_max_bytes = BELAY_STORE_MAX_BYTES_DEFAULT,
+    };
+    struct belay_manifest_stats st;
+    if (belay_manifest_write(mpath, "/dev", &o, &st) != 0) {
+        belay_err_clear();
+        return;   /* /dev not walkable here; nothing to assert */
+    }
+    FILE *f = fopen(mpath, "rb");
+    ASSERT_TRUE(f != NULL);
+    bool found = false;
+    char line[65536];
+    while (f && fgets(line, sizeof line, f) != NULL) {
+        if (strstr(line, "\"path\":\"null\",") != NULL) {
+            found = true;
+            ASSERT_TRUE(strstr(line, "\"type\":\"chr\"") != NULL);
+            ASSERT_TRUE(strstr(line, "\"rdev\":") != NULL);
+        }
+    }
+    if (f) fclose(f);
+    ASSERT_TRUE(found);
+    unlink(mpath);
+}
+
+/* W2. The trailer records what the walk could not capture, and stats agree. */
+TEST(sweep_trailer_and_stats_report_unreadable) {
+    fx_mkdir("tr");
+    fx_mkdir("tr/locked");
+    char p[8192];
+    snprintf(p, sizeof p, "%s/tr/locked", g_root);
+    if (chmod(p, 0000) != 0) return;
+
+    char mpath[512], scope[8192];
+    snprintf(mpath, sizeof mpath, "/tmp/belay_tr_%d.ndjson", (int)getpid());
+    snprintf(scope, sizeof scope, "%s/tr", g_root);
+    struct belay_manifest_opts o = {
+        .hash_max_bytes = BELAY_HASH_MAX_BYTES_DEFAULT,
+        .store_max_bytes = BELAY_STORE_MAX_BYTES_DEFAULT,
+    };
+    struct belay_manifest_stats st;
+    const int rc = belay_manifest_write(mpath, scope, &o, &st);
+    chmod(p, 0755);
+    ASSERT_EQ_INT(0, rc);
+    ASSERT_EQ_INT(2, (int)st.entries);      /* "." and "locked" */
+    ASSERT_EQ_INT(1, (int)st.unreadable);
+
+    ASSERT_EQ_INT(0, load(mpath));
+    ASSERT_TRUE(strstr(g_trailer, "\"belay_manifest_end\":2,") != NULL);
+    ASSERT_TRUE(strstr(g_trailer, "\"unreadable\":1,") != NULL);
+    unlink(mpath);
+    fx_rm("tr/locked"); fx_rm("tr");
+}
+
 int main(void) {
     fx_init();
 
@@ -755,6 +959,11 @@ int main(void) {
     RUN(unreadable_file_is_flagged);
     RUN(spilled_output_is_identical_to_in_memory_output);
     RUN(failed_write_leaves_no_partial_manifest);
+    RUN(sweep_scope_root_is_recorded);
+    RUN(sweep_relative_symlink_escape_is_annotated);
+    RUN(sweep_hash_always_matches_recorded_size_under_concurrent_append);
+    RUN(sweep_device_nodes_record_rdev);
+    RUN(sweep_trailer_and_stats_report_unreadable);
 
     fx_cleanup();
     return belay_test_report();

@@ -191,7 +191,90 @@ static int reject_nul(const char *buf, size_t len, const char *what) {
     return 0;
 }
 
-static int parse_header(const char *line) {
+/* Occurrences of "key": at a key position. */
+static int count_key(const char *line, const char *key) {
+    int n = 0;
+    const char *p = line;
+    char pat[64];
+    const int plen = snprintf(pat, sizeof pat, "\"%s\":", key);
+    while ((p = strstr(p, pat)) != NULL) {
+        if (p != line && (p[-1] == '{' || p[-1] == ',')) n++;
+        p += plen;
+    }
+    return n;
+}
+
+/*
+ *  A duplicated key is rejected rather than resolved: "first wins" would let
+ *  two different lines mean the same thing, and an appended second value
+ *  would silently override nothing.
+ */
+static int reject_duplicate_keys(const char *line, const char *const *keys, size_t nkeys) {
+    for (size_t i = 0; i < nkeys; i++) {
+        if (count_key(line, keys[i]) > 1) {
+            belay_err_set(BELAY_ERR_CORRUPT, 0, "manifest: duplicate key \"%s\"", keys[i]);
+            return -1;
+        }
+    }
+    return 0;
+}
+
+/*
+ *  Boolean flags are spelled exactly `"key":true`. Anything else under that
+ *  key -- `: true`, `false`, `1` -- is an error, NOT "flag absent". Before
+ *  this, `"unreadable": true` with one space parsed as readable, so an
+ *  unreadable directory whose subtree is absent read as an empty one.
+ */
+static int read_flag(const char *line, const char *key, bool *out) {
+    const char *p = find_key(line, key);
+    *out = false;
+    if (p == NULL) return 0;
+    if (strncmp(p, "true", 4) == 0 && (p[4] == ',' || p[4] == '}')) {
+        *out = true;
+        return 0;
+    }
+    belay_err_set(BELAY_ERR_CORRUPT, 0, "manifest: flag \"%s\" is not exactly true", key);
+    return -1;
+}
+
+/*
+ *  Entry paths must be in the one canonical form the writer produces:
+ *  relative, no empty component ("a//b", trailing "/"), no "." or ".."
+ *  component, except that the scope root itself is exactly ".". A
+ *  non-canonical path is a second key for the same file -- "a//b" and "a/b"
+ *  would compare as one removed and one added -- and ".." or an absolute path
+ *  becomes an arbitrary write the moment anything restores from a manifest.
+ */
+static int check_canonical(const char *path, size_t len) {
+    if (len == 1 && path[0] == '.') return 0;
+    if (path[0] == '/') {
+        belay_err_set(BELAY_ERR_CORRUPT, 0, "manifest: entry path is absolute");
+        return -1;
+    }
+    size_t i = 0;
+    while (i <= len) {
+        size_t j = i;
+        while (j < len && path[j] != '/') j++;
+        const size_t n = j - i;
+        if (n == 0) {
+            belay_err_set(BELAY_ERR_CORRUPT, 0, "manifest: entry path has an empty component");
+            return -1;
+        }
+        if (n == 1 && path[i] == '.') {
+            belay_err_set(BELAY_ERR_CORRUPT, 0, "manifest: entry path has a \".\" component");
+            return -1;
+        }
+        if (n == 2 && path[i] == '.' && path[i + 1] == '.') {
+            belay_err_set(BELAY_ERR_CORRUPT, 0,
+                          "manifest: entry path contains a \"..\" component");
+            return -1;
+        }
+        i = j + 1;
+    }
+    return 0;
+}
+
+static int parse_header(const char *line, struct belay_manifest_header *h) {
     const char *p = find_key(line, "belay_manifest");
     if (p == NULL) {
         belay_err_set(BELAY_ERR_CORRUPT, 0, "manifest: missing header");
@@ -207,11 +290,57 @@ static int parse_header(const char *line) {
                       (unsigned long long)ver, BELAY_MANIFEST_VERSION);
         return -1;
     }
+
+    static const char *const hkeys[] = {
+        "belay_manifest", "created_ns", "scopes", "hash", "hash_max_bytes", "store_max_bytes"
+    };
+    if (reject_duplicate_keys(line, hkeys, sizeof hkeys / sizeof hkeys[0]) == -1) return -1;
+
+    memset(h, 0, sizeof *h);
+    h->version = ver;
+
+    if ((p = find_key(line, "created_ns")) == NULL || read_i64(p, &h->created_ns, "created_ns") == -1 ||
+        (p = find_key(line, "hash_max_bytes")) == NULL || read_u64(p, &h->hash_max_bytes, "hash_max_bytes") == -1 ||
+        (p = find_key(line, "store_max_bytes")) == NULL || read_u64(p, &h->store_max_bytes, "store_max_bytes") == -1) {
+        if (belay_err_code() == BELAY_OK)
+            belay_err_set(BELAY_ERR_CORRUPT, 0, "manifest: header is missing a field");
+        return -1;
+    }
+
+    /* The scope is what makes two manifests comparable at all. Exactly one in
+     * this version; several scopes per manifest is not supported yet. */
+    p = find_key(line, "scopes");
+    if (p == NULL || *p != '[') {
+        belay_err_set(BELAY_ERR_CORRUPT, 0, "manifest: header has no scopes array");
+        return -1;
+    }
+    size_t slen = 0;
+    if (read_str(p + 1, h->scope, sizeof h->scope, &slen, "scope") == -1) return -1;
+    if (slen == 0 || reject_nul(h->scope, slen, "scope") == -1 || h->scope[0] != '/') {
+        if (belay_err_code() == BELAY_OK)
+            belay_err_set(BELAY_ERR_CORRUPT, 0, "manifest: scope is not an absolute path");
+        return -1;
+    }
+    /* Skip past the string to require the array closes after one element. */
+    const char *q = p + 2;
+    while (*q != '\0' && !(*q == '"' && q[-1] != '\\')) q++;
+    if (*q != '"' || q[1] != ']') {
+        belay_err_set(BELAY_ERR_UNSUPPORTED, 0, "manifest: more than one scope");
+        return -1;
+    }
     return 0;
 }
 
 static int parse_entry(const char *line, struct belay_entry *e) {
     memset(e, 0, sizeof *e);
+
+    static const char *const ekeys[] = {
+        "path", "path_b64", "type", "mode", "uid", "gid", "size", "mtime_ns",
+        "ctime_ns", "ino", "dev", "nlink", "sha256", "unverified", "unstable",
+        "rdev", "link_target", "link_target_b64", "target_outside_scope",
+        "stored", "mount", "unreadable"
+    };
+    if (reject_duplicate_keys(line, ekeys, sizeof ekeys / sizeof ekeys[0]) == -1) return -1;
 
     const char *p_path = find_key(line, "path");
     const char *p_b64  = find_key(line, "path_b64");
@@ -239,28 +368,10 @@ static int parse_entry(const char *line, struct belay_entry *e) {
     }
     if (reject_nul(e->path, e->path_len, "path") == -1) return -1;
 
-    /*
-     *  Entry paths are relative to the scope root and must stay inside it.
-     *  Rejecting ".." and absolute paths here is defence in depth: M1 only
-     *  reads, but the moment anything restores from a manifest, an accepted
-     *  "../../etc/passwd" is an arbitrary write. Found by independent review
-     *  (§0.4b) -- and the same hidden-".." risk the NUL rule exists to stop.
-     */
-    if (e->path[0] == '/') {
-        belay_err_set(BELAY_ERR_CORRUPT, 0, "manifest: entry path is absolute");
-        return -1;
-    }
-    for (size_t i = 0; i < e->path_len; i++) {
-        if (e->path[i] != '.') continue;
-        const bool at_start = (i == 0) || (e->path[i - 1] == '/');
-        if (!at_start) continue;
-        if (i + 1 < e->path_len && e->path[i + 1] == '.' &&
-            (i + 2 == e->path_len || e->path[i + 2] == '/')) {
-            belay_err_set(BELAY_ERR_CORRUPT, 0,
-                          "manifest: entry path contains a \"..\" component");
-            return -1;
-        }
-    }
+    /* Canonical form only (see check_canonical). Found by independent review
+     * (§0.4b) for ".." and absolute paths; widened by the defect-class sweep
+     * to every non-canonical form. */
+    if (check_canonical(e->path, e->path_len) == -1) return -1;
 
     const char *p = find_key(line, "type");
     if (p == NULL) {
@@ -344,12 +455,18 @@ static int parse_entry(const char *line, struct belay_entry *e) {
         e->has_hash = true;
     }
 
-    e->unverified = (strstr(line, "\"unverified\":true") != NULL);
+    if (read_flag(line, "unverified", &e->unverified) == -1) return -1;
+    if (read_flag(line, "unstable", &e->unstable) == -1) return -1;
 
     /* A hash and the unverified flag are mutually exclusive by construction;
      * both present means the file was edited or written by something else. */
     if (e->has_hash && e->unverified) {
         belay_err_set(BELAY_ERR_CORRUPT, 0, "manifest: both sha256 and unverified");
+        return -1;
+    }
+    /* Unstable means "no trustworthy hash", so it implies unverified. */
+    if (e->unstable && !e->unverified) {
+        belay_err_set(BELAY_ERR_CORRUPT, 0, "manifest: unstable without unverified");
         return -1;
     }
 
@@ -384,9 +501,24 @@ static int parse_entry(const char *line, struct belay_entry *e) {
         return -1;
     }
 
-    e->target_outside_scope = (strstr(line, "\"target_outside_scope\":true") != NULL);
-    e->is_mount             = (strstr(line, "\"mount\":true") != NULL);
-    e->unreadable           = (strstr(line, "\"unreadable\":true") != NULL);
+    if (read_flag(line, "target_outside_scope", &e->target_outside_scope) == -1) return -1;
+    if (read_flag(line, "mount", &e->is_mount) == -1) return -1;
+    if (read_flag(line, "unreadable", &e->unreadable) == -1) return -1;
+
+    /* Device numbers belong to device nodes, and device nodes must carry one:
+     * without it a replaced device or an overlayfs whiteout (char 0,0) would
+     * be indistinguishable from the original. */
+    p = find_key(line, "rdev");
+    const bool is_dev = (e->type == BELAY_T_BLK || e->type == BELAY_T_CHR);
+    if (is_dev != (p != NULL)) {
+        belay_err_set(BELAY_ERR_CORRUPT, 0, is_dev ? "manifest: device without rdev"
+                                                    : "manifest: rdev on a non-device");
+        return -1;
+    }
+    if (p != NULL) {
+        if (read_u64(p, &e->rdev, "rdev") == -1) return -1;
+        e->has_rdev = true;
+    }
 
     p = find_key(line, "stored");
     if (p != NULL) {
@@ -418,7 +550,63 @@ struct belay_manifest_reader {
     size_t cap;
     size_t lineno;
     int    state;       /* 0 open, 1 ended cleanly, -1 failed (sticky) */
+
+    struct belay_manifest_header header;
+    struct belay_manifest_stats  trailer;
+    bool   have_trailer;
+
+    /* What was actually read, checked against the trailer. */
+    size_t n_entries, n_unreadable, n_unstable;
+
+    /* The previous path, for the strict-order check. */
+    char   prev[4096];
+    size_t prev_len;
+    bool   have_prev;
 };
+
+const struct belay_manifest_header *
+belay_manifest_header(const struct belay_manifest_reader *r) {
+    return r == NULL ? NULL : &r->header;
+}
+
+const struct belay_manifest_stats *
+belay_manifest_trailer(const struct belay_manifest_reader *r) {
+    return (r != NULL && r->have_trailer) ? &r->trailer : NULL;
+}
+
+/*
+ *  The trailer must be the last line and must agree with what was read.
+ *  Without it a manifest cut off at a line boundary -- a crash, a full disk --
+ *  is indistinguishable from a complete one with fewer entries, and the
+ *  missing tail would read as deletions.
+ */
+static int parse_trailer(struct belay_manifest_reader *r, const char *line) {
+    static const char *const tkeys[] = { "belay_manifest_end", "vanished", "unreadable", "unstable" };
+    if (reject_duplicate_keys(line, tkeys, sizeof tkeys / sizeof tkeys[0]) == -1) return -1;
+
+    uint64_t v[4];
+    for (size_t i = 0; i < 4; i++) {
+        const char *p = find_key(line, tkeys[i]);
+        if (p == NULL) {
+            belay_err_set(BELAY_ERR_CORRUPT, 0, "manifest: trailer is missing %s", tkeys[i]);
+            return -1;
+        }
+        if (read_u64(p, &v[i], tkeys[i]) == -1) return -1;
+    }
+    if (v[0] != r->n_entries || v[2] != r->n_unreadable || v[3] != r->n_unstable) {
+        belay_err_set(BELAY_ERR_CORRUPT, 0,
+                      "manifest: trailer says %llu entries / %llu unreadable / %llu unstable, "
+                      "read %zu / %zu / %zu",
+                      (unsigned long long)v[0], (unsigned long long)v[2],
+                      (unsigned long long)v[3], r->n_entries, r->n_unreadable, r->n_unstable);
+        return -1;
+    }
+    r->trailer.entries    = (size_t)v[0];
+    r->trailer.vanished   = (size_t)v[1];
+    r->trailer.unreadable = (size_t)v[2];
+    r->trailer.unstable   = (size_t)v[3];
+    return 0;
+}
 
 /* 1 = line in r->line with the newline stripped, 0 = EOF, -1 = error. */
 static int next_line(struct belay_manifest_reader *r) {
@@ -477,15 +665,14 @@ int belay_manifest_open(const char *path, struct belay_manifest_reader **out) {
         return -1;
     }
 
-    int got;
-    while ((got = next_line(r)) == 1 && r->line[0] == '\0') { /* skip blank */ }
+    const int got = next_line(r);
     if (got == -1) { belay_manifest_close(r); return -1; }
     if (got == 0) {
         belay_err_set(BELAY_ERR_CORRUPT, 0, "manifest: file is empty");
         belay_manifest_close(r);
         return -1;
     }
-    if (parse_header(r->line) == -1) {
+    if (parse_header(r->line, &r->header) == -1) {
         err_at_line(r->lineno);
         belay_manifest_close(r);
         return -1;
@@ -502,19 +689,73 @@ int belay_manifest_next(struct belay_manifest_reader *r, struct belay_entry *e) 
     }
     if (r->state != 0) return r->state == 1 ? 0 : -1;
 
-    for (;;) {
-        const int got = next_line(r);
-        if (got == -1) { r->state = -1; return -1; }
-        if (got == 0)  { r->state = 1;  return 0; }
-        if (r->line[0] == '\0') continue;   /* tolerate a blank line */
+    const int got = next_line(r);
+    if (got == -1) { r->state = -1; return -1; }
+    if (got == 0) {
+        belay_err_set(BELAY_ERR_CORRUPT, 0,
+                      "manifest: no end marker after %zu entries (truncated?)", r->n_entries);
+        r->state = -1;
+        return -1;
+    }
 
-        if (parse_entry(r->line, e) == -1) {
+    /* The writer never emits a blank line; accepting one would widen the
+     * reader's language beyond the writer's. */
+    if (r->line[0] == '\0') {
+        belay_err_set(BELAY_ERR_CORRUPT, 0, "manifest: blank line");
+        err_at_line(r->lineno);
+        r->state = -1;
+        return -1;
+    }
+
+    if (find_key(r->line, "belay_manifest_end") != NULL) {
+        if (parse_trailer(r, r->line) == -1) {
             err_at_line(r->lineno);
             r->state = -1;
             return -1;
         }
-        return 1;
+        const int more = next_line(r);
+        if (more != 0) {
+            if (more == 1)
+                belay_err_set(BELAY_ERR_CORRUPT, 0, "manifest: data after the end marker");
+            r->state = -1;
+            return -1;
+        }
+        r->have_trailer = true;
+        r->state = 1;
+        return 0;
     }
+
+    if (parse_entry(r->line, e) == -1) {
+        err_at_line(r->lineno);
+        r->state = -1;
+        return -1;
+    }
+
+    /*
+     *  Strictly increasing raw-path order. The comparator advances two
+     *  manifests as a merge; out of order or duplicated entries would be
+     *  mis-paired silently. Verified before this check: a manifest listing
+     *  "b" before "a", and one listing "a" twice, were both accepted.
+     */
+    if (r->have_prev) {
+        const size_t n = r->prev_len < e->path_len ? r->prev_len : e->path_len;
+        const int c = memcmp(r->prev, e->path, n);
+        if (c > 0 || (c == 0 && r->prev_len >= e->path_len)) {
+            belay_err_set(BELAY_ERR_CORRUPT, 0, c == 0 && r->prev_len == e->path_len
+                          ? "manifest: duplicate path" : "manifest: entries out of order");
+            err_at_line(r->lineno);
+            r->state = -1;
+            return -1;
+        }
+    }
+    memcpy(r->prev, e->path, e->path_len);
+    r->prev_len = e->path_len;
+    r->have_prev = true;
+
+    r->n_entries++;
+    if (e->unreadable) r->n_unreadable++;
+    if (e->unstable)   r->n_unstable++;
+    return 1;
 }
 
 int belay_manifest_read(const char *path, belay_entry_fn fn, void *ctx) {

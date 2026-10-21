@@ -116,6 +116,9 @@ static int serialize(const struct belay_entry *e, char *buf, size_t cap, size_t 
 
     if (e->has_hash && ap(buf, cap, &w, ",\"sha256\":\"%s\"", e->sha256_hex) == -1) return -1;
     if (e->unverified && ap(buf, cap, &w, ",\"unverified\":true") == -1) return -1;
+    if (e->unstable && ap(buf, cap, &w, ",\"unstable\":true") == -1) return -1;
+    if (e->has_rdev &&
+        ap(buf, cap, &w, ",\"rdev\":%llu", (unsigned long long)e->rdev) == -1) return -1;
 
     if (e->has_link_target) {
         if (ap(buf, cap, &w, ",") == -1) return -1;
@@ -391,6 +394,7 @@ struct walk_ctx {
     size_t n_entries;
     size_t n_vanished;
     size_t n_unreadable;
+    size_t n_unstable;
 };
 
 static enum belay_entry_type type_of(mode_t m) {
@@ -405,9 +409,10 @@ static enum belay_entry_type type_of(mode_t m) {
 
 /* Hashes by fd: no path is re-resolved, so there is no window between the
  * open and the read. */
-static int hash_fd(int fd, unsigned char *buf, char hex_out[65]) {
+static int hash_fd(int fd, unsigned char *buf, char hex_out[65], uint64_t *nread) {
     struct belay_sha256 c;
     belay_sha256_init(&c);
+    *nread = 0;
     for (;;) {
         const ssize_t n = read(fd, buf, READ_CHUNK);
         if (n == 0) break;
@@ -417,11 +422,68 @@ static int hash_fd(int fd, unsigned char *buf, char hex_out[65]) {
             return -1;
         }
         belay_sha256_update(&c, buf, (size_t)n);
+        *nread += (uint64_t)n;
     }
     uint8_t d[BELAY_SHA256_DIGEST_LEN];
     belay_sha256_final(&c, d);
     belay_hex_encode(hex_out, d, sizeof d);
     return 0;
+}
+
+static int64_t ts_ns(const struct stat *st, int which) {
+#ifdef __APPLE__
+    const struct timespec *t = which ? &st->st_ctimespec : &st->st_mtimespec;
+#else
+    const struct timespec *t = which ? &st->st_ctim : &st->st_mtim;
+#endif
+    return (int64_t)t->tv_sec * 1000000000 + t->tv_nsec;
+}
+
+static void fill_from_stat(struct belay_entry *e, const struct stat *st) {
+    e->type     = type_of(st->st_mode);
+    e->mode     = (uint32_t)st->st_mode;
+    e->uid      = (uint32_t)st->st_uid;
+    e->gid      = (uint32_t)st->st_gid;
+    e->size     = (uint64_t)st->st_size;
+    e->ino      = (uint64_t)st->st_ino;
+    e->dev      = (uint64_t)st->st_dev;
+    e->nlink    = (uint64_t)st->st_nlink;
+    e->mtime_ns = ts_ns(st, 0);
+    e->ctime_ns = ts_ns(st, 1);
+    if (e->type == BELAY_T_BLK || e->type == BELAY_T_CHR) {
+        e->has_rdev = true;
+        e->rdev = (uint64_t)st->st_rdev;
+    }
+}
+
+/*
+ *  Advisory only (§5.1.1): does a RELATIVE link target leave the scope,
+ *  judged lexically from the link's own directory? ".." pops a component;
+ *  popping above the scope root means outside. Symlinks along the way are
+ *  not followed, so this can be wrong in both directions -- which is why it
+ *  is an annotation and never an input to a decision. Previously only
+ *  absolute targets were analysed, so a relative escape such as "../../etc"
+ *  carried no annotation at all.
+ */
+static bool rel_target_escapes(const char *link_path, size_t link_len,
+                               const char *target, size_t tlen) {
+    /* depth = number of directory components above the link, inside scope */
+    long depth = 0;
+    for (size_t i = 0; i < link_len; i++) if (link_path[i] == '/') depth++;
+
+    size_t i = 0;
+    while (i < tlen) {
+        size_t j = i;
+        while (j < tlen && target[j] != '/') j++;
+        const size_t n = j - i;
+        if (n == 2 && target[i] == '.' && target[i + 1] == '.') {
+            if (--depth < 0) return true;
+        } else if (!(n == 0 || (n == 1 && target[i] == '.'))) {
+            depth++;
+        }
+        i = j + 1;
+    }
+    return false;
 }
 
 static ssize_t rel_join(char *rel, size_t relsz, size_t rel_len, const char *name) {
@@ -472,21 +534,7 @@ static int visit(int parent_fd, const char *name, char *rel, size_t relsz,
     memcpy(e->path, rel, rel_len);
     e->path_len = rel_len;
 
-    e->type  = type_of(st.st_mode);
-    e->mode  = (uint32_t)st.st_mode;
-    e->uid   = (uint32_t)st.st_uid;
-    e->gid   = (uint32_t)st.st_gid;
-    e->size  = (uint64_t)st.st_size;
-    e->ino   = (uint64_t)st.st_ino;
-    e->dev   = (uint64_t)st.st_dev;
-    e->nlink = (uint64_t)st.st_nlink;
-#ifdef __APPLE__
-    e->mtime_ns = (int64_t)st.st_mtimespec.tv_sec * 1000000000 + st.st_mtimespec.tv_nsec;
-    e->ctime_ns = (int64_t)st.st_ctimespec.tv_sec * 1000000000 + st.st_ctimespec.tv_nsec;
-#else
-    e->mtime_ns = (int64_t)st.st_mtim.tv_sec * 1000000000 + st.st_mtim.tv_nsec;
-    e->ctime_ns = (int64_t)st.st_ctim.tv_sec * 1000000000 + st.st_ctim.tv_nsec;
-#endif
+    fill_from_stat(e, &st);
 
     const bool crossed = ((uint64_t)st.st_dev != wc->root_dev);
     int cfd = -1;
@@ -512,8 +560,12 @@ static int visit(int parent_fd, const char *name, char *rel, size_t relsz,
         /* Advisory only (§5.1.1): computed lexically, never used to decide. */
         if (e->link_target[0] == '/') {
             const int within = belay_path_within_lexical(wc->scope, e->link_target);
-            e->target_outside_scope = (within == 0);
+            e->target_outside_scope = (within != 1);
             if (within == -1) belay_err_clear();
+        } else {
+            e->target_outside_scope = rel_target_escapes(e->path, e->path_len,
+                                                         e->link_target,
+                                                         e->link_target_len);
         }
     } else if (e->type == BELAY_T_REG) {
         /* O_NOFOLLOW closes the swap window after fstatat; O_NONBLOCK stops a
@@ -531,13 +583,54 @@ static int visit(int parent_fd, const char *name, char *rel, size_t relsz,
                 return -1;
             }
         } else {
-            if (e->size > wc->opts->hash_max_bytes) {
-                e->unverified = true;
-            } else if (hash_fd(fd, wc->readbuf, e->sha256_hex) == 0) {
-                e->has_hash = true;
-            } else {
+            /*
+             *  The metadata above came from fstatat; the bytes come from this
+             *  fd. They must describe the same file at the same moment, or the
+             *  recorded (size, sha256) pair describes no state the file was
+             *  ever in. Measured before this check: a file appended to during
+             *  `check` was recorded with a hash covering more bytes than its
+             *  recorded size, 5 runs out of 5.
+             */
+            struct stat before, after;
+            if (fstat(fd, &before) == -1) {
+                belay_err_set(BELAY_ERR_IO, errno, "manifest: fstat %s", rel);
                 close(fd);
                 return -1;
+            }
+            const bool same_inode = before.st_ino == st.st_ino &&
+                                    before.st_dev == st.st_dev &&
+                                    S_ISREG(before.st_mode);
+            if (!same_inode) {
+                /* Swapped between fstatat and openat. */
+                e->unverified = true;
+                e->unstable = true;
+                wc->n_unstable++;
+            } else if (e->size > wc->opts->hash_max_bytes) {
+                e->unverified = true;
+            } else {
+                uint64_t nread = 0;
+                if (hash_fd(fd, wc->readbuf, e->sha256_hex, &nread) == -1) {
+                    close(fd);
+                    return -1;
+                }
+                if (fstat(fd, &after) == -1) {
+                    belay_err_set(BELAY_ERR_IO, errno, "manifest: fstat %s", rel);
+                    close(fd);
+                    return -1;
+                }
+                const bool stable = after.st_size == before.st_size &&
+                                    ts_ns(&after, 0) == ts_ns(&before, 0) &&
+                                    ts_ns(&after, 1) == ts_ns(&before, 1) &&
+                                    nread == (uint64_t)before.st_size &&
+                                    (uint64_t)before.st_size == e->size;
+                if (stable) {
+                    e->has_hash = true;
+                } else {
+                    e->sha256_hex[0] = '\0';
+                    e->unverified = true;
+                    e->unstable = true;
+                    wc->n_unstable++;
+                }
             }
             close(fd);
         }
@@ -555,6 +648,11 @@ static int visit(int parent_fd, const char *name, char *rel, size_t relsz,
             cfd = openat(parent_fd, name, O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC);
             if (cfd == -1) {
                 if (errno == ENOENT) {
+                    /* Gone between fstatat and openat. Recorded without its
+                     * subtree, so it MUST be flagged: unflagged it would read
+                     * as an empty directory. */
+                    e->unreadable = true;
+                    wc->n_unreadable++;
                     wc->n_vanished++;
                 } else if (errno == ELOOP || errno == ENOTDIR ||
                            errno == EACCES || errno == EPERM) {
@@ -649,7 +747,7 @@ static int write_header(FILE *f, const char *scope_real,
 
 int belay_manifest_write(const char *out_path, const char *scope,
                          const struct belay_manifest_opts *opts,
-                         size_t *n_entries) {
+                         struct belay_manifest_stats *stats) {
     if (out_path == NULL || scope == NULL || opts == NULL) {
         belay_err_set(BELAY_ERR_INVALID, 0, "manifest_write: null argument");
         return -1;
@@ -714,6 +812,15 @@ int belay_manifest_write(const char *out_path, const char *scope,
     wc->scope = real;
     wc->spill = &sp;
 
+    /* The scope root itself is an entry, path ".". Without it a chmod or
+     * chown on the root is invisible: verified, the manifest body was
+     * byte-identical before and after `chmod 700` on the root. */
+    memset(&wc->e, 0, sizeof wc->e);
+    fill_from_stat(&wc->e, &rst);
+    wc->e.path[0] = '.';
+    wc->e.path_len = 1;
+    if (emit_entry(wc) == -1) goto cleanup;
+
     rel[0] = '\0';
     if (walk(root_fd, rel, PATH_CAP, 0, 0, wc) != 0) goto cleanup;
 
@@ -759,6 +866,17 @@ int belay_manifest_write(const char *out_path, const char *scope,
         goto cleanup;
     }
 
+    /* The trailer makes a manifest self-delimiting: a file cut off at a line
+     * boundary would otherwise be indistinguishable from a complete one with
+     * fewer entries. It also records what the walk could not capture. */
+    if (fprintf(out,
+                "{\"belay_manifest_end\":%zu,\"vanished\":%zu"
+                ",\"unreadable\":%zu,\"unstable\":%zu}\n",
+                wc->n_entries, wc->n_vanished, wc->n_unreadable, wc->n_unstable) < 0) {
+        belay_err_set(BELAY_ERR_IO, errno, "manifest: trailer write failed");
+        goto cleanup;
+    }
+
     if (fflush(out) != 0 || fsync(fileno(out)) != 0) {
         belay_err_set(BELAY_ERR_IO, errno, "manifest: flush failed");
         goto cleanup;
@@ -775,7 +893,12 @@ int belay_manifest_write(const char *out_path, const char *scope,
     }
     outtmp_live = false;
 
-    if (n_entries != NULL) *n_entries = wc->n_entries;
+    if (stats != NULL) {
+        stats->entries    = wc->n_entries;
+        stats->vanished   = wc->n_vanished;
+        stats->unreadable = wc->n_unreadable;
+        stats->unstable   = wc->n_unstable;
+    }
     rc = 0;
 
 cleanup:
