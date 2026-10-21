@@ -55,6 +55,23 @@ int belay_store_open(const char *dir, struct belay_store **out) {
         return -1;
     }
 
+    /* An existing store must be ours and writable only by us. Otherwise
+     * another user could plant objects that dedup would keep; verify-on-read
+     * would still catch them, but nothing should be able to put them there. */
+    struct stat st;
+    if (fstat(dfd, &st) == -1) {
+        belay_err_set(BELAY_ERR_IO, errno, "store: cannot stat %s", dir);
+        close(dfd);
+        return -1;
+    }
+    if (st.st_uid != geteuid() || (st.st_mode & 022) != 0) {
+        belay_err_set(BELAY_ERR_INVALID, 0,
+                      "store: %s must be owned by this user and not group/other-writable "
+                      "(mode %03o)", dir, (unsigned)(st.st_mode & 0777));
+        close(dfd);
+        return -1;
+    }
+
     struct belay_store *s = calloc(1, sizeof *s);
     if (s == NULL) {
         close(dfd);

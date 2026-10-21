@@ -18,11 +18,12 @@
  *  MEMORY IS BOUNDED, independent of entry count. Each entry is serialized as
  *  it is visited and appended to an in-memory run buffer of RUN_BYTES. A full
  *  buffer is sorted by raw path bytes and spilled to an unlinked temporary
- *  file. At the end the runs are k-way merged into the output. When FANIN runs
- *  accumulate during the walk they are merged into one, so open descriptors
- *  are bounded as well. Peak memory is roughly RUN_BYTES plus FANIN merge
- *  cursors. (The previous design held every entry in RAM at ~8.4 KB each;
- *  independent review defect 4.)
+ *  file. Runs are kept by level: FANIN runs at one level merge into one run at
+ *  the next, so each byte is rewritten about log16(runs) times and open
+ *  descriptors stay bounded. At the end the remaining runs are merged into the
+ *  output. Peak memory is roughly RUN_BYTES plus FANIN merge cursors.
+ *  (Earlier designs held every entry in RAM at ~8.4 KB each, then re-merged one
+ *  ever-growing run at every cascade; independent review defects 4 and 6.)
  *
  *  The output is written to a temporary name and renamed into place, so a
  *  crash or a full disk never leaves a partial manifest at `out_path`.
@@ -47,6 +48,9 @@
 #include <stdlib.h>
 #include <string.h>
 #include <sys/stat.h>
+#ifdef __linux__
+#include <sys/sysmacros.h>
+#endif
 #include <time.h>
 #include <unistd.h>
 
@@ -56,6 +60,7 @@
 #define LINE_CAP   (64u * 1024u)       /* one serialized entry; worst case < 50 KB */
 #define RUN_BYTES  (4u * 1024u * 1024u)
 #define FANIN      16
+#define LEVELS     12                  /* 16^12 runs: unreachable in practice */
 #define SNIFF_BYTES 8000u              /* git's binary heuristic: a NUL in the
                                           first 8000 bytes means not text */
 
@@ -156,8 +161,13 @@ struct spill {
     size_t used;
     size_t *offs, *scratch;
     size_t n, cap;
-    FILE *runs[FANIN];
-    size_t nruns;
+    /* Runs by level: level k holds runs merged from 16^k first-level runs. A
+     * full level merges into ONE run at the next level, so each byte is
+     * rewritten about log16(runs) times. (The first version re-merged a
+     * single ever-growing run at every cascade: temporary I/O grew with the
+     * square of the entry count, 13x the manifest size at 80k entries.) */
+    FILE *runs[LEVELS][FANIN];
+    size_t nruns[LEVELS];
     char tmpl[PATH_MAX + 32];   /* mkstemp template for runs */
 };
 
@@ -271,7 +281,8 @@ static int merge(FILE **in, size_t k, FILE *out, int lines_only, size_t *count) 
         if (emitted > 0) {
             const int c = memcmp(prev, m->buf, prev_len < m->plen ? prev_len : m->plen);
             if (c > 0 || (c == 0 && prev_len >= m->plen)) {
-                belay_err_set(BELAY_ERR_CORRUPT, 0, "manifest: internal error, merge out of order");
+                belay_err_set(BELAY_ERR_CORRUPT, 0,
+                              "manifest: the filesystem listed one name twice; refusing");
                 rc = -1;
                 goto done;
             }
@@ -326,24 +337,65 @@ static int spill_flush(struct spill *s) {
         fclose(f);
         return -1;
     }
-    s->runs[s->nruns++] = f;
+    s->runs[0][s->nruns[0]++] = f;
     s->used = 0;
     s->n = 0;
 
-    /* Cascade so open descriptors stay bounded at FANIN however large the
-     * tree: FANIN runs become one. */
-    if (s->nruns == FANIN) {
+    /* Cascade: a full level becomes one run one level up. Open descriptors
+     * stay bounded by FANIN per level. */
+    for (size_t lv = 0; lv + 1 < LEVELS && s->nruns[lv] == FANIN; lv++) {
         FILE *merged = open_tmp(s->tmpl);
         if (merged == NULL) return -1;
-        if (merge(s->runs, s->nruns, merged, 0, NULL) == -1 || fflush(merged) != 0) {
+        if (merge(s->runs[lv], FANIN, merged, 0, NULL) == -1 || fflush(merged) != 0) {
             fclose(merged);
             return -1;
         }
-        for (size_t i = 0; i < s->nruns; i++) fclose(s->runs[i]);
-        s->runs[0] = merged;
-        s->nruns = 1;
+        for (size_t i = 0; i < FANIN; i++) fclose(s->runs[lv][i]);
+        s->nruns[lv] = 0;
+        s->runs[lv + 1][s->nruns[lv + 1]++] = merged;
+    }
+    if (s->nruns[LEVELS - 1] == FANIN) {
+        belay_err_set(BELAY_ERR_RANGE, 0, "manifest: too many entries to sort");
+        return -1;
     }
     return 0;
+}
+
+static size_t spill_total_runs(const struct spill *s) {
+    size_t t = 0;
+    for (size_t lv = 0; lv < LEVELS; lv++) t += s->nruns[lv];
+    return t;
+}
+
+/*
+ *  Merges whatever runs remain, across levels, into `out` as manifest lines.
+ *  At most FANIN-1 runs per level remain, so with several levels populated
+ *  there can be more than FANIN: those are first merged lowest level first
+ *  (the smallest runs, so the least data is rewritten) until FANIN remain.
+ */
+static int spill_finish(struct spill *s, FILE *out, size_t *count) {
+    FILE *all[LEVELS * FANIN];
+    size_t n = 0;
+    for (size_t lv = 0; lv < LEVELS; lv++) {
+        for (size_t i = 0; i < s->nruns[lv]; i++) all[n++] = s->runs[lv][i];
+        s->nruns[lv] = 0;
+    }
+    int rc = 0;
+    while (n > FANIN) {
+        FILE *merged = open_tmp(s->tmpl);
+        if (merged == NULL || merge(all, FANIN, merged, 0, NULL) == -1 || fflush(merged) != 0) {
+            if (merged != NULL) fclose(merged);
+            rc = -1;
+            break;
+        }
+        for (size_t i = 0; i < FANIN; i++) fclose(all[i]);
+        memmove(all, all + FANIN, (n - FANIN) * sizeof *all);
+        n -= FANIN;
+        all[n++] = merged;
+    }
+    if (rc == 0) rc = merge(all, n, out, 1, count);
+    for (size_t i = 0; i < n; i++) fclose(all[i]);
+    return rc;
 }
 
 static int spill_add(struct spill *s, const char *path, size_t plen,
@@ -377,7 +429,8 @@ nomem:
 }
 
 static void spill_free(struct spill *s) {
-    for (size_t i = 0; i < s->nruns; i++) fclose(s->runs[i]);
+    for (size_t lv = 0; lv < LEVELS; lv++)
+        for (size_t i = 0; i < s->nruns[lv]; i++) fclose(s->runs[lv][i]);
     free(s->arena);
     free(s->offs);
     free(s->scratch);
@@ -432,7 +485,7 @@ static int hash_fd(int fd, unsigned char *buf, char hex_out[65], uint64_t *nread
         if (n < 0) {
             if (errno == EINTR) continue;
             belay_err_set(BELAY_ERR_IO, errno, "hash: read failed");
-            return -1;
+            return -2;                      /* the file's problem, not belay's */
         }
         if (*nread < SNIFF_BYTES) {
             const size_t span = (size_t)n < SNIFF_BYTES - *nread ? (size_t)n
@@ -520,226 +573,393 @@ static ssize_t rel_join(char *rel, size_t relsz, size_t rel_len, const char *nam
     return (ssize_t)w;
 }
 
-static int emit_entry(struct walk_ctx *wc) {
+static int emit_one(struct walk_ctx *wc, const struct belay_entry *e) {
     size_t llen = 0;
-    if (serialize(&wc->e, wc->line, LINE_CAP, &llen) == -1) return -1;
-    if (spill_add(wc->spill, wc->e.path, wc->e.path_len, wc->line, llen) == -1) return -1;
+    if (serialize(e, wc->line, LINE_CAP, &llen) == -1) return -1;
+    if (spill_add(wc->spill, e->path, e->path_len, wc->line, llen) == -1) return -1;
     wc->n_entries++;
     return 0;
 }
 
+static int emit_entry(struct walk_ctx *wc) { return emit_one(wc, &wc->e); }
+
 static int walk(int dfd, char *rel, size_t relsz, size_t rel_len,
                 int depth, struct walk_ctx *wc);
+
+/*
+ *  lstat, plus whether the entry is a mount root. st_dev alone misses a bind
+ *  mount from the same filesystem -- verified: a same-device bind of a
+ *  directory from outside the scope was walked and hashed with no flag. On
+ *  Linux statx's STATX_ATTR_MOUNT_ROOT reports every mount root, bind mounts
+ *  included. Elsewhere, or on a kernel without it, st_dev is the fallback.
+ */
+static int stat_entry(int dfd, const char *name, struct stat *st, bool *mount_root) {
+    *mount_root = false;
+#if defined(__linux__) && defined(STATX_ATTR_MOUNT_ROOT)
+    struct statx sx;
+    if (statx(dfd, name, AT_SYMLINK_NOFOLLOW, STATX_BASIC_STATS, &sx) == 0) {
+        memset(st, 0, sizeof *st);
+        st->st_mode  = sx.stx_mode;
+        st->st_ino   = sx.stx_ino;
+        st->st_dev   = makedev(sx.stx_dev_major, sx.stx_dev_minor);
+        st->st_rdev  = makedev(sx.stx_rdev_major, sx.stx_rdev_minor);
+        st->st_nlink = sx.stx_nlink;
+        st->st_uid   = sx.stx_uid;
+        st->st_gid   = sx.stx_gid;
+        st->st_size  = (off_t)sx.stx_size;
+        st->st_mtim.tv_sec  = sx.stx_mtime.tv_sec;
+        st->st_mtim.tv_nsec = sx.stx_mtime.tv_nsec;
+        st->st_ctim.tv_sec  = sx.stx_ctime.tv_sec;
+        st->st_ctim.tv_nsec = sx.stx_ctime.tv_nsec;
+        *mount_root = (sx.stx_attributes_mask & STATX_ATTR_MOUNT_ROOT) &&
+                      (sx.stx_attributes & STATX_ATTR_MOUNT_ROOT);
+        return 0;
+    }
+    if (errno != ENOSYS) return -1;
+#endif
+    return fstatat(dfd, name, st, AT_SYMLINK_NOFOLLOW);
+}
+
+/* Errors that are belay's own resource exhaustion rather than a property of
+ * one entry: these stay fatal, loudly. Everything else about one entry is
+ * recorded on that entry and the walk goes on. */
+static bool fatal_errno(int err) {
+    return err == EMFILE || err == ENFILE || err == ENOMEM;
+}
+
+enum { V_OK = 0, V_VANISHED = 2, V_RACED = 3 };
+
+/*
+ *  Symlink. readlinkat reads the link itself, never its target. The link is
+ *  re-stat'ed afterwards: the target read must belong to the link whose
+ *  metadata was recorded (same inode, unchanged ctime, size equal to the
+ *  target's length), or a swapped link would record one link's target with
+ *  another's metadata.
+ */
+static int read_link(int pfd, const char *name, const struct stat *st, const char *rel,
+                     struct walk_ctx *wc) {
+    struct belay_entry *e = &wc->e;
+    /* Buffer of PATH_CAP: a target of exactly PATH_CAP-1 (4095, the most
+     * Linux allows) fits with its NUL. A full buffer means truncation. */
+    const ssize_t n = readlinkat(pfd, name, e->link_target, sizeof e->link_target);
+    if (n < 0) {
+        if (errno == ENOENT) return V_VANISHED;
+        if (errno == EINVAL) return V_RACED;           /* no longer a symlink */
+        belay_err_set(BELAY_ERR_IO, errno, "manifest: readlinkat %s", rel);
+        return -1;
+    }
+    if ((size_t)n >= sizeof e->link_target) {
+        belay_err_set(BELAY_ERR_RANGE, 0, "manifest: link target too long at %s", rel);
+        return -1;
+    }
+    e->link_target[n] = '\0';
+    e->link_target_len = (size_t)n;
+    e->has_link_target = true;
+
+    struct stat again;
+    bool mr;
+    if (stat_entry(pfd, name, &again, &mr) == -1) {
+        if (errno == ENOENT) return V_VANISHED;
+        belay_err_set(BELAY_ERR_IO, errno, "manifest: stat %s", rel);
+        return -1;
+    }
+    if (again.st_ino != st->st_ino || again.st_dev != st->st_dev ||
+        ts_ns(&again, 1) != ts_ns(st, 1) || (uint64_t)again.st_size != (uint64_t)n)
+        return V_RACED;
+
+    /* Advisory only (§5.1.1): computed lexically, never used to decide. */
+    if (e->link_target[0] == '/') {
+        const int within = belay_path_within_lexical(wc->scope, e->link_target);
+        e->target_outside_scope = (within != 1);
+        if (within == -1) belay_err_clear();
+    } else {
+        e->target_outside_scope = rel_target_escapes(e->path, e->path_len,
+                                                     e->link_target, e->link_target_len);
+    }
+    return V_OK;
+}
+
+static void mark_unreadable_file(struct walk_ctx *wc) {
+    wc->e.unverified = true;
+    wc->e.unreadable = true;
+    wc->n_unreadable++;
+}
+
+/*
+ *  Regular file. Hashes by fd and, when content is kept, stages the copy in
+ *  the same read. The (size, sha256) pair must describe one real state of the
+ *  file, so the fd is checked against the fstatat (inode, size, mtime, ctime)
+ *  before reading and against itself after; any mismatch records no hash.
+ */
+static int read_file(int pfd, const char *name, const struct stat *st, const char *rel,
+                     size_t rel_len, struct walk_ctx *wc) {
+    struct belay_entry *e = &wc->e;
+
+    /* O_NOFOLLOW closes the swap window; O_NONBLOCK stops a FIFO swapped in
+     * from blocking the open forever. */
+    const int fd = openat(pfd, name, O_RDONLY | O_NOFOLLOW | O_NONBLOCK | O_CLOEXEC);
+    if (fd == -1) {
+        if (errno == ENOENT) return V_VANISHED;
+        if (fatal_errno(errno)) {
+            belay_err_set(BELAY_ERR_IO, errno, "manifest: openat %s", rel);
+            return -1;
+        }
+        /* EACCES, EPERM, ELOOP (swapped for a link), EAGAIN (a lease),
+         * ETXTBSY, EIO...: one entry's property, recorded on it. */
+        mark_unreadable_file(wc);
+        return V_OK;
+    }
+
+    struct stat before, after;
+    if (fstat(fd, &before) == -1) {
+        belay_err_set(BELAY_ERR_IO, errno, "manifest: fstat %s", rel);
+        close(fd);
+        return -1;
+    }
+    /* Same file, same moment as the fstatat whose metadata was recorded --
+     * including mtime and ctime, so a same-size rewrite in between cannot
+     * pair the old timestamps with the new content's hash. */
+    const bool same = before.st_ino == st->st_ino && before.st_dev == st->st_dev &&
+                      S_ISREG(before.st_mode) && before.st_size == st->st_size &&
+                      ts_ns(&before, 0) == ts_ns(st, 0) && ts_ns(&before, 1) == ts_ns(st, 1);
+    if (!same) {
+        e->unverified = true;
+        e->unstable = true;
+        wc->n_unstable++;
+        close(fd);
+        return V_OK;
+    }
+    if (e->size > wc->opts->hash_max_bytes) {
+        e->unverified = true;
+        close(fd);
+        return V_OK;
+    }
+
+    /* What must be kept: an interpreter's claim overrides the size threshold
+     * (stored whatever its size) or forbids storing (hash only); unclaimed
+     * files are kept if small and text. */
+    struct belay_claim claim = { BELAY_INTERP_BINARY, BELAY_KEEP_DEFAULT };
+    if (wc->store != NULL) {
+        const size_t sep = wc->scope_len > 1 ? 1 : 0;
+        if (wc->scope_len + sep + rel_len < PATH_MAX * 2) {
+            if (sep) wc->abs[wc->scope_len] = '/';
+            memcpy(wc->abs + wc->scope_len + sep, rel, rel_len);
+            belay_interp_classify(wc->abs, wc->scope_len + sep + rel_len, &claim);
+        }
+    }
+    const bool want = wc->store != NULL && claim.keep != BELAY_KEEP_HASH &&
+                      (claim.keep == BELAY_KEEP_STORE || e->size <= wc->opts->store_max_bytes);
+
+    struct belay_store_tx tx;
+    if (want && belay_store_begin(wc->store, &tx) == -1) {
+        close(fd);
+        return -1;
+    }
+
+    uint64_t nread = 0;
+    bool binary = false;
+    const int h = hash_fd(fd, wc->readbuf, e->sha256_hex, &nread, want ? &tx : NULL, &binary);
+    if (h != 0) {
+        if (want) belay_store_abort(&tx);
+        close(fd);
+        if (h == -2) {
+            /* The file could not be read (EIO and friends): record it. */
+            belay_err_clear();
+            e->sha256_hex[0] = '\0';
+            mark_unreadable_file(wc);
+            return V_OK;
+        }
+        return -1;                                      /* store write failed */
+    }
+    if (fstat(fd, &after) == -1) {
+        belay_err_set(BELAY_ERR_IO, errno, "manifest: fstat %s", rel);
+        if (want) belay_store_abort(&tx);
+        close(fd);
+        return -1;
+    }
+    close(fd);
+
+    const bool stable = after.st_size == before.st_size &&
+                        ts_ns(&after, 0) == ts_ns(&before, 0) &&
+                        ts_ns(&after, 1) == ts_ns(&before, 1) &&
+                        nread == (uint64_t)before.st_size;
+    if (!stable) {
+        /* The bytes read -- and any staged copy -- match no state of the file. */
+        if (want) belay_store_abort(&tx);
+        e->sha256_hex[0] = '\0';
+        e->unverified = true;
+        e->unstable = true;
+        wc->n_unstable++;
+        return V_OK;
+    }
+
+    e->has_hash = true;
+    /* Unclaimed binary content is not kept: the text interpreter could not
+     * use it. Claimed content is kept whatever it is. */
+    if (want && !(claim.keep == BELAY_KEEP_DEFAULT && binary)) {
+        if (belay_store_commit(&tx, e->sha256_hex) == -1) return -1;
+        e->has_stored = true;
+        memcpy(e->stored_hex, e->sha256_hex, sizeof e->stored_hex);
+    } else if (want) {
+        belay_store_abort(&tx);
+    }
+    return V_OK;
+}
+
+/* A name can be at most this long, so a directory whose path is longer than
+ * PATH_CAP - 2 - NAME_BYTES might hold children whose paths do not fit. */
+#define NAME_BYTES 255
+
+/*
+ *  Directory. Opened, and checked, BEFORE its entry is emitted, so whatever
+ *  goes wrong is recorded on the entry itself. Any condition that keeps belay
+ *  from capturing the contents is a flag on this one entry ("contents
+ *  unknown"), never a failure of the whole check.
+ */
+static int open_dir(int pfd, const char *name, const struct stat *st, const char *rel,
+                    size_t rel_len, int depth, struct walk_ctx *wc, int *out_fd) {
+    struct belay_entry *e = &wc->e;
+    *out_fd = -1;
+
+    if (depth >= MAX_DEPTH || rel_len > PATH_CAP - 2 - NAME_BYTES) {
+        e->unreadable = true;
+        wc->n_unreadable++;
+        return V_OK;
+    }
+
+    const int cfd = openat(pfd, name, O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC);
+    if (cfd == -1) {
+        if (fatal_errno(errno)) {
+            belay_err_set(BELAY_ERR_IO, errno, "manifest: openat dir %s", rel);
+            return -1;
+        }
+        if (errno == ENOENT) wc->n_vanished++;
+        /* ENOENT (gone), ELOOP/ENOTDIR (swapped), EACCES/EPERM: the subtree is
+         * absent, and unflagged it would read as an empty directory. */
+        e->unreadable = true;
+        wc->n_unreadable++;
+        return V_OK;
+    }
+
+    /* The directory opened must be the one stat'ed. Verified before this
+     * check: swapping two directories between the stat and the open recorded
+     * A's mode and inode with B's contents, and lost A's contents, with a
+     * clean trailer. */
+    struct stat cs, probe;
+    if (fstat(cfd, &cs) == -1 || cs.st_ino != st->st_ino || cs.st_dev != st->st_dev ||
+        /* Readable but not searchable (r without x): its names can be listed
+         * but none of them can be stat'ed. */
+        fstatat(cfd, ".", &probe, AT_SYMLINK_NOFOLLOW) == -1) {
+        close(cfd);
+        e->unreadable = true;
+        wc->n_unreadable++;
+        return V_OK;
+    }
+    /* Changed between its stat and its open: its listing will not describe
+     * the state its metadata records. Still walked, but flagged. */
+    if (ts_ns(&cs, 0) != ts_ns(st, 0) || ts_ns(&cs, 1) != ts_ns(st, 1)) {
+        e->unstable = true;
+        wc->n_unstable++;
+    }
+    (void)rel;
+    *out_fd = cfd;
+    return V_OK;
+}
+
+#define MAX_RACE_RETRIES 3
 
 /* Records one entry and, for directories, recurses. Takes the parent dirfd and
  * the entry name; never a path string. */
 static int visit(int parent_fd, const char *name, char *rel, size_t relsz,
                  size_t rel_len, int depth, struct walk_ctx *wc) {
-    struct stat st;
-    if (fstatat(parent_fd, name, &st, AT_SYMLINK_NOFOLLOW) == -1) {
-        /* Vanished between readdir and fstatat: the tree changed under us.
-         * Counted rather than fatal, so check stays usable on a live tree. */
-        if (errno == ENOENT) { wc->n_vanished++; return 0; }
-        belay_err_set(BELAY_ERR_IO, errno, "manifest: fstatat %s", rel);
-        return -1;
-    }
-
     struct belay_entry *e = &wc->e;
-    memset(e, 0, sizeof *e);
-    if (rel_len >= sizeof e->path) {
-        belay_err_set(BELAY_ERR_RANGE, 0, "manifest: path too long");
-        return -1;
-    }
-    memcpy(e->path, rel, rel_len);
-    e->path_len = rel_len;
-
-    fill_from_stat(e, &st);
-
-    const bool crossed = ((uint64_t)st.st_dev != wc->root_dev);
     int cfd = -1;
 
-    if (e->type == BELAY_T_LNK) {
-        /* readlinkat reads the link itself. It does not NUL-terminate and
-         * truncates silently, so a full buffer is an error. */
-        const ssize_t n = readlinkat(parent_fd, name, e->link_target,
-                                     sizeof e->link_target - 1);
-        if (n < 0) {
+    for (int attempt = 0; ; attempt++) {
+        struct stat st;
+        bool mount_root;
+        if (stat_entry(parent_fd, name, &st, &mount_root) == -1) {
+            /* Vanished between readdir and stat: the tree changed under us. */
             if (errno == ENOENT) { wc->n_vanished++; return 0; }
-            belay_err_set(BELAY_ERR_IO, errno, "manifest: readlinkat %s", rel);
+            belay_err_set(BELAY_ERR_IO, errno, "manifest: stat %s", rel);
             return -1;
         }
-        if ((size_t)n >= sizeof e->link_target - 1) {
-            belay_err_set(BELAY_ERR_RANGE, 0, "manifest: link target too long at %s", rel);
+
+        memset(e, 0, sizeof *e);
+        if (rel_len >= sizeof e->path) {
+            belay_err_set(BELAY_ERR_RANGE, 0, "manifest: path too long");
             return -1;
         }
-        e->link_target[n] = '\0';
-        e->link_target_len = (size_t)n;
-        e->has_link_target = true;
+        memcpy(e->path, rel, rel_len);
+        e->path_len = rel_len;
+        fill_from_stat(e, &st);
 
-        /* Advisory only (§5.1.1): computed lexically, never used to decide. */
-        if (e->link_target[0] == '/') {
-            const int within = belay_path_within_lexical(wc->scope, e->link_target);
-            e->target_outside_scope = (within != 1);
-            if (within == -1) belay_err_clear();
-        } else {
-            e->target_outside_scope = rel_target_escapes(e->path, e->path_len,
-                                                         e->link_target,
-                                                         e->link_target_len);
-        }
-    } else if (e->type == BELAY_T_REG) {
-        /* O_NOFOLLOW closes the swap window after fstatat; O_NONBLOCK stops a
-         * FIFO swapped in from blocking the open forever. */
-        const int fd = openat(parent_fd, name,
-                              O_RDONLY | O_NOFOLLOW | O_NONBLOCK | O_CLOEXEC);
-        if (fd == -1) {
-            if (errno == ENOENT) { wc->n_vanished++; return 0; }
-            if (errno == EACCES || errno == EPERM || errno == ELOOP) {
-                e->unverified = true;
-                e->unreadable = true;
-                wc->n_unreadable++;
-            } else {
-                belay_err_set(BELAY_ERR_IO, errno, "manifest: openat %s", rel);
-                return -1;
-            }
-        } else {
-            /*
-             *  The metadata above came from fstatat; the bytes come from this
-             *  fd. They must describe the same file at the same moment, or the
-             *  recorded (size, sha256) pair describes no state the file was
-             *  ever in. Measured before this check: a file appended to during
-             *  `check` was recorded with a hash covering more bytes than its
-             *  recorded size, 5 runs out of 5.
-             */
-            struct stat before, after;
-            if (fstat(fd, &before) == -1) {
-                belay_err_set(BELAY_ERR_IO, errno, "manifest: fstat %s", rel);
-                close(fd);
-                return -1;
-            }
-            const bool same_inode = before.st_ino == st.st_ino &&
-                                    before.st_dev == st.st_dev &&
-                                    S_ISREG(before.st_mode);
-            if (!same_inode) {
-                /* Swapped between fstatat and openat. */
-                e->unverified = true;
-                e->unstable = true;
-                wc->n_unstable++;
-            } else if (e->size > wc->opts->hash_max_bytes) {
-                e->unverified = true;
-            } else {
-                /* What must be kept: an interpreter's claim overrides the
-                 * size threshold (stored whatever its size) or forbids storing
-                 * (hash only); unclaimed files are kept if small and text. */
-                struct belay_claim claim = { BELAY_INTERP_BINARY, BELAY_KEEP_DEFAULT };
-                if (wc->store != NULL) {
-                    const size_t sep = wc->scope_len > 1 ? 1 : 0;
-                    if (wc->scope_len + sep + rel_len < PATH_MAX * 2) {
-                        if (sep) wc->abs[wc->scope_len] = '/';
-                        memcpy(wc->abs + wc->scope_len + sep, rel, rel_len);
-                        belay_interp_classify(wc->abs, wc->scope_len + sep + rel_len, &claim);
-                    }
-                }
-                const bool want = wc->store != NULL && claim.keep != BELAY_KEEP_HASH &&
-                                  (claim.keep == BELAY_KEEP_STORE ||
-                                   e->size <= wc->opts->store_max_bytes);
+        /* A mount root of ANY type is a capture boundary: recorded, never read
+         * or descended. Before, only directories were checked, so a file
+         * bind-mounted from elsewhere was hashed and stored as if local. */
+        const bool crossed = mount_root || (uint64_t)st.st_dev != wc->root_dev;
 
-                struct belay_store_tx tx;
-                if (want && belay_store_begin(wc->store, &tx) == -1) {
-                    close(fd);
-                    return -1;
-                }
-
-                uint64_t nread = 0;
-                bool binary = false;
-                if (hash_fd(fd, wc->readbuf, e->sha256_hex, &nread,
-                            want ? &tx : NULL, &binary) == -1) {
-                    if (want) belay_store_abort(&tx);
-                    close(fd);
-                    return -1;
-                }
-                if (fstat(fd, &after) == -1) {
-                    belay_err_set(BELAY_ERR_IO, errno, "manifest: fstat %s", rel);
-                    if (want) belay_store_abort(&tx);
-                    close(fd);
-                    return -1;
-                }
-                const bool stable = after.st_size == before.st_size &&
-                                    ts_ns(&after, 0) == ts_ns(&before, 0) &&
-                                    ts_ns(&after, 1) == ts_ns(&before, 1) &&
-                                    nread == (uint64_t)before.st_size &&
-                                    (uint64_t)before.st_size == e->size;
-                if (stable) {
-                    e->has_hash = true;
-                    /* Unclaimed binary content is not kept: the text
-                     * interpreter could not use it. Claimed content is kept
-                     * whatever it is. */
-                    const bool keep = want && !(claim.keep == BELAY_KEEP_DEFAULT && binary);
-                    if (keep) {
-                        if (belay_store_commit(&tx, e->sha256_hex) == -1) {
-                            close(fd);
-                            return -1;
-                        }
-                        e->has_stored = true;
-                        memcpy(e->stored_hex, e->sha256_hex, sizeof e->stored_hex);
-                    } else if (want) {
-                        belay_store_abort(&tx);
-                    }
-                } else {
-                    /* The staged copy matches no state of the file either. */
-                    if (want) belay_store_abort(&tx);
-                    e->sha256_hex[0] = '\0';
-                    e->unverified = true;
-                    e->unstable = true;
-                    wc->n_unstable++;
-                }
-            }
-            close(fd);
-        }
-    } else if (e->type == BELAY_T_DIR) {
+        int r = V_OK;
         if (crossed) {
             e->is_mount = true;
-        } else {
-            if (depth >= MAX_DEPTH) {
-                belay_err_set(BELAY_ERR_RANGE, 0,
-                              "manifest: directory depth exceeds %d at %s", MAX_DEPTH, rel);
-                return -1;
-            }
-            /* Opened BEFORE the entry is serialized, so a failure can be
-             * recorded on the entry itself. */
-            cfd = openat(parent_fd, name, O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC);
-            if (cfd == -1) {
-                if (errno == ENOENT) {
-                    /* Gone between fstatat and openat. Recorded without its
-                     * subtree, so it MUST be flagged: unflagged it would read
-                     * as an empty directory. */
-                    e->unreadable = true;
-                    wc->n_unreadable++;
-                    wc->n_vanished++;
-                } else if (errno == ELOOP || errno == ENOTDIR ||
-                           errno == EACCES || errno == EPERM) {
-                    /* The subtree is ABSENT from the manifest; without the flag
-                     * this is byte-identical to an empty directory. */
-                    e->unreadable = true;
-                    wc->n_unreadable++;
-                } else {
-                    belay_err_set(BELAY_ERR_IO, errno, "manifest: openat dir %s", rel);
-                    return -1;
-                }
-            }
+            if (e->type == BELAY_T_REG) e->unverified = true;
+            if (e->type == BELAY_T_LNK) r = read_link(parent_fd, name, &st, rel, wc);
+        } else if (e->type == BELAY_T_LNK) {
+            r = read_link(parent_fd, name, &st, rel, wc);
+        } else if (e->type == BELAY_T_REG) {
+            r = read_file(parent_fd, name, &st, rel, rel_len, wc);
+        } else if (e->type == BELAY_T_DIR) {
+            r = open_dir(parent_fd, name, &st, rel, rel_len, depth, wc, &cfd);
         }
+
+        if (r == -1) return -1;
+        if (r == V_VANISHED) { wc->n_vanished++; return 0; }
+        if (r == V_RACED) {
+            if (attempt + 1 < MAX_RACE_RETRIES) continue;     /* stat it again */
+            /* Still changing after several tries. Keep what was read, flagged;
+             * if no target was ever read the entry is counted as vanished. */
+            if (!e->has_link_target) { wc->n_vanished++; return 0; }
+            e->unreadable = true;
+            wc->n_unreadable++;
+        }
+        break;
     }
 
-    if (emit_entry(wc) == -1) {
-        if (cfd != -1) close(cfd);
+    if (cfd == -1) return emit_entry(wc);
+
+    /*
+     *  A walked directory is emitted AFTER its subtree (order is fixed by the
+     *  sort, so this costs nothing) so that a change during its own listing
+     *  can still be recorded on it. Verified before this: a file moved, mid-
+     *  walk, from a not-yet-listed directory into an already-listed one was
+     *  recorded nowhere while the trailer claimed a clean walk. Now the
+     *  directory it left is flagged unstable: its listing describes no single
+     *  instant. The scratch entry is reused by the children, so keep a copy.
+     */
+    struct belay_entry *dir = malloc(sizeof *dir);
+    if (dir == NULL) {
+        belay_err_set(BELAY_ERR_NOMEM, 0, "manifest: out of memory");
+        close(cfd);
         return -1;
     }
+    memcpy(dir, e, sizeof *dir);
 
-    if (cfd != -1) {
-        const int r = walk(cfd, rel, relsz, rel_len, depth + 1, wc);
-        close(cfd);
-        if (r != 0) return r;
+    int r = walk(cfd, rel, relsz, rel_len, depth + 1, wc);
+    if (r == 0) {
+        struct stat post;
+        if (fstat(cfd, &post) == -1) {
+            belay_err_set(BELAY_ERR_IO, errno, "manifest: fstat %s", rel);
+            r = -1;
+        } else if (!dir->unstable &&
+                   (ts_ns(&post, 0) != dir->mtime_ns || ts_ns(&post, 1) != dir->ctime_ns)) {
+            dir->unstable = true;
+            wc->n_unstable++;
+        }
     }
-    return 0;
+    close(cfd);
+    if (r == 0) r = emit_one(wc, dir);
+    free(dir);
+    return r;
 }
 
 static int walk(int dfd, char *rel, size_t relsz, size_t rel_len,
@@ -792,12 +1012,17 @@ static int write_header(FILE *f, const char *scope_real,
     clock_gettime(CLOCK_REALTIME, &now);
     const long long created = (long long)now.tv_sec * 1000000000LL + now.tv_nsec;
 
-    if (belay_json_escape(buf, LINE_CAP, scope_real, strlen(scope_real)) == -1) return -1;
+    /* Same rule as entry paths: JSON for valid UTF-8, base64 otherwise.
+     * Before, a non-UTF-8 scope was written raw and the line was not JSON. */
+    const size_t sl = strlen(scope_real);
+    const bool utf8 = belay_utf8_valid(scope_real, sl);
+    if ((utf8 ? belay_json_escape(buf, LINE_CAP, scope_real, sl)
+              : belay_base64_encode(buf, LINE_CAP, scope_real, sl)) == -1) return -1;
     if (fprintf(f,
-                "{\"belay_manifest\":%d,\"created_ns\":%lld,\"scopes\":[\"%s\"]"
+                "{\"belay_manifest\":%d,\"created_ns\":%lld,\"%s\":[\"%s\"]"
                 ",\"hash\":\"sha256\",\"hash_max_bytes\":%llu"
                 ",\"store_max_bytes\":%llu}\n",
-                BELAY_MANIFEST_VERSION, created, buf,
+                BELAY_MANIFEST_VERSION, created, utf8 ? "scopes" : "scopes_b64", buf,
                 (unsigned long long)opts->hash_max_bytes,
                 (unsigned long long)opts->store_max_bytes) < 0) {
         belay_err_set(BELAY_ERR_IO, errno, "manifest: header write failed");
@@ -891,10 +1116,18 @@ int belay_manifest_write(const char *out_path, const char *scope,
     fill_from_stat(&wc->e, &rst);
     wc->e.path[0] = '.';
     wc->e.path_len = 1;
+    /* A scope root that can be listed but not searched has contents belay
+     * cannot stat: flag it, rather than fail on its first child. */
+    struct stat probe;
+    const bool searchable = fstatat(root_fd, ".", &probe, AT_SYMLINK_NOFOLLOW) == 0;
+    if (!searchable) {
+        wc->e.unreadable = true;
+        wc->n_unreadable++;
+    }
     if (emit_entry(wc) == -1) goto cleanup;
 
     rel[0] = '\0';
-    if (walk(root_fd, rel, PATH_CAP, 0, 0, wc) != 0) goto cleanup;
+    if (searchable && walk(root_fd, rel, PATH_CAP, 0, 0, wc) != 0) goto cleanup;
 
     /* Output goes to a temporary name and is renamed into place. */
     const int ofd = mkstemp(outtmp);
@@ -912,11 +1145,19 @@ int belay_manifest_write(const char *out_path, const char *scope,
     if (write_header(out, real, opts, wc->line) == -1) goto cleanup;
 
     size_t written = 0;
-    if (sp.nruns == 0) {
-        /* Everything fit in one run: sort in memory, write straight out. */
+    if (spill_total_runs(&sp) == 0) {
+        /* Everything fit in one run: sort in memory, write straight out --
+         * with the same strict-order check merge() applies, so a name the
+         * filesystem returns twice fails here too instead of producing a
+         * manifest the reader rejects. */
         sort_offs(sp.arena, sp.offs, sp.scratch, sp.n);
         for (size_t i = 0; i < sp.n; i++) {
             const unsigned char *r = sp.arena + sp.offs[i];
+            if (i > 0 && rec_cmp(sp.arena + sp.offs[i - 1], r) >= 0) {
+                belay_err_set(BELAY_ERR_CORRUPT, 0,
+                              "manifest: the filesystem listed one name twice; refusing");
+                goto cleanup;
+            }
             uint32_t pl, ll;
             memcpy(&pl, r, 4);
             memcpy(&ll, r + 4 + pl, 4);
@@ -928,7 +1169,7 @@ int belay_manifest_write(const char *out_path, const char *scope,
         written = sp.n;
     } else {
         if (spill_flush(&sp) == -1) goto cleanup;
-        if (merge(sp.runs, sp.nruns, out, 1, &written) == -1) goto cleanup;
+        if (spill_finish(&sp, out, &written) == -1) goto cleanup;
     }
 
     if (written != wc->n_entries) {

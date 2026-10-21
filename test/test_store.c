@@ -225,6 +225,22 @@ TEST(store_directory_that_is_a_symlink_is_refused) {
     rmdir(real);
 }
 
+/* A store writable by group or others would let another user plant objects. */
+TEST(store_directory_writable_by_others_is_refused) {
+    char d[600];
+    snprintf(d, sizeof d, "%s_open", g_dir);
+    mkdir(d, 0700);
+    chmod(d, 0777);
+    struct belay_store *s = NULL;
+    ASSERT_EQ_INT(-1, belay_store_open(d, &s));
+    ASSERT_TRUE(s == NULL);
+    belay_err_clear();
+    chmod(d, 0750);
+    ASSERT_EQ_INT(0, belay_store_open(d, &s));   /* group-readable is fine */
+    belay_store_close(s);
+    rmdir(d);
+}
+
 int main(void) {
     snprintf(g_dir, sizeof g_dir, "/tmp/belay_store_%d", (int)getpid());
 
@@ -237,6 +253,7 @@ int main(void) {
     RUN(abort_leaves_nothing);
     RUN(verify_reports_missing_object);
     RUN(store_directory_that_is_a_symlink_is_refused);
+    RUN(store_directory_writable_by_others_is_refused);
 
     char cmd[600];
     snprintf(cmd, sizeof cmd, "rm -rf '%s'", g_dir);

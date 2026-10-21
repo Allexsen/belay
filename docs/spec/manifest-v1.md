@@ -19,6 +19,27 @@ $XDG_STATE_HOME/belay/checkpoints/<id>/
 
 Newline-delimited JSON: one JSON object per line, no array wrapper, LF line endings.
 
+**The encoding is canonical: every manifest state has exactly one byte representation**, and a
+reader MUST reject anything else. Concretely, each line is exactly
+
+```
+line    := '{' pair (',' pair)* '}'      -- then LF; no whitespace anywhere
+pair    := '"' [a-z0-9_]+ '"' ':' value
+value   := string | integer | 'true' | '[' string (',' string)* ']'
+string  := '"' ( byte >= 0x20 other than '"' and '\' | escape )* '"'
+escape  := \" | \\ | \b | \f | \n | \r | \t | \u00XX
+           (\u00XX only for a control byte with no short form, lowercase hex)
+integer := '0' | '-'? [1-9][0-9]*
+```
+
+No line may exceed 64 KiB or contain a NUL byte. `false` and `null` never appear: a flag is absent
+or exactly `true`.
+
+Why canonical: a reader that tolerates a second spelling -- whitespace, a duplicated key, `"x":
+true` with a space, bytes after an embedded NUL -- has a place where a flag can be hidden from it.
+Independent review found such places in a reader that searched lines for keys; this grammar removes
+them as a class.
+
 Chosen over a binary format because it is streamable (a 100k-file manifest never needs a whole-file
 parse), greppable while developing, and because the JSON writer is needed anyway for `--json` output
 (§4.2 contract 2), so it is shared code rather than a second format.
@@ -36,7 +57,7 @@ are not permitted anywhere.
 |---|---|---|
 | `belay_manifest` | int | format version. A reader MUST reject a version it does not know. |
 | `created_ns` | int | wall clock at creation, nanoseconds since the epoch. Informational only — never used for comparison, per §6.3. |
-| `scopes` | array | the normalized scope roots this manifest covers |
+| `scopes` | array | the resolved scope root, exactly one in this version. A scope that is not valid UTF-8 is written as `scopes_b64` (base64 elements) instead, never both. |
 | `hash` | string | digest algorithm for the `sha256` field |
 | `hash_max_bytes` | int | regular files larger than this are recorded without a hash (see `unverified`) |
 | `store_max_bytes` | int | size threshold for copying content into `store/` |
@@ -72,13 +93,27 @@ owner is invisible.
 | `link_target` | string | `lnk` | the link's bytes, verbatim and unresolved |
 | `link_target_b64` | string | `lnk`, non-UTF-8 | base64 of the target bytes |
 | `target_outside_scope` | bool | `lnk`, advisory | `true` when the target resolves lexically outside the scope. **Advisory only** — never drives a decision (§5.1.1). |
-| `unstable` | bool | `reg`, with `unverified` | `true`. The file changed while it was being read (its size, mtime or ctime moved, or the inode opened was not the one stat'ed). No hash is recorded, because the bytes read describe no state the file was ever in. |
+| `unstable` | bool | `reg` (with `unverified`) or `dir` | `true`. On a regular file: it changed while being read (size, mtime or ctime moved, or the inode opened was not the one stat'ed); no hash is recorded, because the bytes read describe no state the file ever had. On a directory: its listing changed between its stat and the end of its listing, so entries may be missing from it or recorded under another directory; the comparator MUST NOT read its children as a complete listing. |
 | `rdev` | int | `blk` and `chr` only, required | the device number. Without it a replaced device node, or an overlayfs whiteout (char 0,0), is indistinguishable from the original. A reader MUST reject a device without `rdev` and `rdev` on anything else. |
 | `stored` | string | when content was copied | the `store/` key, which is the content's sha256 |
-| `mount` | bool | `dir`, at a boundary | `true`. `dev` differs from the scope root's; belay recorded the mount point and did **not** descend (§5.1.1). |
-| `unreadable` | bool | when enumeration or reading failed | `true`. belay could not read this entry: an unreadable directory, or a file it could not open. **For a directory, the entire subtree below it is ABSENT from the manifest.** `diff` MUST report such a subtree as *contents unknown* and never as *unchanged*. Without this field an unreadable directory is byte-identical to an empty one. |
+| `mount` | bool | any type, at a boundary | `true`. The entry is the root of another mount: its `dev` differs from the scope root's, or (Linux) statx reports it as a mount root, which also catches bind mounts from the same filesystem. It is recorded and **never read or descended** (§5.1.1): a mounted regular file carries `unverified` and no hash. |
+| `unreadable` | bool | when capture failed for this entry | `true`. belay could not capture this entry's contents: a directory it could not open or search (permission, or readable-but-not-searchable), a directory swapped for another between its stat and its open, a directory beyond the depth limit (128) or whose path leaves no room for a child name, a file it could not open or read, or a symlink that kept changing while being read. **For a directory, the entire subtree below it is ABSENT.** `diff` MUST report such a subtree as *contents unknown* and never as *unchanged*. Without this field an unreadable directory is byte-identical to an empty one. |
 
 ### Field rules a reader MUST enforce
+
+In addition to the grammar above:
+
+- **Types and fields agree.** A `reg` entry carries exactly one of `sha256` and `unverified`.
+  No other type carries `sha256`, `unverified`, `unstable` or `stored`. `rdev` appears exactly on
+  `blk` and `chr`; `link_target` (or `link_target_b64`) exactly on `lnk`; `target_outside_scope`
+  only on `lnk`. A `mount` entry carries no `sha256`.
+- **`mode`'s type bits match `type`** (`S_IFMT`; the values are the same on Linux and macOS).
+- **A symlink's `size` equals its target's length.** The writer re-stats the link after reading it
+  to guarantee they belong together.
+- **`path` is used only for valid UTF-8 and `path_b64` only for anything else** (likewise
+  `link_target`/`link_target_b64`), so a path has one encoding.
+- **The scope root `.` is present**, exactly once, and is a directory.
+- **Nothing appears below a directory marked `unreadable` or `mount`.**
 
 - **No key appears twice** in one line. "First wins" would let two different lines mean the same
   thing.
@@ -106,7 +141,7 @@ shipped.
 | `belay_manifest_end` | number of entries, including `.` |
 | `vanished` | entries that disappeared between being listed and being read. Non-zero means the tree was changing during the walk, so the manifest is not a single instant. |
 | `unreadable` | entries carrying `unreadable` |
-| `unstable` | entries carrying `unstable` |
+| `unstable` | entries carrying `unstable` (files and directories) |
 
 The trailer is **required** and must be the **last line**. A reader MUST reject a manifest with no
 trailer, a trailer whose counts disagree with the entries read, or anything after the trailer.

@@ -1089,6 +1089,92 @@ TEST(store_discards_copies_of_unstable_files) {
     fx_rm("race");
 }
 
+/* ===== Independent review, D5 class: "a per-entry condition aborted the whole
+ * check". Each is now recorded on the entry and the check completes. ===== */
+
+TEST(review_readable_but_not_searchable_directory_is_flagged) {
+    fx_mkdir("rx");
+    fx_mkdir("rx/d");
+    fx_write("rx/d/f", "x", 1);
+    char p[8192];
+    snprintf(p, sizeof p, "%s/rx/d", g_root);
+    if (chmod(p, 0444) != 0) return;
+    size_t n = 0;
+    const int rc = run_check("rx", &n);
+    chmod(p, 0755);
+    ASSERT_EQ_INT(0, rc);                        /* used to abort: fstatat d/f EACCES */
+    struct found *d = get("d");
+    ASSERT_TRUE(d != NULL && d->unreadable);
+    ASSERT_TRUE(get("d/f") == NULL);
+    fx_rm("rx/d/f"); fx_rm("rx/d"); fx_rm("rx");
+}
+
+TEST(review_unsearchable_scope_root_is_flagged) {
+    fx_mkdir("rr");
+    fx_write("rr/f", "x", 1);
+    char p[8192];
+    snprintf(p, sizeof p, "%s/rr", g_root);
+    if (chmod(p, 0444) != 0) return;
+    size_t n = 0;
+    const int rc = run_check("rr", &n);
+    chmod(p, 0755);
+    ASSERT_EQ_INT(0, rc);
+    struct found *r = get(".");
+    ASSERT_TRUE(r != NULL && r->unreadable);
+    ASSERT_EQ_INT(1, (int)n);
+    fx_rm("rr/f"); fx_rm("rr");
+}
+
+/* Depth beyond MAX_DEPTH: the deepest directory is flagged and the check
+ * completes, instead of the whole check failing. */
+TEST(review_tree_deeper_than_the_limit_is_flagged_not_fatal) {
+    char rel[1024] = "deep";
+    fx_mkdir(rel);
+    for (int i = 0; i < 130; i++) {
+        strcat(rel, "/x");
+        fx_mkdir(rel);
+    }
+    size_t n = 0;
+    ASSERT_EQ_INT(0, run_check("deep", &n));
+    size_t flagged = 0;
+    for (size_t i = 0; i < g_nfound; i++) if (g_found[i].unreadable) flagged++;
+    ASSERT_EQ_INT(1, (int)flagged);
+    char cmd[8300];
+    snprintf(cmd, sizeof cmd, "rm -rf '%s/deep'", g_root);
+    if (system(cmd) != 0) { /* best effort */ }
+}
+
+/* A 4095-byte link target is the longest Linux allows; it was rejected by an
+ * off-by-one. (macOS caps links lower, so the fixture is skipped there.) */
+TEST(review_longest_legal_link_target_is_recorded) {
+    fx_mkdir("lt");
+    static char target[4096];
+    memset(target, 'a', 4095);
+    target[4095] = '\0';
+    char p[8192];
+    snprintf(p, sizeof p, "%s/lt/l", g_root);
+    if (symlink(target, p) != 0) { fx_rm("lt"); return; }
+    size_t n = 0;
+    ASSERT_EQ_INT(0, run_check("lt", &n));
+    struct found *l = get("l");
+    ASSERT_TRUE(l != NULL && strlen(l->link_target) == 4095);
+    unlink(p);
+    fx_rm("lt");
+}
+
+/* A scope that is not UTF-8 goes in scopes_b64 so the header stays JSON.
+ * (APFS refuses such names, so this is skipped on macOS.) */
+TEST(review_non_utf8_scope_produces_valid_header) {
+    char p[8192];
+    snprintf(p, sizeof p, "%s/s\xff", g_root);
+    if (mkdir(p, 0755) != 0) return;
+    size_t n = 0;
+    ASSERT_EQ_INT(0, run_check("s\xff", &n));
+    ASSERT_TRUE(strstr(g_header, "\"scopes_b64\":[\"") != NULL);
+    ASSERT_TRUE(strstr(g_header, "\xff") == NULL);
+    rmdir(p);
+}
+
 int main(void) {
     fx_init();
 
@@ -1122,6 +1208,11 @@ int main(void) {
     RUN(store_keeps_small_text_and_skips_binary);
     RUN(store_follows_interpreter_claims_not_just_size);
     RUN(store_discards_copies_of_unstable_files);
+    RUN(review_readable_but_not_searchable_directory_is_flagged);
+    RUN(review_unsearchable_scope_root_is_flagged);
+    RUN(review_tree_deeper_than_the_limit_is_flagged_not_fatal);
+    RUN(review_longest_legal_link_target_is_recorded);
+    RUN(review_non_utf8_scope_produces_valid_header);
 
     fx_cleanup();
     {
