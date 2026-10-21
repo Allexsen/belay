@@ -180,9 +180,7 @@ static int run_check(const char *scope_rel, size_t *n) {
     else snprintf(scope, sizeof scope, "%s/%s", g_root, scope_rel);
     snprintf(mpath, sizeof mpath, "/tmp/belay_m_%d.ndjson", (int)getpid());
 
-    struct belay_manifest_opts o = {
-        BELAY_HASH_MAX_BYTES_DEFAULT, BELAY_STORE_MAX_BYTES_DEFAULT, NULL
-    };
+    struct belay_manifest_opts o = { .hash_max_bytes = BELAY_HASH_MAX_BYTES_DEFAULT, .store_max_bytes = BELAY_STORE_MAX_BYTES_DEFAULT };
     if (belay_manifest_write(mpath, scope, &o, n) == -1) return -1;
     return load(mpath);
 }
@@ -435,7 +433,7 @@ TEST(oversized_file_is_unverified_not_skipped) {
     snprintf(mpath, sizeof mpath, "/tmp/belay_m2_%d.ndjson", (int)getpid());
     snprintf(scope, sizeof scope, "%s", g_root);
 
-    struct belay_manifest_opts o = { 4, BELAY_STORE_MAX_BYTES_DEFAULT, NULL };
+    struct belay_manifest_opts o = { .hash_max_bytes = 4, .store_max_bytes = BELAY_STORE_MAX_BYTES_DEFAULT };
     size_t n = 0;
     ASSERT_EQ_INT(0, belay_manifest_write(mpath, scope, &o, &n));
     ASSERT_EQ_INT(0, load(mpath));
@@ -497,9 +495,7 @@ TEST(rejects_dotdot_scope_before_touching_fs) {
     snprintf(scope, sizeof scope, "%s/../etc", g_root);
     snprintf(mpath, sizeof mpath, "/tmp/belay_m3_%d.ndjson", (int)getpid());
 
-    struct belay_manifest_opts o = {
-        BELAY_HASH_MAX_BYTES_DEFAULT, BELAY_STORE_MAX_BYTES_DEFAULT, NULL
-    };
+    struct belay_manifest_opts o = { .hash_max_bytes = BELAY_HASH_MAX_BYTES_DEFAULT, .store_max_bytes = BELAY_STORE_MAX_BYTES_DEFAULT };
     ASSERT_EQ_INT(-1, belay_manifest_write(mpath, scope, &o, NULL));
     ASSERT_EQ_INT(BELAY_ERR_INVALID, belay_err_code());
     belay_err_clear();
@@ -510,9 +506,7 @@ TEST(rejects_nonexistent_scope) {
     snprintf(scope, sizeof scope, "%s/no-such-dir", g_root);
     snprintf(mpath, sizeof mpath, "/tmp/belay_m4_%d.ndjson", (int)getpid());
 
-    struct belay_manifest_opts o = {
-        BELAY_HASH_MAX_BYTES_DEFAULT, BELAY_STORE_MAX_BYTES_DEFAULT, NULL
-    };
+    struct belay_manifest_opts o = { .hash_max_bytes = BELAY_HASH_MAX_BYTES_DEFAULT, .store_max_bytes = BELAY_STORE_MAX_BYTES_DEFAULT };
     ASSERT_EQ_INT(-1, belay_manifest_write(mpath, scope, &o, NULL));
     belay_err_clear();
 }
@@ -616,6 +610,126 @@ TEST(unreadable_file_is_flagged) {
     fx_rm("noread");
 }
 
+/* Reads a manifest and returns its body (every line after the header), so two
+ * manifests can be compared without the created_ns timestamp. */
+static char *body_of(const char *mpath, size_t *len) {
+    FILE *f = fopen(mpath, "rb");
+    if (f == NULL) return NULL;
+    int c;
+    while ((c = fgetc(f)) != EOF && c != '\n') { /* skip header */ }
+    size_t cap = 1 << 20, n = 0;
+    char *buf = malloc(cap);
+    while (buf != NULL && (c = fgetc(f)) != EOF) {
+        if (n + 1 >= cap) { cap *= 2; buf = realloc(buf, cap); if (!buf) break; }
+        buf[n++] = (char)c;
+    }
+    fclose(f);
+    if (buf) buf[n] = '\0';
+    *len = n;
+    return buf;
+}
+
+/*
+ *  Defect 4 regression: the writer must hold bounded memory, so large trees
+ *  spill sorted runs to disk and merge them. The strongest check available:
+ *  forcing many spills and several FANIN cascades must produce exactly the
+ *  same entries, in the same order, as a write that never spills.
+ */
+TEST(spilled_output_is_identical_to_in_memory_output) {
+    fx_mkdir("many");
+    char rel[256];
+    /* ~5000 entries across nested dirs: with the minimum budget (~70 KB) that
+     * is ~20 runs, so at least one 16-way cascade plus a final merge. Names
+     * are chosen so walk order and sorted order disagree ("a-x" sorts before
+     * "a/", "A" before "a"). */
+    for (int d = 0; d < 50; d++) {
+        snprintf(rel, sizeof rel, "many/d%02d", d);
+        fx_mkdir(rel);
+        snprintf(rel, sizeof rel, "many/d%02d-x", d);
+        fx_write(rel, "x", 1);
+        for (int i = 0; i < 100; i++) {
+            snprintf(rel, sizeof rel, "many/d%02d/%s%03d", d, (i % 3) ? "f" : "F", i);
+            fx_write(rel, "", 0);
+        }
+    }
+
+    char scope[8192], m_mem[512], m_spill[512];
+    snprintf(scope, sizeof scope, "%s/many", g_root);
+    snprintf(m_mem, sizeof m_mem, "/tmp/belay_sp_mem_%d.ndjson", (int)getpid());
+    snprintf(m_spill, sizeof m_spill, "/tmp/belay_sp_spill_%d.ndjson", (int)getpid());
+
+    struct belay_manifest_opts big = {
+        .hash_max_bytes = BELAY_HASH_MAX_BYTES_DEFAULT,
+        .store_max_bytes = BELAY_STORE_MAX_BYTES_DEFAULT,
+        .run_bytes = 64u * 1024u * 1024u,       /* never spills */
+    };
+    struct belay_manifest_opts tiny = big;
+    tiny.run_bytes = 1;                          /* clamped to the minimum */
+
+    size_t n_mem = 0, n_spill = 0;
+    ASSERT_EQ_INT(0, belay_manifest_write(m_mem, scope, &big, &n_mem));
+    ASSERT_EQ_INT(0, belay_manifest_write(m_spill, scope, &tiny, &n_spill));
+    ASSERT_EQ_INT(5100, (int)n_mem);
+    ASSERT_EQ_INT((int)n_mem, (int)n_spill);
+
+    size_t la = 0, lb = 0;
+    char *a = body_of(m_mem, &la);
+    char *b = body_of(m_spill, &lb);
+    ASSERT_TRUE(a != NULL && b != NULL);
+    if (a && b) {
+        ASSERT_EQ_INT((int)la, (int)lb);
+        ASSERT_TRUE(la == lb && memcmp(a, b, la) == 0);
+    }
+    free(a);
+    free(b);
+
+    /* And the spilled output is strictly sorted, entry by entry. Scanned line
+     * by line rather than loaded, to keep the fixture small. Both outputs share
+     * the sort routine, so equality alone would not catch a wrong sort. */
+    FILE *sf = fopen(m_spill, "rb");
+    ASSERT_TRUE(sf != NULL);
+    if (sf) {
+        char line[65536], prev[4096] = "", cur[4096];
+        size_t lines = 0;
+        while (fgets(line, sizeof line, sf) != NULL) {
+            if (lines++ == 0) continue;            /* header */
+            if (jstr(line, "path", cur, sizeof cur) == NULL) {
+                BELAY_FAIL("line %zu has no path", lines);
+                break;
+            }
+            if (prev[0] != '\0' && strcmp(prev, cur) >= 0) {
+                BELAY_FAIL("not strictly sorted: %s then %s", prev, cur);
+                break;
+            }
+            snprintf(prev, sizeof prev, "%s", cur);
+        }
+        fclose(sf);
+    }
+
+    unlink(m_mem);
+    unlink(m_spill);
+    char cmd[8300];
+    snprintf(cmd, sizeof cmd, "rm -rf '%s/many'", g_root);
+    if (system(cmd) != 0) { /* best effort */ }
+}
+
+/* A failed write must leave nothing at out_path: the output is written to a
+ * temporary name and renamed into place only on success. */
+TEST(failed_write_leaves_no_partial_manifest) {
+    char mpath[512], scope[8192];
+    snprintf(mpath, sizeof mpath, "/tmp/belay_partial_%d.ndjson", (int)getpid());
+    snprintf(scope, sizeof scope, "%s/does-not-exist", g_root);
+    unlink(mpath);
+
+    struct belay_manifest_opts o = {
+        .hash_max_bytes = BELAY_HASH_MAX_BYTES_DEFAULT,
+        .store_max_bytes = BELAY_STORE_MAX_BYTES_DEFAULT,
+    };
+    ASSERT_EQ_INT(-1, belay_manifest_write(mpath, scope, &o, NULL));
+    belay_err_clear();
+    ASSERT_TRUE(access(mpath, F_OK) != 0);
+}
+
 int main(void) {
     fx_init();
 
@@ -639,6 +753,8 @@ int main(void) {
     RUN(unreadable_directory_is_flagged_not_silently_omitted);
     RUN(unreadable_and_empty_directories_are_distinguishable);
     RUN(unreadable_file_is_flagged);
+    RUN(spilled_output_is_identical_to_in_memory_output);
+    RUN(failed_write_leaves_no_partial_manifest);
 
     fx_cleanup();
     return belay_test_report();

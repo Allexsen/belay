@@ -402,75 +402,149 @@ static int parse_entry(const char *line, struct belay_entry *e) {
     return 0;
 }
 
+/* ------------------------------------------------------------------------ */
+/* Pull iterator                                                             */
+/* ------------------------------------------------------------------------ */
+
+/*
+ *  A pull interface rather than callbacks only, because a diff must advance
+ *  two manifests side by side. With callbacks alone one of them would have to
+ *  be held in memory, which would throw away the constant-memory merge that
+ *  sorted output exists to provide.
+ */
+struct belay_manifest_reader {
+    FILE  *f;
+    char  *line;
+    size_t cap;
+    size_t lineno;
+    int    state;       /* 0 open, 1 ended cleanly, -1 failed (sticky) */
+};
+
+/* 1 = line in r->line with the newline stripped, 0 = EOF, -1 = error. */
+static int next_line(struct belay_manifest_reader *r) {
+    const ssize_t len = getline(&r->line, &r->cap, r->f);
+    if (len < 0) {
+        if (ferror(r->f)) {
+            belay_err_set(BELAY_ERR_IO, errno, "manifest: read error");
+            return -1;
+        }
+        return 0;
+    }
+    r->lineno++;
+    /* A line without a terminating newline is a truncated write -- a full
+     * disk or a killed process. Accepting it would mean trusting a partial
+     * record. */
+    if (len == 0 || r->line[len - 1] != '\n') {
+        belay_err_set(BELAY_ERR_CORRUPT, 0,
+                      "manifest: line %zu is truncated (no newline)", r->lineno);
+        return -1;
+    }
+    r->line[len - 1] = '\0';
+    return 1;
+}
+
+/* Appends the line number to the current error, so a corrupt manifest can be
+ * located by hand. */
+static void err_at_line(size_t lineno) {
+    char msg[600];
+    snprintf(msg, sizeof msg, "%s (line %zu)", belay_err_msg(), lineno);
+    belay_err_set(belay_err_code(), belay_err_errno(), "%s", msg);
+}
+
+void belay_manifest_close(struct belay_manifest_reader *r) {
+    if (r == NULL) return;
+    if (r->f != NULL) fclose(r->f);
+    free(r->line);
+    free(r);
+}
+
+int belay_manifest_open(const char *path, struct belay_manifest_reader **out) {
+    if (path == NULL || out == NULL) {
+        belay_err_set(BELAY_ERR_INVALID, 0, "manifest_open: null argument");
+        return -1;
+    }
+    *out = NULL;
+
+    struct belay_manifest_reader *r = calloc(1, sizeof *r);
+    if (r == NULL) {
+        belay_err_set(BELAY_ERR_NOMEM, 0, "manifest: out of memory");
+        return -1;
+    }
+    r->f = fopen(path, "rb");
+    if (r->f == NULL) {
+        belay_err_set(BELAY_ERR_IO, errno, "manifest: cannot open %s", path);
+        belay_manifest_close(r);
+        return -1;
+    }
+
+    int got;
+    while ((got = next_line(r)) == 1 && r->line[0] == '\0') { /* skip blank */ }
+    if (got == -1) { belay_manifest_close(r); return -1; }
+    if (got == 0) {
+        belay_err_set(BELAY_ERR_CORRUPT, 0, "manifest: file is empty");
+        belay_manifest_close(r);
+        return -1;
+    }
+    if (parse_header(r->line) == -1) {
+        err_at_line(r->lineno);
+        belay_manifest_close(r);
+        return -1;
+    }
+
+    *out = r;
+    return 0;
+}
+
+int belay_manifest_next(struct belay_manifest_reader *r, struct belay_entry *e) {
+    if (r == NULL || e == NULL) {
+        belay_err_set(BELAY_ERR_INVALID, 0, "manifest_next: null argument");
+        return -1;
+    }
+    if (r->state != 0) return r->state == 1 ? 0 : -1;
+
+    for (;;) {
+        const int got = next_line(r);
+        if (got == -1) { r->state = -1; return -1; }
+        if (got == 0)  { r->state = 1;  return 0; }
+        if (r->line[0] == '\0') continue;   /* tolerate a blank line */
+
+        if (parse_entry(r->line, e) == -1) {
+            err_at_line(r->lineno);
+            r->state = -1;
+            return -1;
+        }
+        return 1;
+    }
+}
+
 int belay_manifest_read(const char *path, belay_entry_fn fn, void *ctx) {
     if (path == NULL || fn == NULL) {
         belay_err_set(BELAY_ERR_INVALID, 0, "manifest_read: null argument");
         return -1;
     }
 
-    FILE *f = fopen(path, "rb");
-    if (f == NULL) {
-        belay_err_set(BELAY_ERR_IO, errno, "manifest: cannot open %s", path);
+    struct belay_manifest_reader *r;
+    if (belay_manifest_open(path, &r) == -1) return -1;
+
+    struct belay_entry *e = malloc(sizeof *e);
+    if (e == NULL) {
+        belay_err_set(BELAY_ERR_NOMEM, 0, "manifest: out of memory");
+        belay_manifest_close(r);
         return -1;
     }
 
-    char *line = NULL;
-    size_t cap = 0;
+    /* `got` is the iterator's status; `rc` is what this function returns.
+     * Kept apart so a callback that stops the walk by returning 1 is passed
+     * through rather than mistaken for "an entry was read". */
     int rc = 0;
-    bool header_done = false;
-    size_t lineno = 0;
-
-    for (;;) {
-        const ssize_t len = getline(&line, &cap, f);
-        if (len < 0) {
-            if (ferror(f)) {
-                belay_err_set(BELAY_ERR_IO, errno, "manifest: read error");
-                rc = -1;
-            }
-            break;
-        }
-        lineno++;
-
-        /* A line without a terminating newline is a truncated write -- a full
-         * disk or a killed process. Accepting it would mean trusting a partial
-         * record. */
-        if (len == 0 || line[len - 1] != '\n') {
-            belay_err_set(BELAY_ERR_CORRUPT, 0,
-                          "manifest: line %zu is truncated (no newline)", lineno);
-            rc = -1;
-            break;
-        }
-        line[len - 1] = '\0';
-
-        if (line[0] == '\0') continue;   /* tolerate a blank line */
-
-        if (!header_done) {
-            if (parse_header(line) == -1) { rc = -1; break; }
-            header_done = true;
-            continue;
-        }
-
-        struct belay_entry e;
-        if (parse_entry(line, &e) == -1) {
-            /* Name the line: a corrupt manifest is otherwise very hard to
-             * locate by hand. */
-            char msg[600];
-            snprintf(msg, sizeof msg, "%s (line %zu)", belay_err_msg(), lineno);
-            belay_err_set(belay_err_code(), belay_err_errno(), "%s", msg);
-            rc = -1;
-            break;
-        }
-
-        rc = fn(&e, ctx);
-        if (rc != 0) break;
+    int got;
+    while ((got = belay_manifest_next(r, e)) == 1) {
+        const int c = fn(e, ctx);
+        if (c != 0) { rc = c; break; }
     }
+    if (got == -1) rc = -1;
 
-    if (rc == 0 && !header_done) {
-        belay_err_set(BELAY_ERR_CORRUPT, 0, "manifest: file is empty");
-        rc = -1;
-    }
-
-    free(line);
-    fclose(f);
+    free(e);
+    belay_manifest_close(r);
     return rc;
 }

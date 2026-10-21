@@ -37,9 +37,7 @@ int main(int argc, char **argv) {
     char mpath[4096];
     snprintf(mpath, sizeof mpath, "/tmp/belay_bench_%d.ndjson", (int)getpid());
 
-    struct belay_manifest_opts o = {
-        BELAY_HASH_MAX_BYTES_DEFAULT, BELAY_STORE_MAX_BYTES_DEFAULT, NULL
-    };
+    struct belay_manifest_opts o = { .hash_max_bytes = BELAY_HASH_MAX_BYTES_DEFAULT, .store_max_bytes = BELAY_STORE_MAX_BYTES_DEFAULT };
 
     size_t n = 0;
     const double t0 = now_s();

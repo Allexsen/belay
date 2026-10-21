@@ -84,6 +84,14 @@ struct belay_manifest_opts {
     uint64_t hash_max_bytes;
     uint64_t store_max_bytes;
     const char *store_dir;              /* NULL disables content storage */
+
+    /*
+     *  Memory budget for the writer's sort buffer. 0 selects the default
+     *  (4 MiB). Values below the minimum (one maximal entry, ~70 KB) are
+     *  raised to it. Peak writer memory is roughly this plus ~1 MiB of merge
+     *  cursors, independent of how many entries the scope holds.
+     */
+    size_t   run_bytes;
 };
 
 /*
@@ -110,5 +118,22 @@ int belay_manifest_write(const char *out_path, const char *scope,
 typedef int (*belay_entry_fn)(const struct belay_entry *e, void *ctx);
 
 int belay_manifest_read(const char *path, belay_entry_fn fn, void *ctx);
+
+/*
+ *  Pull interface. A diff advances two manifests side by side; with callbacks
+ *  alone one of them would have to be held in memory.
+ *
+ *    belay_manifest_open   reads and validates the header. 0 / -1.
+ *    belay_manifest_next   1 = an entry was stored in *e, 0 = clean end of
+ *                          manifest, -1 = error. Errors are sticky.
+ *    belay_manifest_close  always safe, including on NULL.
+ *
+ *  The same validation applies as for belay_manifest_read.
+ */
+struct belay_manifest_reader;
+
+int  belay_manifest_open(const char *path, struct belay_manifest_reader **out);
+int  belay_manifest_next(struct belay_manifest_reader *r, struct belay_entry *e);
+void belay_manifest_close(struct belay_manifest_reader *r);
 
 #endif /* BELAY_MANIFEST_H */
