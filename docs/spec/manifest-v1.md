@@ -204,6 +204,26 @@ Each rule below closes a way for a state the format records to be rendered as "n
 - **Compare under the same `hash_max_bytes`**, or report entries hashed on one side and unverified
   on the other as unverified rather than changed.
 
+## What a hash, and a stored copy, prove
+
+A recorded `sha256`, and the copy under `store/` when there is one, are the bytes of one read
+pass during which the file's size, mtime and ctime did not change (checked on the open file
+before and after the read, and against the stat that was recorded). That proves the bytes are a
+state the file really had **only where every write moves those timestamps**: Linux 6.13 and later
+on local filesystems with fine-grained timestamps. On older kernels, which stamp files once per
+timer tick (about 4 ms), and on filesystems with coarse timestamps (FAT, HFS+, some network and
+FUSE filesystems), two same-size writes inside one tick around belay's read can leave the
+timestamps unchanged, and the hash -- and the stored copy -- can then be of bytes the file never
+held. belay does not yet detect this; git's "racy" rule (re-read, or mark unverified, any file
+whose timestamp falls in the current tick) is the decided fix.
+
+The window exists only while something writes to the tree during the check. In RL mode the
+policy's processes are killed before the scan, and host-reader mode reads from outside the
+sandbox, so this is a limit of dev-tier and live checks, not of the trust model.
+
+(An earlier statement, in the commit that introduced the store, that "the store never holds bytes
+that match no state of the file" was true only under the first condition above.)
+
 ## Path encoding
 
 POSIX paths are **bytes**, not text. They may contain anything except `/` and NUL.
