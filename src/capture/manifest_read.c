@@ -632,78 +632,20 @@ static int parse_header(const struct obj *o, struct belay_manifest_header *h) {
 /* ------------------------------------------------------------------------ */
 
 /*
- *  Paths of directories that were recorded but not descended (unreadable or a
- *  mount point). Nothing may appear below them. A hash table, probed once per
- *  ancestor of each entry with a hash built incrementally along the path, so
- *  the check is O(path length) per entry however many directories are sealed.
- *  (The first version scanned every sealed path for every entry: 40k sealed
- *  directories took 1.9 s, quadratic.)
+ *  Directories recorded but not descended (unreadable, or a mount point):
+ *  nothing may appear below them.
+ *
+ *  Entries are strictly sorted, so a sealed directory D can still have an
+ *  entry below it only while the reader sits between D and D + "/" -- and
+ *  every path in that range starts with D. ("D!x" sorts there too, which is
+ *  why D cannot be dropped at its first non-descendant.) So the sealed
+ *  directories still open are all prefixes of the previous path, a stack of
+ *  their lengths is enough, and lengths strictly increase up the stack: at
+ *  most one per byte of a path, however many directories the manifest seals.
+ *  (The first version kept every sealed path: memory grew with the manifest,
+ *  and scanning the list made 40k sealed directories take 1.9 s.)
  */
-struct pathset {
-    char    **v;        /* NULL = empty slot */
-    size_t   *len;
-    uint64_t *h;
-    size_t    n, cap;   /* cap is a power of two */
-};
-
-#define FNV_OFF 1469598103934665603ULL
-#define FNV_MUL 1099511628211ULL
-
-static bool ps_has(const struct pathset *s, uint64_t h, const char *p, size_t len) {
-    if (s->cap == 0) return false;
-    for (size_t i = h & (s->cap - 1); s->v[i] != NULL; i = (i + 1) & (s->cap - 1))
-        if (s->h[i] == h && s->len[i] == len && memcmp(s->v[i], p, len) == 0) return true;
-    return false;
-}
-
-static int ps_put_slot(char **v, size_t *len, uint64_t *hs, size_t cap,
-                       char *p, size_t l, uint64_t h) {
-    size_t i = h & (cap - 1);
-    while (v[i] != NULL) i = (i + 1) & (cap - 1);
-    v[i] = p; len[i] = l; hs[i] = h;
-    return 0;
-}
-
-static int seal(struct pathset *s, const char *p, size_t len) {
-    if ((s->n + 1) * 2 > s->cap) {
-        const size_t nc = s->cap ? s->cap * 2 : 64;
-        char **nv = calloc(nc, sizeof *nv);
-        size_t *nl = calloc(nc, sizeof *nl);
-        uint64_t *nh = calloc(nc, sizeof *nh);
-        if (nv == NULL || nl == NULL || nh == NULL) {
-            free(nv); free(nl); free(nh);
-            goto nomem;
-        }
-        for (size_t i = 0; i < s->cap; i++)
-            if (s->v[i] != NULL) ps_put_slot(nv, nl, nh, nc, s->v[i], s->len[i], s->h[i]);
-        free(s->v); free(s->len); free(s->h);
-        s->v = nv; s->len = nl; s->h = nh; s->cap = nc;
-    }
-    char *copy = malloc(len);
-    if (copy == NULL) goto nomem;
-    memcpy(copy, p, len);
-    uint64_t h = FNV_OFF;
-    for (size_t i = 0; i < len; i++) { h ^= (unsigned char)p[i]; h *= FNV_MUL; }
-    ps_put_slot(s->v, s->len, s->h, s->cap, copy, len, h);
-    s->n++;
-    return 0;
-nomem:
-    belay_err_set(BELAY_ERR_NOMEM, 0, "manifest: out of memory");
-    return -1;
-}
-
-/* True when some proper ancestor of `p` is sealed. Every proper ancestor is a
- * prefix ending just before a '/', so one pass over `p` checks them all. */
-static bool under_sealed(const struct pathset *s, const char *p, size_t len) {
-    if (s->n == 0) return false;
-    uint64_t h = FNV_OFF;
-    for (size_t i = 0; i < len; i++) {
-        if (p[i] == '/' && ps_has(s, h, p, i)) return true;
-        h ^= (unsigned char)p[i];
-        h *= FNV_MUL;
-    }
-    return false;
-}
+#define SEALED_MAX 4096     /* > the longest path, so the stack cannot fill */
 
 struct belay_manifest_reader {
     FILE  *f;
@@ -724,7 +666,8 @@ struct belay_manifest_reader {
     size_t prev_len;
     bool   have_prev;
 
-    struct pathset sealed;
+    size_t sealed[SEALED_MAX];  /* lengths of sealed prefixes of prev */
+    size_t n_sealed;
 };
 
 const struct belay_manifest_header *
@@ -789,10 +732,6 @@ static void err_at_line(size_t lineno) {
 void belay_manifest_close(struct belay_manifest_reader *r) {
     if (r == NULL) return;
     if (r->f != NULL) fclose(r->f);
-    for (size_t i = 0; i < r->sealed.cap; i++) free(r->sealed.v[i]);
-    free(r->sealed.v);
-    free(r->sealed.len);
-    free(r->sealed.h);
     free(r->line);
     free(r);
 }
@@ -904,12 +843,16 @@ int belay_manifest_next(struct belay_manifest_reader *r, struct belay_entry *e) 
 
     /* Strictly increasing raw-path order: the comparator merges two
      * manifests and would mis-pair out-of-order or duplicated entries. */
+    size_t common = 0;          /* length of the prefix shared with prev */
     if (r->have_prev) {
         const size_t n = r->prev_len < e->path_len ? r->prev_len : e->path_len;
-        const int c = memcmp(r->prev, e->path, n);
-        if (c > 0 || (c == 0 && r->prev_len >= e->path_len)) {
-            corrupt(c == 0 && r->prev_len == e->path_len ? "duplicate path"
-                                                          : "entries out of order");
+        while (common < n && r->prev[common] == e->path[common]) common++;
+        const bool greater = common < n
+            ? (unsigned char)r->prev[common] < (unsigned char)e->path[common]
+            : r->prev_len < e->path_len;
+        if (!greater) {
+            corrupt(common == n && r->prev_len == e->path_len ? "duplicate path"
+                                                               : "entries out of order");
             return fail(r);
         }
     }
@@ -919,15 +862,29 @@ int belay_manifest_next(struct belay_manifest_reader *r, struct belay_entry *e) 
 
     /* Nothing below a directory that was not descended -- the writer never
      * emits such an entry, and one appearing would contradict the flag that
-     * tells the comparator "contents unknown". */
-    if (under_sealed(&r->sealed, e->path, e->path_len)) {
-        corrupt("entry below an unreadable or mounted directory");
-        return fail(r);
+     * tells the comparator "contents unknown". A sealed prefix longer than
+     * the shared one is behind us for good. One of exactly the shared length
+     * is a prefix of this path: the byte after it decides -- '/' is an entry
+     * below it, above '/' is past its range, below '/' (as in "d!x") is
+     * neither. Shorter ones are untouched: this path agrees with prev there. */
+    while (r->n_sealed > 0 && r->sealed[r->n_sealed - 1] > common) r->n_sealed--;
+    if (r->n_sealed > 0 && r->sealed[r->n_sealed - 1] == common) {
+        const unsigned char next = (unsigned char)e->path[common];
+        if (next == '/') {
+            corrupt("entry below an unreadable or mounted directory");
+            return fail(r);
+        }
+        if (next > '/') r->n_sealed--;
     }
+    /* "." is not a prefix of the paths below it; an unreadable root is
+     * checked at the trailer instead (it must be the only entry). */
     if (e->type == BELAY_T_DIR && (e->unreadable || e->is_mount) &&
-        seal(&r->sealed, e->path, e->path_len) == -1) {
-        r->state = -1;
-        return -1;
+        !(e->path_len == 1 && e->path[0] == '.')) {
+        if (r->n_sealed == SEALED_MAX) {        /* unreachable: see SEALED_MAX */
+            corrupt("too many nested sealed directories");
+            return fail(r);
+        }
+        r->sealed[r->n_sealed++] = e->path_len;
     }
 
     if (e->path_len == 1 && e->path[0] == '.') {

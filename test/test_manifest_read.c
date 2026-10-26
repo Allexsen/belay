@@ -886,6 +886,65 @@ TEST(r2_reader_accepts_the_writers_unreadable_symlinks) {
     ASSERT_EQ_INT(2, (int)g_n);
 }
 
+/* Review round 2 found the sealed-directory check quadratic; the first fix
+ * made it fast but still kept every sealed path, so memory grew with the
+ * manifest. The reader now keeps only sealed prefixes of the previous path.
+ * These orderings are what make that subtle: a sibling such as "d!x" sorts
+ * BETWEEN "d" and "d/x", so "d" must stay sealed past its first
+ * non-descendant, and an inner seal closing must not release an outer one. */
+TEST(r3_sealed_directories_hold_across_interleaved_siblings) {
+#define UNR ",\"unreadable\":true"
+    static const struct { const char *name; const char *m; int want; } cases[] = {
+        { "sibling sorting between a sealed dir and its child",
+          HDR DIR_E("d", UNR) REG_LINE("d!x", SHA_F) REG_LINE("d/x", SHA_F), -1 },
+        { "child of a sealed dir opened inside another seal's range",
+          HDR DIR_E("d", UNR) DIR_E("d!", UNR) REG_LINE("d!/x", SHA_F), -1 },
+        { "outer seal still holds after an inner one closes",
+          HDR DIR_E("d", UNR) DIR_E("d!", UNR) REG_LINE("d!x", SHA_F) REG_LINE("d/x", SHA_F), -1 },
+        { "mount point with siblings in between",
+          HDR DIR_E("m", ",\"mount\":true") REG_LINE("m-1", SHA_F) REG_LINE("m.2", SHA_F)
+          REG_LINE("m/z", SHA_F), -1 },
+        { "a seal ends once its range is passed",
+          HDR DIR_E("d", UNR) REG_LINE("d!x", SHA_F) REG_LINE("d.y", SHA_F)
+          DIR_E("d0", "") REG_LINE("d0/x", SHA_F), 0 },
+        { "an unsealed sibling's children are fine",
+          HDR DIR_E("a", UNR) DIR_E("b", "") REG_LINE("b/c", SHA_F), 0 },
+        { "nested seals closing innermost first",
+          HDR DIR_E("d", UNR) DIR_E("d!", UNR) DIR_E("d!!", UNR) REG_LINE("d!!x", SHA_F)
+          REG_LINE("d!x", SHA_F) REG_LINE("dx", SHA_F), 0 },
+    };
+#undef UNR
+    for (size_t i = 0; i < sizeof cases / sizeof cases[0]; i++) {
+        const int rc = read_it(cases[i].m);
+        if (rc != cases[i].want)
+            BELAY_FAIL("%s: got %d, want %d (%s)", cases[i].name, rc, cases[i].want,
+                       belay_err_msg());
+        belay_err_clear();
+    }
+}
+
+/* Many sealed siblings, then an entry below the last one: still caught, and
+ * the same manifest without it is accepted. */
+TEST(r3_many_sealed_directories) {
+    enum { N = 3000 };
+    const size_t per = 256;    /* longest line here is under 200 bytes */
+    char *m = malloc(sizeof HDR + (N + 1) * per);
+    ASSERT_TRUE(m != NULL);
+    size_t w = (size_t)snprintf(m, sizeof HDR, "%s", HDR);
+    for (int i = 0; i < N; i++)
+        w += (size_t)snprintf(m + w, per,
+            "{\"path\":\"s%04d\",\"type\":\"dir\",\"mode\":16877,\"uid\":1,"
+            "\"gid\":1,\"size\":1,\"mtime_ns\":1,\"ctime_ns\":1,\"ino\":1,\"dev\":1,"
+            "\"nlink\":1,\"unreadable\":true}\n", i);
+    const size_t base = w;
+    ASSERT_EQ_INT(0, read_it(m));
+    snprintf(m + base, per, REG_LINE("s%04d/x", SHA_F), N - 1);
+    ASSERT_EQ_INT(-1, read_it(m));
+    ASSERT_TRUE(strstr(belay_err_msg(), "below an unreadable") != NULL);
+    belay_err_clear();
+    free(m);
+}
+
 int main(void) {
     RUN(reads_a_well_formed_entry);
     RUN(rejects_traversal_and_absolute_entry_paths);
@@ -933,6 +992,8 @@ int main(void) {
     RUN(review_scope_ending_in_backslash_is_read_back);
     RUN(r2_reader_rejects_remaining_non_canonical_forms);
     RUN(r2_reader_accepts_the_writers_unreadable_symlinks);
+    RUN(r3_sealed_directories_hold_across_interleaved_siblings);
+    RUN(r3_many_sealed_directories);
     RUN(round_trips_the_writers_output);
 
     unlink(g_path);

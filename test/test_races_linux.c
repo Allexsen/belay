@@ -27,6 +27,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <sys/stat.h>
+#include <time.h>
 #include <unistd.h>
 
 enum arm { NONE, SWAP_ON_DIR_OPEN, SWAP_ON_READLINK, REPLACE_LINK_WITH_FILE,
@@ -36,7 +37,9 @@ enum arm { NONE, SWAP_ON_DIR_OPEN, SWAP_ON_READLINK, REPLACE_LINK_WITH_FILE,
            LINK_KEEPS_CHANGING,      /* every readlinkat: new target, new length */
            LINK_FLICKERS,            /* every readlinkat: briefly a regular file */
            LINK_EIO,                 /* readlinkat fails with EIO */
-           SUBDIR_READDIR_EIO };     /* a subdirectory's readdir fails with EIO */
+           SUBDIR_READDIR_EIO,       /* a subdirectory's readdir fails with EIO */
+           CLOCK_STEP,               /* wall clock steps once the walk has begun */
+           CLOCK_BEHIND };           /* wall clock 100 s behind the files' stamps */
 static int g_flip;
 
 static char g_root[256], g_m[300];
@@ -139,6 +142,30 @@ ssize_t __wrap___readlinkat_chk(int fd, const char *name, char *buf, size_t n, s
     return __wrap_readlinkat(fd, name, buf, n);
 }
 
+/*
+ *  The wall clock as the writer sees it; monotonic time is never touched.
+ *  CLOCK_STEP: once the walk's first readdir has run, every CLOCK_REALTIME
+ *  read is off by g_step_s -- the clock stepped during the walk. CLOCK_BEHIND:
+ *  every realtime read, fine and coarse, is 100 s behind the clock that
+ *  stamped the files -- the clock was stepped back before the walk, so
+ *  directories changed just before it carry ctimes "in the future".
+ */
+static int g_step_s, g_stepped;
+int __real_clock_gettime(clockid_t, struct timespec *);
+int __wrap_clock_gettime(clockid_t id, struct timespec *ts) {
+    const int r = __real_clock_gettime(id, ts);
+    if (r != 0) return r;
+    if (g_arm == CLOCK_STEP && g_stepped && id == CLOCK_REALTIME) {
+        ts->tv_sec += g_step_s;
+        g_fired = 1;
+    }
+    if (g_arm == CLOCK_BEHIND && (id == CLOCK_REALTIME || id == CLOCK_REALTIME_COARSE)) {
+        ts->tv_sec -= 100;
+        g_fired = 1;
+    }
+    return r;
+}
+
 struct dirent *__real_readdir(DIR *);
 static DIR *g_rootdir;
 static const char *g_walked;   /* first of A/B returned by the root's readdir */
@@ -155,6 +182,7 @@ struct dirent *__wrap_readdir(DIR *d) {
         errno = EIO;
         return NULL;
     }
+    if (g_arm == CLOCK_STEP) g_stepped = 1;
     struct dirent *e = __real_readdir(d);
     if (g_rootdir == NULL) g_rootdir = d;     /* the first DIR opened is the root's */
     /* The reviewer's ordering: when the root listing returns the SECOND of
@@ -182,7 +210,7 @@ struct dirent *__wrap_readdir(DIR *d) {
 
 static void arm(enum arm a, const char *x, const char *y) {
     g_arm = a; g_x = x; g_y = y; g_fired = 0; g_replay = 0; g_dir = NULL; g_first = NULL;
-    g_rootdir = NULL; g_walked = NULL; g_flip = 0;
+    g_rootdir = NULL; g_walked = NULL; g_flip = 0; g_stepped = 0; g_step_s = 0;
 }
 
 static void path(char *out, size_t n, const char *rel) { snprintf(out, n, "%s/%s", g_root, rel); }
@@ -394,6 +422,47 @@ TEST(r2_link_that_flickers_is_recorded_not_dropped) {
     ASSERT_EQ_INT(0, (int)st.vanished);
 }
 
+/* R3: the wall clock stepped DURING the walk (WSL steps it by ~100 s; NTP can
+ * too). Every "changed during the walk" judgment compares ctimes with the
+ * walk's start, so after a step none of them can be trusted, and the root --
+ * the manifest as a whole -- must not claim to be one instant. Both
+ * directions. The step itself is not a change to any directory. */
+TEST(r3_clock_step_during_the_walk_flags_the_root) {
+    static const int steps[] = { 2, -2 };
+    for (size_t i = 0; i < sizeof steps / sizeof steps[0]; i++) {
+        reset();
+        mk("A");
+        touch("A/f", "x");
+        usleep(20000);
+        arm(CLOCK_STEP, NULL, NULL);
+        g_step_s = steps[i];
+        struct belay_manifest_stats st;
+        ASSERT_EQ_INT(0, check(&st));
+        ASSERT_TRUE(g_fired);
+        const struct belay_entry *r = find(".");
+        ASSERT_TRUE(r != NULL && r->unstable);
+        const struct belay_entry *a = find("A");
+        ASSERT_TRUE(a != NULL && !a->unstable);
+        ASSERT_EQ_INT(1, (int)st.unstable);
+    }
+}
+
+/* R3: the clock was stepped BACK before the walk. Directories changed just
+ * before it then carry ctimes later than "now" -- not a change during the
+ * walk. With only a lower bound on ctime every such directory was flagged:
+ * the flake WSL produced. Nothing may be flagged here. */
+TEST(r3_clock_behind_the_files_flags_nothing) {
+    reset();
+    mk("A"); mk("A/B"); mk("C");
+    touch("A/B/f", "x");
+    usleep(20000);
+    arm(CLOCK_BEHIND, NULL, NULL);
+    struct belay_manifest_stats st;
+    ASSERT_EQ_INT(0, check(&st));
+    ASSERT_TRUE(g_fired);
+    ASSERT_EQ_INT(0, (int)st.unstable);
+}
+
 /* R2-5: I/O errors on one entry are recorded on it, not fatal. */
 TEST(r2_readlink_eio_is_recorded_not_fatal) {
     reset();
@@ -499,6 +568,8 @@ int main(void) {
     RUN(r2_readlink_eio_is_recorded_not_fatal);
     RUN(r2_readdir_eio_marks_the_directory_unstable_not_fatal);
     RUN(r2_overlay_scope_files_are_hashed_not_flagged_as_mounts);
+    RUN(r3_clock_step_during_the_walk_flags_the_root);
+    RUN(r3_clock_behind_the_files_flags_nothing);
 
     char cmd[600];
     snprintf(cmd, sizeof cmd, "rm -rf '%s' '%s'", g_root, g_m);
