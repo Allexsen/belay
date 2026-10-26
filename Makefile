@@ -47,7 +47,7 @@ TEST_SRC	= $(wildcard test/test_*.c)
 # the compiler emits the checked variant, which --wrap=readlinkat would miss.
 RACE_WRAP	= -Wl,--wrap=openat,--wrap=readlinkat,--wrap=__readlinkat_chk,--wrap=readdir,--wrap=clock_gettime,--wrap=statx
 ifneq ($(UNAME_S),Linux)
-TEST_SRC	:= $(filter-out test/test_races_linux.c,$(TEST_SRC))
+TEST_SRC	:= $(filter-out test/test_races_linux.c test/test_stress_linux.c,$(TEST_SRC))
 endif
 TEST_BIN	= $(TEST_SRC:test/%.c=$(BUILD)/test/%)
 
@@ -88,6 +88,7 @@ $(SAN_BUILD)/test/%: test/%.c $(SAN_CORE_OBJ)
 	$(CC) $(SAN_FLAGS) $(WARN) $(INC) -Itest -MMD -MP -o $@ $< $(SAN_CORE_OBJ) $(TEST_LDFLAGS)
 
 $(BUILD)/test/test_races_linux $(SAN_BUILD)/test/test_races_linux: TEST_LDFLAGS = $(RACE_WRAP)
+$(BUILD)/test/test_stress_linux $(SAN_BUILD)/test/test_stress_linux: TEST_LDFLAGS = -pthread
 
 test: $(TEST_BIN)
 	@fail=0; \

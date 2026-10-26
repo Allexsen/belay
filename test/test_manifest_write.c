@@ -1253,6 +1253,94 @@ TEST(r3_output_inside_the_scope_is_not_a_change) {
 #endif
 }
 
+/* Gap (c), 2026-10-26: Claude Code issues tool calls in parallel, so M1.5's
+ * hooks will run checks concurrently against one store. Eight processes check
+ * eight trees at once into the same store directory. Half of each tree's
+ * content is shared with every other tree, so the same object is committed by
+ * several processes at nearly the same moment. Every check must succeed,
+ * every object a manifest names must exist and verify, the object count must
+ * be exact, and no staging file may be left. Three rounds into one store. */
+static size_t g_cc_n;
+static char g_cc_hex[2048][65];
+static int cc_collect(const struct belay_entry *e, void *ctx) {
+    (void)ctx;
+    if (e->has_stored && g_cc_n < 2048) snprintf(g_cc_hex[g_cc_n++], 65, "%s", e->stored_hex);
+    return 0;
+}
+
+TEST(concurrent_checks_share_one_store) {
+    enum { P = 8, FILES = 200 };
+    fx_mkdir("cc");
+    char rel[256], content[64];
+    for (int t = 0; t < P; t++) {
+        snprintf(rel, sizeof rel, "cc/t%d", t);
+        fx_mkdir(rel);
+        for (int i = 0; i < FILES; i++) {
+            if (i % 2 == 0) snprintf(content, sizeof content, "shared %d\n", i);
+            else            snprintf(content, sizeof content, "tree %d file %d\n", t, i);
+            snprintf(rel, sizeof rel, "cc/t%d/f%03d.txt", t, i);
+            fx_write(rel, content, strlen(content));
+        }
+    }
+    char store[512];
+    snprintf(store, sizeof store, "/tmp/belay_cc_store_%d", (int)getpid());
+    for (int round = 0; round < 3; round++) {
+        pid_t kid[P];
+        for (int t = 0; t < P; t++) {
+            kid[t] = fork();
+            if (kid[t] == 0) {
+                char scope[8192], m[512];
+                snprintf(scope, sizeof scope, "%s/cc/t%d", g_root, t);
+                snprintf(m, sizeof m, "/tmp/belay_cc_%d_%d.ndjson", (int)getppid(), t);
+                struct belay_manifest_opts o = {
+                    .hash_max_bytes = BELAY_HASH_MAX_BYTES_DEFAULT,
+                    .store_max_bytes = BELAY_STORE_MAX_BYTES_DEFAULT,
+                    .store_dir = store,
+                };
+                _exit(belay_manifest_write(m, scope, &o, NULL) == 0 ? 0 : 1);
+            }
+        }
+        for (int t = 0; t < P; t++) {
+            int status = 0;
+            waitpid(kid[t], &status, 0);
+            if (!WIFEXITED(status) || WEXITSTATUS(status) != 0)
+                BELAY_FAIL("round %d: concurrent check %d failed", round, t);
+        }
+    }
+    struct belay_store *st = NULL;
+    ASSERT_EQ_INT(0, belay_store_open(store, &st));
+    size_t named = 0;
+    for (int t = 0; t < P && st != NULL; t++) {
+        char m[512];
+        snprintf(m, sizeof m, "/tmp/belay_cc_%d_%d.ndjson", (int)getpid(), t);
+        g_cc_n = 0;
+        ASSERT_EQ_INT(0, belay_manifest_read(m, cc_collect, NULL));
+        ASSERT_EQ_INT(FILES, (int)g_cc_n);
+        for (size_t i = 0; i < g_cc_n; i++)
+            if (belay_store_verify(st, g_cc_hex[i]) != 1)
+                BELAY_FAIL("tree %d: object %s missing or wrong (%s)", t, g_cc_hex[i], belay_err_msg());
+        named += g_cc_n;
+        unlink(m);
+    }
+    belay_store_close(st);
+    ASSERT_EQ_INT(P * FILES, (int)named);
+    /* 100 shared contents plus 100 unique ones per tree. */
+    char cmd[1200], out[64] = "";
+    snprintf(cmd, sizeof cmd, "find '%s' -type f ! -name '.tmp-*' | wc -l; "
+             "find '%s' -name '.tmp-*' | wc -l", store, store);
+    FILE *pf = popen(cmd, "r");
+    int objects = -1, staging = -1;
+    if (pf) {
+        if (fgets(out, sizeof out, pf)) objects = atoi(out);
+        if (fgets(out, sizeof out, pf)) staging = atoi(out);
+        pclose(pf);
+    }
+    ASSERT_EQ_INT(FILES / 2 + P * (FILES / 2), objects);
+    ASSERT_EQ_INT(0, staging);
+    snprintf(cmd, sizeof cmd, "rm -rf '%s'", store);
+    if (system(cmd) != 0) { /* best effort */ }
+}
+
 int main(void) {
     fx_init();
 
@@ -1293,6 +1381,7 @@ int main(void) {
     RUN(review_non_utf8_scope_produces_valid_header);
     RUN(r2_far_future_timestamp_saturates_instead_of_overflowing);
     RUN(r3_output_inside_the_scope_is_not_a_change);
+    RUN(concurrent_checks_share_one_store);
 
     fx_cleanup();
     {
