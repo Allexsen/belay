@@ -45,15 +45,44 @@ static int check_entry(const struct belay_entry *e, void *ctx) {
         }
     }
 
-    /* rdev exactly on device nodes; unstable implies unverified. */
+    /* rdev exactly on device nodes. */
     if (e->has_rdev != (e->type == BELAY_T_BLK || e->type == BELAY_T_CHR)) abort();
-    if (e->unstable && !e->unverified) abort();
+
+    /* Flags only in the combinations the writer produces (spec, "Types,
+     * fields and flags agree"). */
+    if (e->has_stored && (!e->has_hash || strcmp(e->stored_hex, e->sha256_hex) != 0)) abort();
+    if (e->is_mount && e->has_hash) abort();
+    switch (e->type) {
+    case BELAY_T_REG:
+        if (e->has_hash == e->unverified) abort();
+        if ((e->unstable || e->unreadable) && !e->unverified) abort();
+        if (e->unstable && e->unreadable) abort();
+        if (e->is_mount && (e->unstable || e->unreadable)) abort();
+        break;
+    case BELAY_T_DIR:
+        if (e->has_hash || e->unverified || e->has_stored) abort();
+        if ((int)e->unreadable + (int)e->unstable + (int)e->is_mount > 1) abort();
+        break;
+    case BELAY_T_LNK:
+        if (e->has_hash || e->unverified || e->has_stored || e->unstable) abort();
+        break;
+    default:
+        if (e->has_hash || e->unverified || e->has_stored || e->unstable || e->unreadable) abort();
+        break;
+    }
 
     /* Canonical paths only: no empty, "." or ".." component except a lone ".". */
     if (!(e->path_len == 1 && e->path[0] == '.')) {
         if (e->path[0] == '/' || e->path[e->path_len - 1] == '/') abort();
-        for (size_t i = 0; i + 1 < e->path_len; i++)
-            if (e->path[i] == '/' && e->path[i + 1] == '/') abort();
+        for (size_t i = 0; i < e->path_len; ) {
+            size_t j = i;
+            while (j < e->path_len && e->path[j] != '/') j++;
+            const size_t n = j - i;
+            if (n == 0) abort();
+            if (n == 1 && e->path[i] == '.') abort();
+            if (n == 2 && e->path[i] == '.' && e->path[i + 1] == '.') abort();
+            i = j + 1;
+        }
     }
 
     /* Only symlinks carry targets, and a symlink must carry one. */
@@ -62,6 +91,10 @@ static int check_entry(const struct belay_entry *e, void *ctx) {
     if (e->has_link_target) {
         if (memchr(e->link_target, '\0', e->link_target_len) != NULL) abort();
         if (e->link_target_len >= sizeof e->link_target) abort();
+        /* An empty target means "unknown" and only an unreadable link has
+         * one; any other link's size is its target's length. */
+        if (!e->unreadable && (e->link_target_len == 0 || e->size != e->link_target_len)) abort();
+        if (e->target_outside_scope && e->link_target_len == 0) abort();
     }
 
     return 0;

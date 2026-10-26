@@ -55,7 +55,8 @@ struct belay_entry {
 
     bool     has_hash;                  /* sha256 computed */
     char     sha256_hex[65];
-    bool     unverified;                /* too large to hash (> hash_max_bytes) */
+    bool     unverified;                /* no hash: too large (> hash_max_bytes),
+                                           unstable, unreadable, or a mount */
 
     bool     has_link_target;
     char     link_target[4096];
@@ -65,7 +66,9 @@ struct belay_entry {
     bool     has_stored;                /* content copied into store/ */
     char     stored_hex[65];
 
-    bool     is_mount;                  /* dev differs from scope root; not descended */
+    bool     is_mount;                  /* a mount root (statx; for directories also a
+                                           dev differing from the scope root's);
+                                           recorded, never read or descended */
 
     /* Device number, for blk and chr entries only. Without it a device node
      * replaced by another with the same mode and owner differs only in
@@ -74,14 +77,24 @@ struct belay_entry {
     bool     has_rdev;
     uint64_t rdev;
 
-    /* The file changed while it was being hashed (size, mtime or ctime moved,
-     * or the inode opened was not the one stat'ed). No hash is recorded:
-     * the bytes read describe no state the file was ever in. Also unverified. */
+    /*
+     *  Regular file: it changed while being hashed (size, mtime or ctime
+     *  moved, or the inode opened was not the one stat'ed). No hash is
+     *  recorded -- the bytes read describe no state the file was ever in --
+     *  so it is also unverified.
+     *
+     *  Directory: its listing is not one complete, single-instant listing. It
+     *  changed during the walk, or listing it failed part way. Entries may be
+     *  missing below it or recorded under another directory. On the root it
+     *  also means the clock stepped during the walk.
+     */
     bool     unstable;
 
     /*
      *  Set when belay could not enumerate or read this entry: an unreadable
-     *  directory (EACCES on opendir) or an unreadable file. The subtree below
+     *  directory (EACCES on opendir) or an unreadable file, or a symlink
+     *  whose target could not be read reliably (its link_target is then
+     *  empty, meaning "unknown"). The subtree below
      *  an unreadable directory is ABSENT from the manifest, so `diff` must
      *  report it as "contents unknown" and never as "unchanged".
      *
@@ -112,7 +125,8 @@ struct belay_manifest_stats {
     size_t vanished;    /* disappeared between readdir and stat/open: the walk
                            saw a tree that was changing under it */
     size_t unreadable;  /* entries flagged unreadable */
-    size_t unstable;    /* regular files that changed while being hashed */
+    size_t unstable;    /* entries flagged unstable: files that changed while
+                           hashed, directories whose listing changed */
 };
 
 /*

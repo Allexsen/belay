@@ -85,42 +85,59 @@ owner is invisible.
 | `mode` | int | always | `st_mode`, full value including type bits |
 | `uid`, `gid` | int | always | owner |
 | `size` | int | always | `st_size`. For `lnk`, the target length. |
-| `mtime_ns`, `ctime_ns` | int | always | nanosecond timestamps. **`ctime_ns` is the change prefilter**: an unprivileged process can set mtime but not ctime (§6.3). Never the sole evidence for a protected path — hash those. |
-| `ino`, `dev` | int | always | identity. `dev` differing from the scope root's means a mount boundary. |
+| `mtime_ns`, `ctime_ns` | int | always | nanosecond timestamps. **`ctime_ns` is the change prefilter**: an unprivileged process can set mtime but not ctime (§6.3). Never the sole evidence for a protected path — hash those. Times outside the int64 range (before 1678, after 2262) saturate at its bounds. |
+| `ino`, `dev` | int | always | identity. On a directory, `dev` differing from the scope root's means a mount boundary; on other types it need not (see `mount`). |
 | `nlink` | int | always | link count. `> 1` on a regular file means hard links exist. |
 | `sha256` | string | `reg`, size ≤ `hash_max_bytes` | lowercase hex content digest |
 | `unverified` | bool | `reg`, size > `hash_max_bytes` | `true`. The file was too large to hash; `diff` must report any change to it as **modified (unverified)**, never as unchanged. |
 | `link_target` | string | `lnk` | the link's bytes, verbatim and unresolved |
 | `link_target_b64` | string | `lnk`, non-UTF-8 | base64 of the target bytes |
 | `target_outside_scope` | bool | `lnk`, advisory | `true` when the target resolves lexically outside the scope. **Advisory only** — never drives a decision (§5.1.1). |
-| `unstable` | bool | `reg` (with `unverified`) or `dir` | `true`. On a regular file: it changed while being read (size, mtime or ctime moved, or the inode opened was not the one stat'ed); no hash is recorded, because the bytes read describe no state the file ever had. On a directory: its listing changed between its stat and the end of its listing, so entries may be missing from it or recorded under another directory; the comparator MUST NOT read its children as a complete listing. |
+| `unstable` | bool | `reg` (with `unverified`) or `dir` | `true`. On a regular file: it changed while being read (size, mtime or ctime moved, or the inode opened was not the one stat'ed); no hash is recorded, because the bytes read describe no state the file ever had. On a directory: **its listing is not a complete, single-instant listing** -- it changed during the walk (its ctime lies between the walk's start and the moment belay reached it, or its mtime or ctime moved between its stat and the end of its subtree's walk), or the listing failed part way (a `readdir` error, or a child that could not be stat'ed at all). Entries may be missing from it or recorded under another directory; the comparator MUST NOT read its children as a complete listing. On the root `.` it additionally means the system clock was stepped during the walk, so the manifest as a whole is not a single instant. |
 | `rdev` | int | `blk` and `chr` only, required | the device number. Without it a replaced device node, or an overlayfs whiteout (char 0,0), is indistinguishable from the original. A reader MUST reject a device without `rdev` and `rdev` on anything else. |
 | `stored` | string | when content was copied | the `store/` key, which is the content's sha256 |
-| `mount` | bool | any type, at a boundary | `true`. The entry is the root of another mount: its `dev` differs from the scope root's, or (Linux) statx reports it as a mount root, which also catches bind mounts from the same filesystem. It is recorded and **never read or descended** (§5.1.1): a mounted regular file carries `unverified` and no hash. |
-| `unreadable` | bool | when capture failed for this entry | `true`. belay could not capture this entry's contents: a directory it could not open or search (permission, or readable-but-not-searchable), a directory swapped for another between its stat and its open, a directory beyond the depth limit (128) or whose path leaves no room for a child name, a file it could not open or read, or a symlink that kept changing while being read. **For a directory, the entire subtree below it is ABSENT.** `diff` MUST report such a subtree as *contents unknown* and never as *unchanged*. Without this field an unreadable directory is byte-identical to an empty one. |
+| `mount` | bool | any type, at a boundary | `true`. The entry is the root of another mount: on Linux, statx reports it as a mount root (`STATX_ATTR_MOUNT_ROOT`), which also catches bind mounts from the same filesystem; for directories, a `dev` different from the scope root's also counts. `dev` is deliberately **not** used for other types: on overlayfs every regular file carries its underlying layer's device, so that test would flag every file of an overlay scope. A mount is recorded and **never read or descended** (§5.1.1): a mounted regular file carries `unverified` and no hash. |
+| `unreadable` | bool | when capture failed for this entry | `true`. belay could not capture this entry's contents: a directory it could not open or search (permission, or readable-but-not-searchable), a directory swapped for another between its stat and its open, a directory beyond the depth limit (128) or whose path leaves no room for a child name, a file it could not open or read, or a symlink whose target could not be read or kept changing while being read. **For a directory, the entire subtree below it is ABSENT.** `diff` MUST report such a subtree as *contents unknown* and never as *unchanged*. Without this field an unreadable directory is byte-identical to an empty one. |
 
 ### Field rules a reader MUST enforce
 
 In addition to the grammar above:
 
-- **Types and fields agree.** A `reg` entry carries exactly one of `sha256` and `unverified`.
-  No other type carries `sha256`, `unverified`, `unstable` or `stored`. `rdev` appears exactly on
-  `blk` and `chr`; `link_target` (or `link_target_b64`) exactly on `lnk`; `target_outside_scope`
-  only on `lnk`. A `mount` entry carries no `sha256`.
-- **`mode`'s type bits match `type`** (`S_IFMT`; the values are the same on Linux and macOS).
-- **A symlink's `size` equals its target's length.** The writer re-stats the link after reading it
-  to guarantee they belong together.
-- **`path` is used only for valid UTF-8 and `path_b64` only for anything else** (likewise
-  `link_target`/`link_target_b64`), so a path has one encoding.
-- **The scope root `.` is present**, exactly once, and is a directory.
-- **Nothing appears below a directory marked `unreadable` or `mount`.**
-
+- **Fields appear in one fixed order.** Entries: `path`|`path_b64`, `type`, `mode`, `uid`, `gid`,
+  `size`, `mtime_ns`, `ctime_ns`, `ino`, `dev`, `nlink`, `sha256`, `unverified`, `unstable`, `rdev`,
+  `link_target`|`link_target_b64`, `target_outside_scope`, `stored`, `mount`, `unreadable`. Header:
+  `belay_manifest`, `created_ns`, `scopes`|`scopes_b64`, `hash`, `hash_max_bytes`,
+  `store_max_bytes`. Trailer: `belay_manifest_end`, `vanished`, `unreadable`, `unstable`. Optional
+  fields are omitted, never reordered. Unknown fields may appear only after every known one.
 - **No key appears twice** in one line. "First wins" would let two different lines mean the same
   thing.
-- **Boolean flags are spelled exactly `"key":true`.** Any other value under a flag's key (`: true`,
-  `false`, `1`, `"true"`) is an error, never "flag absent". A flag that silently reads as absent is
-  the failure this format exists to prevent: an unreadable directory would read as an empty one.
-- **`unstable` implies `unverified`**, and `sha256` excludes both.
+- **Boolean flags are spelled exactly `"key":true`**, and are absent otherwise. Any other value
+  under a flag's key (`: true`, `false`, `1`, `"true"`) is an error, never "flag absent". A flag
+  that silently reads as absent is the failure this format exists to prevent: an unreadable
+  directory would read as an empty one.
+- **Types, fields and flags agree** -- exactly the combinations the writer produces:
+
+  | type | hash fields | flags allowed |
+  |---|---|---|
+  | `reg` | exactly one of `sha256` and `unverified`; `stored` only with `sha256` and equal to it | `unstable` or `unreadable` (each requires `unverified`, never both); `mount` (with `unverified`, alone) |
+  | `dir` | none | at most one of `unreadable`, `unstable`, `mount` |
+  | `lnk` | none | `unreadable`, `mount`, `target_outside_scope` |
+  | `fifo` `sock` `blk` `chr` | none | `mount` only |
+
+  `rdev` appears exactly on `blk` and `chr`; `link_target` (or `link_target_b64`) exactly on `lnk`.
+- **`mode`'s type bits match `type`** (`S_IFMT`; the values are the same on Linux and macOS).
+- **A symlink's `size` equals its target's length, and its target is not empty** -- unless the link
+  is `unreadable`, meaning its target could not be read reliably (an I/O error, or a link that kept
+  changing while belay read it). An unreadable link with an **empty** target means "target unknown":
+  no real symlink has an empty target, so this cannot be confused with a real one.
+- **`path` is used only for valid UTF-8 and `path_b64` only for anything else** (likewise
+  `link_target`/`link_target_b64`, `scopes`/`scopes_b64`), and base64 is canonical (padding bits
+  zero, padding only at the end), so every byte string has exactly one encoding.
+- **The scope is a canonical absolute path** (as `realpath` produces: no empty, `.` or `..`
+  component, no trailing slash except `/` itself).
+- **The scope root `.` is present**, exactly once, is a directory and is never a mount. If it is
+  `unreadable`, it is the only entry.
+- **Nothing appears below a directory marked `unreadable` or `mount`.**
 
 ### Growing the format
 
@@ -141,7 +158,7 @@ shipped.
 | `belay_manifest_end` | number of entries, including `.` |
 | `vanished` | entries that disappeared between being listed and being read. Non-zero means the tree was changing during the walk, so the manifest is not a single instant. |
 | `unreadable` | entries carrying `unreadable` |
-| `unstable` | entries carrying `unstable` (files and directories) |
+| `unstable` | entries carrying `unstable` (files and directories). Non-zero means the manifest is not a consistent single-instant snapshot. |
 
 The trailer is **required** and must be the **last line**. A reader MUST reject a manifest with no
 trailer, a trailer whose counts disagree with the entries read, or anything after the trailer.

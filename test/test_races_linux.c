@@ -17,6 +17,10 @@
 #include "belay/error.h"
 
 #include <dirent.h>
+#include <errno.h>
+#include <sched.h>
+#include <sys/mount.h>
+#include <sys/wait.h>
 #include <fcntl.h>
 #include <stdarg.h>
 #include <stdio.h>
@@ -26,7 +30,14 @@
 #include <unistd.h>
 
 enum arm { NONE, SWAP_ON_DIR_OPEN, SWAP_ON_READLINK, REPLACE_LINK_WITH_FILE,
-           DUP_READDIR, REWRITE_ON_FILE_OPEN, MOVE_BETWEEN_DIRS };
+           DUP_READDIR, REWRITE_ON_FILE_OPEN, MOVE_BETWEEN_DIRS,
+           MOVE_ON_ROOT_READDIR,     /* move a file into an already-walked sibling */
+           TOUCH_ROOT_ON_DIR_OPEN,   /* change the root while a child is walked */
+           LINK_KEEPS_CHANGING,      /* every readlinkat: new target, new length */
+           LINK_FLICKERS,            /* every readlinkat: briefly a regular file */
+           LINK_EIO,                 /* readlinkat fails with EIO */
+           SUBDIR_READDIR_EIO };     /* a subdirectory's readdir fails with EIO */
+static int g_flip;
 
 static char g_root[256], g_m[300];
 static const char *g_first;      /* MOVE_BETWEEN_DIRS: the directory walked first */
@@ -54,6 +65,14 @@ int __wrap_openat(int fd, const char *name, int flags, ...) {
             if (rename(from, to) == 0) g_fired = 1;
         }
     }
+    if (g_arm == TOUCH_ROOT_ON_DIR_OPEN && !g_fired && (flags & O_DIRECTORY) &&
+        g_x != NULL && strcmp(name, g_x) == 0) {
+        g_fired = 1;
+        char p[600];
+        snprintf(p, sizeof p, "%s/created_mid_walk", g_root);
+        const int w = __real_openat(AT_FDCWD, p, O_WRONLY | O_CREAT | O_EXCL, 0644);
+        if (w >= 0) close(w);
+    }
     if (!g_fired && g_x != NULL && strcmp(name, g_x) == 0) {
         if (g_arm == SWAP_ON_DIR_OPEN && (flags & O_DIRECTORY)) {
             g_fired = 1;
@@ -70,6 +89,32 @@ int __wrap_openat(int fd, const char *name, int flags, ...) {
 
 ssize_t __real_readlinkat(int, const char *, char *, size_t);
 ssize_t __wrap_readlinkat(int fd, const char *name, char *buf, size_t n) {
+    if (g_x != NULL && strcmp(name, g_x) == 0) {
+        if (g_arm == LINK_EIO) {
+            g_fired = 1;
+            errno = EIO;
+            return -1;
+        }
+        if (g_arm == LINK_KEEPS_CHANGING) {
+            /* Fires on every call, so all retries see a different link. */
+            g_fired = 1;
+            unlinkat(fd, g_x, 0);
+            if (symlinkat((g_flip++ & 1) ? "short" : "a-much-longer-target-than-before", fd, g_x) != 0) { /* fixture */ }
+        } else if (g_arm == LINK_FLICKERS) {
+            /* The link is a regular file at the moment it is read, and a
+             * symlink again afterwards: it never went away. */
+            g_fired = 1;
+            unlinkat(fd, g_x, 0);
+            const int w = __real_openat(fd, g_x, O_WRONLY | O_CREAT | O_EXCL, 0644);
+            if (w >= 0) close(w);
+            const ssize_t r = __real_readlinkat(fd, name, buf, n);
+            const int saved = errno;
+            unlinkat(fd, g_x, 0);
+            if (symlinkat("target", fd, g_x) != 0) { /* fixture */ }
+            errno = saved;
+            return r;
+        }
+    }
     if (!g_fired && g_x != NULL && strcmp(name, g_x) == 0) {
         if (g_arm == SWAP_ON_READLINK) {
             g_fired = 1;
@@ -81,7 +126,6 @@ ssize_t __wrap_readlinkat(int fd, const char *name, char *buf, size_t n) {
             if (w >= 0) close(w);
         }
     }
-    if (buf == NULL) return 0;                         /* probe from the _chk wrapper */
     return __real_readlinkat(fd, name, buf, n);
 }
 
@@ -89,11 +133,15 @@ ssize_t __wrap_readlinkat(int fd, const char *name, char *buf, size_t n) {
  * variant, so it needs the same interposition or the race never fires. */
 ssize_t __real___readlinkat_chk(int, const char *, char *, size_t, size_t);
 ssize_t __wrap___readlinkat_chk(int fd, const char *name, char *buf, size_t n, size_t buflen) {
-    (void)__wrap_readlinkat(fd, name, NULL, 0);        /* fire the armed race, if any */
-    return __real___readlinkat_chk(fd, name, buf, n, buflen);
+    /* Run the full hooked path, injected errors included. The buffer check
+     * the _chk variant adds is irrelevant in a test that owns the buffer. */
+    (void)buflen;
+    return __wrap_readlinkat(fd, name, buf, n);
 }
 
 struct dirent *__real_readdir(DIR *);
+static DIR *g_rootdir;
+static const char *g_walked;   /* first of A/B returned by the root's readdir */
 static struct dirent g_saved;
 static int g_replay;
 static DIR *g_dir;
@@ -102,7 +150,27 @@ struct dirent *__wrap_readdir(DIR *d) {
         g_replay = 2;
         return &g_saved;                  /* the same name, a second time */
     }
+    if (g_arm == SUBDIR_READDIR_EIO && !g_fired && g_rootdir != NULL && d != g_rootdir) {
+        g_fired = 1;
+        errno = EIO;
+        return NULL;
+    }
     struct dirent *e = __real_readdir(d);
+    if (g_rootdir == NULL) g_rootdir = d;     /* the first DIR opened is the root's */
+    /* The reviewer's ordering: when the root listing returns the SECOND of
+     * A/B, move that one's file into the first, which is fully walked by now
+     * and will not be re-checked. The second is not stat'ed yet. */
+    if (g_arm == MOVE_ON_ROOT_READDIR && !g_fired && e != NULL && d == g_rootdir &&
+        (strcmp(e->d_name, "A") == 0 || strcmp(e->d_name, "B") == 0)) {
+        if (g_walked == NULL) {
+            g_walked = e->d_name[0] == 'A' ? "A" : "B";
+        } else {
+            char from[1200], to[1200];
+            snprintf(from, sizeof from, "%s/%s/m_%s", g_root, e->d_name, e->d_name);
+            snprintf(to, sizeof to, "%s/%s/m_%s", g_root, g_walked, e->d_name);
+            if (rename(from, to) == 0) g_fired = 1;
+        }
+    }
     if (g_arm == DUP_READDIR && e != NULL && g_replay == 0 && g_x != NULL &&
         strcmp(e->d_name, g_x) == 0) {
         g_saved = *e;
@@ -114,6 +182,7 @@ struct dirent *__wrap_readdir(DIR *d) {
 
 static void arm(enum arm a, const char *x, const char *y) {
     g_arm = a; g_x = x; g_y = y; g_fired = 0; g_replay = 0; g_dir = NULL; g_first = NULL;
+    g_rootdir = NULL; g_walked = NULL; g_flip = 0;
 }
 
 static void path(char *out, size_t n, const char *rel) { snprintf(out, n, "%s/%s", g_root, rel); }
@@ -254,6 +323,7 @@ TEST(directory_changed_during_the_walk_is_flagged_unstable) {
     mk("A"); mk("B");
     touch("A/m_A", "");
     touch("B/m_B", "");
+    usleep(250000);   /* let the fixture age past the walk-start margin */
     arm(MOVE_BETWEEN_DIRS, NULL, NULL);
     struct belay_manifest_stats st;
     ASSERT_EQ_INT(0, check(&st));
@@ -262,6 +332,154 @@ TEST(directory_changed_during_the_walk_is_flagged_unstable) {
     const struct belay_entry *d = find(second);
     ASSERT_TRUE(d != NULL && d->unstable);
     ASSERT_EQ_INT(1, (int)st.unstable);
+}
+
+/* ===== Independent review, round 2 ===== */
+
+/* R2-1: the reviewer's ordering. B is fully walked and closed; then the root's
+ * listing returns A, and A's file moves into B. The file is in neither
+ * listing. Before the walk-start rule, the trailer claimed a clean walk. */
+TEST(r2_move_into_an_already_walked_sibling_is_not_a_clean_walk) {
+    reset();
+    mk("A"); mk("B");
+    touch("A/m_A", "");
+    touch("B/m_B", "");
+    usleep(250000);
+    arm(MOVE_ON_ROOT_READDIR, NULL, NULL);
+    struct belay_manifest_stats st;
+    ASSERT_EQ_INT(0, check(&st));
+    ASSERT_TRUE(g_fired);
+    ASSERT_TRUE(st.unstable >= 1);
+}
+
+/* R2-1, the root instance: the root has no parent to flag it, so a change to
+ * the root during the walk must flag "." itself. */
+TEST(r2_root_changed_during_the_walk_is_flagged) {
+    reset();
+    mk("A");
+    touch("A/f", "");
+    usleep(250000);
+    arm(TOUCH_ROOT_ON_DIR_OPEN, "A", NULL);
+    struct belay_manifest_stats st;
+    ASSERT_EQ_INT(0, check(&st));
+    ASSERT_TRUE(g_fired);
+    const struct belay_entry *r = find(".");
+    ASSERT_TRUE(r != NULL && r->unstable);
+}
+
+/* R2-2: a link that changes on every read exhausts the retries. Its fallback
+ * used to pair one link's size with another's target, and the reader rejected
+ * the whole manifest. Now: recorded unreadable, and the reader accepts it. */
+TEST(r2_link_that_keeps_changing_is_unreadable_and_readable_back) {
+    reset();
+    lnk("initial", "L");
+    arm(LINK_KEEPS_CHANGING, "L", NULL);
+    ASSERT_EQ_INT(0, check(NULL));            /* check() also runs the reader */
+    ASSERT_TRUE(g_fired);
+    const struct belay_entry *l = find("L");
+    ASSERT_TRUE(l != NULL && l->type == BELAY_T_LNK && l->unreadable);
+}
+
+/* R2-3: a link that is briefly a file whenever it is read never went away.
+ * It used to be dropped and counted vanished -- a diff would call it deleted. */
+TEST(r2_link_that_flickers_is_recorded_not_dropped) {
+    reset();
+    lnk("target", "L");
+    arm(LINK_FLICKERS, "L", NULL);
+    struct belay_manifest_stats st;
+    ASSERT_EQ_INT(0, check(&st));
+    ASSERT_TRUE(g_fired);
+    const struct belay_entry *l = find("L");
+    ASSERT_TRUE(l != NULL);
+    ASSERT_EQ_INT(0, (int)st.vanished);
+}
+
+/* R2-5: I/O errors on one entry are recorded on it, not fatal. */
+TEST(r2_readlink_eio_is_recorded_not_fatal) {
+    reset();
+    lnk("target", "L");
+    arm(LINK_EIO, "L", NULL);
+    ASSERT_EQ_INT(0, check(NULL));
+    const struct belay_entry *l = find("L");
+    ASSERT_TRUE(l != NULL && l->unreadable && l->link_target_len == 0);
+}
+
+TEST(r2_readdir_eio_marks_the_directory_unstable_not_fatal) {
+    reset();
+    mk("sub");
+    touch("sub/f", "");
+    usleep(250000);
+    arm(SUBDIR_READDIR_EIO, NULL, NULL);
+    ASSERT_EQ_INT(0, check(NULL));
+    ASSERT_TRUE(g_fired);
+    const struct belay_entry *d = find("sub");
+    ASSERT_TRUE(d != NULL && d->unstable);
+}
+
+/*
+ *  R2-4, the regression: on overlayfs (xino off) regular files carry their
+ *  layer's st_dev, not the overlay's. The D4 fix compared st_dev for every
+ *  type, so every file of an overlay scope was flagged a mount and none was
+ *  hashed -- and belay's own session engine runs on such overlays.
+ *
+ *  Needs an unprivileged user + mount namespace; skipped where the host
+ *  forbids it (e.g. Ubuntu 24.04's AppArmor default). Runs in a child so the
+ *  mounts die with it.
+ */
+static int overlay_child(void) {
+    char lower[300], up[300], merged[300], p[400];
+    snprintf(lower, sizeof lower, "%s/lower", g_root);
+    snprintf(up, sizeof up, "%s/up", g_root);
+    snprintf(merged, sizeof merged, "%s/merged", g_root);
+    const uid_t uid = getuid();
+    const gid_t gid = getgid();
+    if (unshare(CLONE_NEWUSER | CLONE_NEWNS) != 0) return 77;            /* skip */
+    /* Map ourselves, as `unshare -r` does; an unmapped user cannot mount. */
+    char map[64];
+    int fd = open("/proc/self/setgroups", O_WRONLY);
+    if (fd >= 0) { if (write(fd, "deny", 4) != 4) { /* best effort */ } close(fd); }
+    snprintf(map, sizeof map, "0 %u 1\n", (unsigned)uid);
+    fd = open("/proc/self/uid_map", O_WRONLY);
+    if (fd < 0 || write(fd, map, strlen(map)) < 0) return 77;
+    close(fd);
+    snprintf(map, sizeof map, "0 %u 1\n", (unsigned)gid);
+    fd = open("/proc/self/gid_map", O_WRONLY);
+    if (fd < 0 || write(fd, map, strlen(map)) < 0) return 77;
+    close(fd);
+    if (mount("none", up, "tmpfs", 0, NULL) != 0) return 77;
+    snprintf(p, sizeof p, "%s/u", up); mkdir(p, 0755);
+    snprintf(p, sizeof p, "%s/w", up); mkdir(p, 0755);
+    char opts[1200];
+    snprintf(opts, sizeof opts, "lowerdir=%s,upperdir=%s/u,workdir=%s/w", lower, up, up);
+    if (mount("overlay", merged, "overlay", 0, opts) != 0) return 77;
+    snprintf(p, sizeof p, "%s/upper.txt", merged);
+    FILE *f = fopen(p, "wb");
+    if (f) { fputs("upper", f); fclose(f); }
+
+    struct belay_manifest_opts o = {
+        .hash_max_bytes = BELAY_HASH_MAX_BYTES_DEFAULT,
+        .store_max_bytes = BELAY_STORE_MAX_BYTES_DEFAULT,
+    };
+    if (belay_manifest_write(g_m, merged, &o, NULL) != 0) return 1;
+    g_n = 0;
+    if (belay_manifest_read(g_m, collect, NULL) != 0) return 2;
+    const struct belay_entry *a = find("lower.txt"), *u = find("upper.txt");
+    if (a == NULL || u == NULL) return 3;
+    if (a->is_mount || u->is_mount || !a->has_hash || !u->has_hash) return 4;
+    return 0;
+}
+
+TEST(r2_overlay_scope_files_are_hashed_not_flagged_as_mounts) {
+    reset();
+    mk("lower"); mk("up"); mk("merged");
+    touch("lower/lower.txt", "lower");
+    const pid_t pid = fork();
+    if (pid == 0) _exit(overlay_child());
+    int status = 0;
+    waitpid(pid, &status, 0);
+    const int rc = WIFEXITED(status) ? WEXITSTATUS(status) : 99;
+    if (rc == 77) { printf("      (skipped: no unprivileged user+mount namespace here)\n"); return; }
+    ASSERT_EQ_INT(0, rc);
 }
 
 int main(void) {
@@ -274,6 +492,13 @@ int main(void) {
     RUN(name_listed_twice_is_refused_cleanly);
     RUN(rewrite_between_stat_and_open_is_unstable);
     RUN(directory_changed_during_the_walk_is_flagged_unstable);
+    RUN(r2_move_into_an_already_walked_sibling_is_not_a_clean_walk);
+    RUN(r2_root_changed_during_the_walk_is_flagged);
+    RUN(r2_link_that_keeps_changing_is_unreadable_and_readable_back);
+    RUN(r2_link_that_flickers_is_recorded_not_dropped);
+    RUN(r2_readlink_eio_is_recorded_not_fatal);
+    RUN(r2_readdir_eio_marks_the_directory_unstable_not_fatal);
+    RUN(r2_overlay_scope_files_are_hashed_not_flagged_as_mounts);
 
     char cmd[600];
     snprintf(cmd, sizeof cmd, "rm -rf '%s' '%s'", g_root, g_m);

@@ -453,6 +453,10 @@ struct walk_ctx {
     size_t n_unreadable;
     size_t n_unstable;
 
+    /* Walk start (realtime ns, minus a margin for coarse kernel clocks): a
+     * directory whose ctime is later changed during the walk. */
+    int64_t walk_start_ns;
+
     struct belay_store *store;  /* NULL when content storage is off */
     char  *abs;                 /* scope + "/" + rel, for interpreter claims */
     size_t scope_len;
@@ -502,13 +506,23 @@ static int hash_fd(int fd, unsigned char *buf, char hex_out[65], uint64_t *nread
     return 0;
 }
 
+/* Seconds + nanoseconds as int64 nanoseconds, saturating outside 1678..2262
+ * rather than overflowing (undefined behaviour; a year-2300 mtime used to wrap
+ * to year 1715). Saturation can map two far-future times to one value, but
+ * ctime still changes on every metadata change, so no change is hidden. */
+static int64_t ns_of(int64_t sec, long nsec) {
+    if (sec > (INT64_MAX - nsec) / 1000000000) return INT64_MAX;
+    if (sec < INT64_MIN / 1000000000 + 1)      return INT64_MIN;
+    return sec * 1000000000 + nsec;
+}
+
 static int64_t ts_ns(const struct stat *st, int which) {
 #ifdef __APPLE__
     const struct timespec *t = which ? &st->st_ctimespec : &st->st_mtimespec;
 #else
     const struct timespec *t = which ? &st->st_ctim : &st->st_mtim;
 #endif
-    return (int64_t)t->tv_sec * 1000000000 + t->tv_nsec;
+    return ns_of((int64_t)t->tv_sec, t->tv_nsec);
 }
 
 static void fill_from_stat(struct belay_entry *e, const struct stat *st) {
@@ -596,8 +610,14 @@ static int walk(int dfd, char *rel, size_t relsz, size_t rel_len,
 static int stat_entry(int dfd, const char *name, struct stat *st, bool *mount_root) {
     *mount_root = false;
 #if defined(__linux__) && defined(STATX_ATTR_MOUNT_ROOT)
+    /* AT_NO_AUTOMOUNT: walking a scope must not trigger autofs mounts.
+     * (fstatat implies it since Linux 4.14; statx does not.) A seccomp profile
+     * that blocks statx with EPERM -- older container runtimes -- falls back
+     * to fstatat for the rest of the process. */
+    static int statx_blocked;
     struct statx sx;
-    if (statx(dfd, name, AT_SYMLINK_NOFOLLOW, STATX_BASIC_STATS, &sx) == 0) {
+    if (!statx_blocked &&
+        statx(dfd, name, AT_SYMLINK_NOFOLLOW | AT_NO_AUTOMOUNT, STATX_BASIC_STATS, &sx) == 0) {
         memset(st, 0, sizeof *st);
         st->st_mode  = sx.stx_mode;
         st->st_ino   = sx.stx_ino;
@@ -615,7 +635,10 @@ static int stat_entry(int dfd, const char *name, struct stat *st, bool *mount_ro
                       (sx.stx_attributes & STATX_ATTR_MOUNT_ROOT);
         return 0;
     }
-    if (errno != ENOSYS) return -1;
+    if (!statx_blocked) {
+        if (errno != ENOSYS && errno != EPERM) return -1;
+        statx_blocked = 1;
+    }
 #endif
     return fstatat(dfd, name, st, AT_SYMLINK_NOFOLLOW);
 }
@@ -627,7 +650,8 @@ static bool fatal_errno(int err) {
     return err == EMFILE || err == ENFILE || err == ENOMEM;
 }
 
-enum { V_OK = 0, V_VANISHED = 2, V_RACED = 3 };
+enum { V_OK = 0, V_VANISHED = 2, V_RACED = 3, V_UNREADABLE = 4,
+       W_INCOMPLETE = 5 /* walk(): the listing could not be fully captured */ };
 
 /*
  *  Symlink. readlinkat reads the link itself, never its target. The link is
@@ -645,13 +669,13 @@ static int read_link(int pfd, const char *name, const struct stat *st, const cha
     if (n < 0) {
         if (errno == ENOENT) return V_VANISHED;
         if (errno == EINVAL) return V_RACED;           /* no longer a symlink */
-        belay_err_set(BELAY_ERR_IO, errno, "manifest: readlinkat %s", rel);
-        return -1;
+        if (fatal_errno(errno)) {
+            belay_err_set(BELAY_ERR_IO, errno, "manifest: readlinkat %s", rel);
+            return -1;
+        }
+        return V_UNREADABLE;                           /* EIO and friends */
     }
-    if ((size_t)n >= sizeof e->link_target) {
-        belay_err_set(BELAY_ERR_RANGE, 0, "manifest: link target too long at %s", rel);
-        return -1;
-    }
+    if ((size_t)n >= sizeof e->link_target) return V_UNREADABLE;
     e->link_target[n] = '\0';
     e->link_target_len = (size_t)n;
     e->has_link_target = true;
@@ -660,8 +684,11 @@ static int read_link(int pfd, const char *name, const struct stat *st, const cha
     bool mr;
     if (stat_entry(pfd, name, &again, &mr) == -1) {
         if (errno == ENOENT) return V_VANISHED;
-        belay_err_set(BELAY_ERR_IO, errno, "manifest: stat %s", rel);
-        return -1;
+        if (fatal_errno(errno)) {
+            belay_err_set(BELAY_ERR_IO, errno, "manifest: stat %s", rel);
+            return -1;
+        }
+        return V_RACED;
     }
     if (again.st_ino != st->st_ino || again.st_dev != st->st_dev ||
         ts_ns(&again, 1) != ts_ns(st, 1) || (uint64_t)again.st_size != (uint64_t)n)
@@ -712,9 +739,9 @@ static int read_file(int pfd, const char *name, const struct stat *st, const cha
 
     struct stat before, after;
     if (fstat(fd, &before) == -1) {
-        belay_err_set(BELAY_ERR_IO, errno, "manifest: fstat %s", rel);
         close(fd);
-        return -1;
+        mark_unreadable_file(wc);
+        return V_OK;
     }
     /* Same file, same moment as the fstatat whose metadata was recorded --
      * including mtime and ctime, so a same-size rewrite in between cannot
@@ -772,10 +799,11 @@ static int read_file(int pfd, const char *name, const struct stat *st, const cha
         return -1;                                      /* store write failed */
     }
     if (fstat(fd, &after) == -1) {
-        belay_err_set(BELAY_ERR_IO, errno, "manifest: fstat %s", rel);
         if (want) belay_store_abort(&tx);
         close(fd);
-        return -1;
+        e->sha256_hex[0] = '\0';
+        mark_unreadable_file(wc);
+        return V_OK;
     }
     close(fd);
 
@@ -881,8 +909,13 @@ static int visit(int parent_fd, const char *name, char *rel, size_t relsz,
         if (stat_entry(parent_fd, name, &st, &mount_root) == -1) {
             /* Vanished between readdir and stat: the tree changed under us. */
             if (errno == ENOENT) { wc->n_vanished++; return 0; }
-            belay_err_set(BELAY_ERR_IO, errno, "manifest: stat %s", rel);
-            return -1;
+            if (fatal_errno(errno)) {
+                belay_err_set(BELAY_ERR_IO, errno, "manifest: stat %s", rel);
+                return -1;
+            }
+            /* EIO, or EACCES from an LSM: this entry cannot be recorded at all,
+             * so the PARENT's listing is incomplete -- reported to walk(). */
+            return W_INCOMPLETE;
         }
 
         memset(e, 0, sizeof *e);
@@ -895,9 +928,15 @@ static int visit(int parent_fd, const char *name, char *rel, size_t relsz,
         fill_from_stat(e, &st);
 
         /* A mount root of ANY type is a capture boundary: recorded, never read
-         * or descended. Before, only directories were checked, so a file
-         * bind-mounted from elsewhere was hashed and stored as if local. */
-        const bool crossed = mount_root || (uint64_t)st.st_dev != wc->root_dev;
+         * or descended. statx reports mount roots directly, bind mounts
+         * included. st_dev is compared for DIRECTORIES only: on overlayfs
+         * (xino off) every regular file and symlink carries its underlying
+         * layer's device, not the overlay's -- treating that as a boundary
+         * flagged every file of an overlay scope as a mount and hashed none,
+         * and belay's own session engine runs on exactly such overlays.
+         * Directories always carry the overlay's device. */
+        const bool crossed = mount_root ||
+            (e->type == BELAY_T_DIR && (uint64_t)st.st_dev != wc->root_dev);
 
         int r = V_OK;
         if (crossed) {
@@ -914,15 +953,49 @@ static int visit(int parent_fd, const char *name, char *rel, size_t relsz,
 
         if (r == -1) return -1;
         if (r == V_VANISHED) { wc->n_vanished++; return 0; }
-        if (r == V_RACED) {
-            if (attempt + 1 < MAX_RACE_RETRIES) continue;     /* stat it again */
-            /* Still changing after several tries. Keep what was read, flagged;
-             * if no target was ever read the entry is counted as vanished. */
-            if (!e->has_link_target) { wc->n_vanished++; return 0; }
+        if (r == V_RACED && attempt + 1 < MAX_RACE_RETRIES) continue;   /* stat again */
+        if (r == V_RACED || r == V_UNREADABLE) {
+            /* A symlink whose target could not be read reliably -- an I/O
+             * error, a target too long, or still changing after several
+             * tries -- is recorded unreadable, never dropped: dropping a link
+             * that never went away would read as a deletion. If no target
+             * was read at all, the target is recorded empty, which no real
+             * symlink can have, so "unknown" stays unambiguous. */
+            if (r == V_UNREADABLE || !e->has_link_target) {
+                e->link_target[0] = '\0';
+                e->link_target_len = 0;
+                e->has_link_target = true;
+                e->target_outside_scope = false;
+            }
             e->unreadable = true;
             wc->n_unreadable++;
         }
         break;
+    }
+
+    /*
+     *  A directory whose ctime falls between the start of the walk and NOW
+     *  changed while belay was walking. Together with the per-directory window
+     *  check below, this covers a file moved between two directories listed
+     *  at different moments -- which otherwise vanishes from both listings
+     *  with a clean trailer (verified).
+     *
+     *  The upper bound matters. A ctime in the FUTURE is not a change during
+     *  the walk: it is left over from a backward clock step before the walk.
+     *  WSL steps its clock back ~100 s at a time (measured twice: 101 s and
+     *  108 s); with only a lower bound, every directory edited in the last
+     *  ~100 s was flagged after each step. "Now" is read after the stat, so a
+     *  change during the walk always lands at or below it -- unless the clock
+     *  stepped back during the walk, which the realtime/monotonic comparison
+     *  at the end catches separately.
+     */
+    if (cfd != -1 && !e->unstable && e->ctime_ns >= wc->walk_start_ns) {
+        struct timespec now;
+        clock_gettime(CLOCK_REALTIME, &now);
+        if (e->ctime_ns <= ns_of((int64_t)now.tv_sec, now.tv_nsec)) {
+            e->unstable = true;
+            wc->n_unstable++;
+        }
     }
 
     if (cfd == -1) return emit_entry(wc);
@@ -945,16 +1018,15 @@ static int visit(int parent_fd, const char *name, char *rel, size_t relsz,
     memcpy(dir, e, sizeof *dir);
 
     int r = walk(cfd, rel, relsz, rel_len, depth + 1, wc);
-    if (r == 0) {
+    if (r == 0 || r == W_INCOMPLETE) {
         struct stat post;
-        if (fstat(cfd, &post) == -1) {
-            belay_err_set(BELAY_ERR_IO, errno, "manifest: fstat %s", rel);
-            r = -1;
-        } else if (!dir->unstable &&
-                   (ts_ns(&post, 0) != dir->mtime_ns || ts_ns(&post, 1) != dir->ctime_ns)) {
+        const bool incomplete = (r == W_INCOMPLETE) || fstat(cfd, &post) == -1 ||
+            ts_ns(&post, 0) != dir->mtime_ns || ts_ns(&post, 1) != dir->ctime_ns;
+        if (incomplete && !dir->unstable) {
             dir->unstable = true;
             wc->n_unstable++;
         }
+        r = 0;
     }
     close(cfd);
     if (r == 0) r = emit_one(wc, dir);
@@ -962,6 +1034,13 @@ static int visit(int parent_fd, const char *name, char *rel, size_t relsz,
     return r;
 }
 
+/*
+ *  Lists one directory and visits each entry. Returns 0, -1 (fatal: belay's
+ *  own resource exhaustion or an output error), or W_INCOMPLETE when the
+ *  listing could not be fully captured -- a readdir error part way through,
+ *  or a child that could not even be stat'ed. The caller then flags the
+ *  directory unstable rather than failing the whole check.
+ */
 static int walk(int dfd, char *rel, size_t relsz, size_t rel_len,
                 int depth, struct walk_ctx *wc) {
     /* closedir closes the fd it was given; dup so the caller's stays valid. */
@@ -972,34 +1051,49 @@ static int walk(int dfd, char *rel, size_t relsz, size_t rel_len,
     }
     DIR *d = fdopendir(ddup);
     if (d == NULL) {
-        belay_err_set(BELAY_ERR_IO, errno, "manifest: fdopendir");
+        const int err = errno;
         close(ddup);
-        return -1;
+        if (fatal_errno(err)) {
+            belay_err_set(BELAY_ERR_IO, err, "manifest: fdopendir");
+            return -1;
+        }
+        return W_INCOMPLETE;
     }
 
     int rc = 0;
+    bool incomplete = false;
     for (;;) {
         errno = 0;
         const struct dirent *de = readdir(d);
         if (de == NULL) {
             if (errno != 0) {
-                belay_err_set(BELAY_ERR_IO, errno, "manifest: readdir");
-                rc = -1;
+                if (fatal_errno(errno)) {
+                    belay_err_set(BELAY_ERR_IO, errno, "manifest: readdir");
+                    rc = -1;
+                } else {
+                    incomplete = true;         /* EIO part way through */
+                }
             }
             break;
         }
         if (strcmp(de->d_name, ".") == 0 || strcmp(de->d_name, "..") == 0) continue;
 
         const ssize_t nlen = rel_join(rel, relsz, rel_len, de->d_name);
-        if (nlen == -1) { rc = -1; break; }
+        if (nlen == -1) {
+            belay_err_clear();
+            incomplete = true;                 /* cannot be named within PATH_CAP */
+            continue;
+        }
 
-        rc = visit(dfd, de->d_name, rel, relsz, (size_t)nlen, depth, wc);
+        const int v = visit(dfd, de->d_name, rel, relsz, (size_t)nlen, depth, wc);
         rel[rel_len] = '\0';
-        if (rc != 0) break;
+        if (v == W_INCOMPLETE) { incomplete = true; continue; }
+        if (v != 0) { rc = v; break; }
     }
 
     closedir(d);
-    return rc;
+    if (rc != 0) return rc;
+    return incomplete ? W_INCOMPLETE : 0;
 }
 
 /* ------------------------------------------------------------------------ */
@@ -1010,7 +1104,7 @@ static int write_header(FILE *f, const char *scope_real,
                         const struct belay_manifest_opts *opts, char *buf) {
     struct timespec now;
     clock_gettime(CLOCK_REALTIME, &now);
-    const long long created = (long long)now.tv_sec * 1000000000LL + now.tv_nsec;
+    const long long created = (long long)ns_of((int64_t)now.tv_sec, now.tv_nsec);
 
     /* Same rule as entry paths: JSON for valid UTF-8, base64 otherwise.
      * Before, a non-UTF-8 scope was written raw and the line was not JSON. */
@@ -1109,25 +1203,68 @@ int belay_manifest_write(const char *out_path, const char *scope,
         if (belay_store_open(opts->store_dir, &wc->store) == -1) goto cleanup;
     }
 
+    /*
+     *  Walk start, for the "changed during the walk" rule. On Linux it is
+     *  read from CLOCK_REALTIME_COARSE -- the clock the kernel stamps files
+     *  with -- so a change made after this instant can never carry an earlier
+     *  ctime, and no margin is needed. False positives are limited to a
+     *  directory changed in the same kernel tick (1-10 ms) just before the
+     *  walk. Elsewhere file timestamps come from the fine clock; a 10 ms
+     *  margin covers any rounding. Clock STEPS are handled separately: a step
+     *  before the walk by the upper bound at each check, a step during the
+     *  walk by comparing realtime with monotonic time at the end.
+     */
+    struct timespec rt0, mono0, start;
+    clock_gettime(CLOCK_REALTIME, &rt0);
+    clock_gettime(CLOCK_MONOTONIC, &mono0);
+#if defined(__linux__) && defined(CLOCK_REALTIME_COARSE)
+    clock_gettime(CLOCK_REALTIME_COARSE, &start);
+    wc->walk_start_ns = ns_of((int64_t)start.tv_sec, start.tv_nsec);
+#else
+    start = rt0;
+    wc->walk_start_ns = ns_of((int64_t)start.tv_sec, start.tv_nsec) - 10000000LL;
+#endif
+
     /* The scope root itself is an entry, path ".". Without it a chmod or
-     * chown on the root is invisible: verified, the manifest body was
-     * byte-identical before and after `chmod 700` on the root. */
+     * chown on the root is invisible. Like every directory it is emitted
+     * after its listing, so a change during the walk can be recorded on it. */
     memset(&wc->e, 0, sizeof wc->e);
     fill_from_stat(&wc->e, &rst);
     wc->e.path[0] = '.';
     wc->e.path_len = 1;
+    struct belay_entry root_e;
+    memcpy(&root_e, &wc->e, sizeof root_e);
+
     /* A scope root that can be listed but not searched has contents belay
      * cannot stat: flag it, rather than fail on its first child. */
     struct stat probe;
-    const bool searchable = fstatat(root_fd, ".", &probe, AT_SYMLINK_NOFOLLOW) == 0;
-    if (!searchable) {
-        wc->e.unreadable = true;
+    if (fstatat(root_fd, ".", &probe, AT_SYMLINK_NOFOLLOW) != 0) {
+        root_e.unreadable = true;
         wc->n_unreadable++;
-    }
-    if (emit_entry(wc) == -1) goto cleanup;
+    } else {
+        rel[0] = '\0';
+        const int wr = walk(root_fd, rel, PATH_CAP, 0, 0, wc);
+        if (wr == -1) goto cleanup;
 
-    rel[0] = '\0';
-    if (searchable && walk(root_fd, rel, PATH_CAP, 0, 0, wc) != 0) goto cleanup;
+        struct stat post;
+        struct timespec rt1, mono1;
+        clock_gettime(CLOCK_REALTIME, &rt1);
+        clock_gettime(CLOCK_MONOTONIC, &mono1);
+        const int64_t d_rt   = ns_of((int64_t)rt1.tv_sec, rt1.tv_nsec) - ns_of((int64_t)rt0.tv_sec, rt0.tv_nsec);
+        const int64_t d_mono = ns_of((int64_t)mono1.tv_sec, mono1.tv_nsec) - ns_of((int64_t)mono0.tv_sec, mono0.tv_nsec);
+        /* If the wall clock was stepped during the walk (WSL steps it by
+         * minutes; NTP can too), ctime comparisons against the walk's start
+         * mean nothing, so the manifest cannot claim to be one instant. */
+        const bool clock_stepped = d_rt - d_mono > 500000000LL || d_mono - d_rt > 500000000LL;
+        const bool changed = wr == W_INCOMPLETE || clock_stepped ||
+            fstat(root_fd, &post) == -1 ||
+            ts_ns(&post, 0) != root_e.mtime_ns || ts_ns(&post, 1) != root_e.ctime_ns;
+        if (changed) {
+            root_e.unstable = true;
+            wc->n_unstable++;
+        }
+    }
+    if (emit_one(wc, &root_e) == -1) goto cleanup;
 
     /* Output goes to a temporary name and is renamed into place. */
     const int ofd = mkstemp(outtmp);

@@ -180,14 +180,14 @@ static int parse_object(const char *s, size_t len, struct obj *o) {
         p++;
 
         if (p < lim && *p == '"') {
-            const char *e;
+            const char *e = p + 1;
             if (scan_string(p + 1, lim, &e) == -1) return -1;
             pr->kind = V_STR;
             pr->val = p + 1;
             pr->vlen = (size_t)(e - (p + 1));
             p = e + 1;
         } else if (p < lim && (*p == '-' || (*p >= '0' && *p <= '9'))) {
-            const char *e;
+            const char *e = p;
             if (scan_int(p, lim, &e) == -1) return -1;
             pr->kind = V_INT;
             pr->val = p;
@@ -234,6 +234,44 @@ static int parse_object(const char *s, size_t len, struct obj *o) {
     if (p != lim) return corrupt("data after the closing brace");
     return 0;
 }
+
+/*
+ *  Field order is part of the canonical form: the writer always emits known
+ *  keys in the order of `order`, and the reader rejects any other order --
+ *  otherwise one entry would have many spellings. Unknown keys (informational
+ *  fields a newer writer may add) may only follow every known key.
+ */
+static int check_order(const struct obj *o, const char *const *order, size_t n) {
+    size_t next = 0;               /* index into `order` the next known key must be at or after */
+    bool seen_unknown = false;
+    for (size_t i = 0; i < o->n; i++) {
+        size_t k = n;
+        for (size_t j = 0; j < n; j++) {
+            if (strlen(order[j]) == o->p[i].klen && memcmp(order[j], o->p[i].key, o->p[i].klen) == 0) {
+                k = j;
+                break;
+            }
+        }
+        if (k == n) { seen_unknown = true; continue; }
+        if (seen_unknown) return corrupt("a known field follows an unknown one");
+        if (k < next) return corrupt("fields out of canonical order");
+        next = k + 1;
+    }
+    return 0;
+}
+
+static const char *const ENTRY_ORDER[] = {
+    "path", "path_b64", "type", "mode", "uid", "gid", "size", "mtime_ns", "ctime_ns",
+    "ino", "dev", "nlink", "sha256", "unverified", "unstable", "rdev", "link_target",
+    "link_target_b64", "target_outside_scope", "stored", "mount", "unreadable"
+};
+static const char *const HEADER_ORDER[] = {
+    "belay_manifest", "created_ns", "scopes", "scopes_b64", "hash", "hash_max_bytes",
+    "store_max_bytes"
+};
+static const char *const TRAILER_ORDER[] = {
+    "belay_manifest_end", "vanished", "unreadable", "unstable"
+};
 
 static const struct pair *get(const struct obj *o, const char *key) {
     const size_t kl = strlen(key);
@@ -425,6 +463,7 @@ static int type_from(const struct pair *p, enum belay_entry_type *t, uint32_t *i
 
 static int parse_entry(const struct obj *o, struct belay_entry *e) {
     memset(e, 0, sizeof *e);
+    if (check_order(o, ENTRY_ORDER, sizeof ENTRY_ORDER / sizeof ENTRY_ORDER[0]) == -1) return -1;
 
     bool have_path;
     if (get_bytes(o, "path", "path_b64", e->path, sizeof e->path, &e->path_len, &have_path) == -1)
@@ -435,7 +474,7 @@ static int parse_entry(const struct obj *o, struct belay_entry *e) {
 
     const struct pair *tp = get(o, "type");
     if (tp == NULL) return corrupt("entry has no type");
-    uint32_t ifmt;
+    uint32_t ifmt = 0;
     if (type_from(tp, &e->type, &ifmt) == -1) return -1;
 
     if (get_u32(o, "mode", &e->mode) == -1 || get_u32(o, "uid", &e->uid) == -1 ||
@@ -473,22 +512,35 @@ static int parse_entry(const struct obj *o, struct belay_entry *e) {
         return -1;
     e->has_link_target = have_target;
 
-    /* Which fields belong to which types -- exactly as the writer emits. */
-    if (e->type == BELAY_T_REG) {
-        /* Every regular file has a hash or is marked unverified, never both
-         * and never neither: neither would let a comparator treat an
-         * unhashed file as unflagged. */
+    /* Which fields and flags belong to which types -- exactly the
+     * combinations the writer can produce, and no others. */
+    switch (e->type) {
+    case BELAY_T_REG:
+        /* A hash or "unverified", never both and never neither. */
         if (e->has_hash == e->unverified)
             return corrupt(e->has_hash ? "both sha256 and unverified"
                                        : "regular file with neither sha256 nor unverified");
-        if (e->unstable && !e->unverified) return corrupt("unstable without unverified");
-    } else {
+        if ((e->unstable || e->unreadable) && !e->unverified)
+            return corrupt("unstable or unreadable file without unverified");
+        if (e->unstable && e->unreadable) return corrupt("file both unstable and unreadable");
+        if (e->is_mount && (e->unstable || e->unreadable)) return corrupt("mounted file with read flags");
+        break;
+    case BELAY_T_DIR:
         if (e->has_hash || e->unverified || e->has_stored)
-            return corrupt("hash fields on an entry that is not a regular file");
-        /* On a directory, unstable means its listing changed while it was being
-         * read: entries may be missing from it. Meaningless on anything else. */
-        if (e->unstable && e->type != BELAY_T_DIR)
-            return corrupt("unstable on an entry that is neither a file nor a directory");
+            return corrupt("hash fields on a directory");
+        /* unreadable: contents absent. unstable: listing changed while read.
+         * mount: not descended. At most one applies. */
+        if ((int)e->unreadable + (int)e->unstable + (int)e->is_mount > 1)
+            return corrupt("directory flags unreadable, unstable and mount are exclusive");
+        break;
+    case BELAY_T_LNK:
+        if (e->has_hash || e->unverified || e->has_stored || e->unstable)
+            return corrupt("file-only fields on a symlink");
+        break;
+    default:   /* fifo, socket, block and character devices: nothing is read */
+        if (e->has_hash || e->unverified || e->has_stored || e->unstable || e->unreadable)
+            return corrupt("read flags on a node that is never read");
+        break;
     }
     if (e->has_stored && (!e->has_hash || strcmp(e->stored_hex, e->sha256_hex) != 0))
         return corrupt("stored key does not match sha256");
@@ -503,9 +555,16 @@ static int parse_entry(const struct obj *o, struct belay_entry *e) {
     if (e->target_outside_scope && e->type != BELAY_T_LNK)
         return corrupt("target_outside_scope on a non-symlink");
     /* A symlink's size is its target's length; the writer re-stats the link
-     * after reading it to guarantee the two belong together. */
-    if (e->type == BELAY_T_LNK && e->size != e->link_target_len)
-        return corrupt("symlink size disagrees with its target's length");
+     * after reading it to guarantee the two belong together. An unreadable
+     * link is the exception: its target could not be read reliably, and an
+     * empty target (which no real symlink has) means "unknown". */
+    if (e->type == BELAY_T_LNK && !e->unreadable) {
+        if (e->link_target_len == 0) return corrupt("symlink with an empty target");
+        if (e->size != e->link_target_len)
+            return corrupt("symlink size disagrees with its target's length");
+    }
+    if (e->target_outside_scope && e->link_target_len == 0)
+        return corrupt("target_outside_scope on an unknown target");
 
     /* A mount point is recorded, never read: no hash on a mounted file. */
     if (e->is_mount && e->has_hash) return corrupt("hash on a mount point");
@@ -526,6 +585,7 @@ static int parse_header(const struct obj *o, struct belay_manifest_header *h) {
         return -1;
     }
     h->version = ver;
+    if (check_order(o, HEADER_ORDER, sizeof HEADER_ORDER / sizeof HEADER_ORDER[0]) == -1) return -1;
 
     if (get_i64(o, "created_ns", &h->created_ns) == -1 ||
         get_u64(o, "hash_max_bytes", true, &h->hash_max_bytes, NULL) == -1 ||
@@ -557,6 +617,13 @@ static int parse_header(const struct obj *o, struct belay_manifest_header *h) {
     if (get_bytes(&one, "scope", "scope_b64", h->scope, sizeof h->scope, &slen, &have) == -1)
         return -1;
     if (slen == 0 || h->scope[0] != '/') return corrupt("scope is not an absolute path");
+    /* The writer records realpath()'s output: absolute and canonical. "/" is
+     * the only scope ending in a slash. */
+    if (slen > 1 && check_canonical(h->scope + 1, slen - 1) == -1) {
+        belay_err_clear();
+        return corrupt("scope is not a canonical absolute path");
+    }
+    if (slen > 1 && h->scope[1] == '.' && slen == 2) return corrupt("scope is not canonical");
     return 0;
 }
 
@@ -564,13 +631,79 @@ static int parse_header(const struct obj *o, struct belay_manifest_header *h) {
 /* Iterator                                                                  */
 /* ------------------------------------------------------------------------ */
 
-/* Paths of directories that were recorded but not descended (unreadable or a
- * mount point). Nothing may appear below them. Small: one per such dir. */
+/*
+ *  Paths of directories that were recorded but not descended (unreadable or a
+ *  mount point). Nothing may appear below them. A hash table, probed once per
+ *  ancestor of each entry with a hash built incrementally along the path, so
+ *  the check is O(path length) per entry however many directories are sealed.
+ *  (The first version scanned every sealed path for every entry: 40k sealed
+ *  directories took 1.9 s, quadratic.)
+ */
 struct pathset {
-    char  **v;
-    size_t *len;
-    size_t  n, cap;
+    char    **v;        /* NULL = empty slot */
+    size_t   *len;
+    uint64_t *h;
+    size_t    n, cap;   /* cap is a power of two */
 };
+
+#define FNV_OFF 1469598103934665603ULL
+#define FNV_MUL 1099511628211ULL
+
+static bool ps_has(const struct pathset *s, uint64_t h, const char *p, size_t len) {
+    if (s->cap == 0) return false;
+    for (size_t i = h & (s->cap - 1); s->v[i] != NULL; i = (i + 1) & (s->cap - 1))
+        if (s->h[i] == h && s->len[i] == len && memcmp(s->v[i], p, len) == 0) return true;
+    return false;
+}
+
+static int ps_put_slot(char **v, size_t *len, uint64_t *hs, size_t cap,
+                       char *p, size_t l, uint64_t h) {
+    size_t i = h & (cap - 1);
+    while (v[i] != NULL) i = (i + 1) & (cap - 1);
+    v[i] = p; len[i] = l; hs[i] = h;
+    return 0;
+}
+
+static int seal(struct pathset *s, const char *p, size_t len) {
+    if ((s->n + 1) * 2 > s->cap) {
+        const size_t nc = s->cap ? s->cap * 2 : 64;
+        char **nv = calloc(nc, sizeof *nv);
+        size_t *nl = calloc(nc, sizeof *nl);
+        uint64_t *nh = calloc(nc, sizeof *nh);
+        if (nv == NULL || nl == NULL || nh == NULL) {
+            free(nv); free(nl); free(nh);
+            goto nomem;
+        }
+        for (size_t i = 0; i < s->cap; i++)
+            if (s->v[i] != NULL) ps_put_slot(nv, nl, nh, nc, s->v[i], s->len[i], s->h[i]);
+        free(s->v); free(s->len); free(s->h);
+        s->v = nv; s->len = nl; s->h = nh; s->cap = nc;
+    }
+    char *copy = malloc(len);
+    if (copy == NULL) goto nomem;
+    memcpy(copy, p, len);
+    uint64_t h = FNV_OFF;
+    for (size_t i = 0; i < len; i++) { h ^= (unsigned char)p[i]; h *= FNV_MUL; }
+    ps_put_slot(s->v, s->len, s->h, s->cap, copy, len, h);
+    s->n++;
+    return 0;
+nomem:
+    belay_err_set(BELAY_ERR_NOMEM, 0, "manifest: out of memory");
+    return -1;
+}
+
+/* True when some proper ancestor of `p` is sealed. Every proper ancestor is a
+ * prefix ending just before a '/', so one pass over `p` checks them all. */
+static bool under_sealed(const struct pathset *s, const char *p, size_t len) {
+    if (s->n == 0) return false;
+    uint64_t h = FNV_OFF;
+    for (size_t i = 0; i < len; i++) {
+        if (p[i] == '/' && ps_has(s, h, p, i)) return true;
+        h ^= (unsigned char)p[i];
+        h *= FNV_MUL;
+    }
+    return false;
+}
 
 struct belay_manifest_reader {
     FILE  *f;
@@ -585,6 +718,7 @@ struct belay_manifest_reader {
 
     size_t n_entries, n_unreadable, n_unstable;
     bool   have_root;
+    bool   root_unreadable;
 
     char   prev[4096];
     size_t prev_len;
@@ -652,44 +786,13 @@ static void err_at_line(size_t lineno) {
     belay_err_set(belay_err_code(), belay_err_errno(), "%s", msg);
 }
 
-static int seal(struct pathset *s, const char *p, size_t len) {
-    if (s->n == s->cap) {
-        const size_t nc = s->cap ? s->cap * 2 : 16;
-        char **nv = realloc(s->v, nc * sizeof *nv);
-        if (nv == NULL) goto nomem;
-        s->v = nv;
-        size_t *nl = realloc(s->len, nc * sizeof *nl);
-        if (nl == NULL) goto nomem;
-        s->len = nl;
-        s->cap = nc;
-    }
-    s->v[s->n] = malloc(len);
-    if (s->v[s->n] == NULL) goto nomem;
-    memcpy(s->v[s->n], p, len);
-    s->len[s->n] = len;
-    s->n++;
-    return 0;
-nomem:
-    belay_err_set(BELAY_ERR_NOMEM, 0, "manifest: out of memory");
-    return -1;
-}
-
-/* True when some proper ancestor of `p` is sealed. */
-static bool under_sealed(const struct pathset *s, const char *p, size_t len) {
-    for (size_t i = 0; i < s->n; i++) {
-        const size_t l = s->len[i];
-        if (l == 1 && s->v[i][0] == '.') { if (!(len == 1 && p[0] == '.')) return true; continue; }
-        if (len > l && p[l] == '/' && memcmp(p, s->v[i], l) == 0) return true;
-    }
-    return false;
-}
-
 void belay_manifest_close(struct belay_manifest_reader *r) {
     if (r == NULL) return;
     if (r->f != NULL) fclose(r->f);
-    for (size_t i = 0; i < r->sealed.n; i++) free(r->sealed.v[i]);
+    for (size_t i = 0; i < r->sealed.cap; i++) free(r->sealed.v[i]);
     free(r->sealed.v);
     free(r->sealed.len);
+    free(r->sealed.h);
     free(r->line);
     free(r);
 }
@@ -738,6 +841,7 @@ static int fail(struct belay_manifest_reader *r) {
 }
 
 static int parse_trailer(struct belay_manifest_reader *r, const struct obj *o) {
+    if (check_order(o, TRAILER_ORDER, sizeof TRAILER_ORDER / sizeof TRAILER_ORDER[0]) == -1) return -1;
     uint64_t v[4];
     static const char *const keys[] = { "belay_manifest_end", "vanished", "unreadable", "unstable" };
     for (size_t i = 0; i < 4; i++)
@@ -751,6 +855,11 @@ static int parse_trailer(struct belay_manifest_reader *r, const struct obj *o) {
         return -1;
     }
     if (!r->have_root) return corrupt("no entry for the scope root \".\"");
+    /* An unreadable root was not walked, so it is the only entry. Checked here
+     * rather than per entry because names sorting before "." (such as "!x")
+     * are read before the root itself. */
+    if (r->root_unreadable && r->n_entries != 1)
+        return corrupt("entries recorded under an unreadable scope root");
     r->trailer.entries    = (size_t)v[0];
     r->trailer.vanished   = (size_t)v[1];
     r->trailer.unreadable = (size_t)v[2];
@@ -823,7 +932,9 @@ int belay_manifest_next(struct belay_manifest_reader *r, struct belay_entry *e) 
 
     if (e->path_len == 1 && e->path[0] == '.') {
         if (e->type != BELAY_T_DIR) { corrupt("scope root is not a directory"); return fail(r); }
+        if (e->is_mount) { corrupt("scope root flagged as a mount"); return fail(r); }
         r->have_root = true;
+        r->root_unreadable = e->unreadable;
     }
     r->n_entries++;
     if (e->unreadable) r->n_unreadable++;

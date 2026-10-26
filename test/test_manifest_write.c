@@ -679,6 +679,12 @@ TEST(spilled_output_is_identical_to_in_memory_output) {
     struct belay_manifest_opts tiny = big;
     tiny.run_bytes = 1;                          /* clamped to the minimum */
 
+    /* The two checks below must see the same tree state. A directory changed
+     * in the same kernel tick as a check's start is legitimately flagged
+     * "changed during the walk" by one check and not the other, so let the
+     * fixture settle first. */
+    usleep(50000);
+
     size_t n_mem = 0, n_spill = 0;
     struct belay_manifest_stats s_mem, s_spill;
     ASSERT_EQ_INT(0, belay_manifest_write(m_mem, scope, &big, &s_mem));
@@ -1175,6 +1181,30 @@ TEST(review_non_utf8_scope_produces_valid_header) {
     rmdir(p);
 }
 
+/* R2-8: a timestamp outside int64 nanoseconds (1678..2262) used to overflow --
+ * undefined behaviour; a year-2300 mtime came out as 1715. It now saturates.
+ * The sanitizer build would abort on the overflow itself. */
+TEST(r2_far_future_timestamp_saturates_instead_of_overflowing) {
+    fx_mkdir("ts");
+    fx_write("ts/f", "x", 1);
+    char p[8192];
+    snprintf(p, sizeof p, "%s/ts/f", g_root);
+    struct timespec t[2] = { { 10413792000LL, 0 }, { 10413792000LL, 0 } };  /* year 2300 */
+    if (utimensat(AT_FDCWD, p, t, 0) != 0) { fx_rm("ts/f"); fx_rm("ts"); return; }
+    size_t n = 0;
+    ASSERT_EQ_INT(0, run_check("ts", &n));
+    char mpath[512], line[65536];
+    snprintf(mpath, sizeof mpath, "/tmp/belay_m_%d.ndjson", (int)getpid());
+    FILE *f = fopen(mpath, "rb");
+    bool saturated = false;
+    while (f && fgets(line, sizeof line, f) != NULL)
+        if (strstr(line, "\"path\":\"f\",") && strstr(line, "\"mtime_ns\":9223372036854775807,"))
+            saturated = true;
+    if (f) fclose(f);
+    ASSERT_TRUE(saturated);
+    fx_rm("ts/f"); fx_rm("ts");
+}
+
 int main(void) {
     fx_init();
 
@@ -1213,6 +1243,7 @@ int main(void) {
     RUN(review_tree_deeper_than_the_limit_is_flagged_not_fatal);
     RUN(review_longest_legal_link_target_is_recorded);
     RUN(review_non_utf8_scope_produces_valid_header);
+    RUN(r2_far_future_timestamp_saturates_instead_of_overflowing);
 
     fx_cleanup();
     {
