@@ -1246,7 +1246,7 @@ TEST(r3_output_inside_the_scope_is_not_a_change) {
         struct belay_manifest_stats st;
         ASSERT_EQ_INT(0, belay_manifest_write(m, scope, &tiny, &st));
         ASSERT_EQ_INT(0, (int)st.unstable);
-        ASSERT_EQ_INT(0, (int)st.drifted);
+        ASSERT_EQ_INT(0, (int)st.raced);
     }
 #else
     printf("      (skipped: no O_TMPFILE on this platform)\n");

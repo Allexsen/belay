@@ -117,7 +117,7 @@ struct belay_entry {
      *  instead; this appears on directories only when they are unreadable or
      *  mount points.)
      */
-    bool     drifted;
+    bool     raced;
 };
 
 struct belay_manifest_opts {
@@ -143,7 +143,7 @@ struct belay_manifest_stats {
     size_t unstable;    /* entries flagged unstable: files that changed while
                            hashed, directories whose listing changed */
     size_t mounts;      /* mount points: recorded, contents not captured */
-    size_t drifted;     /* entries that changed after being recorded, before
+    size_t raced;     /* entries that changed after being recorded, before
                            the walk ended (the end-of-walk re-check) */
 };
 

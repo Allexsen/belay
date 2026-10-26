@@ -77,10 +77,10 @@ static void write_manifest(const char *content) {
     char trailer[256];
     snprintf(trailer, sizeof trailer,
              "{\"belay_manifest_end\":%zu,\"vanished\":0,\"unreadable\":%zu,\"unstable\":%zu,"
-             "\"mounts\":%zu,\"drifted\":%zu}\n",
+             "\"mounts\":%zu,\"raced\":%zu}\n",
              entries, count_sub(content, "\"unreadable\":true"),
              count_sub(content, "\"unstable\":true"), count_sub(content, "\"mount\":true"),
-             count_sub(content, "\"drifted\":true"));
+             count_sub(content, "\"raced\":true"));
     strcat(buf, trailer);
     write_raw(buf);
     free(buf);
@@ -619,19 +619,19 @@ TEST(sweep_missing_or_wrong_trailer_is_rejected) {
     belay_err_clear();
 
     write_raw(HDR DIR_E("a", "") DIR_E("b", "")
-              "{\"belay_manifest_end\":1,\"vanished\":0,\"unreadable\":0,\"unstable\":0,\"mounts\":0,\"drifted\":0}\n");
+              "{\"belay_manifest_end\":1,\"vanished\":0,\"unreadable\":0,\"unstable\":0,\"mounts\":0,\"raced\":0}\n");
     ASSERT_EQ_INT(-1, belay_manifest_read(g_path, collect, NULL));   /* count wrong */
     belay_err_clear();
 
     /* A dropped flag shows up as a count mismatch: the trailer says one
      * entry was unreadable, the entries say none. */
     write_raw(HDR DIR_E("a", "")
-              "{\"belay_manifest_end\":1,\"vanished\":0,\"unreadable\":1,\"unstable\":0,\"mounts\":0,\"drifted\":0}\n");
+              "{\"belay_manifest_end\":1,\"vanished\":0,\"unreadable\":1,\"unstable\":0,\"mounts\":0,\"raced\":0}\n");
     ASSERT_EQ_INT(-1, belay_manifest_read(g_path, collect, NULL));
     belay_err_clear();
 
     write_raw(HDR DIR_E("a", "")
-              "{\"belay_manifest_end\":1,\"vanished\":0,\"unreadable\":0,\"unstable\":0,\"mounts\":0,\"drifted\":0}\n"
+              "{\"belay_manifest_end\":1,\"vanished\":0,\"unreadable\":0,\"unstable\":0,\"mounts\":0,\"raced\":0}\n"
               DIR_E("b", ""));
     ASSERT_EQ_INT(-1, belay_manifest_read(g_path, collect, NULL));   /* data after end */
     belay_err_clear();
@@ -726,7 +726,7 @@ TEST(sweep_unstable_requires_unverified) {
     "\"nlink\":1" mid "}\n"
 #define SHA_F ",\"sha256\":\"" EMPTY_SHA "\""
 #define TRL(n, u) "{\"belay_manifest_end\":" #n ",\"vanished\":0,\"unreadable\":" #u \
-                  ",\"unstable\":0,\"mounts\":0,\"drifted\":0}\n"
+                  ",\"unstable\":0,\"mounts\":0,\"raced\":0}\n"
 
 TEST(review_d8_reader_rejects_what_the_writer_never_emits) {
     static const struct { const char *name; const char *m; } cases[] = {
@@ -988,18 +988,18 @@ TEST(r3_reader_checks_annotation_and_hash_limit_against_the_header) {
     }
 }
 
-/* Round 3: entries that changed after being recorded carry "drifted", and
- * the trailer counts drifted entries and mount points, so a dropped flag
- * shows as a count mismatch. drifted is never on a directory whose listing
+/* Round 3: entries that changed after being recorded carry "raced", and
+ * the trailer counts raced entries and mount points, so a dropped flag
+ * shows as a count mismatch. raced is never on a directory whose listing
  * was recorded: that is what "unstable" says. */
-TEST(r3_drifted_flag_and_mount_and_drift_counts) {
+TEST(r3_raced_flag_and_mount_and_race_counts) {
     static const struct { const char *name; const char *m; int want; } cases[] = {
-        { "drifted file",                HDR REG_LINE("f", SHA_F ",\"drifted\":true"), 0 },
-        { "drifted unreadable directory", HDR DIR_E("d", ",\"unreadable\":true,\"drifted\":true"), 0 },
-        { "drifted mount point",         HDR DIR_E("m", ",\"mount\":true,\"drifted\":true"), 0 },
-        { "drifted listed directory",    HDR DIR_E("d", ",\"drifted\":true"), -1 },
-        { "drifted out of order",        HDR DIR_E("d", ",\"drifted\":true,\"unreadable\":true"), -1 },
-        { "drifted spelled false",       HDR REG_LINE("f", SHA_F ",\"drifted\":false"), -1 },
+        { "raced file",                HDR REG_LINE("f", SHA_F ",\"raced\":true"), 0 },
+        { "raced unreadable directory", HDR DIR_E("d", ",\"unreadable\":true,\"raced\":true"), 0 },
+        { "raced mount point",         HDR DIR_E("m", ",\"mount\":true,\"raced\":true"), 0 },
+        { "raced listed directory",    HDR DIR_E("d", ",\"raced\":true"), -1 },
+        { "raced out of order",        HDR DIR_E("d", ",\"raced\":true,\"unreadable\":true"), -1 },
+        { "raced spelled false",       HDR REG_LINE("f", SHA_F ",\"raced\":false"), -1 },
     };
     for (size_t i = 0; i < sizeof cases / sizeof cases[0]; i++) {
         const int rc = read_it(cases[i].m);
@@ -1007,15 +1007,15 @@ TEST(r3_drifted_flag_and_mount_and_drift_counts) {
             BELAY_FAIL("%s: got %d, want %d (%s)", cases[i].name, rc, cases[i].want, belay_err_msg());
         belay_err_clear();
     }
-    /* Counts: one mount and one drifted entry, against trailers that say 0. */
+    /* Counts: one mount and one raced entry, against trailers that say 0. */
     g_n = 0;
     write_raw(HDR ROOT_E DIR_E("m", ",\"mount\":true") TRL(2, 0));
     ASSERT_EQ_INT(-1, belay_manifest_read(g_path, collect, NULL));
     ASSERT_TRUE(strstr(belay_err_msg(), "mounts") != NULL);
     belay_err_clear();
-    write_raw(HDR ROOT_E REG_LINE("f", SHA_F ",\"drifted\":true") TRL(2, 0));
+    write_raw(HDR ROOT_E REG_LINE("f", SHA_F ",\"raced\":true") TRL(2, 0));
     ASSERT_EQ_INT(-1, belay_manifest_read(g_path, collect, NULL));
-    ASSERT_TRUE(strstr(belay_err_msg(), "drifted") != NULL);
+    ASSERT_TRUE(strstr(belay_err_msg(), "raced") != NULL);
     belay_err_clear();
     /* A trailer without the new counts is a truncated or older format. */
     write_raw(HDR ROOT_E "{\"belay_manifest_end\":1,\"vanished\":0,\"unreadable\":0,\"unstable\":0}\n");
@@ -1073,7 +1073,7 @@ int main(void) {
     RUN(r3_sealed_directories_hold_across_interleaved_siblings);
     RUN(r3_many_sealed_directories);
     RUN(r3_reader_checks_annotation_and_hash_limit_against_the_header);
-    RUN(r3_drifted_flag_and_mount_and_drift_counts);
+    RUN(r3_raced_flag_and_mount_and_race_counts);
     RUN(round_trips_the_writers_output);
 
     unlink(g_path);

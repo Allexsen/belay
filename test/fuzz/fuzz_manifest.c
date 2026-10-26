@@ -62,8 +62,8 @@ static int check_entry(const struct belay_entry *e, void *ctx) {
     case BELAY_T_DIR:
         if (e->has_hash || e->unverified || e->has_stored) abort();
         if ((int)e->unreadable + (int)e->unstable + (int)e->is_mount > 1) abort();
-        /* A listed directory that changed is unstable, never drifted. */
-        if (e->drifted && !e->unreadable && !e->is_mount) abort();
+        /* A listed directory that changed is unstable, never raced. */
+        if (e->raced && !e->unreadable && !e->is_mount) abort();
         break;
     case BELAY_T_LNK:
         if (e->has_hash || e->unverified || e->has_stored || e->unstable) abort();

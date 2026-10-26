@@ -491,7 +491,7 @@ TEST(r3_clock_step_during_the_walk_is_not_a_change) {
         ASSERT_EQ_INT(0, check(&st));
         ASSERT_TRUE(g_fired);
         ASSERT_EQ_INT(0, (int)st.unstable);
-        ASSERT_EQ_INT(0, (int)st.drifted);
+        ASSERT_EQ_INT(0, (int)st.raced);
     }
 }
 
@@ -690,8 +690,8 @@ TEST(r3_move_into_a_listed_directory_is_caught_whatever_the_file_clock) {
 
 /* R3-F2: a file changed after it was hashed, while the walk went on, gave a
  * manifest of a state that never existed -- with a clean trailer. It is now
- * flagged drifted, and the hash it carries is still the one it had when read. */
-TEST(r3_file_changed_after_it_was_read_is_drifted) {
+ * flagged raced, and the hash it carries is still the one it had when read. */
+TEST(r3_file_changed_after_it_was_read_is_raced) {
     reset();
     touch("f1", "one");
     touch("f2", "two");
@@ -701,8 +701,8 @@ TEST(r3_file_changed_after_it_was_read_is_drifted) {
     ASSERT_EQ_INT(0, check(&st));
     ASSERT_TRUE(g_fired);
     const struct belay_entry *f = find(g_first != NULL ? g_first : "f1");
-    ASSERT_TRUE(f != NULL && f->drifted && f->has_hash);
-    ASSERT_EQ_INT(1, (int)st.drifted);
+    ASSERT_TRUE(f != NULL && f->raced && f->has_hash);
+    ASSERT_EQ_INT(1, (int)st.raced);
     const struct belay_entry *r = find(".");
     ASSERT_TRUE(r != NULL && !r->unstable);
 }
@@ -764,7 +764,7 @@ int main(void) {
     RUN(r3_clock_behind_the_files_flags_nothing);
     RUN(r3_file_bind_mounted_from_another_fs_is_a_boundary_with_or_without_statx);
     RUN(r3_move_into_a_listed_directory_is_caught_whatever_the_file_clock);
-    RUN(r3_file_changed_after_it_was_read_is_drifted);
+    RUN(r3_file_changed_after_it_was_read_is_raced);
     RUN(r3_one_statx_eperm_is_recorded_and_does_not_switch_statx_off);
     RUN(r3_empty_link_target_is_recorded_unreadable);
 

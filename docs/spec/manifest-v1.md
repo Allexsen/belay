@@ -98,7 +98,7 @@ owner is invisible.
 | `stored` | string | when content was copied | the `store/` key, which is the content's sha256 |
 | `mount` | bool | any type, at a boundary | `true`. The entry is the root of another mount. Where statx can say so (`STATX_ATTR_MOUNT_ROOT`, Linux 5.8+), its answer is used alone: it catches bind mounts from the same filesystem, and it does not mistake a btrfs subvolume (a directory with its own `dev`, not a mount) for one. Without it, an entry whose `dev` differs from the scope root's is a mount -- except a non-directory in an overlayfs scope, where every file carries its layer's device. A mount is recorded and **never read or descended** (§5.1.1): a mounted regular file carries `unverified` and no hash, and **for a directory the subtree below it is ABSENT**: `diff` MUST report it as *not captured*, never as *unchanged*. |
 | `unreadable` | bool | when capture failed for this entry | `true`. belay could not capture this entry's contents: a directory it could not open or search (permission, or readable-but-not-searchable), a directory swapped for another between its stat and its open, a directory beyond the depth limit (128) or whose path leaves no room for a child name, a file it could not open or read, or a symlink whose target could not be read or kept changing while being read. **For a directory, the entire subtree below it is ABSENT.** `diff` MUST report such a subtree as *contents unknown* and never as *unchanged*. Without this field an unreadable directory is byte-identical to an empty one. |
-| `drifted` | bool | any type except a listed directory | `true`. The entry changed after it was recorded, before the walk ended: re-stat'ed at the end of the walk, its inode, mode, size, mtime or ctime differed, or it could not be reached. What is recorded held when belay read it, but not at the end. (A listed directory that changed is flagged `unstable` instead, since its listing is what no longer holds; `drifted` appears on a directory only when it is `unreadable` or a `mount`.) |
+| `raced` | bool | any type except a listed directory | `true`. The entry changed after it was recorded, before the walk ended: re-stat'ed at the end of the walk, its inode, mode, size, mtime or ctime differed, or it could not be reached. What is recorded held when belay read it, but not at the end. (A listed directory that changed is flagged `unstable` instead, since its listing is what no longer holds; `raced` appears on a directory only when it is `unreadable` or a `mount`.) |
 
 ### Field rules a reader MUST enforce
 
@@ -106,10 +106,10 @@ In addition to the grammar above:
 
 - **Fields appear in one fixed order.** Entries: `path`|`path_b64`, `type`, `mode`, `uid`, `gid`,
   `size`, `mtime_ns`, `ctime_ns`, `ino`, `dev`, `nlink`, `sha256`, `unverified`, `unstable`, `rdev`,
-  `link_target`|`link_target_b64`, `target_outside_scope`, `stored`, `mount`, `unreadable`, `drifted`. Header:
+  `link_target`|`link_target_b64`, `target_outside_scope`, `stored`, `mount`, `unreadable`, `raced`. Header:
   `belay_manifest`, `created_ns`, `scopes`|`scopes_b64`, `hash`, `hash_max_bytes`,
   `store_max_bytes`. Trailer: `belay_manifest_end`, `vanished`, `unreadable`, `unstable`, `mounts`,
-  `drifted`. Optional
+  `raced`. Optional
   fields are omitted, never reordered. Unknown fields may appear only after every known one.
 - **No key appears twice** in one line. "First wins" would let two different lines mean the same
   thing.
@@ -121,10 +121,10 @@ In addition to the grammar above:
 
   | type | hash fields | flags allowed |
   |---|---|---|
-  | `reg` | exactly one of `sha256` and `unverified`; `stored` only with `sha256` and equal to it | `unstable` or `unreadable` (each requires `unverified`, never both); `mount` (with `unverified`, alone); `drifted` |
-  | `dir` | none | at most one of `unreadable`, `unstable`, `mount`; `drifted` only with `unreadable` or `mount` |
-  | `lnk` | none | `unreadable`, `mount`, `target_outside_scope` (never with `unreadable`), `drifted` |
-  | `fifo` `sock` `blk` `chr` | none | `mount`, `drifted` |
+  | `reg` | exactly one of `sha256` and `unverified`; `stored` only with `sha256` and equal to it | `unstable` or `unreadable` (each requires `unverified`, never both); `mount` (with `unverified`, alone); `raced` |
+  | `dir` | none | at most one of `unreadable`, `unstable`, `mount`; `raced` only with `unreadable` or `mount` |
+  | `lnk` | none | `unreadable`, `mount`, `target_outside_scope` (never with `unreadable`), `raced` |
+  | `fifo` `sock` `blk` `chr` | none | `mount`, `raced` |
 
   `rdev` appears exactly on `blk` and `chr`; `link_target` (or `link_target_b64`) exactly on `lnk`.
 - **`mode`'s type bits match `type`** (`S_IFMT`; the values are the same on Linux and macOS).
@@ -153,13 +153,14 @@ In addition to the grammar above:
 Unknown fields are ignored by a reader, so the format can grow -- **but only by informational
 fields.** Any new field whose absence an older reader would misread as "nothing changed" (as
 `unreadable`, `unstable` and `rdev` would have been) MUST come with a version bump, which older
-readers refuse. `unreadable`, `unstable` and `rdev` are part of version 1 because version 1 has not
-shipped.
+readers refuse. `unreadable`, `unstable`, `rdev`, `raced` and the trailer counts `mounts` and
+`raced` are part of version 1 because version 1 has not shipped. Once Phase 3 publishes the diff
+schema (diff.v1), every format change needs an explicit version bump.
 
 ## Trailer
 
 ```json
-{"belay_manifest_end":12345,"vanished":0,"unreadable":2,"unstable":0,"mounts":1,"drifted":0}
+{"belay_manifest_end":12345,"vanished":0,"unreadable":2,"unstable":0,"mounts":1,"raced":0}
 ```
 
 | field | meaning |
@@ -169,10 +170,10 @@ shipped.
 | `unreadable` | entries carrying `unreadable` |
 | `unstable` | entries carrying `unstable` (files and directories). Non-zero means the manifest is not a consistent single-instant snapshot. |
 | `mounts` | entries carrying `mount`: boundaries whose contents were not captured |
-| `drifted` | entries carrying `drifted`. Non-zero means the tree was changing during the walk, so the manifest is not a single instant. |
+| `raced` | entries carrying `raced`. Non-zero means the tree was changing during the walk, so the manifest is not a single instant. |
 
 A manifest is a complete record of one instant only when `vanished`, `unreadable`, `unstable` and
-`drifted` are all zero, and it covers everything in the scope only when `mounts` is zero too.
+`raced` are all zero, and it covers everything in the scope only when `mounts` is zero too.
 
 The trailer is **required** and must be the **last line**. A reader MUST reject a manifest with no
 trailer, a trailer whose counts disagree with the entries read, or anything after the trailer.
@@ -191,10 +192,17 @@ Each rule below closes a way for a state the format records to be rendered as "n
   "not captured"**: the same, by design rather than by failure.
 - **An `unstable` directory's children are not a complete listing.** An entry absent below it is
   "possibly present", never "deleted"; an entry present below it may also exist elsewhere.
-- **`drifted` means the recorded state held during the walk but not at its end.** Report the entry
+- **`raced` means the recorded state held during the walk but not at its end.** Report the entry
   as changed during capture, not as unchanged.
-- **Non-zero `vanished`, `unstable` or `drifted` in the trailer makes the whole result provisional**:
+- **Non-zero `vanished`, `unstable` or `raced` in the trailer makes the whole result provisional**:
   the tree was changing while it was read. Say so, and recommend a re-check.
+- **`unstable`, `raced` and `unverified` map to the outcome `unknown`, never to "unchanged".** In the
+  diff schema (diff.v1), `unknown` is a first-class outcome beside added, removed, modified,
+  type-changed and metadata-only.
+- **Do not assume an entry's parent is present.** The reader does not reject an orphan (`a/b`
+  without `a`): that would cost memory in proportion to the number of directories, and flat memory
+  at a million entries is worth more. A comparator must handle an orphan without crashing or
+  misreporting it.
 - **`unverified` (including `unstable`) never reports "unchanged" on content alone.** With identical
   metadata the honest label is "unchanged (unverified)"; on a protected path it is a failure to
   verify, not a pass.

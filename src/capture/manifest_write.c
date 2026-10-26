@@ -180,7 +180,7 @@ struct ident {
     uint8_t  pad[2];
 };
 enum { RC_NONE, RC_LISTING, RC_ENTRY };
-enum { MARK_NONE, MARK_UNSTABLE, MARK_DRIFTED };
+enum { MARK_NONE, MARK_UNSTABLE, MARK_RACED };
 #define IDENT_BYTES sizeof(struct ident)
 
 struct spill {
@@ -263,15 +263,15 @@ static FILE *open_tmp(const struct spill *s) {
 /*
  *  Writes one manifest line, with the flag the end-of-walk re-check set.
  *  Either flag goes at the end of the object, which is its canonical place:
- *  "drifted" is the last known field, and "unstable" is only ever added to a
+ *  "raced" is the last known field, and "unstable" is only ever added to a
  *  directory that carries no "mount" or "unreadable" after it. The single
  *  writer for both output paths (in-memory and merged), so neither can drop
  *  the flag -- an invariant kept on one path but not its sibling is how a
  *  duplicate name once got through.
  */
 static int write_line(FILE *out, const unsigned char *line, uint32_t llen, uint8_t mark) {
-    static const char *const flag[] = { "", ",\"unstable\":true", ",\"drifted\":true" };
-    if (mark == MARK_NONE || mark > MARK_DRIFTED || llen < 2)
+    static const char *const flag[] = { "", ",\"unstable\":true", ",\"raced\":true" };
+    if (mark == MARK_NONE || mark > MARK_RACED || llen < 2)
         return fwrite(line, 1, llen, out) == llen ? 0 : -1;
     const size_t body = llen - 2;                       /* the line ends "}\n" */
     const size_t fl = strlen(flag[mark]);
@@ -519,7 +519,7 @@ struct walk_ctx {
     size_t n_unreadable;
     size_t n_unstable;
     size_t n_mounts;
-    size_t n_drifted;
+    size_t n_raced;
 
     /* Walk start, realtime ns (see belay_manifest_write): a directory whose
      * ctime lies between this and "now" changed during the walk. */
@@ -640,7 +640,7 @@ static int emit_one(struct walk_ctx *wc, const struct belay_entry *e) {
     /* What the end-of-walk re-check compares. A directory whose listing was
      * recorded is re-checked as a listing (a change flags it unstable),
      * unless it is unstable already; everything else as an entry (a change
-     * flags it drifted). */
+     * flags it raced). */
     struct ident id;
     memset(&id, 0, sizeof id);
     id.ino = e->ino; id.dev = e->dev; id.size = e->size;
@@ -1176,7 +1176,7 @@ static int walk(int dfd, char *rel, size_t relsz, size_t rel_len,
  *  So when the walk is over, every recorded entry is stat'ed again and
  *  compared with what was recorded -- by EQUALITY, so no clock is involved.
  *  A directory whose listing may no longer hold is flagged unstable; any
- *  other entry that changed is flagged drifted. This runs before the output
+ *  other entry that changed is flagged raced. This runs before the output
  *  file is created, so belay's own output is never seen as a change.
  *
  *  Entries are reached the way the walk reached them: component by component
@@ -1284,7 +1284,7 @@ static int recheck_one(struct rstack *rs, struct walk_ctx *wc,
     }
     if (!same) {
         if (id->kind == RC_LISTING) { id->mark = MARK_UNSTABLE; wc->n_unstable++; }
-        else                        { id->mark = MARK_DRIFTED;  wc->n_drifted++;  }
+        else                        { id->mark = MARK_RACED;  wc->n_raced++;  }
     }
     return 0;
 }
@@ -1595,9 +1595,9 @@ int belay_manifest_write(const char *out_path, const char *scope,
      * fewer entries. It also records what the walk could not capture. */
     if (fprintf(out,
                 "{\"belay_manifest_end\":%zu,\"vanished\":%zu"
-                ",\"unreadable\":%zu,\"unstable\":%zu,\"mounts\":%zu,\"drifted\":%zu}\n",
+                ",\"unreadable\":%zu,\"unstable\":%zu,\"mounts\":%zu,\"raced\":%zu}\n",
                 wc->n_entries, wc->n_vanished, wc->n_unreadable, wc->n_unstable,
-                wc->n_mounts, wc->n_drifted) < 0) {
+                wc->n_mounts, wc->n_raced) < 0) {
         belay_err_set(BELAY_ERR_IO, errno, "manifest: trailer write failed");
         goto cleanup;
     }
@@ -1624,7 +1624,7 @@ int belay_manifest_write(const char *out_path, const char *scope,
         stats->unreadable = wc->n_unreadable;
         stats->unstable   = wc->n_unstable;
         stats->mounts     = wc->n_mounts;
-        stats->drifted    = wc->n_drifted;
+        stats->raced    = wc->n_raced;
     }
     rc = 0;
 
