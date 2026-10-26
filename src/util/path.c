@@ -141,3 +141,43 @@ int belay_path_within_lexical(const char *root, const char *path) {
     if (rlen == 1 && nroot[0] == '/') return 1;
     return npath[rlen] == '/' ? 1 : 0;
 }
+
+/*
+ *  Advisory only (§5.1.1): does a RELATIVE link target leave the scope,
+ *  judged lexically from the link's own directory? ".." pops a component;
+ *  popping above the scope root means outside. Symlinks along the way are
+ *  not followed, so this can be wrong in both directions -- which is why it
+ *  is an annotation and never an input to a decision. Previously only
+ *  absolute targets were analysed, so a relative escape such as "../../etc"
+ *  carried no annotation at all.
+ */
+static bool rel_target_escapes(const char *link_path, size_t link_len,
+                               const char *target, size_t tlen) {
+    /* depth = number of directory components above the link, inside scope */
+    long depth = 0;
+    for (size_t i = 0; i < link_len; i++) if (link_path[i] == '/') depth++;
+
+    size_t i = 0;
+    while (i < tlen) {
+        size_t j = i;
+        while (j < tlen && target[j] != '/') j++;
+        const size_t n = j - i;
+        if (n == 2 && target[i] == '.' && target[i + 1] == '.') {
+            if (--depth < 0) return true;
+        } else if (!(n == 0 || (n == 1 && target[i] == '.'))) {
+            depth++;
+        }
+        i = j + 1;
+    }
+    return false;
+}
+
+bool belay_link_target_outside(const char *scope, const char *link_path, size_t link_len,
+                               const char *target, size_t tlen) {
+    if (tlen > 0 && target[0] == '/') {
+        const int within = belay_path_within_lexical(scope, target);
+        if (within == -1) belay_err_clear();
+        return within != 1;
+    }
+    return rel_target_escapes(link_path, link_len, target, tlen);
+}

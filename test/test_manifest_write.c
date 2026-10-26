@@ -701,6 +701,16 @@ TEST(spilled_output_is_identical_to_in_memory_output) {
     if (a && b) {
         ASSERT_EQ_INT((int)la, (int)lb);
         ASSERT_TRUE(la == lb && memcmp(a, b, la) == 0);
+        if (la != lb || memcmp(a, b, la) != 0) {
+            /* Say which line differs: a flag on one side only is a timing
+             * event (a clock step flags the root), anything else a bug. */
+            size_t i = 0, line = 0;
+            while (i < la && i < lb && a[i] == b[i]) { if (a[i] == '\n') line++; i++; }
+            size_t s0 = i;
+            while (s0 > 0 && a[s0 - 1] != '\n') s0--;
+            printf("      first difference in body line %zu:\n      mem:   %.160s\n"
+                   "      spill: %.160s\n", line + 1, a + s0, b + s0);
+        }
     }
     free(a);
     free(b);
@@ -1205,6 +1215,42 @@ TEST(r2_far_future_timestamp_saturates_instead_of_overflowing) {
     fx_rm("ts/f"); fx_rm("ts");
 }
 
+/* Review round 3, F8: with the output inside the scope (scope = $HOME, state
+ * directory under it), belay's own temporary runs changed the output's
+ * directory during the walk: it was flagged unstable on every check, so no
+ * check of an unchanged tree was ever clean. Runs are now O_TMPFILE, never
+ * linked into the directory, and the output itself is created only after the
+ * end-of-walk re-check. Two passes: the second also records the first's
+ * manifest. Linux only: elsewhere a named temporary is the fallback. */
+TEST(r3_output_inside_the_scope_is_not_a_change) {
+#ifdef O_TMPFILE
+    fx_mkdir("self");
+    fx_mkdir("self/state");
+    char rel[256];
+    for (int i = 0; i < 400; i++) {              /* ~130 KB of records: spills */
+        snprintf(rel, sizeof rel, "self/f%03d", i);
+        fx_write(rel, "x", 1);
+    }
+    char scope[8192], m[8192];
+    snprintf(scope, sizeof scope, "%s/self", g_root);
+    snprintf(m, sizeof m, "%s/self/state/m.ndjson", g_root);
+    struct belay_manifest_opts tiny = {
+        .hash_max_bytes = BELAY_HASH_MAX_BYTES_DEFAULT,
+        .store_max_bytes = BELAY_STORE_MAX_BYTES_DEFAULT,
+        .run_bytes = 1,                          /* clamped to the minimum */
+    };
+    for (int pass = 0; pass < 2; pass++) {
+        usleep(20000);       /* past the kernel tick of the previous rename */
+        struct belay_manifest_stats st;
+        ASSERT_EQ_INT(0, belay_manifest_write(m, scope, &tiny, &st));
+        ASSERT_EQ_INT(0, (int)st.unstable);
+        ASSERT_EQ_INT(0, (int)st.drifted);
+    }
+#else
+    printf("      (skipped: no O_TMPFILE on this platform)\n");
+#endif
+}
+
 int main(void) {
     fx_init();
 
@@ -1244,6 +1290,7 @@ int main(void) {
     RUN(review_longest_legal_link_target_is_recorded);
     RUN(review_non_utf8_scope_produces_valid_header);
     RUN(r2_far_future_timestamp_saturates_instead_of_overflowing);
+    RUN(r3_output_inside_the_scope_is_not_a_change);
 
     fx_cleanup();
     {

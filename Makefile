@@ -45,7 +45,7 @@ TEST_SRC	= $(wildcard test/test_*.c)
 # are built only on Linux, where the paths they test live anyway.
 # __readlinkat_chk: with _FORTIFY_SOURCE (on by default at -O1+ on Ubuntu)
 # the compiler emits the checked variant, which --wrap=readlinkat would miss.
-RACE_WRAP	= -Wl,--wrap=openat,--wrap=readlinkat,--wrap=__readlinkat_chk,--wrap=readdir,--wrap=clock_gettime
+RACE_WRAP	= -Wl,--wrap=openat,--wrap=readlinkat,--wrap=__readlinkat_chk,--wrap=readdir,--wrap=clock_gettime,--wrap=statx
 ifneq ($(UNAME_S),Linux)
 TEST_SRC	:= $(filter-out test/test_races_linux.c,$(TEST_SRC))
 endif

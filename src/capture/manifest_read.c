@@ -32,6 +32,7 @@
 #define _GNU_SOURCE
 
 #include "belay/manifest.h"
+#include "belay/path.h"
 #include "belay/error.h"
 #include "belay/hash.h"
 #include "belay/json.h"
@@ -263,14 +264,14 @@ static int check_order(const struct obj *o, const char *const *order, size_t n) 
 static const char *const ENTRY_ORDER[] = {
     "path", "path_b64", "type", "mode", "uid", "gid", "size", "mtime_ns", "ctime_ns",
     "ino", "dev", "nlink", "sha256", "unverified", "unstable", "rdev", "link_target",
-    "link_target_b64", "target_outside_scope", "stored", "mount", "unreadable"
+    "link_target_b64", "target_outside_scope", "stored", "mount", "unreadable", "drifted"
 };
 static const char *const HEADER_ORDER[] = {
     "belay_manifest", "created_ns", "scopes", "scopes_b64", "hash", "hash_max_bytes",
     "store_max_bytes"
 };
 static const char *const TRAILER_ORDER[] = {
-    "belay_manifest_end", "vanished", "unreadable", "unstable"
+    "belay_manifest_end", "vanished", "unreadable", "unstable", "mounts", "drifted"
 };
 
 static const struct pair *get(const struct obj *o, const char *key) {
@@ -500,7 +501,8 @@ static int parse_entry(const struct obj *o, struct belay_entry *e) {
         get_flag(o, "unstable", &e->unstable) == -1 ||
         get_flag(o, "target_outside_scope", &e->target_outside_scope) == -1 ||
         get_flag(o, "mount", &e->is_mount) == -1 ||
-        get_flag(o, "unreadable", &e->unreadable) == -1)
+        get_flag(o, "unreadable", &e->unreadable) == -1 ||
+        get_flag(o, "drifted", &e->drifted) == -1)
         return -1;
 
     bool have_rdev;
@@ -528,6 +530,10 @@ static int parse_entry(const struct obj *o, struct belay_entry *e) {
     case BELAY_T_DIR:
         if (e->has_hash || e->unverified || e->has_stored)
             return corrupt("hash fields on a directory");
+        /* A directory whose listing was recorded and then changed is flagged
+         * unstable; drifted is only for one recorded without its listing. */
+        if (e->drifted && !e->unreadable && !e->is_mount)
+            return corrupt("drifted on a listed directory");
         /* unreadable: contents absent. unstable: listing changed while read.
          * mount: not descended. At most one applies. */
         if ((int)e->unreadable + (int)e->unstable + (int)e->is_mount > 1)
@@ -647,6 +653,34 @@ static int parse_header(const struct obj *o, struct belay_manifest_header *h) {
  */
 #define SEALED_MAX 4096     /* > the longest path, so the stack cannot fill */
 
+/*
+ *  Rules that need the header. The writer hashes a regular file exactly when
+ *  its size is within hash_max_bytes and nothing else prevents it, and it
+ *  computes target_outside_scope from the scope with one shared function, so
+ *  both are checked rather than taken on trust: otherwise one state would have
+ *  two encodings (review round 3, F7).
+ */
+static int check_against_header(const struct belay_manifest_header *h,
+                                 const struct belay_entry *e) {
+    if (e->type == BELAY_T_REG) {
+        if (e->has_hash && e->size > h->hash_max_bytes)
+            return corrupt("hash on a file larger than hash_max_bytes");
+        if (e->unverified && !e->unstable && !e->unreadable && !e->is_mount &&
+            e->size <= h->hash_max_bytes)
+            return corrupt("unverified file within hash_max_bytes, with no reason");
+    }
+    if (e->type == BELAY_T_LNK) {
+        /* An unreadable link's target is unknown or stale: never annotated. */
+        const bool want = !e->unreadable &&
+            belay_link_target_outside(h->scope, e->path, e->path_len,
+                                      e->link_target, e->link_target_len);
+        if (e->target_outside_scope != want)
+            return corrupt(want ? "target_outside_scope missing on a link leaving the scope"
+                                : "target_outside_scope on a link that stays in the scope");
+    }
+    return 0;
+}
+
 struct belay_manifest_reader {
     FILE  *f;
     char  *line;            /* LINE_MAX_BYTES + 1 */
@@ -658,7 +692,7 @@ struct belay_manifest_reader {
     struct belay_manifest_stats  trailer;
     bool   have_trailer;
 
-    size_t n_entries, n_unreadable, n_unstable;
+    size_t n_entries, n_unreadable, n_unstable, n_mounts, n_drifted;
     bool   have_root;
     bool   root_unreadable;
 
@@ -781,16 +815,19 @@ static int fail(struct belay_manifest_reader *r) {
 
 static int parse_trailer(struct belay_manifest_reader *r, const struct obj *o) {
     if (check_order(o, TRAILER_ORDER, sizeof TRAILER_ORDER / sizeof TRAILER_ORDER[0]) == -1) return -1;
-    uint64_t v[4];
-    static const char *const keys[] = { "belay_manifest_end", "vanished", "unreadable", "unstable" };
-    for (size_t i = 0; i < 4; i++)
-        if (get_u64(o, keys[i], true, &v[i], NULL) == -1) return -1;
-    if (v[0] != r->n_entries || v[2] != r->n_unreadable || v[3] != r->n_unstable) {
+    enum { N = sizeof TRAILER_ORDER / sizeof TRAILER_ORDER[0] };
+    uint64_t v[N];
+    for (size_t i = 0; i < N; i++)
+        if (get_u64(o, TRAILER_ORDER[i], true, &v[i], NULL) == -1) return -1;
+    if (v[0] != r->n_entries || v[2] != r->n_unreadable || v[3] != r->n_unstable ||
+        v[4] != r->n_mounts || v[5] != r->n_drifted) {
         belay_err_set(BELAY_ERR_CORRUPT, 0,
-                      "manifest: trailer says %llu entries / %llu unreadable / %llu unstable, "
-                      "read %zu / %zu / %zu",
+                      "manifest: trailer says %llu entries / %llu unreadable / %llu unstable / "
+                      "%llu mounts / %llu drifted, read %zu / %zu / %zu / %zu / %zu",
                       (unsigned long long)v[0], (unsigned long long)v[2],
-                      (unsigned long long)v[3], r->n_entries, r->n_unreadable, r->n_unstable);
+                      (unsigned long long)v[3], (unsigned long long)v[4],
+                      (unsigned long long)v[5], r->n_entries, r->n_unreadable,
+                      r->n_unstable, r->n_mounts, r->n_drifted);
         return -1;
     }
     if (!r->have_root) return corrupt("no entry for the scope root \".\"");
@@ -803,6 +840,8 @@ static int parse_trailer(struct belay_manifest_reader *r, const struct obj *o) {
     r->trailer.vanished   = (size_t)v[1];
     r->trailer.unreadable = (size_t)v[2];
     r->trailer.unstable   = (size_t)v[3];
+    r->trailer.mounts     = (size_t)v[4];
+    r->trailer.drifted    = (size_t)v[5];
     return 0;
 }
 
@@ -840,6 +879,7 @@ int belay_manifest_next(struct belay_manifest_reader *r, struct belay_entry *e) 
     }
 
     if (parse_entry(&o, e) == -1) return fail(r);
+    if (check_against_header(&r->header, e) == -1) return fail(r);
 
     /* Strictly increasing raw-path order: the comparator merges two
      * manifests and would mis-pair out-of-order or duplicated entries. */
@@ -896,6 +936,8 @@ int belay_manifest_next(struct belay_manifest_reader *r, struct belay_entry *e) 
     r->n_entries++;
     if (e->unreadable) r->n_unreadable++;
     if (e->unstable)   r->n_unstable++;
+    if (e->is_mount)   r->n_mounts++;
+    if (e->drifted)    r->n_drifted++;
     return 1;
 }
 

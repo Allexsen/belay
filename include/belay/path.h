@@ -4,7 +4,8 @@
  *  BELAY_DESIGN.md §5.1.1 is binding here. These functions operate purely on
  *  strings: they touch no filesystem, follow no symlink, and prove nothing
  *  about where a path actually lands. They exist to validate user-supplied
- *  --scope arguments before anything is opened.
+ *  --scope arguments before anything is opened, and to compute the advisory
+ *  (never decisive) target_outside_scope annotation of a recorded symlink.
  *
  *  Containment during a walk is by construction (root dirfd + openat/fstatat
  *  with AT_SYMLINK_NOFOLLOW / O_NOFOLLOW), NOT by calling these.
@@ -16,6 +17,7 @@
 #ifndef BELAY_PATH_H
 #define BELAY_PATH_H
 
+#include <stdbool.h>
 #include <stddef.h>
 
 /*
@@ -58,5 +60,23 @@ int belay_path_normalize(char *out, size_t outsz, const char *in);
  *  Says NOTHING about symlinks. See the header comment.
  */
 int belay_path_within_lexical(const char *root, const char *path);
+
+/*
+ *  The advisory `target_outside_scope` annotation of a symlink (§5.1.1): does
+ *  a link at `link_path` (scope-relative, as a manifest records it) whose
+ *  target is `target` point lexically outside `scope`? An absolute target is
+ *  compared with the scope by belay_path_within_lexical; a relative one is
+ *  resolved from the link's own directory, ".." popping a component and
+ *  popping above the scope root meaning outside. Nothing is followed, so the
+ *  answer can be wrong in both directions -- which is why it is an annotation
+ *  and never an input to a decision. A target the lexical check cannot judge
+ *  (a ".." inside an absolute target, an overlong one) counts as outside.
+ *
+ *  One function for the writer, which records the annotation, and the reader,
+ *  which recomputes it: a flag either side could set freely would give one
+ *  state two encodings. `target` is NUL-terminated, `tlen` bytes long.
+ */
+bool belay_link_target_outside(const char *scope, const char *link_path, size_t link_len,
+                               const char *target, size_t tlen);
 
 #endif /* BELAY_PATH_H */

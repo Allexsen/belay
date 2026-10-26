@@ -76,9 +76,11 @@ static void write_manifest(const char *content) {
     }
     char trailer[256];
     snprintf(trailer, sizeof trailer,
-             "{\"belay_manifest_end\":%zu,\"vanished\":0,\"unreadable\":%zu,\"unstable\":%zu}\n",
+             "{\"belay_manifest_end\":%zu,\"vanished\":0,\"unreadable\":%zu,\"unstable\":%zu,"
+             "\"mounts\":%zu,\"drifted\":%zu}\n",
              entries, count_sub(content, "\"unreadable\":true"),
-             count_sub(content, "\"unstable\":true"));
+             count_sub(content, "\"unstable\":true"), count_sub(content, "\"mount\":true"),
+             count_sub(content, "\"drifted\":true"));
     strcat(buf, trailer);
     write_raw(buf);
     free(buf);
@@ -617,19 +619,19 @@ TEST(sweep_missing_or_wrong_trailer_is_rejected) {
     belay_err_clear();
 
     write_raw(HDR DIR_E("a", "") DIR_E("b", "")
-              "{\"belay_manifest_end\":1,\"vanished\":0,\"unreadable\":0,\"unstable\":0}\n");
+              "{\"belay_manifest_end\":1,\"vanished\":0,\"unreadable\":0,\"unstable\":0,\"mounts\":0,\"drifted\":0}\n");
     ASSERT_EQ_INT(-1, belay_manifest_read(g_path, collect, NULL));   /* count wrong */
     belay_err_clear();
 
     /* A dropped flag shows up as a count mismatch: the trailer says one
      * entry was unreadable, the entries say none. */
     write_raw(HDR DIR_E("a", "")
-              "{\"belay_manifest_end\":1,\"vanished\":0,\"unreadable\":1,\"unstable\":0}\n");
+              "{\"belay_manifest_end\":1,\"vanished\":0,\"unreadable\":1,\"unstable\":0,\"mounts\":0,\"drifted\":0}\n");
     ASSERT_EQ_INT(-1, belay_manifest_read(g_path, collect, NULL));
     belay_err_clear();
 
     write_raw(HDR DIR_E("a", "")
-              "{\"belay_manifest_end\":1,\"vanished\":0,\"unreadable\":0,\"unstable\":0}\n"
+              "{\"belay_manifest_end\":1,\"vanished\":0,\"unreadable\":0,\"unstable\":0,\"mounts\":0,\"drifted\":0}\n"
               DIR_E("b", ""));
     ASSERT_EQ_INT(-1, belay_manifest_read(g_path, collect, NULL));   /* data after end */
     belay_err_clear();
@@ -723,7 +725,8 @@ TEST(sweep_unstable_requires_unverified) {
     "\"uid\":1,\"gid\":1,\"size\":1,\"mtime_ns\":1,\"ctime_ns\":1,\"ino\":2,\"dev\":1," \
     "\"nlink\":1" mid "}\n"
 #define SHA_F ",\"sha256\":\"" EMPTY_SHA "\""
-#define TRL(n, u) "{\"belay_manifest_end\":" #n ",\"vanished\":0,\"unreadable\":" #u ",\"unstable\":0}\n"
+#define TRL(n, u) "{\"belay_manifest_end\":" #n ",\"vanished\":0,\"unreadable\":" #u \
+                  ",\"unstable\":0,\"mounts\":0,\"drifted\":0}\n"
 
 TEST(review_d8_reader_rejects_what_the_writer_never_emits) {
     static const struct { const char *name; const char *m; } cases[] = {
@@ -945,6 +948,81 @@ TEST(r3_many_sealed_directories) {
     free(m);
 }
 
+#define LNK_LINE(path, size, target, extra) "{\"path\":\"" path "\",\"type\":\"lnk\"," \
+    "\"mode\":41471,\"uid\":1,\"gid\":1,\"size\":" #size ",\"mtime_ns\":1,\"ctime_ns\":1," \
+    "\"ino\":3,\"dev\":1,\"nlink\":1,\"link_target\":\"" target "\"" extra "}\n"
+#define REG_SIZED(path, size, mid) "{\"path\":\"" path "\",\"type\":\"reg\",\"mode\":33188," \
+    "\"uid\":1,\"gid\":1,\"size\":" #size ",\"mtime_ns\":1,\"ctime_ns\":1,\"ino\":2,\"dev\":1," \
+    "\"nlink\":1" mid "}\n"
+#define OUT ",\"target_outside_scope\":true"
+
+/* Review round 3, F7: the reader still accepted states the writer never
+ * emits. target_outside_scope is now recomputed from the scope (with the
+ * writer's own function), and the hash limit is checked both ways. The
+ * header's scope is "/s"; hash_max_bytes is 67108864. */
+TEST(r3_reader_checks_annotation_and_hash_limit_against_the_header) {
+    static const struct { const char *name; const char *m; int want; } cases[] = {
+        { "absolute link outside, annotated",     HDR LNK_LINE("l", 4, "/etc", OUT), 0 },
+        { "absolute link outside, unannotated",   HDR LNK_LINE("l", 4, "/etc", ""), -1 },
+        { "relative link inside, unannotated",    HDR LNK_LINE("l", 1, "x", ""), 0 },
+        { "relative link inside, annotated",      HDR LNK_LINE("l", 1, "x", OUT), -1 },
+        { "relative escape, annotated",           HDR LNK_LINE("l", 4, "../x", OUT), 0 },
+        { "relative escape, unannotated",         HDR LNK_LINE("l", 4, "../x", ""), -1 },
+        { "absolute link into the scope",         HDR LNK_LINE("l", 4, "/s/x", ""), 0 },
+        { "unreadable link with a stale target, annotated",
+          HDR LNK_LINE("l", 9, "/etc", OUT ",\"unreadable\":true"), -1 },
+        { "unreadable link with a stale target",  HDR LNK_LINE("l", 9, "/etc", ",\"unreadable\":true"), 0 },
+        { "unverified with no reason, within the limit",
+          HDR REG_SIZED("f", 5, ",\"unverified\":true"), -1 },
+        { "unverified over the limit",            HDR REG_SIZED("f", 67108865, ",\"unverified\":true"), 0 },
+        { "hash over the limit",                  HDR REG_SIZED("f", 67108865, SHA_F), -1 },
+        { "hash at the limit",                    HDR REG_SIZED("f", 67108864, SHA_F), 0 },
+    };
+    for (size_t i = 0; i < sizeof cases / sizeof cases[0]; i++) {
+        const int rc = read_it(cases[i].m);
+        if (rc != cases[i].want)
+            BELAY_FAIL("%s: got %d, want %d (%s)", cases[i].name, rc, cases[i].want, belay_err_msg());
+        else if (rc == -1 && strstr(belay_err_msg(), "trailer says") != NULL)
+            BELAY_FAIL("%s: rejected for its trailer, not for itself", cases[i].name);
+        belay_err_clear();
+    }
+}
+
+/* Round 3: entries that changed after being recorded carry "drifted", and
+ * the trailer counts drifted entries and mount points, so a dropped flag
+ * shows as a count mismatch. drifted is never on a directory whose listing
+ * was recorded: that is what "unstable" says. */
+TEST(r3_drifted_flag_and_mount_and_drift_counts) {
+    static const struct { const char *name; const char *m; int want; } cases[] = {
+        { "drifted file",                HDR REG_LINE("f", SHA_F ",\"drifted\":true"), 0 },
+        { "drifted unreadable directory", HDR DIR_E("d", ",\"unreadable\":true,\"drifted\":true"), 0 },
+        { "drifted mount point",         HDR DIR_E("m", ",\"mount\":true,\"drifted\":true"), 0 },
+        { "drifted listed directory",    HDR DIR_E("d", ",\"drifted\":true"), -1 },
+        { "drifted out of order",        HDR DIR_E("d", ",\"drifted\":true,\"unreadable\":true"), -1 },
+        { "drifted spelled false",       HDR REG_LINE("f", SHA_F ",\"drifted\":false"), -1 },
+    };
+    for (size_t i = 0; i < sizeof cases / sizeof cases[0]; i++) {
+        const int rc = read_it(cases[i].m);
+        if (rc != cases[i].want)
+            BELAY_FAIL("%s: got %d, want %d (%s)", cases[i].name, rc, cases[i].want, belay_err_msg());
+        belay_err_clear();
+    }
+    /* Counts: one mount and one drifted entry, against trailers that say 0. */
+    g_n = 0;
+    write_raw(HDR ROOT_E DIR_E("m", ",\"mount\":true") TRL(2, 0));
+    ASSERT_EQ_INT(-1, belay_manifest_read(g_path, collect, NULL));
+    ASSERT_TRUE(strstr(belay_err_msg(), "mounts") != NULL);
+    belay_err_clear();
+    write_raw(HDR ROOT_E REG_LINE("f", SHA_F ",\"drifted\":true") TRL(2, 0));
+    ASSERT_EQ_INT(-1, belay_manifest_read(g_path, collect, NULL));
+    ASSERT_TRUE(strstr(belay_err_msg(), "drifted") != NULL);
+    belay_err_clear();
+    /* A trailer without the new counts is a truncated or older format. */
+    write_raw(HDR ROOT_E "{\"belay_manifest_end\":1,\"vanished\":0,\"unreadable\":0,\"unstable\":0}\n");
+    ASSERT_EQ_INT(-1, belay_manifest_read(g_path, collect, NULL));
+    belay_err_clear();
+}
+
 int main(void) {
     RUN(reads_a_well_formed_entry);
     RUN(rejects_traversal_and_absolute_entry_paths);
@@ -994,6 +1072,8 @@ int main(void) {
     RUN(r2_reader_accepts_the_writers_unreadable_symlinks);
     RUN(r3_sealed_directories_hold_across_interleaved_siblings);
     RUN(r3_many_sealed_directories);
+    RUN(r3_reader_checks_annotation_and_hash_limit_against_the_header);
+    RUN(r3_drifted_flag_and_mount_and_drift_counts);
     RUN(round_trips_the_writers_output);
 
     unlink(g_path);

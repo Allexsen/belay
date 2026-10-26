@@ -6,7 +6,10 @@
  *  scope, then openat/fstatat relative to a held dirfd, with
  *  AT_SYMLINK_NOFOLLOW and O_NOFOLLOW. Paths are never re-resolved from
  *  strings during a walk, so a swapped directory or a symlink cannot redirect
- *  it. M1 reads only; nothing here writes into a scope.
+ *  it. The writer writes only the manifest (a temporary beside it, renamed
+ *  into place), its unlinked temporary runs, and objects in the store. If
+ *  those lie inside the scope, the next check records them as changes:
+ *  excluding belay's own state directory is phase 5 work.
  */
 #ifndef BELAY_MANIFEST_H
 #define BELAY_MANIFEST_H
@@ -84,17 +87,18 @@ struct belay_entry {
      *  so it is also unverified.
      *
      *  Directory: its listing is not one complete, single-instant listing. It
-     *  changed during the walk, or listing it failed part way. Entries may be
-     *  missing below it or recorded under another directory. On the root it
-     *  also means the clock stepped during the walk.
+     *  changed during the walk (including after it was listed: the
+     *  end-of-walk re-check), or listing it failed part way. Entries may be
+     *  missing below it or recorded under another directory.
      */
     bool     unstable;
 
     /*
      *  Set when belay could not enumerate or read this entry: an unreadable
      *  directory (EACCES on opendir) or an unreadable file, or a symlink
-     *  whose target could not be read reliably (its link_target is then
-     *  empty, meaning "unknown"). The subtree below
+     *  whose target could not be read reliably: its link_target is empty
+     *  ("unknown") when none could be read, otherwise the last one read,
+     *  which may be stale. The subtree below
      *  an unreadable directory is ABSENT from the manifest, so `diff` must
      *  report it as "contents unknown" and never as "unchanged".
      *
@@ -103,6 +107,17 @@ struct belay_entry {
      *  saw -- the false-negative class §5.3 rules worst.
      */
     bool     unreadable;
+
+    /*
+     *  The entry changed after it was recorded, before the walk ended: the
+     *  end-of-walk re-check found its inode, type, mode, size, mtime or ctime
+     *  different, or it was gone. What is recorded held at the moment belay
+     *  read it, but not at the end, so the manifest as a whole is not one
+     *  instant. (A directory whose listing changed is flagged unstable
+     *  instead; this appears on directories only when they are unreadable or
+     *  mount points.)
+     */
+    bool     drifted;
 };
 
 struct belay_manifest_opts {
@@ -127,6 +142,9 @@ struct belay_manifest_stats {
     size_t unreadable;  /* entries flagged unreadable */
     size_t unstable;    /* entries flagged unstable: files that changed while
                            hashed, directories whose listing changed */
+    size_t mounts;      /* mount points: recorded, contents not captured */
+    size_t drifted;     /* entries that changed after being recorded, before
+                           the walk ended (the end-of-walk re-check) */
 };
 
 /*

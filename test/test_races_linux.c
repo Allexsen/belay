@@ -39,7 +39,11 @@ enum arm { NONE, SWAP_ON_DIR_OPEN, SWAP_ON_READLINK, REPLACE_LINK_WITH_FILE,
            LINK_EIO,                 /* readlinkat fails with EIO */
            SUBDIR_READDIR_EIO,       /* a subdirectory's readdir fails with EIO */
            CLOCK_STEP,               /* wall clock steps once the walk has begun */
-           CLOCK_BEHIND };           /* wall clock 100 s behind the files' stamps */
+           CLOCK_BEHIND,             /* wall clock 100 s behind the files' stamps */
+           APPEND_TO_FIRST_FILE,     /* on the 2nd file opened, append to the 1st */
+           STATX_EPERM_ONCE,         /* statx of one name fails with EPERM, once */
+           STATX_ENOSYS,             /* statx missing altogether */
+           LINK_EMPTY };             /* readlinkat returns an empty target */
 static int g_flip;
 
 static char g_root[256], g_m[300];
@@ -68,6 +72,19 @@ int __wrap_openat(int fd, const char *name, int flags, ...) {
             if (rename(from, to) == 0) g_fired = 1;
         }
     }
+    if (g_arm == APPEND_TO_FIRST_FILE && !g_fired && !(flags & O_DIRECTORY) &&
+        (flags & O_ACCMODE) == O_RDONLY) {
+        if (g_first == NULL) {
+            static char first[256];
+            snprintf(first, sizeof first, "%s", name);
+            g_first = first;
+        } else {
+            char p[600];
+            snprintf(p, sizeof p, "%s/%s", g_root, g_first);
+            const int w = __real_openat(AT_FDCWD, p, O_WRONLY | O_APPEND, 0);
+            if (w >= 0) { if (write(w, "!", 1) == 1) g_fired = 1; close(w); }
+        }
+    }
     if (g_arm == TOUCH_ROOT_ON_DIR_OPEN && !g_fired && (flags & O_DIRECTORY) &&
         g_x != NULL && strcmp(name, g_x) == 0) {
         g_fired = 1;
@@ -93,6 +110,10 @@ int __wrap_openat(int fd, const char *name, int flags, ...) {
 ssize_t __real_readlinkat(int, const char *, char *, size_t);
 ssize_t __wrap_readlinkat(int fd, const char *name, char *buf, size_t n) {
     if (g_x != NULL && strcmp(name, g_x) == 0) {
+        if (g_arm == LINK_EMPTY) {
+            g_fired = 1;
+            return 0;
+        }
         if (g_arm == LINK_EIO) {
             g_fired = 1;
             errno = EIO;
@@ -151,10 +172,14 @@ ssize_t __wrap___readlinkat_chk(int fd, const char *name, char *buf, size_t n, s
  *  directories changed just before it carry ctimes "in the future".
  */
 static int g_step_s, g_stepped;
+/* g_skew_s: every realtime read is off by this much, whatever is armed -- as
+ * on a filesystem whose timestamps come from another machine's clock. */
+static int g_skew_s;
 int __real_clock_gettime(clockid_t, struct timespec *);
 int __wrap_clock_gettime(clockid_t id, struct timespec *ts) {
     const int r = __real_clock_gettime(id, ts);
     if (r != 0) return r;
+    if (id == CLOCK_REALTIME || id == CLOCK_REALTIME_COARSE) ts->tv_sec += g_skew_s;
     if (g_arm == CLOCK_STEP && g_stepped && id == CLOCK_REALTIME) {
         ts->tv_sec += g_step_s;
         g_fired = 1;
@@ -163,6 +188,25 @@ int __wrap_clock_gettime(clockid_t id, struct timespec *ts) {
         ts->tv_sec -= 100;
         g_fired = 1;
     }
+    return r;
+}
+
+/* statx: calls are counted, and those after an armed failure separately --
+ * so a test can see that one entry's error did not switch statx off. */
+static size_t g_statx_calls, g_statx_after;
+int __real_statx(int, const char *, int, unsigned int, struct statx *);
+int __wrap_statx(int dfd, const char *name, int flags, unsigned int mask, struct statx *sx) {
+    if (g_arm == STATX_ENOSYS) { errno = ENOSYS; return -1; }
+    if (g_arm == STATX_EPERM_ONCE && !g_fired && g_x != NULL && strcmp(name, g_x) == 0) {
+        g_fired = 1;
+        errno = EPERM;
+        return -1;
+    }
+    g_statx_calls++;
+    if (g_fired) g_statx_after++;
+    const int r = __real_statx(dfd, name, flags, mask, sx);
+    /* LINK_EMPTY: the filesystem presents the link as empty, size included. */
+    if (r == 0 && g_arm == LINK_EMPTY && g_x != NULL && strcmp(name, g_x) == 0) sx->stx_size = 0;
     return r;
 }
 
@@ -210,7 +254,8 @@ struct dirent *__wrap_readdir(DIR *d) {
 
 static void arm(enum arm a, const char *x, const char *y) {
     g_arm = a; g_x = x; g_y = y; g_fired = 0; g_replay = 0; g_dir = NULL; g_first = NULL;
-    g_rootdir = NULL; g_walked = NULL; g_flip = 0; g_stepped = 0; g_step_s = 0;
+    g_rootdir = NULL; g_walked = NULL; g_flip = 0; g_stepped = 0; g_step_s = 0; g_skew_s = 0;
+    g_statx_calls = 0; g_statx_after = 0;
 }
 
 static void path(char *out, size_t n, const char *rel) { snprintf(out, n, "%s/%s", g_root, rel); }
@@ -258,6 +303,7 @@ static int check(struct belay_manifest_stats *st) {
     };
     const int rc = belay_manifest_write(g_m, g_root, &o, st);
     g_arm = NONE;                 /* disarm, but keep g_fired for the assertions */
+    g_skew_s = 0;
     if (rc != 0) return rc;
     g_n = 0;
     return belay_manifest_read(g_m, collect, NULL);   /* the reader must accept it */
@@ -359,7 +405,12 @@ TEST(directory_changed_during_the_walk_is_flagged_unstable) {
     const char *second = (g_first != NULL && g_first[0] == 'A') ? "B" : "A";
     const struct belay_entry *d = find(second);
     ASSERT_TRUE(d != NULL && d->unstable);
-    ASSERT_EQ_INT(1, (int)st.unstable);
+    /* The first was already listed when the file arrived: its listing no
+     * longer held at the end of the walk, and the end-of-walk re-check says
+     * so (round 3). Before, only the second was flagged. */
+    const struct belay_entry *f = find(g_first != NULL ? g_first : "A");
+    ASSERT_TRUE(f != NULL && f->unstable);
+    ASSERT_EQ_INT(2, (int)st.unstable);
 }
 
 /* ===== Independent review, round 2 ===== */
@@ -422,12 +473,12 @@ TEST(r2_link_that_flickers_is_recorded_not_dropped) {
     ASSERT_EQ_INT(0, (int)st.vanished);
 }
 
-/* R3: the wall clock stepped DURING the walk (WSL steps it by ~100 s; NTP can
- * too). Every "changed during the walk" judgment compares ctimes with the
- * walk's start, so after a step none of them can be trusted, and the root --
- * the manifest as a whole -- must not claim to be one instant. Both
- * directions. The step itself is not a change to any directory. */
-TEST(r3_clock_step_during_the_walk_flags_the_root) {
+/* R3: the wall clock stepped DURING the walk (WSL here steps it +108 s and
+ * back every 5.4 s; NTP can step it too). A step is not a change: nothing
+ * may be flagged for it. Round 2 flagged the root on any step; with the
+ * end-of-walk re-check comparing by equality that protected nothing, and on
+ * WSL it flagged every check longer than ~7 s. Both directions. */
+TEST(r3_clock_step_during_the_walk_is_not_a_change) {
     static const int steps[] = { 2, -2 };
     for (size_t i = 0; i < sizeof steps / sizeof steps[0]; i++) {
         reset();
@@ -439,11 +490,8 @@ TEST(r3_clock_step_during_the_walk_flags_the_root) {
         struct belay_manifest_stats st;
         ASSERT_EQ_INT(0, check(&st));
         ASSERT_TRUE(g_fired);
-        const struct belay_entry *r = find(".");
-        ASSERT_TRUE(r != NULL && r->unstable);
-        const struct belay_entry *a = find("A");
-        ASSERT_TRUE(a != NULL && !a->unstable);
-        ASSERT_EQ_INT(1, (int)st.unstable);
+        ASSERT_EQ_INT(0, (int)st.unstable);
+        ASSERT_EQ_INT(0, (int)st.drifted);
     }
 }
 
@@ -495,15 +543,12 @@ TEST(r2_readdir_eio_marks_the_directory_unstable_not_fatal) {
  *  forbids it (e.g. Ubuntu 24.04's AppArmor default). Runs in a child so the
  *  mounts die with it.
  */
-static int overlay_child(void) {
-    char lower[300], up[300], merged[300], p[400];
-    snprintf(lower, sizeof lower, "%s/lower", g_root);
-    snprintf(up, sizeof up, "%s/up", g_root);
-    snprintf(merged, sizeof merged, "%s/merged", g_root);
+/* Enters a new user + mount namespace with ourselves mapped to root, as
+ * `unshare -r` does (an unmapped user cannot mount). 0, or 77 to skip. */
+static int enter_userns(void) {
     const uid_t uid = getuid();
     const gid_t gid = getgid();
-    if (unshare(CLONE_NEWUSER | CLONE_NEWNS) != 0) return 77;            /* skip */
-    /* Map ourselves, as `unshare -r` does; an unmapped user cannot mount. */
+    if (unshare(CLONE_NEWUSER | CLONE_NEWNS) != 0) return 77;
     char map[64];
     int fd = open("/proc/self/setgroups", O_WRONLY);
     if (fd >= 0) { if (write(fd, "deny", 4) != 4) { /* best effort */ } close(fd); }
@@ -515,6 +560,15 @@ static int overlay_child(void) {
     fd = open("/proc/self/gid_map", O_WRONLY);
     if (fd < 0 || write(fd, map, strlen(map)) < 0) return 77;
     close(fd);
+    return 0;
+}
+
+static int overlay_child(void) {
+    char lower[300], up[300], merged[300], p[400];
+    snprintf(lower, sizeof lower, "%s/lower", g_root);
+    snprintf(up, sizeof up, "%s/up", g_root);
+    snprintf(merged, sizeof merged, "%s/merged", g_root);
+    if (enter_userns() != 0) return 77;
     if (mount("none", up, "tmpfs", 0, NULL) != 0) return 77;
     snprintf(p, sizeof p, "%s/u", up); mkdir(p, 0755);
     snprintf(p, sizeof p, "%s/w", up); mkdir(p, 0755);
@@ -529,12 +583,58 @@ static int overlay_child(void) {
         .hash_max_bytes = BELAY_HASH_MAX_BYTES_DEFAULT,
         .store_max_bytes = BELAY_STORE_MAX_BYTES_DEFAULT,
     };
-    if (belay_manifest_write(g_m, merged, &o, NULL) != 0) return 1;
-    g_n = 0;
-    if (belay_manifest_read(g_m, collect, NULL) != 0) return 2;
-    const struct belay_entry *a = find("lower.txt"), *u = find("upper.txt");
-    if (a == NULL || u == NULL) return 3;
-    if (a->is_mount || u->is_mount || !a->has_hash || !u->has_hash) return 4;
+    /* With statx, and again as on a kernel without it (round 3, F5: the
+     * st_dev fallback must still exempt an overlay's files). */
+    for (int pass = 0; pass < 2; pass++) {
+        g_arm = pass ? STATX_ENOSYS : NONE;
+        const int w = belay_manifest_write(g_m, merged, &o, NULL);
+        g_arm = NONE;
+        if (w != 0) return 1;
+        g_n = 0;
+        if (belay_manifest_read(g_m, collect, NULL) != 0) return 2;
+        const struct belay_entry *a = find("lower.txt"), *u = find("upper.txt");
+        if (a == NULL || u == NULL) return 3;
+        if (a->is_mount || u->is_mount || !a->has_hash || !u->has_hash) return 4 + pass;
+    }
+    return 0;
+}
+
+/*
+ *  R3-F5: a FILE bind-mounted into the scope from another filesystem is a
+ *  boundary: recorded, never read. With statx it is a mount root; without
+ *  statx (kernels before 5.8, or statx blocked) only st_dev can tell, and
+ *  the round-2 rule compared st_dev for directories only -- so the file was
+ *  hashed as a local one. Both ways now.
+ */
+static int bind_child(void) {
+    char fs[300], scope[300], src[400], dst[400];
+    snprintf(fs, sizeof fs, "%s/fs", g_root);
+    snprintf(scope, sizeof scope, "%s/scope", g_root);
+    snprintf(src, sizeof src, "%s/outside.txt", fs);
+    snprintf(dst, sizeof dst, "%s/f", scope);
+    if (enter_userns() != 0) return 77;
+    if (mount("none", fs, "tmpfs", 0, NULL) != 0) return 77;
+    FILE *f = fopen(src, "wb");
+    if (f == NULL) return 10;
+    fputs("from another filesystem", f);
+    fclose(f);
+    if (mount(src, dst, NULL, MS_BIND, NULL) != 0) return 77;
+
+    struct belay_manifest_opts o = {
+        .hash_max_bytes = BELAY_HASH_MAX_BYTES_DEFAULT,
+        .store_max_bytes = BELAY_STORE_MAX_BYTES_DEFAULT,
+    };
+    for (int pass = 0; pass < 2; pass++) {
+        g_arm = pass ? STATX_ENOSYS : NONE;
+        const int w = belay_manifest_write(g_m, scope, &o, NULL);
+        g_arm = NONE;
+        if (w != 0) return 1;
+        g_n = 0;
+        if (belay_manifest_read(g_m, collect, NULL) != 0) return 2;
+        const struct belay_entry *e = find("f");
+        if (e == NULL) return 3;
+        if (!e->is_mount || e->has_hash) return 4 + pass;
+    }
     return 0;
 }
 
@@ -549,6 +649,98 @@ TEST(r2_overlay_scope_files_are_hashed_not_flagged_as_mounts) {
     const int rc = WIFEXITED(status) ? WEXITSTATUS(status) : 99;
     if (rc == 77) { printf("      (skipped: no unprivileged user+mount namespace here)\n"); return; }
     ASSERT_EQ_INT(0, rc);
+}
+
+TEST(r3_file_bind_mounted_from_another_fs_is_a_boundary_with_or_without_statx) {
+    reset();
+    mk("fs"); mk("scope");
+    touch("scope/f", "local");
+    const pid_t pid = fork();
+    if (pid == 0) _exit(bind_child());
+    int status = 0;
+    waitpid(pid, &status, 0);
+    const int rc = WIFEXITED(status) ? WEXITSTATUS(status) : 99;
+    if (rc == 77) { printf("      (skipped: no unprivileged user+mount namespace here)\n"); return; }
+    ASSERT_EQ_INT(0, rc);
+}
+
+/* R3-F1: the round-2 rule needed file timestamps from this machine's clock.
+ * With the file clock 5 s off either way (NFS, SMB, WSL's /mnt/c, FUSE), a
+ * file moved from an unlisted directory into an already-listed one was again
+ * recorded nowhere, with a clean trailer. The end-of-walk re-check compares
+ * by equality, so the directory it arrived in is flagged whatever the clock. */
+TEST(r3_move_into_a_listed_directory_is_caught_whatever_the_file_clock) {
+    static const int skew[] = { 5, -5 };
+    for (size_t i = 0; i < sizeof skew / sizeof skew[0]; i++) {
+        reset();
+        mk("A"); mk("B");
+        touch("A/m_A", "");
+        touch("B/m_B", "");
+        usleep(250000);
+        arm(MOVE_ON_ROOT_READDIR, NULL, NULL);
+        g_skew_s = skew[i];
+        struct belay_manifest_stats st;
+        ASSERT_EQ_INT(0, check(&st));
+        ASSERT_TRUE(g_fired);
+        ASSERT_TRUE(g_walked != NULL);
+        const struct belay_entry *dest = find(g_walked != NULL ? g_walked : "A");
+        ASSERT_TRUE(dest != NULL && dest->unstable);
+    }
+}
+
+/* R3-F2: a file changed after it was hashed, while the walk went on, gave a
+ * manifest of a state that never existed -- with a clean trailer. It is now
+ * flagged drifted, and the hash it carries is still the one it had when read. */
+TEST(r3_file_changed_after_it_was_read_is_drifted) {
+    reset();
+    touch("f1", "one");
+    touch("f2", "two");
+    usleep(20000);
+    arm(APPEND_TO_FIRST_FILE, NULL, NULL);
+    struct belay_manifest_stats st;
+    ASSERT_EQ_INT(0, check(&st));
+    ASSERT_TRUE(g_fired);
+    const struct belay_entry *f = find(g_first != NULL ? g_first : "f1");
+    ASSERT_TRUE(f != NULL && f->drifted && f->has_hash);
+    ASSERT_EQ_INT(1, (int)st.drifted);
+    const struct belay_entry *r = find(".");
+    ASSERT_TRUE(r != NULL && !r->unstable);
+}
+
+/* R3-F3: one entry's statx EPERM used to switch statx off for the rest of the
+ * process -- and with it mount-root detection, for every later walk. Now the
+ * entry is not recorded (its directory is flagged, as for any entry that
+ * cannot be stat'ed), and statx stays in use, in this walk and the next. */
+TEST(r3_one_statx_eperm_is_recorded_and_does_not_switch_statx_off) {
+    reset();
+    mk("d");
+    touch("d/denied", "x");
+    touch("d/other", "y");
+    usleep(20000);
+    arm(STATX_EPERM_ONCE, "denied", NULL);
+    struct belay_manifest_stats st;
+    ASSERT_EQ_INT(0, check(&st));
+    ASSERT_TRUE(g_fired);
+    const struct belay_entry *d = find("d");
+    ASSERT_TRUE(d != NULL && d->unstable);
+    ASSERT_TRUE(find("d/denied") == NULL);
+    ASSERT_TRUE(g_statx_after > 0);
+    arm(NONE, NULL, NULL);
+    ASSERT_EQ_INT(0, check(&st));
+    ASSERT_TRUE(g_statx_calls > 0);
+}
+
+/* R3-F6: a filesystem presenting an empty symlink (FUSE, NFS) made the writer
+ * emit a manifest its own reader rejected. It is recorded unreadable, with
+ * the empty "unknown" target, and reads back. */
+TEST(r3_empty_link_target_is_recorded_unreadable) {
+    reset();
+    lnk("target", "L");
+    arm(LINK_EMPTY, "L", NULL);
+    ASSERT_EQ_INT(0, check(NULL));            /* check() also runs the reader */
+    ASSERT_TRUE(g_fired);
+    const struct belay_entry *l = find("L");
+    ASSERT_TRUE(l != NULL && l->unreadable && l->link_target_len == 0);
 }
 
 int main(void) {
@@ -568,8 +760,13 @@ int main(void) {
     RUN(r2_readlink_eio_is_recorded_not_fatal);
     RUN(r2_readdir_eio_marks_the_directory_unstable_not_fatal);
     RUN(r2_overlay_scope_files_are_hashed_not_flagged_as_mounts);
-    RUN(r3_clock_step_during_the_walk_flags_the_root);
+    RUN(r3_clock_step_during_the_walk_is_not_a_change);
     RUN(r3_clock_behind_the_files_flags_nothing);
+    RUN(r3_file_bind_mounted_from_another_fs_is_a_boundary_with_or_without_statx);
+    RUN(r3_move_into_a_listed_directory_is_caught_whatever_the_file_clock);
+    RUN(r3_file_changed_after_it_was_read_is_drifted);
+    RUN(r3_one_statx_eperm_is_recorded_and_does_not_switch_statx_off);
+    RUN(r3_empty_link_target_is_recorded_unreadable);
 
     char cmd[600];
     snprintf(cmd, sizeof cmd, "rm -rf '%s' '%s'", g_root, g_m);

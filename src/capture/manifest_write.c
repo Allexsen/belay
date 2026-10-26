@@ -2,7 +2,8 @@
  *  Manifest writer.
  *
  *  BLAST RADIUS. Reads the user's real filesystem; writes only its own
- *  manifest file and unlinked temporaries beside it. Containment is by
+ *  manifest file, unlinked temporaries beside it (O_TMPFILE where available,
+ *  so the directory never changes) and store objects. Containment is by
  *  construction (BELAY_DESIGN.md §5.1.1):
  *
  *    - realpath() runs exactly once, on the scope, then the result is opened
@@ -12,8 +13,12 @@
  *      ELOOP rather than redirecting the walk.
  *    - Every stat is fstatat(parent_fd, name, ..., AT_SYMLINK_NOFOLLOW), so a
  *      symlink is described as a symlink and never followed.
- *    - st_dev is compared against the scope root's. A boundary is recorded and
- *      not descended into.
+ *    - A mount root is a boundary: recorded, never read or descended. statx
+ *      says which entries are mount roots; without it, st_dev compared with
+ *      the scope root's decides (see the crossing rule in visit()).
+ *    - When the walk is over, every recorded entry is re-stat'ed and compared
+ *      by equality, so a change after it was recorded is flagged (see
+ *      "End-of-walk re-check").
  *
  *  MEMORY IS BOUNDED, independent of entry count. Each entry is serialized as
  *  it is visited and appended to an in-memory run buffer of RUN_BYTES. A full
@@ -50,6 +55,8 @@
 #include <sys/stat.h>
 #ifdef __linux__
 #include <sys/sysmacros.h>
+#include <sys/vfs.h>
+#define OVERLAYFS_MAGIC 0x794c7630      /* <linux/magic.h> OVERLAYFS_SUPER_MAGIC */
 #endif
 #include <time.h>
 #include <unistd.h>
@@ -63,6 +70,9 @@
 #define LEVELS     12                  /* 16^12 runs: unreachable in practice */
 #define SNIFF_BYTES 8000u              /* git's binary heuristic: a NUL in the
                                           first 8000 bytes means not text */
+#define NAME_BYTES 255                 /* longest entry name: a directory whose
+                                          path exceeds PATH_CAP - 2 - NAME_BYTES
+                                          may hold children that do not fit */
 
 /* ------------------------------------------------------------------------ */
 /* Serialization                                                             */
@@ -155,6 +165,24 @@ static int serialize(const struct belay_entry *e, char *buf, size_t cap, size_t 
  *  path travels with the line because the sort key is the raw path, which the
  *  serialized line may hold only as escaped JSON or base64.
  */
+/*
+ *  Each record is [u32 path length][path][u32 line length][line][ident]. The
+ *  ident is what the end-of-walk re-check compares the entry against; the
+ *  re-check writes its verdict into `mark`, and the line is written out with
+ *  the matching flag.
+ */
+struct ident {
+    uint64_t ino, dev, size;
+    int64_t  mtime_ns, ctime_ns;
+    uint32_t mode;
+    uint8_t  kind;              /* RC_* */
+    uint8_t  mark;              /* MARK_* */
+    uint8_t  pad[2];
+};
+enum { RC_NONE, RC_LISTING, RC_ENTRY };
+enum { MARK_NONE, MARK_UNSTABLE, MARK_DRIFTED };
+#define IDENT_BYTES sizeof(struct ident)
+
 struct spill {
     unsigned char *arena;
     size_t budget;
@@ -168,7 +196,8 @@ struct spill {
      * square of the entry count, 13x the manifest size at 80k entries.) */
     FILE *runs[LEVELS][FANIN];
     size_t nruns[LEVELS];
-    char tmpl[PATH_MAX + 32];   /* mkstemp template for runs */
+    char dir[PATH_MAX + 32];    /* the output's directory, for O_TMPFILE runs */
+    char tmpl[PATH_MAX + 32];   /* mkstemp template, where O_TMPFILE is missing */
 };
 
 static int rec_cmp(const unsigned char *a, const unsigned char *b) {
@@ -198,17 +227,31 @@ static void sort_offs(const unsigned char *base, size_t *a, size_t *tmp, size_t 
     }
 }
 
-/* Creates an anonymous temporary file beside the output. It is unlinked at
- * once, so nothing is left behind on a crash and nothing else can open it. */
-static FILE *open_tmp(const char *tmpl) {
-    char name[PATH_MAX + 32];
-    snprintf(name, sizeof name, "%s", tmpl);
-    const int fd = mkstemp(name);
-    if (fd == -1) {
+/* Creates an anonymous temporary file beside the output. With O_TMPFILE it
+ * is never linked into the directory at all, so the directory does not
+ * change -- which matters when the output lies inside the scope being
+ * walked: a named temporary, even unlinked at once, changes the directory,
+ * and the walk then sees belay's own writes (review round 3, F8). Elsewhere
+ * it is created and unlinked at once; nothing is left behind on a crash. */
+static FILE *open_tmp(const struct spill *s) {
+    int fd = -1;
+#ifdef O_TMPFILE
+    fd = open(s->dir, O_TMPFILE | O_RDWR | O_CLOEXEC, 0600);
+    if (fd == -1 && (errno == EMFILE || errno == ENFILE || errno == ENOMEM)) {
         belay_err_set(BELAY_ERR_IO, errno, "manifest: cannot create temporary file");
         return NULL;
     }
-    unlink(name);
+#endif
+    if (fd == -1) {
+        char name[PATH_MAX + 32];
+        snprintf(name, sizeof name, "%s", s->tmpl);
+        fd = mkstemp(name);
+        if (fd == -1) {
+            belay_err_set(BELAY_ERR_IO, errno, "manifest: cannot create temporary file");
+            return NULL;
+        }
+        unlink(name);
+    }
     FILE *f = fdopen(fd, "w+b");
     if (f == NULL) {
         belay_err_set(BELAY_ERR_IO, errno, "manifest: fdopen");
@@ -217,10 +260,30 @@ static FILE *open_tmp(const char *tmpl) {
     return f;
 }
 
+/*
+ *  Writes one manifest line, with the flag the end-of-walk re-check set.
+ *  Either flag goes at the end of the object, which is its canonical place:
+ *  "drifted" is the last known field, and "unstable" is only ever added to a
+ *  directory that carries no "mount" or "unreadable" after it. The single
+ *  writer for both output paths (in-memory and merged), so neither can drop
+ *  the flag -- an invariant kept on one path but not its sibling is how a
+ *  duplicate name once got through.
+ */
+static int write_line(FILE *out, const unsigned char *line, uint32_t llen, uint8_t mark) {
+    static const char *const flag[] = { "", ",\"unstable\":true", ",\"drifted\":true" };
+    if (mark == MARK_NONE || mark > MARK_DRIFTED || llen < 2)
+        return fwrite(line, 1, llen, out) == llen ? 0 : -1;
+    const size_t body = llen - 2;                       /* the line ends "}\n" */
+    const size_t fl = strlen(flag[mark]);
+    return fwrite(line, 1, body, out) == body && fwrite(flag[mark], 1, fl, out) == fl &&
+           fwrite("}\n", 1, 2, out) == 2 ? 0 : -1;
+}
+
 struct cursor {
     FILE *f;
     uint32_t plen, llen;
     unsigned char *buf;         /* PATH_CAP bytes of path, then LINE_CAP of line */
+    struct ident id;
     int live;
 };
 
@@ -232,6 +295,7 @@ static int cur_next(struct cursor *c) {
     if (fread(c->buf, 1, pl, c->f) != pl) goto bad;
     if (fread(&ll, 1, 4, c->f) != 4 || ll == 0 || ll > LINE_CAP) goto bad;
     if (fread(c->buf + PATH_CAP, 1, ll, c->f) != ll) goto bad;
+    if (fread(&c->id, 1, IDENT_BYTES, c->f) != IDENT_BYTES) goto bad;
     c->plen = pl;
     c->llen = ll;
     c->live = 1;
@@ -292,12 +356,13 @@ static int merge(FILE **in, size_t k, FILE *out, int lines_only, size_t *count) 
 
         int ok;
         if (lines_only) {
-            ok = fwrite(m->buf + PATH_CAP, 1, m->llen, out) == m->llen;
+            ok = write_line(out, m->buf + PATH_CAP, m->llen, m->id.mark) == 0;
         } else {
             ok = fwrite(&m->plen, 1, 4, out) == 4 &&
                  fwrite(m->buf, 1, m->plen, out) == m->plen &&
                  fwrite(&m->llen, 1, 4, out) == 4 &&
-                 fwrite(m->buf + PATH_CAP, 1, m->llen, out) == m->llen;
+                 fwrite(m->buf + PATH_CAP, 1, m->llen, out) == m->llen &&
+                 fwrite(&m->id, 1, IDENT_BYTES, out) == IDENT_BYTES;
         }
         if (!ok) {
             belay_err_set(BELAY_ERR_IO, errno, "manifest: write failed during merge");
@@ -318,14 +383,14 @@ static int spill_flush(struct spill *s) {
     if (s->n == 0) return 0;
     sort_offs(s->arena, s->offs, s->scratch, s->n);
 
-    FILE *f = open_tmp(s->tmpl);
+    FILE *f = open_tmp(s);
     if (f == NULL) return -1;
     for (size_t i = 0; i < s->n; i++) {
         const unsigned char *r = s->arena + s->offs[i];
         uint32_t pl, ll;
         memcpy(&pl, r, 4);
         memcpy(&ll, r + 4 + pl, 4);
-        const size_t sz = 8 + (size_t)pl + ll;
+        const size_t sz = 8 + (size_t)pl + ll + IDENT_BYTES;
         if (fwrite(r, 1, sz, f) != sz) {
             belay_err_set(BELAY_ERR_IO, errno, "manifest: temporary run write failed");
             fclose(f);
@@ -344,7 +409,7 @@ static int spill_flush(struct spill *s) {
     /* Cascade: a full level becomes one run one level up. Open descriptors
      * stay bounded by FANIN per level. */
     for (size_t lv = 0; lv + 1 < LEVELS && s->nruns[lv] == FANIN; lv++) {
-        FILE *merged = open_tmp(s->tmpl);
+        FILE *merged = open_tmp(s);
         if (merged == NULL) return -1;
         if (merge(s->runs[lv], FANIN, merged, 0, NULL) == -1 || fflush(merged) != 0) {
             fclose(merged);
@@ -382,7 +447,7 @@ static int spill_finish(struct spill *s, FILE *out, size_t *count) {
     }
     int rc = 0;
     while (n > FANIN) {
-        FILE *merged = open_tmp(s->tmpl);
+        FILE *merged = open_tmp(s);
         if (merged == NULL || merge(all, FANIN, merged, 0, NULL) == -1 || fflush(merged) != 0) {
             if (merged != NULL) fclose(merged);
             rc = -1;
@@ -399,8 +464,8 @@ static int spill_finish(struct spill *s, FILE *out, size_t *count) {
 }
 
 static int spill_add(struct spill *s, const char *path, size_t plen,
-                     const char *line, size_t llen) {
-    const size_t sz = 8 + plen + llen;
+                     const char *line, size_t llen, const struct ident *id) {
+    const size_t sz = 8 + plen + llen + IDENT_BYTES;
     if (s->used + sz > s->budget && spill_flush(s) == -1) return -1;
 
     if (s->n == s->cap) {
@@ -420,6 +485,7 @@ static int spill_add(struct spill *s, const char *path, size_t plen,
     memcpy(r + 4, path, plen);
     memcpy(r + 4 + plen, &ll, 4);
     memcpy(r + 8 + plen, line, llen);
+    memcpy(r + 8 + plen + llen, id, IDENT_BYTES);
     s->offs[s->n++] = s->used;
     s->used += sz;
     return 0;
@@ -452,10 +518,20 @@ struct walk_ctx {
     size_t n_vanished;
     size_t n_unreadable;
     size_t n_unstable;
+    size_t n_mounts;
+    size_t n_drifted;
 
-    /* Walk start (realtime ns, minus a margin for coarse kernel clocks): a
-     * directory whose ctime is later changed during the walk. */
+    /* Walk start, realtime ns (see belay_manifest_write): a directory whose
+     * ctime lies between this and "now" changed during the walk. */
     int64_t walk_start_ns;
+
+    /* Decided once per walk, never by one entry's error: whether statx works
+     * here (a seccomp profile may answer EPERM for it), and whether the scope
+     * root is on overlayfs, where non-directories carry their layer's
+     * st_dev. Process-global state set by one entry's EPERM used to switch
+     * mount detection off for every later walk. */
+    bool statx_ok;
+    bool scope_overlay;
 
     struct belay_store *store;  /* NULL when content storage is off */
     char  *abs;                 /* scope + "/" + rel, for interpreter claims */
@@ -542,36 +618,6 @@ static void fill_from_stat(struct belay_entry *e, const struct stat *st) {
     }
 }
 
-/*
- *  Advisory only (§5.1.1): does a RELATIVE link target leave the scope,
- *  judged lexically from the link's own directory? ".." pops a component;
- *  popping above the scope root means outside. Symlinks along the way are
- *  not followed, so this can be wrong in both directions -- which is why it
- *  is an annotation and never an input to a decision. Previously only
- *  absolute targets were analysed, so a relative escape such as "../../etc"
- *  carried no annotation at all.
- */
-static bool rel_target_escapes(const char *link_path, size_t link_len,
-                               const char *target, size_t tlen) {
-    /* depth = number of directory components above the link, inside scope */
-    long depth = 0;
-    for (size_t i = 0; i < link_len; i++) if (link_path[i] == '/') depth++;
-
-    size_t i = 0;
-    while (i < tlen) {
-        size_t j = i;
-        while (j < tlen && target[j] != '/') j++;
-        const size_t n = j - i;
-        if (n == 2 && target[i] == '.' && target[i + 1] == '.') {
-            if (--depth < 0) return true;
-        } else if (!(n == 0 || (n == 1 && target[i] == '.'))) {
-            depth++;
-        }
-        i = j + 1;
-    }
-    return false;
-}
-
 static ssize_t rel_join(char *rel, size_t relsz, size_t rel_len, const char *name) {
     const size_t nlen = strlen(name);
     const size_t need = rel_len + (rel_len ? 1 : 0) + nlen;
@@ -590,7 +636,20 @@ static ssize_t rel_join(char *rel, size_t relsz, size_t rel_len, const char *nam
 static int emit_one(struct walk_ctx *wc, const struct belay_entry *e) {
     size_t llen = 0;
     if (serialize(e, wc->line, LINE_CAP, &llen) == -1) return -1;
-    if (spill_add(wc->spill, e->path, e->path_len, wc->line, llen) == -1) return -1;
+
+    /* What the end-of-walk re-check compares. A directory whose listing was
+     * recorded is re-checked as a listing (a change flags it unstable),
+     * unless it is unstable already; everything else as an entry (a change
+     * flags it drifted). */
+    struct ident id;
+    memset(&id, 0, sizeof id);
+    id.ino = e->ino; id.dev = e->dev; id.size = e->size;
+    id.mtime_ns = e->mtime_ns; id.ctime_ns = e->ctime_ns; id.mode = e->mode;
+    if (e->type == BELAY_T_DIR && !e->unreadable && !e->is_mount)
+        id.kind = e->unstable ? RC_NONE : RC_LISTING;
+    else
+        id.kind = RC_ENTRY;
+    if (spill_add(wc->spill, e->path, e->path_len, wc->line, llen, &id) == -1) return -1;
     wc->n_entries++;
     return 0;
 }
@@ -601,23 +660,26 @@ static int walk(int dfd, char *rel, size_t relsz, size_t rel_len,
                 int depth, struct walk_ctx *wc);
 
 /*
- *  lstat, plus whether the entry is a mount root. st_dev alone misses a bind
- *  mount from the same filesystem -- verified: a same-device bind of a
- *  directory from outside the scope was walked and hashed with no flag. On
- *  Linux statx's STATX_ATTR_MOUNT_ROOT reports every mount root, bind mounts
- *  included. Elsewhere, or on a kernel without it, st_dev is the fallback.
+ *  lstat, plus whether the entry is a mount root. On Linux, statx's
+ *  STATX_ATTR_MOUNT_ROOT reports every mount root, bind mounts from the same
+ *  filesystem included (st_dev alone missed those -- verified). *mount_known
+ *  says whether it could answer; when not, the caller falls back to st_dev.
+ *  AT_NO_AUTOMOUNT: walking a scope must not trigger autofs mounts (fstatat
+ *  implies it since Linux 4.14; statx does not).
+ *
+ *  An error here is one entry's property (EIO, or EACCES/EPERM from an LSM or
+ *  a FUSE server) and is handled by the caller like any other. Whether statx
+ *  is usable at all was settled once, on the scope root.
  */
-static int stat_entry(int dfd, const char *name, struct stat *st, bool *mount_root) {
+static int stat_entry(const struct walk_ctx *wc, int dfd, const char *name, struct stat *st,
+                      bool *mount_root, bool *mount_known) {
     *mount_root = false;
+    *mount_known = false;
 #if defined(__linux__) && defined(STATX_ATTR_MOUNT_ROOT)
-    /* AT_NO_AUTOMOUNT: walking a scope must not trigger autofs mounts.
-     * (fstatat implies it since Linux 4.14; statx does not.) A seccomp profile
-     * that blocks statx with EPERM -- older container runtimes -- falls back
-     * to fstatat for the rest of the process. */
-    static int statx_blocked;
-    struct statx sx;
-    if (!statx_blocked &&
-        statx(dfd, name, AT_SYMLINK_NOFOLLOW | AT_NO_AUTOMOUNT, STATX_BASIC_STATS, &sx) == 0) {
+    if (wc->statx_ok) {
+        struct statx sx;
+        if (statx(dfd, name, AT_SYMLINK_NOFOLLOW | AT_NO_AUTOMOUNT, STATX_BASIC_STATS, &sx) != 0)
+            return -1;
         memset(st, 0, sizeof *st);
         st->st_mode  = sx.stx_mode;
         st->st_ino   = sx.stx_ino;
@@ -631,14 +693,12 @@ static int stat_entry(int dfd, const char *name, struct stat *st, bool *mount_ro
         st->st_mtim.tv_nsec = sx.stx_mtime.tv_nsec;
         st->st_ctim.tv_sec  = sx.stx_ctime.tv_sec;
         st->st_ctim.tv_nsec = sx.stx_ctime.tv_nsec;
-        *mount_root = (sx.stx_attributes_mask & STATX_ATTR_MOUNT_ROOT) &&
-                      (sx.stx_attributes & STATX_ATTR_MOUNT_ROOT);
+        *mount_known = (sx.stx_attributes_mask & STATX_ATTR_MOUNT_ROOT) != 0;
+        *mount_root  = *mount_known && (sx.stx_attributes & STATX_ATTR_MOUNT_ROOT);
         return 0;
     }
-    if (!statx_blocked) {
-        if (errno != ENOSYS && errno != EPERM) return -1;
-        statx_blocked = 1;
-    }
+#else
+    (void)wc;
 #endif
     return fstatat(dfd, name, st, AT_SYMLINK_NOFOLLOW);
 }
@@ -676,13 +736,17 @@ static int read_link(int pfd, const char *name, const struct stat *st, const cha
         return V_UNREADABLE;                           /* EIO and friends */
     }
     if ((size_t)n >= sizeof e->link_target) return V_UNREADABLE;
+    /* No real symlink has an empty target (symlink(2) refuses one), but a
+     * FUSE or network filesystem can present it. Recorded as such it would be
+     * read back as "unknown" without the unreadable flag that says so. */
+    if (n == 0) return V_UNREADABLE;
     e->link_target[n] = '\0';
     e->link_target_len = (size_t)n;
     e->has_link_target = true;
 
     struct stat again;
-    bool mr;
-    if (stat_entry(pfd, name, &again, &mr) == -1) {
+    bool mr, mk;
+    if (stat_entry(wc, pfd, name, &again, &mr, &mk) == -1) {
         if (errno == ENOENT) return V_VANISHED;
         if (fatal_errno(errno)) {
             belay_err_set(BELAY_ERR_IO, errno, "manifest: stat %s", rel);
@@ -695,14 +759,8 @@ static int read_link(int pfd, const char *name, const struct stat *st, const cha
         return V_RACED;
 
     /* Advisory only (§5.1.1): computed lexically, never used to decide. */
-    if (e->link_target[0] == '/') {
-        const int within = belay_path_within_lexical(wc->scope, e->link_target);
-        e->target_outside_scope = (within != 1);
-        if (within == -1) belay_err_clear();
-    } else {
-        e->target_outside_scope = rel_target_escapes(e->path, e->path_len,
-                                                     e->link_target, e->link_target_len);
-    }
+    e->target_outside_scope = belay_link_target_outside(wc->scope, e->path, e->path_len,
+                                                        e->link_target, e->link_target_len);
     return V_OK;
 }
 
@@ -834,10 +892,6 @@ static int read_file(int pfd, const char *name, const struct stat *st, const cha
     return V_OK;
 }
 
-/* A name can be at most this long, so a directory whose path is longer than
- * PATH_CAP - 2 - NAME_BYTES might hold children whose paths do not fit. */
-#define NAME_BYTES 255
-
 /*
  *  Directory. Opened, and checked, BEFORE its entry is emitted, so whatever
  *  goes wrong is recorded on the entry itself. Any condition that keeps belay
@@ -905,8 +959,8 @@ static int visit(int parent_fd, const char *name, char *rel, size_t relsz,
 
     for (int attempt = 0; ; attempt++) {
         struct stat st;
-        bool mount_root;
-        if (stat_entry(parent_fd, name, &st, &mount_root) == -1) {
+        bool mount_root, mount_known;
+        if (stat_entry(wc, parent_fd, name, &st, &mount_root, &mount_known) == -1) {
             /* Vanished between readdir and stat: the tree changed under us. */
             if (errno == ENOENT) { wc->n_vanished++; return 0; }
             if (fatal_errno(errno)) {
@@ -928,15 +982,17 @@ static int visit(int parent_fd, const char *name, char *rel, size_t relsz,
         fill_from_stat(e, &st);
 
         /* A mount root of ANY type is a capture boundary: recorded, never read
-         * or descended. statx reports mount roots directly, bind mounts
-         * included. st_dev is compared for DIRECTORIES only: on overlayfs
-         * (xino off) every regular file and symlink carries its underlying
-         * layer's device, not the overlay's -- treating that as a boundary
-         * flagged every file of an overlay scope as a mount and hashed none,
-         * and belay's own session engine runs on exactly such overlays.
-         * Directories always carry the overlay's device. */
-        const bool crossed = mount_root ||
-            (e->type == BELAY_T_DIR && (uint64_t)st.st_dev != wc->root_dev);
+         * or descended. Where statx can say whether this is a mount root, its
+         * answer is used alone: st_dev is only a proxy, and a wrong one both
+         * ways -- a btrfs subvolume is a directory with its own st_dev but no
+         * mount, and on overlayfs (xino off) every non-directory carries its
+         * layer's device. Without statx (kernels before 5.8, or statx
+         * blocked), st_dev decides for every type, except non-directories of
+         * an overlayfs scope. (Directories-only everywhere hashed a file
+         * bind-mounted from another filesystem as a local file -- verified.) */
+        const bool crossed = mount_known ? mount_root
+            : (uint64_t)st.st_dev != wc->root_dev &&
+              (e->type == BELAY_T_DIR || !wc->scope_overlay);
 
         int r = V_OK;
         if (crossed) {
@@ -972,6 +1028,8 @@ static int visit(int parent_fd, const char *name, char *rel, size_t relsz,
         }
         break;
     }
+    /* Counted after the retry loop: a retried entry is still one entry. */
+    if (e->is_mount) wc->n_mounts++;
 
     /*
      *  A directory whose ctime falls between the start of the walk and NOW
@@ -985,9 +1043,9 @@ static int visit(int parent_fd, const char *name, char *rel, size_t relsz,
      *  WSL steps its clock back ~100 s at a time (measured twice: 101 s and
      *  108 s); with only a lower bound, every directory edited in the last
      *  ~100 s was flagged after each step. "Now" is read after the stat, so a
-     *  change during the walk always lands at or below it -- unless the clock
-     *  stepped back during the walk, which the realtime/monotonic comparison
-     *  at the end catches separately.
+     *  change during the walk lands at or below it unless the clock stepped
+     *  back meanwhile -- and then this rule merely misses it: the end-of-walk
+     *  re-check, which compares by equality, does not depend on the clock.
      */
     if (cfd != -1 && !e->unstable && e->ctime_ns >= wc->walk_start_ns) {
         struct timespec now;
@@ -1100,6 +1158,195 @@ static int walk(int dfd, char *rel, size_t relsz, size_t rel_len,
 /* Entry point                                                               */
 /* ------------------------------------------------------------------------ */
 
+/* ------------------------------------------------------------------------ */
+/* End-of-walk re-check                                                      */
+/* ------------------------------------------------------------------------ */
+
+/*
+ *  A walk is not a snapshot. An entry recorded early can change while the
+ *  walk goes on, and a directory already listed can gain or lose entries: a
+ *  file moved from a directory not yet listed into one already listed was
+ *  recorded nowhere, with a clean trailer. The ctime window rule catches part
+ *  of that, but only where file timestamps come from this machine's clock,
+ *  finely enough -- not on NFS, SMB, WSL's /mnt/c, FUSE, or one-second
+ *  filesystems (review round 3, F1). A file rewritten after it was hashed,
+ *  while another is rewritten before it is reached, gave a state that never
+ *  existed, again with a clean trailer (F2).
+ *
+ *  So when the walk is over, every recorded entry is stat'ed again and
+ *  compared with what was recorded -- by EQUALITY, so no clock is involved.
+ *  A directory whose listing may no longer hold is flagged unstable; any
+ *  other entry that changed is flagged drifted. This runs before the output
+ *  file is created, so belay's own output is never seen as a change.
+ *
+ *  Entries are reached the way the walk reached them: component by component
+ *  with openat(O_NOFOLLOW) from the scope root, never as a path string the
+ *  kernel would resolve through symlinks. A stack of open directories is
+ *  shared between neighbouring paths, and runs are sorted, so this costs
+ *  about one open per directory. Depth is bounded by MAX_DEPTH: nothing is
+ *  recorded below a directory the walk did not open.
+ *
+ *  What equality cannot see: a change within one timestamp tick of the
+ *  recorded stat, on a filesystem whose timestamps are coarser than the
+ *  change. The window rule covers part of that for local filesystems.
+ */
+struct rstack {
+    int    root_fd;
+    int    fd[MAX_DEPTH + 1];
+    size_t end[MAX_DEPTH + 1];      /* fd[i] is the directory path[0..end[i]) */
+    size_t n;
+    char   path[PATH_CAP];
+};
+
+static void rs_pop_to(struct rstack *rs, size_t keep) {
+    while (rs->n > keep) close(rs->fd[--rs->n]);
+}
+
+/* Makes the top of the stack the directory `dir` (dir_len bytes; 0 is the
+ * scope root). Returns 0; 1 when a component can no longer be opened as a
+ * directory, so nothing at or below it can be verified; -1 on a fatal error. */
+static int rs_to(struct rstack *rs, const char *dir, size_t dir_len) {
+    size_t keep = 0;                /* deepest level that is a component prefix */
+    for (size_t i = rs->n; i > 0; i--) {
+        const size_t e = rs->end[i - 1];
+        if (e <= dir_len && memcmp(rs->path, dir, e) == 0 && (e == dir_len || dir[e] == '/')) {
+            keep = i;
+            break;
+        }
+    }
+    rs_pop_to(rs, keep);
+    for (size_t pos = keep ? rs->end[keep - 1] + 1 : 0; pos < dir_len; ) {
+        size_t j = pos;
+        while (j < dir_len && dir[j] != '/') j++;
+        const size_t nl = j - pos;
+        if (nl == 0 || nl > NAME_BYTES || rs->n == MAX_DEPTH + 1) return 1;
+        char name[NAME_BYTES + 1];
+        memcpy(name, dir + pos, nl);
+        name[nl] = '\0';
+        const int parent = rs->n ? rs->fd[rs->n - 1] : rs->root_fd;
+        const int fd = openat(parent, name, O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC);
+        if (fd == -1) {
+            if (fatal_errno(errno)) {
+                belay_err_set(BELAY_ERR_IO, errno, "manifest: re-check: openat");
+                return -1;
+            }
+            return 1;
+        }
+        if (pos > 0) rs->path[pos - 1] = '/';
+        memcpy(rs->path + pos, dir + pos, nl);
+        rs->fd[rs->n] = fd;
+        rs->end[rs->n] = j;
+        rs->n++;
+        pos = j + 1;
+    }
+    return 0;
+}
+
+static bool ident_matches(const struct ident *id, const struct stat *st) {
+    return (uint64_t)st->st_ino == id->ino && (uint64_t)st->st_dev == id->dev &&
+           (uint32_t)st->st_mode == id->mode && (uint64_t)st->st_size == id->size &&
+           ts_ns(st, 0) == id->mtime_ns && ts_ns(st, 1) == id->ctime_ns;
+}
+
+/* Re-checks one record: sets id->mark and counts it. 0, or -1 if fatal. */
+static int recheck_one(struct rstack *rs, struct walk_ctx *wc,
+                       const unsigned char *path, uint32_t plen, struct ident *id) {
+    id->mark = MARK_NONE;
+    if (id->kind == RC_NONE) return 0;
+
+    struct stat st;
+    bool same = false;
+    if (plen == 1 && path[0] == '.') {
+        same = fstat(rs->root_fd, &st) == 0 && ident_matches(id, &st);
+    } else if (id->kind == RC_LISTING) {
+        const int r = rs_to(rs, (const char *)path, plen);
+        if (r == -1) return -1;
+        same = r == 0 && fstat(rs->fd[rs->n - 1], &st) == 0 && ident_matches(id, &st);
+    } else {
+        size_t base = plen;                             /* start of the last component */
+        while (base > 0 && path[base - 1] != '/') base--;
+        const int r = rs_to(rs, (const char *)path, base ? base - 1 : 0);
+        if (r == -1) return -1;
+        const size_t nl = plen - base;
+        if (r == 0 && nl > 0 && nl <= NAME_BYTES) {
+            char name[NAME_BYTES + 1];
+            memcpy(name, path + base, nl);
+            name[nl] = '\0';
+            bool mr, mk;
+            const int parent = rs->n ? rs->fd[rs->n - 1] : rs->root_fd;
+            if (stat_entry(wc, parent, name, &st, &mr, &mk) == 0) {
+                same = ident_matches(id, &st);
+            } else if (fatal_errno(errno)) {
+                belay_err_set(BELAY_ERR_IO, errno, "manifest: re-check: stat");
+                return -1;
+            }
+        }
+    }
+    if (!same) {
+        if (id->kind == RC_LISTING) { id->mark = MARK_UNSTABLE; wc->n_unstable++; }
+        else                        { id->mark = MARK_DRIFTED;  wc->n_drifted++;  }
+    }
+    return 0;
+}
+
+/* Re-checks every record: in the arena (sorted already) when nothing was
+ * spilled, else in each run file, whose marks are rewritten in place. */
+static int recheck(struct spill *s, struct walk_ctx *wc, int root_fd) {
+    struct rstack *rs = calloc(1, sizeof *rs);
+    unsigned char *pbuf = malloc(PATH_CAP);
+    int rc = -1;
+    if (rs == NULL || pbuf == NULL) {
+        belay_err_set(BELAY_ERR_NOMEM, 0, "manifest: out of memory");
+        goto done;
+    }
+    rs->root_fd = root_fd;
+
+    for (size_t i = 0; i < s->n; i++) {
+        unsigned char *r = s->arena + s->offs[i];
+        uint32_t pl, ll;
+        memcpy(&pl, r, 4);
+        memcpy(&ll, r + 4 + pl, 4);
+        struct ident id;
+        memcpy(&id, r + 8 + pl + ll, IDENT_BYTES);
+        if (recheck_one(rs, wc, r + 4, pl, &id) == -1) goto done;
+        memcpy(r + 8 + pl + ll, &id, IDENT_BYTES);
+    }
+
+    for (size_t lv = 0; lv < LEVELS; lv++) {
+        for (size_t k = 0; k < s->nruns[lv]; k++) {
+            FILE *f = s->runs[lv][k];
+            if (fseeko(f, 0, SEEK_SET) != 0) goto io;
+            for (;;) {
+                uint32_t pl, ll;
+                const size_t got = fread(&pl, 1, 4, f);
+                if (got == 0 && feof(f)) break;
+                if (got != 4 || pl == 0 || pl >= PATH_CAP || fread(pbuf, 1, pl, f) != pl ||
+                    fread(&ll, 1, 4, f) != 4 || ll == 0 || ll > LINE_CAP ||
+                    fseeko(f, (off_t)ll, SEEK_CUR) != 0)
+                    goto io;
+                struct ident id;
+                if (fread(&id, 1, IDENT_BYTES, f) != IDENT_BYTES) goto io;
+                if (recheck_one(rs, wc, pbuf, pl, &id) == -1) goto done;
+                if (id.mark != MARK_NONE &&
+                    (fseeko(f, -(off_t)IDENT_BYTES, SEEK_CUR) != 0 ||
+                     fwrite(&id, 1, IDENT_BYTES, f) != IDENT_BYTES ||
+                     fseeko(f, 0, SEEK_CUR) != 0))      /* switch back to reading */
+                    goto io;
+            }
+            if (fflush(f) != 0) goto io;
+        }
+    }
+    rc = 0;
+    goto done;
+io:
+    belay_err_set(BELAY_ERR_IO, errno, "manifest: re-check of a temporary run failed");
+done:
+    if (rs != NULL) rs_pop_to(rs, 0);
+    free(rs);
+    free(pbuf);
+    return rc;
+}
+
 static int write_header(FILE *f, const char *scope_real,
                         const struct belay_manifest_opts *opts, char *buf) {
     struct timespec now;
@@ -1164,6 +1411,12 @@ int belay_manifest_write(const char *out_path, const char *scope,
     struct spill sp;
     memset(&sp, 0, sizeof sp);
     snprintf(sp.tmpl, sizeof sp.tmpl, "%s.run.XXXXXX", out_path);
+    {
+        const char *slash = strrchr(out_path, '/');
+        if (slash == NULL)            snprintf(sp.dir, sizeof sp.dir, ".");
+        else if (slash == out_path)   snprintf(sp.dir, sizeof sp.dir, "/");
+        else snprintf(sp.dir, sizeof sp.dir, "%.*s", (int)(slash - out_path), out_path);
+    }
 
     struct walk_ctx *wc = calloc(1, sizeof *wc);
     char *rel = malloc(PATH_CAP);
@@ -1173,7 +1426,7 @@ int belay_manifest_write(const char *out_path, const char *scope,
     snprintf(outtmp, sizeof outtmp, "%s.tmp.XXXXXX", out_path);
 
     /* The budget must hold at least one maximal record. */
-    const size_t min_budget = 8 + PATH_CAP + LINE_CAP;
+    const size_t min_budget = 8 + PATH_CAP + LINE_CAP + IDENT_BYTES;
     sp.budget = opts->run_bytes == 0 ? RUN_BYTES
               : opts->run_bytes < min_budget ? min_budget : opts->run_bytes;
     sp.arena = malloc(sp.budget);
@@ -1193,6 +1446,22 @@ int belay_manifest_write(const char *out_path, const char *scope,
     wc->spill = &sp;
     wc->scope_len = strlen(real);
 
+    /* Once per walk: can statx be used here, and is the scope on overlayfs?
+     * (See stat_entry and the crossing rule in visit.) */
+#if defined(__linux__) && defined(STATX_ATTR_MOUNT_ROOT)
+    {
+        struct statx sx;
+        wc->statx_ok = statx(root_fd, "", AT_EMPTY_PATH | AT_SYMLINK_NOFOLLOW | AT_NO_AUTOMOUNT,
+                             STATX_BASIC_STATS, &sx) == 0;
+    }
+#endif
+#ifdef __linux__
+    {
+        struct statfs sfs;
+        wc->scope_overlay = fstatfs(root_fd, &sfs) == 0 && sfs.f_type == OVERLAYFS_MAGIC;
+    }
+#endif
+
     if (opts->store_dir != NULL) {
         wc->abs = malloc(PATH_MAX * 2);
         if (wc->abs == NULL) {
@@ -1210,13 +1479,20 @@ int belay_manifest_write(const char *out_path, const char *scope,
      *  ctime, and no margin is needed. False positives are limited to a
      *  directory changed in the same kernel tick (1-10 ms) just before the
      *  walk. Elsewhere file timestamps come from the fine clock; a 10 ms
-     *  margin covers any rounding. Clock STEPS are handled separately: a step
-     *  before the walk by the upper bound at each check, a step during the
-     *  walk by comparing realtime with monotonic time at the end.
+     *  margin covers any rounding.
+     *
+     *  A clock STEP can blind this rule but never make it flag: a ctime later
+     *  than "now" is not counted. Nothing is lost by that, since the
+     *  end-of-walk re-check catches every change after a listing by equality.
+     *  (Round 2 also flagged the root whenever realtime and monotonic time
+     *  diverged during the walk. On this development machine WSL steps the
+     *  wall clock +108 s and back every 5.4 s, drifting 0.4 s per cycle --
+     *  measured, 45 steps in 2 minutes -- so every check longer than about
+     *  7 s was flagged. With the re-check in place that rule protected
+     *  nothing, and it was removed.)
      */
-    struct timespec rt0, mono0, start;
+    struct timespec rt0, start;
     clock_gettime(CLOCK_REALTIME, &rt0);
-    clock_gettime(CLOCK_MONOTONIC, &mono0);
 #if defined(__linux__) && defined(CLOCK_REALTIME_COARSE)
     clock_gettime(CLOCK_REALTIME_COARSE, &start);
     wc->walk_start_ns = ns_of((int64_t)start.tv_sec, start.tv_nsec);
@@ -1247,16 +1523,7 @@ int belay_manifest_write(const char *out_path, const char *scope,
         if (wr == -1) goto cleanup;
 
         struct stat post;
-        struct timespec rt1, mono1;
-        clock_gettime(CLOCK_REALTIME, &rt1);
-        clock_gettime(CLOCK_MONOTONIC, &mono1);
-        const int64_t d_rt   = ns_of((int64_t)rt1.tv_sec, rt1.tv_nsec) - ns_of((int64_t)rt0.tv_sec, rt0.tv_nsec);
-        const int64_t d_mono = ns_of((int64_t)mono1.tv_sec, mono1.tv_nsec) - ns_of((int64_t)mono0.tv_sec, mono0.tv_nsec);
-        /* If the wall clock was stepped during the walk (WSL steps it by
-         * minutes; NTP can too), ctime comparisons against the walk's start
-         * mean nothing, so the manifest cannot claim to be one instant. */
-        const bool clock_stepped = d_rt - d_mono > 500000000LL || d_mono - d_rt > 500000000LL;
-        const bool changed = wr == W_INCOMPLETE || clock_stepped ||
+        const bool changed = wr == W_INCOMPLETE ||
             fstat(root_fd, &post) == -1 ||
             ts_ns(&post, 0) != root_e.mtime_ns || ts_ns(&post, 1) != root_e.ctime_ns;
         if (changed) {
@@ -1265,6 +1532,13 @@ int belay_manifest_write(const char *out_path, const char *scope,
         }
     }
     if (emit_one(wc, &root_e) == -1) goto cleanup;
+
+    /* Every record is now in the arena (sorted here) or in runs (the arena
+     * spilled first). Re-check them all before the output file exists. */
+    const bool in_memory = spill_total_runs(&sp) == 0;
+    if (in_memory) sort_offs(sp.arena, sp.offs, sp.scratch, sp.n);
+    else if (spill_flush(&sp) == -1) goto cleanup;
+    if (recheck(&sp, wc, root_fd) == -1) goto cleanup;
 
     /* Output goes to a temporary name and is renamed into place. */
     const int ofd = mkstemp(outtmp);
@@ -1282,12 +1556,11 @@ int belay_manifest_write(const char *out_path, const char *scope,
     if (write_header(out, real, opts, wc->line) == -1) goto cleanup;
 
     size_t written = 0;
-    if (spill_total_runs(&sp) == 0) {
-        /* Everything fit in one run: sort in memory, write straight out --
+    if (in_memory) {
+        /* Everything fit in one run, sorted above: write straight out --
          * with the same strict-order check merge() applies, so a name the
          * filesystem returns twice fails here too instead of producing a
          * manifest the reader rejects. */
-        sort_offs(sp.arena, sp.offs, sp.scratch, sp.n);
         for (size_t i = 0; i < sp.n; i++) {
             const unsigned char *r = sp.arena + sp.offs[i];
             if (i > 0 && rec_cmp(sp.arena + sp.offs[i - 1], r) >= 0) {
@@ -1298,14 +1571,15 @@ int belay_manifest_write(const char *out_path, const char *scope,
             uint32_t pl, ll;
             memcpy(&pl, r, 4);
             memcpy(&ll, r + 4 + pl, 4);
-            if (fwrite(r + 8 + pl, 1, ll, out) != ll) {
+            struct ident id;
+            memcpy(&id, r + 8 + pl + ll, IDENT_BYTES);
+            if (write_line(out, r + 8 + pl, ll, id.mark) == -1) {
                 belay_err_set(BELAY_ERR_IO, errno, "manifest: write failed");
                 goto cleanup;
             }
         }
         written = sp.n;
     } else {
-        if (spill_flush(&sp) == -1) goto cleanup;
         if (spill_finish(&sp, out, &written) == -1) goto cleanup;
     }
 
@@ -1321,8 +1595,9 @@ int belay_manifest_write(const char *out_path, const char *scope,
      * fewer entries. It also records what the walk could not capture. */
     if (fprintf(out,
                 "{\"belay_manifest_end\":%zu,\"vanished\":%zu"
-                ",\"unreadable\":%zu,\"unstable\":%zu}\n",
-                wc->n_entries, wc->n_vanished, wc->n_unreadable, wc->n_unstable) < 0) {
+                ",\"unreadable\":%zu,\"unstable\":%zu,\"mounts\":%zu,\"drifted\":%zu}\n",
+                wc->n_entries, wc->n_vanished, wc->n_unreadable, wc->n_unstable,
+                wc->n_mounts, wc->n_drifted) < 0) {
         belay_err_set(BELAY_ERR_IO, errno, "manifest: trailer write failed");
         goto cleanup;
     }
@@ -1348,6 +1623,8 @@ int belay_manifest_write(const char *out_path, const char *scope,
         stats->vanished   = wc->n_vanished;
         stats->unreadable = wc->n_unreadable;
         stats->unstable   = wc->n_unstable;
+        stats->mounts     = wc->n_mounts;
+        stats->drifted    = wc->n_drifted;
     }
     rc = 0;
 

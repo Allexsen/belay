@@ -62,6 +62,8 @@ static int check_entry(const struct belay_entry *e, void *ctx) {
     case BELAY_T_DIR:
         if (e->has_hash || e->unverified || e->has_stored) abort();
         if ((int)e->unreadable + (int)e->unstable + (int)e->is_mount > 1) abort();
+        /* A listed directory that changed is unstable, never drifted. */
+        if (e->drifted && !e->unreadable && !e->is_mount) abort();
         break;
     case BELAY_T_LNK:
         if (e->has_hash || e->unverified || e->has_stored || e->unstable) abort();
@@ -95,6 +97,8 @@ static int check_entry(const struct belay_entry *e, void *ctx) {
          * one; any other link's size is its target's length. */
         if (!e->unreadable && (e->link_target_len == 0 || e->size != e->link_target_len)) abort();
         if (e->target_outside_scope && e->link_target_len == 0) abort();
+        /* An unreadable link's target is unknown or stale: never annotated. */
+        if (e->unreadable && e->target_outside_scope) abort();
     }
 
     return 0;
