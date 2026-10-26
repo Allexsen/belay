@@ -127,7 +127,9 @@ BENCH_BIN	= $(BENCH_SRC:bench/%.c=$(BUILD)/bench/%)
 
 $(BUILD)/bench/%: bench/%.c $(CORE_OBJ)
 	@mkdir -p $(dir $@)
-	$(CC) $(CFLAGS) $(WARN) $(INC) -MMD -MP -o $@ $< $(CORE_OBJ)
+	$(CC) $(CFLAGS) $(WARN) $(INC) -MMD -MP -o $@ $< $(CORE_OBJ) $(BENCH_LDFLAGS)
+
+$(BUILD)/bench/spike_torn: BENCH_LDFLAGS = -pthread
 
 bench: $(BENCH_BIN)
 	@echo "built: $(BENCH_BIN)"

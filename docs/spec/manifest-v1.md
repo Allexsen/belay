@@ -216,21 +216,26 @@ Each rule below closes a way for a state the format records to be rendered as "n
 
 A recorded `sha256`, and the copy under `store/` when there is one, are the bytes of one read
 pass during which the file's size, mtime and ctime did not change (checked on the open file
-before and after the read, and against the stat that was recorded). That proves the bytes are a
-state the file really had **only where every write moves those timestamps**: Linux 6.13 and later
-on local filesystems with fine-grained timestamps. On older kernels, which stamp files once per
-timer tick (about 4 ms), and on filesystems with coarse timestamps (FAT, HFS+, some network and
-FUSE filesystems), two same-size writes inside one tick around belay's read can leave the
-timestamps unchanged, and the hash -- and the stored copy -- can then be of bytes the file never
-held. belay does not yet detect this; git's "racy" rule (re-read, or mark unverified, any file
-whose timestamp falls in the current tick) is the decided fix.
+before and after the read, and against the stat that was recorded). **That does not prove the
+bytes are a state the file really had.** It catches a write that starts during the read, but not
+one already in flight when the read began: `write(2)` updates the timestamps first and copies the
+data afterwards, so a read that overlaps the copy sees part old and part new bytes with timestamps
+that no longer move. Measured on Linux 6.18 (fine-grained timestamps) with a 4 MiB in-place
+rewrite racing the read: 56 of 2,000 reads were torn and passed the check on ext4, 11 of 2,000 on
+tmpfs (`bench/spike_torn.c`). On kernels before 6.13, which stamp files once per timer tick, and
+on filesystems with coarse timestamps, two writes inside one tick widen the window further.
+
+So whenever something writes to a file during the check, its hash -- and its stored copy -- can be
+of bytes the file never held, on any kernel. belay does not yet detect this. git's racy rule
+(decided) narrows it; closing it is part of the design-level review of walk consistency.
 
 The window exists only while something writes to the tree during the check. In RL mode the
 policy's processes are killed before the scan, and host-reader mode reads from outside the
 sandbox, so this is a limit of dev-tier and live checks, not of the trust model.
 
-(An earlier statement, in the commit that introduced the store, that "the store never holds bytes
-that match no state of the file" was true only under the first condition above.)
+(Two earlier statements were wrong. The commit that introduced the store said "the store never
+holds bytes that match no state of the file"; its first correction said that holds on Linux
+6.13+ with fine-grained timestamps. Neither holds while a write is in flight.)
 
 ## Path encoding
 

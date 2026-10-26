@@ -1063,9 +1063,9 @@ TEST(store_follows_interpreter_claims_not_just_size) {
 
 /* A file seen to change while being read is recorded unstable and its staged
  * copy discarded: the store never keeps a copy belay knows to be torn.
- * (Changes inside one timestamp tick are not seen on kernels before 6.13;
- * see the spec, "What a hash, and a stored copy, prove".) Asserted as an
- * invariant over several racing runs. */
+ * (A write already in flight when the read begins is not seen, on any
+ * kernel; see the spec, "What a hash, and a stored copy, prove".) Asserted
+ * as an invariant over several racing runs. */
 TEST(store_discards_copies_of_unstable_files) {
     fx_mkdir("race");
     char fpath[8192];
