@@ -24,6 +24,11 @@
 #include <string.h>
 #include <sys/stat.h>
 #include <sys/wait.h>
+#include <sys/xattr.h>
+#ifdef __linux__
+#include <linux/fs.h>
+#include <sys/ioctl.h>
+#endif
 #include <time.h>
 #include <unistd.h>
 
@@ -1341,6 +1346,153 @@ TEST(concurrent_checks_share_one_store) {
     if (system(cmd) != 0) { /* best effort */ }
 }
 
+/* ---------- W6: extended metadata (decided 2026-10-26) ---------- */
+
+static int set_x(const char *path, const char *name, const char *value) {
+#ifdef __APPLE__
+    return setxattr(path, name, value, strlen(value), 0, XATTR_NOFOLLOW);
+#else
+    return setxattr(path, name, value, strlen(value), 0);
+#endif
+}
+
+static struct belay_entry g_x_e[16];
+static size_t g_x_n;
+static int x_collect(const struct belay_entry *e, void *ctx) {
+    (void)ctx;
+    if (g_x_n < 16) g_x_e[g_x_n++] = *e;
+    return 0;
+}
+static const struct belay_entry *x_find(const char *p) {
+    for (size_t i = 0; i < g_x_n; i++) if (strcmp(g_x_e[i].path, p) == 0) return &g_x_e[i];
+    return NULL;
+}
+static int x_check(const char *scope) {
+    char m[512];
+    snprintf(m, sizeof m, "/tmp/belay_x_%d.ndjson", (int)getpid());
+    struct belay_manifest_opts o = {
+        .hash_max_bytes = BELAY_HASH_MAX_BYTES_DEFAULT,
+        .store_max_bytes = BELAY_STORE_MAX_BYTES_DEFAULT,
+    };
+    g_x_n = 0;
+    const int rc = belay_manifest_write(m, scope, &o, NULL) == 0 &&
+                   belay_manifest_read(m, x_collect, NULL) == 0 ? 0 : -1;
+    unlink(m);
+    return rc;
+}
+
+/* `setfattr` and ACLs used to change nothing recorded but ctime. Now: each
+ * attribute is recorded by name with the digest of its value, a changed
+ * value changes the record, and a symlink never shows its target's. */
+TEST(w6_xattrs_are_recorded_and_a_symlink_never_shows_its_targets) {
+#ifdef __APPLE__
+    const char *A = "com.belay.alpha", *B = "com.belay.beta";
+#else
+    const char *A = "user.alpha", *B = "user.beta";
+#endif
+    fx_mkdir("xa");
+    fx_mkdir("xa/d");
+    fx_write("xa/f", "content", 7);
+    fx_symlink("f", "xa/l");
+    char f[8192], d[8192], scope[8192];
+    snprintf(f, sizeof f, "%s/xa/f", g_root);
+    snprintf(d, sizeof d, "%s/xa/d", g_root);
+    snprintf(scope, sizeof scope, "%s/xa", g_root);
+    if (set_x(f, A, "1") != 0 || set_x(f, B, "2") != 0 || set_x(d, A, "dir") != 0) {
+        printf("      (skipped: no user xattrs on this filesystem)\n");
+        return;
+    }
+    ASSERT_EQ_INT(0, x_check(scope));
+    const struct belay_entry *ef = x_find("f"), *ed = x_find("d"), *el = x_find("l");
+    ASSERT_TRUE(ef != NULL && ed != NULL && el != NULL);
+    if (!ef || !ed || !el) return;
+    ASSERT_TRUE(ef->has_xattrs && ef->xattrs_inline && !ef->xattrs_unknown);
+    ASSERT_TRUE(strstr(ef->xattrs, A) != NULL && strstr(ef->xattrs, B) != NULL);
+    ASSERT_TRUE(ed->has_xattrs && strstr(ed->xattrs, A) != NULL);
+    ASSERT_TRUE(!el->has_xattrs);                     /* the target's are not the link's */
+    char before[65];
+    snprintf(before, sizeof before, "%s", ef->xattrs_sha256_hex);
+    ASSERT_EQ_INT(0, set_x(f, B, "changed"));
+    ASSERT_EQ_INT(0, x_check(scope));
+    ef = x_find("f");
+    ASSERT_TRUE(ef != NULL && strcmp(ef->xattrs_sha256_hex, before) != 0);
+}
+
+/* `chattr +i` on a grader file used to be invisible. nodump is the flag an
+ * unprivileged owner may set; immutable needs CAP_LINUX_IMMUTABLE but lives
+ * in the same field. */
+TEST(w6_inode_flags_are_recorded) {
+    fx_mkdir("fl");
+    fx_write("fl/f", "x", 1);
+    char f[8192], scope[8192];
+    snprintf(f, sizeof f, "%s/fl/f", g_root);
+    snprintf(scope, sizeof scope, "%s/fl", g_root);
+    ASSERT_EQ_INT(0, x_check(scope));
+    const struct belay_entry *e = x_find("f");
+    if (e == NULL || !e->has_iflags) {
+        printf("      (skipped: no inode flags on this filesystem)\n");
+        return;
+    }
+    const uint64_t before = e->iflags;
+#ifdef __APPLE__
+    const int set = chflags(f, UF_NODUMP);
+    const uint64_t bit = UF_NODUMP;
+#else
+    int set = -1, fl = 0;
+    const int fd = open(f, O_RDONLY);
+    if (fd >= 0 && ioctl(fd, FS_IOC_GETFLAGS, &fl) == 0) {
+        fl |= FS_NODUMP_FL;
+        set = ioctl(fd, FS_IOC_SETFLAGS, &fl);
+    }
+    if (fd >= 0) close(fd);
+    const uint64_t bit = FS_NODUMP_FL;
+#endif
+    if (set != 0) {
+        printf("      (skipped: cannot set nodump here)\n");
+        return;
+    }
+    ASSERT_EQ_INT(0, x_check(scope));
+    e = x_find("f");
+    ASSERT_TRUE(e != NULL && e->has_iflags && (e->iflags & bit) && e->iflags != before);
+}
+
+/* A set too large to inline (8 KiB) is recorded by the digest of its
+ * canonical text alone, which still moves when any value moves. On tmpfs,
+ * which holds more user xattrs than ext4's one block. */
+TEST(w6_large_xattr_set_is_recorded_by_digest) {
+#ifdef __linux__
+    char base[256], f[512], name[128];
+    snprintf(base, sizeof base, "/dev/shm/belay_x_%d", (int)getpid());
+    mkdir(base, 0755);
+    snprintf(f, sizeof f, "%s/f", base);
+    FILE *fp = fopen(f, "wb");
+    if (fp) { fputs("x", fp); fclose(fp); }
+    int ok = 1;
+    for (int i = 0; i < 100 && ok; i++) {
+        snprintf(name, sizeof name, "user.a-fairly-long-attribute-name-number-%03d", i);
+        ok = set_x(f, name, "v") == 0;
+    }
+    if (!ok) {
+        printf("      (skipped: tmpfs here does not hold 100 user xattrs)\n");
+    } else {
+        ASSERT_EQ_INT(0, x_check(base));
+        const struct belay_entry *e = x_find("f");
+        ASSERT_TRUE(e != NULL && e->has_xattrs && !e->xattrs_inline);
+        char before[65] = "";
+        if (e) snprintf(before, sizeof before, "%s", e->xattrs_sha256_hex);
+        ASSERT_EQ_INT(0, set_x(f, "user.a-fairly-long-attribute-name-number-050", "w"));
+        ASSERT_EQ_INT(0, x_check(base));
+        e = x_find("f");
+        ASSERT_TRUE(e != NULL && strcmp(e->xattrs_sha256_hex, before) != 0);
+    }
+    char cmd[400];
+    snprintf(cmd, sizeof cmd, "rm -rf '%s'", base);
+    if (system(cmd) != 0) { /* best effort */ }
+#else
+    printf("      (skipped: Linux tmpfs only)\n");
+#endif
+}
+
 int main(void) {
     fx_init();
 
@@ -1382,6 +1534,9 @@ int main(void) {
     RUN(r2_far_future_timestamp_saturates_instead_of_overflowing);
     RUN(r3_output_inside_the_scope_is_not_a_change);
     RUN(concurrent_checks_share_one_store);
+    RUN(w6_xattrs_are_recorded_and_a_symlink_never_shows_its_targets);
+    RUN(w6_inode_flags_are_recorded);
+    RUN(w6_large_xattr_set_is_recorded_by_digest);
 
     fx_cleanup();
     {

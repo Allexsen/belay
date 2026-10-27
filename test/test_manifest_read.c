@@ -11,6 +11,7 @@
 
 #include "belay_test.h"
 #include "belay/manifest.h"
+#include "belay/hash.h"
 #include "belay/error.h"
 
 #include <stdbool.h>
@@ -1023,6 +1024,59 @@ TEST(r3_raced_flag_and_mount_and_race_counts) {
     belay_err_clear();
 }
 
+/* W6 (decided 2026-10-26): extended metadata has one spelling per state.
+ * Elements are "name=<sha256 of value>", sorted by name bytes; a name is
+ * written as itself only when printable ASCII without '"', '\\' or '=' and
+ * not starting "x:"; the file capability lives in "caps" alone. */
+#define XH "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+TEST(w6_reader_accepts_exactly_the_canonical_extended_metadata) {
+    static const struct { const char *name; const char *m; int want; } cases[] = {
+        { "inode flags",                  HDR REG_LINE("f", ",\"iflags\":524288" SHA_F), 0 },
+        { "capability",                   HDR REG_LINE("f", ",\"caps\":\"0100000200200000\"" SHA_F), 0 },
+        { "two attributes, sorted",       HDR REG_LINE("f", ",\"xattrs\":[\"user.a=" XH "\",\"user.b=" XH "\"]" SHA_F), 0 },
+        { "hex-encoded non-ASCII name",   HDR REG_LINE("f", ",\"xattrs\":[\"x:757365722e77c3a9=" XH "\"]" SHA_F), 0 },
+        { "set recorded by digest",       HDR REG_LINE("f", ",\"xattrs_sha256\":\"" XH "\"" SHA_F), 0 },
+        { "attributes unknown",           HDR REG_LINE("f", ",\"xattrs_unknown\":true" SHA_F), 0 },
+        { "attributes on a directory",    HDR DIR_E("d", ",\"xattrs\":[\"user.a=" XH "\"]"), 0 },
+        { "unsorted",                     HDR REG_LINE("f", ",\"xattrs\":[\"user.b=" XH "\",\"user.a=" XH "\"]" SHA_F), -1 },
+        { "duplicate name",               HDR REG_LINE("f", ",\"xattrs\":[\"user.a=" XH "\",\"user.a=" XH "\"]" SHA_F), -1 },
+        { "capability inside xattrs",     HDR REG_LINE("f", ",\"xattrs\":[\"security.capability=" XH "\"]" SHA_F), -1 },
+        { "printable name hex-encoded",   HDR REG_LINE("f", ",\"xattrs\":[\"x:612e62=" XH "\"]" SHA_F), -1 },
+        { "name containing '='",          HDR REG_LINE("f", ",\"xattrs\":[\"a=b=" XH "\"]" SHA_F), -1 },
+        { "uppercase digest",             HDR REG_LINE("f", ",\"xattrs\":[\"user.a=E3B0C44298FC1C149AFBF4C8996FB92427AE41E4649B934CA495991B7852B855\"]" SHA_F), -1 },
+        { "escape in an element",         HDR REG_LINE("f", ",\"xattrs\":[\"user.\\u0061=" XH "\"]" SHA_F), -1 },
+        { "empty array",                  HDR REG_LINE("f", ",\"xattrs\":[]" SHA_F), -1 },
+        { "both inline and digest",       HDR REG_LINE("f", ",\"xattrs\":[\"user.a=" XH "\"],\"xattrs_sha256\":\"" XH "\"" SHA_F), -1 },
+        { "unknown with attributes",      HDR REG_LINE("f", ",\"xattrs\":[\"user.a=" XH "\"],\"xattrs_unknown\":true" SHA_F), -1 },
+        { "capability on a directory",    HDR DIR_E("d", ",\"caps\":\"01000002\""), -1 },
+        { "capability of odd length",     HDR REG_LINE("f", ",\"caps\":\"010\"" SHA_F), -1 },
+        { "extended metadata on a mount", HDR DIR_E("m", ",\"iflags\":1,\"mount\":true"), -1 },
+        { "fields out of order",          HDR REG_LINE("f", ",\"xattrs\":[\"user.a=" XH "\"],\"iflags\":1" SHA_F), -1 },
+    };
+    for (size_t i = 0; i < sizeof cases / sizeof cases[0]; i++) {
+        const int rc = read_it(cases[i].m);
+        if (rc != cases[i].want)
+            BELAY_FAIL("%s: got %d, want %d (%s)", cases[i].name, rc, cases[i].want, belay_err_msg());
+        belay_err_clear();
+    }
+    /* The digest of an inline set is the digest of its array body, so a set
+     * recorded inline in one manifest and by digest in another compares. */
+    ASSERT_EQ_INT(0, read_it(HDR REG_LINE("f", ",\"xattrs\":[\"user.a=" XH "\"]" SHA_F)));
+    ASSERT_TRUE(g_n == 1 && g_e[0].has_xattrs && g_e[0].xattrs_inline);
+    if (g_n == 1) {
+        struct belay_sha256 h;
+        uint8_t d[BELAY_SHA256_DIGEST_LEN];
+        char hex[65];
+        const char body[] = "\"user.a=" XH "\"";
+        belay_sha256_init(&h);
+        belay_sha256_update(&h, body, strlen(body));
+        belay_sha256_final(&h, d);
+        belay_hex_encode(hex, d, sizeof d);
+        ASSERT_EQ_STR(hex, g_e[0].xattrs_sha256_hex);
+    }
+}
+#undef XH
+
 int main(void) {
     RUN(reads_a_well_formed_entry);
     RUN(rejects_traversal_and_absolute_entry_paths);
@@ -1074,6 +1128,7 @@ int main(void) {
     RUN(r3_many_sealed_directories);
     RUN(r3_reader_checks_annotation_and_hash_limit_against_the_header);
     RUN(r3_raced_flag_and_mount_and_race_counts);
+    RUN(w6_reader_accepts_exactly_the_canonical_extended_metadata);
     RUN(round_trips_the_writers_output);
 
     unlink(g_path);

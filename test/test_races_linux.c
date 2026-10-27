@@ -27,6 +27,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <sys/stat.h>
+#include <sys/xattr.h>
 #include <time.h>
 #include <unistd.h>
 
@@ -43,7 +44,8 @@ enum arm { NONE, SWAP_ON_DIR_OPEN, SWAP_ON_READLINK, REPLACE_LINK_WITH_FILE,
            APPEND_TO_FIRST_FILE,     /* on the 2nd file opened, append to the 1st */
            STATX_EPERM_ONCE,         /* statx of one name fails with EPERM, once */
            STATX_ENOSYS,             /* statx missing altogether */
-           LINK_EMPTY };             /* readlinkat returns an empty target */
+           LINK_EMPTY,               /* readlinkat returns an empty target */
+           XATTR_EIO };              /* the first fd xattr listing fails with EIO */
 static int g_flip;
 
 static char g_root[256], g_m[300];
@@ -208,6 +210,16 @@ int __wrap_statx(int dfd, const char *name, int flags, unsigned int mask, struct
     /* LINK_EMPTY: the filesystem presents the link as empty, size included. */
     if (r == 0 && g_arm == LINK_EMPTY && g_x != NULL && strcmp(name, g_x) == 0) sx->stx_size = 0;
     return r;
+}
+
+ssize_t __real_flistxattr(int, char *, size_t);
+ssize_t __wrap_flistxattr(int fd, char *buf, size_t n) {
+    if (g_arm == XATTR_EIO && !g_fired) {
+        g_fired = 1;
+        errno = EIO;
+        return -1;
+    }
+    return __real_flistxattr(fd, buf, n);
 }
 
 struct dirent *__real_readdir(DIR *);
@@ -563,6 +575,29 @@ static int enter_userns(void) {
     return 0;
 }
 
+/* W6: a file capability is the privilege-change route `setcap` takes, and
+ * it used to change nothing recorded but ctime. Setting one needs
+ * CAP_SETFCAP, which a user namespace's root has over its own files. */
+static int caps_child(void) {
+    char f[400];
+    snprintf(f, sizeof f, "%s/capfile", g_root);
+    if (enter_userns() != 0) return 77;
+    /* VFS_CAP_REVISION_2 | effective; permitted = CAP_NET_RAW (13). */
+    const uint32_t v[5] = { 0x02000001u, 1u << 13, 0, 0, 0 };
+    if (setxattr(f, "security.capability", v, sizeof v, 0) != 0) return 77;
+    struct belay_manifest_opts o = {
+        .hash_max_bytes = BELAY_HASH_MAX_BYTES_DEFAULT,
+        .store_max_bytes = BELAY_STORE_MAX_BYTES_DEFAULT,
+    };
+    if (belay_manifest_write(g_m, g_root, &o, NULL) != 0) return 1;
+    g_n = 0;
+    if (belay_manifest_read(g_m, collect, NULL) != 0) return 2;
+    const struct belay_entry *e = find("capfile");
+    if (e == NULL || !e->has_caps || strlen(e->caps_hex) < 40) return 3;
+    if (e->has_xattrs && strstr(e->xattrs, "security.capability") != NULL) return 4;
+    return 0;
+}
+
 static int overlay_child(void) {
     char lower[300], up[300], merged[300], p[400];
     snprintf(lower, sizeof lower, "%s/lower", g_root);
@@ -636,6 +671,31 @@ static int bind_child(void) {
         if (!e->is_mount || e->has_hash) return 4 + pass;
     }
     return 0;
+}
+
+TEST(w6_file_capability_is_recorded) {
+    reset();
+    touch("capfile", "#!/bin/true\n");
+    const pid_t pid = fork();
+    if (pid == 0) _exit(caps_child());
+    int status = 0;
+    waitpid(pid, &status, 0);
+    const int rc = WIFEXITED(status) ? WEXITSTATUS(status) : 99;
+    if (rc == 77) { printf("      (skipped: cannot set a file capability here)\n"); return; }
+    ASSERT_EQ_INT(0, rc);
+}
+
+/* W6: attributes that could not be read are recorded as unknown, never as
+ * "none" -- an absent field would read as "no ACL, no capability". */
+TEST(w6_unreadable_xattrs_are_unknown_not_none) {
+    reset();
+    touch("f", "x");
+    arm(XATTR_EIO, NULL, NULL);
+    ASSERT_EQ_INT(0, check(NULL));            /* check() also runs the reader */
+    ASSERT_TRUE(g_fired);
+    size_t unknown = 0;
+    for (size_t i = 0; i < g_n; i++) if (g_e[i].xattrs_unknown) unknown++;
+    ASSERT_EQ_INT(1, (int)unknown);
 }
 
 TEST(r2_overlay_scope_files_are_hashed_not_flagged_as_mounts) {
@@ -767,6 +827,8 @@ int main(void) {
     RUN(r3_file_changed_after_it_was_read_is_raced);
     RUN(r3_one_statx_eperm_is_recorded_and_does_not_switch_statx_off);
     RUN(r3_empty_link_target_is_recorded_unreadable);
+    RUN(w6_file_capability_is_recorded);
+    RUN(w6_unreadable_xattrs_are_unknown_not_none);
 
     char cmd[600];
     snprintf(cmd, sizeof cmd, "rm -rf '%s' '%s'", g_root, g_m);

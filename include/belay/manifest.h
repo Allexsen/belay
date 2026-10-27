@@ -21,6 +21,7 @@
 #define BELAY_MANIFEST_VERSION 1
 
 /* Defaults; overridable per run. */
+#define BELAY_XATTRS_INLINE_MAX 8192u   /* larger sets: digest only */
 #define BELAY_HASH_MAX_BYTES_DEFAULT   (64u * 1024u * 1024u)  /* hash up to 64MB */
 #define BELAY_STORE_MAX_BYTES_DEFAULT  (64u * 1024u)          /* copy up to 64KB */
 
@@ -55,6 +56,35 @@ struct belay_entry {
     uint64_t ino;
     uint64_t dev;
     uint64_t nlink;
+
+    /*
+     *  Extended metadata (decided 2026-10-26: `setcap` on a binary and
+     *  `chattr +i` on a grader file are tampering routes, and both used to
+     *  change nothing but ctime). Absent on mount points, which are never
+     *  read.
+     *
+     *  iflags: inode flags -- FS_IOC_GETFLAGS on Linux (regular files and
+     *  directories), st_flags on macOS (every type). Absent where the
+     *  filesystem has none.
+     *  caps: the raw security.capability value, lowercase hex.
+     *  xattrs: every other extended attribute (POSIX ACLs included, as
+     *  system.posix_acl_*): xattrs_sha256_hex is the digest of the canonical
+     *  set, and when xattrs_inline the set itself is in xattrs[] -- the body
+     *  of the manifest's "xattrs" array, one "name=<sha256 of value>" per
+     *  attribute, sorted by name. Large sets are recorded by digest only.
+     *  xattrs_unknown: the attributes could not be read; none of the above is
+     *  recorded, and "none" must not be assumed.
+     */
+    bool     has_iflags;
+    uint64_t iflags;
+    bool     has_caps;
+    char     caps_hex[129];
+    bool     has_xattrs;
+    char     xattrs_sha256_hex[65];
+    bool     xattrs_inline;
+    char     xattrs[8193];
+    size_t   xattrs_len;
+    bool     xattrs_unknown;
 
     bool     has_hash;                  /* sha256 computed */
     char     sha256_hex[65];

@@ -45,6 +45,13 @@ static int check_entry(const struct belay_entry *e, void *ctx) {
         }
     }
 
+    /* Extended metadata (W6): a capability only on a regular file; "unknown"
+     * excludes anything recorded; a mount point carries none of it. */
+    if (e->has_caps && e->type != BELAY_T_REG) abort();
+    if (e->xattrs_unknown && (e->has_xattrs || e->has_caps)) abort();
+    if (e->is_mount && (e->has_iflags || e->has_caps || e->has_xattrs || e->xattrs_unknown)) abort();
+    if (e->xattrs_inline && (!e->has_xattrs || e->xattrs_len > BELAY_XATTRS_INLINE_MAX)) abort();
+
     /* rdev exactly on device nodes. */
     if (e->has_rdev != (e->type == BELAY_T_BLK || e->type == BELAY_T_CHR)) abort();
 

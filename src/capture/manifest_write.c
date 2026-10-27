@@ -53,7 +53,10 @@
 #include <stdlib.h>
 #include <string.h>
 #include <sys/stat.h>
+#include <sys/xattr.h>
 #ifdef __linux__
+#include <linux/fs.h>                   /* FS_IOC_GETFLAGS */
+#include <sys/ioctl.h>
 #include <sys/sysmacros.h>
 #include <sys/vfs.h>
 #define OVERLAYFS_MAGIC 0x794c7630      /* <linux/magic.h> OVERLAYFS_SUPER_MAGIC */
@@ -70,6 +73,7 @@
 #define LEVELS     12                  /* 16^12 runs: unreachable in practice */
 #define SNIFF_BYTES 8000u              /* git's binary heuristic: a NUL in the
                                           first 8000 bytes means not text */
+#define XLIST_CAP  (64u * 1024u)       /* XATTR_LIST_MAX: longest xattr name list */
 #define NAME_BYTES 255                 /* longest entry name: a directory whose
                                           path exceeds PATH_CAP - 2 - NAME_BYTES
                                           may hold children that do not fit */
@@ -132,6 +136,16 @@ static int serialize(const struct belay_entry *e, char *buf, size_t cap, size_t 
            (unsigned long long)e->size, (long long)e->mtime_ns, (long long)e->ctime_ns,
            (unsigned long long)e->ino, (unsigned long long)e->dev,
            (unsigned long long)e->nlink) == -1) return -1;
+
+    if (e->has_iflags &&
+        ap(buf, cap, &w, ",\"iflags\":%llu", (unsigned long long)e->iflags) == -1) return -1;
+    if (e->has_caps && ap(buf, cap, &w, ",\"caps\":\"%s\"", e->caps_hex) == -1) return -1;
+    if (e->has_xattrs) {
+        if (e->xattrs_inline ? ap(buf, cap, &w, ",\"xattrs\":[%s]", e->xattrs)
+                             : ap(buf, cap, &w, ",\"xattrs_sha256\":\"%s\"", e->xattrs_sha256_hex))
+            return -1;
+    }
+    if (e->xattrs_unknown && ap(buf, cap, &w, ",\"xattrs_unknown\":true") == -1) return -1;
 
     if (e->has_hash && ap(buf, cap, &w, ",\"sha256\":\"%s\"", e->sha256_hex) == -1) return -1;
     if (e->unverified && ap(buf, cap, &w, ",\"unverified\":true") == -1) return -1;
@@ -513,7 +527,10 @@ struct walk_ctx {
     struct spill *spill;
     struct belay_entry e;       /* scratch; finished before any recursion */
     char *line;                 /* LINE_CAP */
-    unsigned char *readbuf;     /* READ_CHUNK */
+    unsigned char *readbuf;     /* READ_CHUNK; also holds one xattr value */
+    char  *xlist;               /* XLIST_CAP + 1: an entry's xattr name list */
+    const char **xnames;        /* pointers into xlist, sorted */
+    bool   extras_done;         /* this attempt already read the entry's extras */
     size_t n_entries;
     size_t n_vanished;
     size_t n_unreadable;
@@ -616,6 +633,200 @@ static void fill_from_stat(struct belay_entry *e, const struct stat *st) {
         e->has_rdev = true;
         e->rdev = (uint64_t)st->st_rdev;
     }
+#ifdef __APPLE__
+    e->has_iflags = true;                  /* chflags: uchg, schg, hidden... */
+    e->iflags = (uint64_t)st->st_flags;
+#endif
+}
+
+/* ------------------------------------------------------------------------ */
+/* Extended metadata: xattrs, ACLs, file capabilities, inode flags          */
+/* ------------------------------------------------------------------------ */
+
+/*
+ *  `setcap` on a binary and `chattr +i` on a grader file used to change
+ *  nothing recorded but ctime (decided 2026-10-26, W6). The entry's
+ *  attributes are reached through its open fd (regular files, directories),
+ *  or on Linux through the /proc/self/fd path of an O_PATH|O_NOFOLLOW fd,
+ *  which acts on the entry itself -- a symlink, never its target (verified:
+ *  the target's user.* attribute is not seen through the link). Nothing is
+ *  resolved from a path string, so containment holds as for the walk.
+ */
+static bool fatal_errno(int err);
+
+struct xsrc { int fd; const char *proc; };
+
+static ssize_t x_list(const struct xsrc *x, char *buf, size_t n) {
+#if defined(__APPLE__)
+    return flistxattr(x->fd, buf, n, XATTR_NOFOLLOW);
+#else
+    return x->proc != NULL ? listxattr(x->proc, buf, n) : flistxattr(x->fd, buf, n);
+#endif
+}
+
+static ssize_t x_get(const struct xsrc *x, const char *name, void *buf, size_t n) {
+#if defined(__APPLE__)
+    return fgetxattr(x->fd, name, buf, n, 0, XATTR_NOFOLLOW);
+#else
+    return x->proc != NULL ? getxattr(x->proc, name, buf, n) : fgetxattr(x->fd, name, buf, n);
+#endif
+}
+
+/* Names written as themselves: printable ASCII without '"', '\\' or '=',
+ * not starting "x:". Anything else is written "x:" + hex, so every name has
+ * exactly one spelling and none needs JSON escaping. */
+static bool plain_xattr_name(const char *n, size_t l) {
+    if (l == 0 || (l >= 2 && n[0] == 'x' && n[1] == ':')) return false;
+    for (size_t i = 0; i < l; i++) {
+        const unsigned char c = (unsigned char)n[i];
+        if (c < 0x21 || c > 0x7e || c == '"' || c == '\\' || c == '=') return false;
+    }
+    return true;
+}
+
+static int name_cmp(const void *a, const void *b) {
+    return strcmp(*(const char *const *)a, *(const char *const *)b);   /* bytewise */
+}
+
+/* The canonical "xattrs" array body goes to the digest always, and to the
+ * entry while it fits; larger sets are recorded by digest alone. */
+struct xout { struct belay_sha256 h; char *buf; size_t len, cap; bool fits; size_t n; };
+static void xo_put(struct xout *o, const char *s, size_t l) {
+    belay_sha256_update(&o->h, s, l);
+    if (o->fits && o->len + l < o->cap) {
+        memcpy(o->buf + o->len, s, l);
+        o->len += l;
+    } else {
+        o->fits = false;
+    }
+}
+
+/* Reads the extras of wc->e. `fd` is the entry's open fd, or -1 to reach it
+ * from parent `pfd` + `name` (checked against `st`, the recorded stat). Any
+ * failure other than "no xattrs on this filesystem" records xattrs_unknown:
+ * an absent field must never stand for "could not read". 0, or -1 if fatal. */
+static int read_extras(struct walk_ctx *wc, int fd, int pfd, const char *name,
+                       const struct stat *st) {
+    struct belay_entry *e = &wc->e;
+    wc->extras_done = true;
+    int own = -1;
+    struct xsrc x = { fd, NULL };
+#ifdef __linux__
+    char proc[64];
+    if (fd != -1) {
+        int fl;
+        if (ioctl(fd, FS_IOC_GETFLAGS, &fl) == 0) {
+            e->has_iflags = true;
+            e->iflags = (uint32_t)fl;
+        }
+    } else {
+        own = openat(pfd, name, O_PATH | O_NOFOLLOW | O_CLOEXEC);
+        if (own == -1) {
+            if (fatal_errno(errno)) {
+                belay_err_set(BELAY_ERR_IO, errno, "manifest: openat (O_PATH)");
+                return -1;
+            }
+            goto unknown;
+        }
+        struct stat os;
+        if (fstat(own, &os) == -1 || os.st_ino != st->st_ino || os.st_dev != st->st_dev)
+            goto unknown;                            /* not the entry recorded */
+        snprintf(proc, sizeof proc, "/proc/self/fd/%d", own);
+        x.proc = proc;
+    }
+#elif defined(__APPLE__)
+    if (fd == -1) {
+        /* Opening a FIFO or a device has side effects; symlinks open safely. */
+        if (!S_ISLNK(st->st_mode)) goto unknown;
+        own = openat(pfd, name, O_RDONLY | O_SYMLINK | O_CLOEXEC);
+        if (own == -1) {
+            if (fatal_errno(errno)) {
+                belay_err_set(BELAY_ERR_IO, errno, "manifest: openat (O_SYMLINK)");
+                return -1;
+            }
+            goto unknown;
+        }
+        struct stat os;
+        if (fstat(own, &os) == -1 || os.st_ino != st->st_ino || os.st_dev != st->st_dev)
+            goto unknown;
+        x.fd = own;
+    }
+#else
+    (void)pfd; (void)name; (void)st;
+    if (fd == -1) goto unknown;
+#endif
+    {
+        const ssize_t ln = x_list(&x, wc->xlist, XLIST_CAP);
+        if (ln < 0) {
+            if (errno == ENOTSUP || errno == EOPNOTSUPP) goto done;   /* none here */
+            goto unknown;
+        }
+        size_t n = 0;
+        for (ssize_t i = 0; i < ln; ) {
+            const char *nm = wc->xlist + i;
+            const size_t l = strnlen(nm, (size_t)(ln - i));
+            if (l > 0) wc->xnames[n++] = nm;
+            i += (ssize_t)l + 1;
+        }
+        qsort(wc->xnames, n, sizeof *wc->xnames, name_cmp);
+
+        struct xout o = { .buf = e->xattrs, .cap = sizeof e->xattrs, .fits = true };
+        belay_sha256_init(&o.h);
+        for (size_t i = 0; i < n; i++) {
+            const char *nm = wc->xnames[i];
+            const ssize_t vl = x_get(&x, nm, wc->readbuf, READ_CHUNK);
+            if (vl < 0) goto unknown;                /* removed meanwhile, or denied */
+            if (strcmp(nm, "security.capability") == 0) {
+                if ((size_t)vl * 2 >= sizeof e->caps_hex) goto unknown;
+                belay_hex_encode(e->caps_hex, wc->readbuf, (size_t)vl);
+                e->has_caps = true;
+                continue;
+            }
+            struct belay_sha256 vh;
+            uint8_t d[BELAY_SHA256_DIGEST_LEN];
+            belay_sha256_init(&vh);
+            belay_sha256_update(&vh, wc->readbuf, (size_t)vl);
+            belay_sha256_final(&vh, d);
+            char el[2 * NAME_BYTES + 3 * BELAY_SHA256_DIGEST_LEN + 16];
+            size_t w = 0;
+            if (o.n > 0) el[w++] = ',';
+            el[w++] = '"';
+            const size_t nl = strlen(nm);
+            if (nl > NAME_BYTES) goto unknown;
+            if (plain_xattr_name(nm, nl)) {
+                memcpy(el + w, nm, nl);
+                w += nl;
+            } else {
+                el[w++] = 'x';
+                el[w++] = ':';
+                belay_hex_encode(el + w, (const uint8_t *)nm, nl);
+                w += 2 * nl;
+            }
+            el[w++] = '=';
+            belay_hex_encode(el + w, d, sizeof d);
+            w += 2 * sizeof d;
+            el[w++] = '"';
+            xo_put(&o, el, w);
+            o.n++;
+        }
+        if (o.n > 0) {
+            uint8_t d[BELAY_SHA256_DIGEST_LEN];
+            belay_sha256_final(&o.h, d);
+            belay_hex_encode(e->xattrs_sha256_hex, d, sizeof d);
+            e->has_xattrs = true;
+            e->xattrs_inline = o.fits && o.len <= BELAY_XATTRS_INLINE_MAX;
+            e->xattrs_len = e->xattrs_inline ? o.len : 0;
+            e->xattrs[e->xattrs_len] = '\0';
+        }
+    }
+    goto done;
+unknown:
+    e->has_caps = e->has_xattrs = e->xattrs_inline = false;
+    e->xattrs_len = 0;
+    e->xattrs_unknown = true;
+done:
+    if (own != -1) close(own);
+    return 0;
 }
 
 static ssize_t rel_join(char *rel, size_t relsz, size_t rel_len, const char *name) {
@@ -814,6 +1025,10 @@ static int read_file(int pfd, const char *name, const struct stat *st, const cha
         close(fd);
         return V_OK;
     }
+    if (read_extras(wc, fd, pfd, name, st) == -1) {
+        close(fd);
+        return -1;
+    }
     if (e->size > wc->opts->hash_max_bytes) {
         e->unverified = true;
         close(fd);
@@ -943,6 +1158,10 @@ static int open_dir(int pfd, const char *name, const struct stat *st, const char
         e->unstable = true;
         wc->n_unstable++;
     }
+    if (read_extras(wc, cfd, pfd, name, st) == -1) {
+        close(cfd);
+        return -1;
+    }
     (void)rel;
     *out_fd = cfd;
     return V_OK;
@@ -973,6 +1192,7 @@ static int visit(int parent_fd, const char *name, char *rel, size_t relsz,
         }
 
         memset(e, 0, sizeof *e);
+        wc->extras_done = false;
         if (rel_len >= sizeof e->path) {
             belay_err_set(BELAY_ERR_RANGE, 0, "manifest: path too long");
             return -1;
@@ -997,6 +1217,7 @@ static int visit(int parent_fd, const char *name, char *rel, size_t relsz,
         int r = V_OK;
         if (crossed) {
             e->is_mount = true;
+            e->has_iflags = false;              /* a mount point is never read */
             if (e->type == BELAY_T_REG) e->unverified = true;
             if (e->type == BELAY_T_LNK) r = read_link(parent_fd, name, &st, rel, wc);
         } else if (e->type == BELAY_T_LNK) {
@@ -1025,6 +1246,14 @@ static int visit(int parent_fd, const char *name, char *rel, size_t relsz,
             }
             e->unreadable = true;
             wc->n_unreadable++;
+        }
+        /* Entries not reached through an open fd -- symlinks, FIFOs,
+         * devices, anything that could not be opened -- get their extras
+         * through O_PATH. Mount points are never read. */
+        if (!e->is_mount && !wc->extras_done &&
+            read_extras(wc, -1, parent_fd, name, &st) == -1) {
+            if (cfd != -1) close(cfd);
+            return -1;
         }
         break;
     }
@@ -1436,7 +1665,9 @@ int belay_manifest_write(const char *out_path, const char *scope,
     }
     wc->line = malloc(LINE_CAP);
     wc->readbuf = malloc(READ_CHUNK);
-    if (wc->line == NULL || wc->readbuf == NULL) {
+    wc->xlist = malloc(XLIST_CAP + 1);
+    wc->xnames = malloc((XLIST_CAP / 2 + 1) * sizeof *wc->xnames);
+    if (wc->line == NULL || wc->readbuf == NULL || wc->xlist == NULL || wc->xnames == NULL) {
         belay_err_set(BELAY_ERR_NOMEM, 0, "manifest: out of memory");
         goto cleanup;
     }
@@ -1506,6 +1737,8 @@ int belay_manifest_write(const char *out_path, const char *scope,
      * after its listing, so a change during the walk can be recorded on it. */
     memset(&wc->e, 0, sizeof wc->e);
     fill_from_stat(&wc->e, &rst);
+    wc->extras_done = false;
+    if (read_extras(wc, root_fd, -1, ".", &rst) == -1) goto cleanup;
     wc->e.path[0] = '.';
     wc->e.path_len = 1;
     struct belay_entry root_e;
@@ -1635,6 +1868,8 @@ cleanup:
     if (wc != NULL) {
         free(wc->line);
         free(wc->readbuf);
+        free(wc->xlist);
+        free(wc->xnames);
         free(wc->abs);
         belay_store_close(wc->store);
     }

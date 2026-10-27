@@ -88,6 +88,11 @@ owner is invisible.
 | `mtime_ns`, `ctime_ns` | int | always | nanosecond timestamps. **`ctime_ns` is the change prefilter**: an unprivileged process can set mtime but not ctime (§6.3). Never the sole evidence for a protected path — hash those. Times outside the int64 range (before 1678, after 2262) saturate at its bounds. |
 | `ino`, `dev` | int | always | identity. On a directory, `dev` differing from the scope root's means a mount boundary; on other types it need not (see `mount`). |
 | `nlink` | int | always | link count. `> 1` on a regular file means hard links exist. |
+| `iflags` | int | where the filesystem has inode flags | Linux: `FS_IOC_GETFLAGS` (`chattr`: immutable, append-only, nodump...), on regular files and directories. macOS: `st_flags` (`chflags`), on every type. Absent on a mount point. |
+| `caps` | string | `reg` with a file capability | the raw `security.capability` value, lowercase hex. `setcap` on an interpreter is a privilege change; this is where it shows. |
+| `xattrs` | array | when the entry has extended attributes | one string per attribute other than `security.capability`, `"<name>=<sha256 of value>"`, sorted strictly by name bytes. POSIX ACLs appear here as `system.posix_acl_access` / `system.posix_acl_default`. A name is written as itself when it is printable ASCII without `"`, `\` or `=` and does not start `x:`; otherwise as `x:` followed by its bytes in hex. At most 8192 bytes of array body; a larger set is recorded as `xattrs_sha256` instead. |
+| `xattrs_sha256` | string | instead of `xattrs`, for a large set | the sha256 of the array body that `xattrs` would have held, so a set recorded inline in one manifest and by digest in another still compares. |
+| `xattrs_unknown` | bool | when the attributes could not be read | `true`. Excludes `xattrs`, `xattrs_sha256` and `caps`: an absent field means "none", so failing to read must say so. `diff` reports the entry's metadata as `unknown`, never unchanged. |
 | `sha256` | string | `reg`, size ≤ `hash_max_bytes`, read in one stable pass | lowercase hex content digest |
 | `unverified` | bool | `reg` without a hash | `true`. No hash is recorded: the file is larger than `hash_max_bytes`, or it is also flagged `unstable`, `unreadable` or `mount`, which say why. `diff` must report any change to it as **modified (unverified)**, never as unchanged. |
 | `link_target` | string | `lnk` | the link's bytes, verbatim and unresolved |
@@ -105,7 +110,8 @@ owner is invisible.
 In addition to the grammar above:
 
 - **Fields appear in one fixed order.** Entries: `path`|`path_b64`, `type`, `mode`, `uid`, `gid`,
-  `size`, `mtime_ns`, `ctime_ns`, `ino`, `dev`, `nlink`, `sha256`, `unverified`, `unstable`, `rdev`,
+  `size`, `mtime_ns`, `ctime_ns`, `ino`, `dev`, `nlink`, `iflags`, `caps`, `xattrs`|`xattrs_sha256`,
+  `xattrs_unknown`, `sha256`, `unverified`, `unstable`, `rdev`,
   `link_target`|`link_target_b64`, `target_outside_scope`, `stored`, `mount`, `unreadable`, `raced`. Header:
   `belay_manifest`, `created_ns`, `scopes`|`scopes_b64`, `hash`, `hash_max_bytes`,
   `store_max_bytes`. Trailer: `belay_manifest_end`, `vanished`, `unreadable`, `unstable`, `mounts`,
@@ -206,9 +212,11 @@ Each rule below closes a way for a state the format records to be rendered as "n
 - **`unverified` (including `unstable`) never reports "unchanged" on content alone.** With identical
   metadata the honest label is "unchanged (unverified)"; on a protected path it is a failure to
   verify, not a pass.
+- **A change in `iflags`, `caps` or the xattr set is a metadata change**, reported as such
+  (diff.v1: metadata-only), naming the attributes where `xattrs` is inline.
 - **A `ctime_ns` change with every recorded field equal means "changed: unrecorded attribute"**,
-  never "unchanged". Extended attributes, ACLs, file capabilities and inode flags are not recorded
-  (see below) but do change ctime. This turns their absence into a visible, if unspecific, change.
+  never "unchanged". The extended metadata belay cannot see (see below) still changes ctime. This
+  turns its absence into a visible, if unspecific, change.
 - **Compare under the same `hash_max_bytes`**, or report entries hashed on one side and unverified
   on the other as unverified rather than changed.
 
@@ -256,11 +264,12 @@ hidden-traversal risk the NUL rule above exists to prevent.
 
 ## What is deliberately not recorded
 
-- **Extended attributes, ACLs, file capabilities (`security.capability`) and inode flags**
-  (`chattr +i`, BSD `chflags`). A change to any of them alters only `ctime_ns` -- measured with a
-  `user.*` xattr. This is a known gap and is open for decision; until it closes, the ctime rule above
-  is what keeps such a change from rendering as "unchanged". `security.capability` matters most for
-  the RL use case, since `setcap` on an interpreter is a privilege change.
+- **Extended metadata belay cannot see or does not reach** (recorded since 2026-10-26 otherwise):
+  `trusted.*` attributes, which only root can list; macOS ACLs, which are not extended attributes;
+  inode flags of symlinks, FIFOs, sockets and devices on Linux (no safe fd to ask through); and on
+  macOS the attributes of FIFOs, sockets and devices, which are recorded as `xattrs_unknown`
+  because opening them has side effects. A change to any of these still moves `ctime_ns`, and the
+  ctime rule above keeps it from rendering as "unchanged".
 - **File content**, except copies under `store/` for files within `store_max_bytes` or claimed by an
   interpreter.
 - **Anything below a mount boundary** inside a scope.

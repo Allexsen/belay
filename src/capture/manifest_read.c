@@ -263,7 +263,7 @@ static int check_order(const struct obj *o, const char *const *order, size_t n) 
 
 static const char *const ENTRY_ORDER[] = {
     "path", "path_b64", "type", "mode", "uid", "gid", "size", "mtime_ns", "ctime_ns",
-    "ino", "dev", "nlink", "sha256", "unverified", "unstable", "rdev", "link_target",
+    "ino", "dev", "nlink", "iflags", "caps", "xattrs", "xattrs_sha256", "xattrs_unknown", "sha256", "unverified", "unstable", "rdev", "link_target",
     "link_target_b64", "target_outside_scope", "stored", "mount", "unreadable", "raced"
 };
 static const char *const HEADER_ORDER[] = {
@@ -416,6 +416,118 @@ static int get_hex64(const struct obj *o, const char *key, char out[65], bool *p
     return 0;
 }
 
+/*
+ *  Extended metadata. Each "xattrs" element is "<name>=<sha256 of value>":
+ *  the name as itself when it is printable ASCII without '"', '\\' or '='
+ *  and does not start "x:", otherwise "x:" + its bytes in hex -- one
+ *  spelling per name, never escaped. Sorted strictly by name bytes; the
+ *  file capability is never in the list (it has its own field, "caps").
+ */
+static int hexval(char c) { return c >= '0' && c <= '9' ? c - '0' : c >= 'a' && c <= 'f' ? c - 'a' + 10 : -1; }
+
+static bool plain_xname(const char *n, size_t l) {
+    if (l == 0 || (l >= 2 && n[0] == 'x' && n[1] == ':')) return false;
+    for (size_t i = 0; i < l; i++) {
+        const unsigned char c = (unsigned char)n[i];
+        if (c < 0x21 || c > 0x7e || c == '"' || c == '\\' || c == '=') return false;
+    }
+    return true;
+}
+
+static int parse_xattrs(const struct pair *p, struct belay_entry *e) {
+    if (p->kind != V_ARR || p->nelem == 0) return bad_kind("xattrs", "a non-empty array");
+    if (p->vlen > BELAY_XATTRS_INLINE_MAX) return corrupt("xattrs longer than the inline limit");
+    char prev[256], cur[256];
+    size_t prev_len = 0;
+    bool have_prev = false;
+    const char *q = p->val, *end = p->val + p->vlen;
+    while (q < end) {
+        if (*q == ',') q++;
+        if (q >= end || *q != '"') return corrupt("malformed xattrs element");
+        const char *b = ++q;
+        while (q < end && *q != '"') {
+            if (*q == '\\') return corrupt("escape in an xattrs element");
+            q++;
+        }
+        if (q >= end) return corrupt("malformed xattrs element");
+        const char *el_end = q++;                     /* past the closing quote */
+        const char *eq = el_end - 1 - BELAY_SHA256_HEX_LEN;
+        if (eq < b + 1 || *eq != '=') return corrupt("xattrs element is not name=sha256");
+        for (const char *h = eq + 1; h < el_end; h++)
+            if (hexval(*h) < 0) return corrupt("xattrs element is not name=sha256");
+        const size_t raw = (size_t)(eq - b);
+        size_t cl;
+        if (raw >= 2 && b[0] == 'x' && b[1] == ':') {
+            const size_t hx = raw - 2;
+            if (hx == 0 || hx % 2 || hx / 2 > 255) return corrupt("bad hex xattr name");
+            cl = hx / 2;
+            for (size_t i = 0; i < cl; i++) {
+                const int hi = hexval(b[2 + 2 * i]), lo = hexval(b[3 + 2 * i]);
+                if (hi < 0 || lo < 0) return corrupt("bad hex xattr name");
+                cur[i] = (char)(hi * 16 + lo);
+                if (cur[i] == '\0') return corrupt("NUL in an xattr name");
+            }
+            if (plain_xname(cur, cl)) return corrupt("xattr name hex-encoded but printable");
+        } else {
+            if (raw > 255 || !plain_xname(b, raw)) return corrupt("bad xattr name");
+            cl = raw;
+            memcpy(cur, b, cl);
+        }
+        if (cl == 19 && memcmp(cur, "security.capability", 19) == 0)
+            return corrupt("security.capability belongs in caps, not xattrs");
+        if (have_prev) {
+            const size_t m = prev_len < cl ? prev_len : cl;
+            const int c = memcmp(prev, cur, m);
+            if (c > 0 || (c == 0 && prev_len >= cl)) return corrupt("xattrs not strictly sorted");
+        }
+        memcpy(prev, cur, cl);
+        prev_len = cl;
+        have_prev = true;
+    }
+    /* The digest of the canonical set is the digest of this array body:
+     * what the writer records instead when the set is too large to inline. */
+    struct belay_sha256 h;
+    uint8_t d[BELAY_SHA256_DIGEST_LEN];
+    belay_sha256_init(&h);
+    belay_sha256_update(&h, p->val, p->vlen);
+    belay_sha256_final(&h, d);
+    belay_hex_encode(e->xattrs_sha256_hex, d, sizeof d);
+    memcpy(e->xattrs, p->val, p->vlen);
+    e->xattrs[p->vlen] = '\0';
+    e->xattrs_len = p->vlen;
+    e->xattrs_inline = true;
+    e->has_xattrs = true;
+    return 0;
+}
+
+static int parse_extras(const struct obj *o, struct belay_entry *e) {
+    if (get_u64(o, "iflags", false, &e->iflags, &e->has_iflags) == -1) return -1;
+    const struct pair *c = get(o, "caps");
+    if (c != NULL) {
+        if (c->kind != V_STR || c->vlen == 0 || c->vlen % 2 || c->vlen >= sizeof e->caps_hex)
+            return bad_kind("caps", "lowercase hex");
+        for (size_t i = 0; i < c->vlen; i++)
+            if (hexval(c->val[i]) < 0) return bad_kind("caps", "lowercase hex");
+        memcpy(e->caps_hex, c->val, c->vlen);
+        e->caps_hex[c->vlen] = '\0';
+        e->has_caps = true;
+    }
+    const struct pair *x = get(o, "xattrs");
+    bool have_digest;
+    if (x != NULL && parse_xattrs(x, e) == -1) return -1;
+    char digest[65];
+    if (get_hex64(o, "xattrs_sha256", digest, &have_digest) == -1) return -1;
+    if (have_digest) {
+        if (x != NULL) return corrupt("both xattrs and xattrs_sha256");
+        memcpy(e->xattrs_sha256_hex, digest, sizeof digest);
+        e->has_xattrs = true;
+    }
+    if (get_flag(o, "xattrs_unknown", &e->xattrs_unknown) == -1) return -1;
+    if (e->xattrs_unknown && (e->has_xattrs || e->has_caps))
+        return corrupt("xattrs_unknown with recorded attributes");
+    return 0;
+}
+
 /* ------------------------------------------------------------------------ */
 /* Semantic layer                                                            */
 /* ------------------------------------------------------------------------ */
@@ -508,6 +620,10 @@ static int parse_entry(const struct obj *o, struct belay_entry *e) {
     bool have_rdev;
     if (get_u64(o, "rdev", false, &e->rdev, &have_rdev) == -1) return -1;
     e->has_rdev = have_rdev;
+    if (parse_extras(o, e) == -1) return -1;
+    /* A file capability can only be set on a regular file; a mount point is
+     * never read, so it carries no extended metadata at all. */
+    if (e->has_caps && e->type != BELAY_T_REG) return corrupt("caps on a non-regular file");
 
     if (get_bytes(o, "link_target", "link_target_b64", e->link_target, sizeof e->link_target,
                   &e->link_target_len, &have_target) == -1)
@@ -572,8 +688,11 @@ static int parse_entry(const struct obj *o, struct belay_entry *e) {
     if (e->target_outside_scope && e->link_target_len == 0)
         return corrupt("target_outside_scope on an unknown target");
 
-    /* A mount point is recorded, never read: no hash on a mounted file. */
+    /* A mount point is recorded, never read: no hash on a mounted file, and
+     * no extended metadata. */
     if (e->is_mount && e->has_hash) return corrupt("hash on a mount point");
+    if (e->is_mount && (e->has_iflags || e->has_caps || e->has_xattrs || e->xattrs_unknown))
+        return corrupt("extended metadata on a mount point");
     return 0;
 }
 
