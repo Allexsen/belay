@@ -35,6 +35,7 @@ enum entry_field {
 /* Entry types: the manifest's spelling and the S_IFMT bits `mode` carries
  * (the same values on Linux and macOS). */
 #define ENTRY_TYPE_COUNT (BELAY_T_CHR + 1)
+#define ENTRY_IFMT       0170000u      /* the type bits of `mode` */
 struct entry_type_def {
     const char *name;
     uint32_t ifmt;

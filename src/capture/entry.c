@@ -64,7 +64,7 @@ const struct entry_field_def ENTRY_FIELDS[F_COUNT] = {
                 FBIT(F_XATTRS_UNKNOWN))
 
 static bool mode_disagrees(const struct belay_entry *e) {
-    return (e->mode & 0170000u) != ENTRY_TYPES[e->type].ifmt;
+    return (e->mode & ENTRY_IFMT) != ENTRY_TYPES[e->type].ifmt;
 }
 static bool stored_differs(const struct belay_entry *e) {
     return e->has_stored && (!e->has_hash || strcmp(e->stored_hex, e->sha256_hex) != 0);

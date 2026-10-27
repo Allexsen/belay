@@ -17,13 +17,13 @@
 #include <string.h>
 #include <unistd.h>
 
+/* The schema's type for these mode bits. A type the format does not know
+ * (none on Linux; a whiteout on macOS) falls through to chr, as before;
+ * its mode bits then disagree with chr, so the writer's check of the entry
+ * fails the capture. */
 static enum belay_entry_type type_of(mode_t m) {
-    if (S_ISREG(m))  return BELAY_T_REG;
-    if (S_ISDIR(m))  return BELAY_T_DIR;
-    if (S_ISLNK(m))  return BELAY_T_LNK;
-    if (S_ISFIFO(m)) return BELAY_T_FIFO;
-    if (S_ISSOCK(m)) return BELAY_T_SOCK;
-    if (S_ISBLK(m))  return BELAY_T_BLK;
+    for (int t = 0; t < ENTRY_TYPE_COUNT; t++)
+        if (((uint32_t)m & ENTRY_IFMT) == ENTRY_TYPES[t].ifmt) return (enum belay_entry_type)t;
     return BELAY_T_CHR;
 }
 
