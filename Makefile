@@ -58,7 +58,7 @@ SAN_FLAGS	= -fsanitize=address,undefined -fno-omit-frame-pointer -g -O1
 SAN_BUILD	= $(BUILD)/san
 SAN_TEST_BIN	= $(TEST_SRC:test/%.c=$(SAN_BUILD)/test/%)
 
-.PHONY: all clean test check check-san fuzz bench platform fs-scenarios
+.PHONY: all clean test check check-san fuzz bench platform fs-scenarios gen gen-check
 
 all: $(BIN)
 
@@ -110,7 +110,29 @@ check-san: $(SAN_TEST_BIN)
 	done; \
 	exit $$fail
 
-check: all test
+check: all gen-check test
+
+# Generated from the entry schema (src/capture/entry.c): the spec's field
+# rules and the fuzz target's invariants. `make gen` rewrites them;
+# `make gen-check` (part of `check`) fails when a committed one is stale.
+GEN_TOOL	= $(BUILD)/tools/gen_schema
+GEN_SPEC	= docs/spec/manifest-v1.md
+GEN_FUZZ	= test/fuzz/fuzz_invariants.gen.h
+
+$(GEN_TOOL): tools/gen_schema.c $(CORE_OBJ)
+	@mkdir -p $(dir $@)
+	$(CC) $(CFLAGS) $(WARN) $(INC) -MMD -MP -o $@ $< $(CORE_OBJ)
+
+gen: $(GEN_TOOL)
+	$(GEN_TOOL) spec $(GEN_SPEC) > $(GEN_SPEC).tmp && mv $(GEN_SPEC).tmp $(GEN_SPEC)
+	$(GEN_TOOL) fuzz > $(GEN_FUZZ).tmp && mv $(GEN_FUZZ).tmp $(GEN_FUZZ)
+
+gen-check: $(GEN_TOOL)
+	@fail=0; \
+	$(GEN_TOOL) spec $(GEN_SPEC) | diff -u $(GEN_SPEC) - || fail=1; \
+	$(GEN_TOOL) fuzz | diff -u $(GEN_FUZZ) - || fail=1; \
+	if [ $$fail = 1 ]; then echo "gen-check: generated files are stale; run make gen"; exit 1; fi; \
+	echo "gen-check: generated files are current"
 
 # Fuzz targets (§0.4c). libFuzzer needs clang; `make fuzz CC=clang`.
 # FUZZ_SECS bounds each target so CI stays fast.
@@ -118,7 +140,7 @@ FUZZ_SRC	= $(wildcard test/fuzz/fuzz_*.c)
 FUZZ_BIN	= $(FUZZ_SRC:test/fuzz/%.c=$(BUILD)/fuzz/%)
 FUZZ_SECS	?= 30
 
-$(BUILD)/fuzz/%: test/fuzz/%.c $(CORE_SRC)
+$(BUILD)/fuzz/%: test/fuzz/%.c $(CORE_SRC) $(GEN_FUZZ)
 	@mkdir -p $(dir $@)
 	$(CC) -fsanitize=fuzzer,address,undefined -g -O1 $(INC) -o $@ $< $(CORE_SRC)
 

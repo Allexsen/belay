@@ -89,6 +89,8 @@ for k in unverified unstable unreadable mount raced target_outside_scope stored 
 done
 echo
 python3 "$HERE/mutate.py" "$WORK/corpus" "$WORK"/out/old/*/*.ndjson > "$WORK/corpus.count"
+# Keep the corpus for other oracles (the fuzz target's invariants, say).
+[ -n "${GOLDEN_CORPUS_OUT:-}" ] && cp -r "$WORK/corpus" "$GOLDEN_CORPUS_OUT"
 "$WORK/old.reader" "$WORK"/corpus/* > "$WORK/read.old"
 "$WORK/new.reader" "$WORK"/corpus/* > "$WORK/read.new"
 accepted=$(grep -c '^-> ACCEPT' "$WORK/read.old" || true)

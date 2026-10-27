@@ -77,6 +77,9 @@ owner is invisible.
 {"path":"src/main.c","type":"reg","mode":33188,"uid":1000,"gid":1000,"size":1234,"mtime_ns":1760...,"ctime_ns":1760...,"ino":8612,"dev":2096,"nlink":1,"sha256":"e3b0...","stored":"e3b0..."}
 ```
 
+The table describes each field; where it and the generated rules under "Field rules a reader MUST
+enforce" differ, the rules are normative.
+
 | field | type | present when | meaning |
 |---|---|---|---|
 | `path` | string | always, unless `path_b64` | path relative to its scope root, `/`-separated |
@@ -109,50 +112,111 @@ owner is invisible.
 
 In addition to the grammar above:
 
-- **Fields appear in one fixed order.** Entries: `path`|`path_b64`, `type`, `mode`, `uid`, `gid`,
-  `size`, `mtime_ns`, `ctime_ns`, `ino`, `dev`, `nlink`, `iflags`, `caps`, `xattrs`|`xattrs_sha256`,
-  `xattrs_unknown`, `sha256`, `unverified`, `unstable`, `rdev`,
-  `link_target`|`link_target_b64`, `target_outside_scope`, `stored`, `mount`, `unreadable`, `raced`. Header:
+- **Fields appear in one fixed order**, optional ones omitted, never reordered; unknown fields
+  may appear only after every known one. The entry order is generated below. Header:
   `belay_manifest`, `created_ns`, `scopes`|`scopes_b64`, `hash`, `hash_max_bytes`,
   `store_max_bytes`. Trailer: `belay_manifest_end`, `vanished`, `unreadable`, `unstable`, `mounts`,
-  `raced`. Optional
-  fields are omitted, never reordered. Unknown fields may appear only after every known one.
+  `raced`.
 - **No key appears twice** in one line. "First wins" would let two different lines mean the same
   thing.
 - **Boolean flags are spelled exactly `"key":true`**, and are absent otherwise. Any other value
   under a flag's key (`: true`, `false`, `1`, `"true"`) is an error, never "flag absent". A flag
   that silently reads as absent is the failure this format exists to prevent: an unreadable
   directory would read as an empty one.
-- **Types, fields and flags agree** -- exactly the combinations the writer produces:
-
-  | type | hash fields | flags allowed |
-  |---|---|---|
-  | `reg` | exactly one of `sha256` and `unverified`; `stored` only with `sha256` and equal to it | `unstable` or `unreadable` (each requires `unverified`, never both); `mount` (with `unverified`, alone); `raced` |
-  | `dir` | none | at most one of `unreadable`, `unstable`, `mount`; `raced` only with `unreadable` or `mount` |
-  | `lnk` | none | `unreadable`, `mount`, `target_outside_scope` (never with `unreadable`), `raced` |
-  | `fifo` `sock` `blk` `chr` | none | `mount`, `raced` |
-
-  `rdev` appears exactly on `blk` and `chr`; `link_target` (or `link_target_b64`) exactly on `lnk`.
-- **`mode`'s type bits match `type`** (`S_IFMT`; the values are the same on Linux and macOS).
-- **A symlink's `size` equals its target's length, and its target is not empty** -- unless the link
-  is `unreadable`, meaning its target could not be read reliably (an I/O error, or a link that kept
-  changing while belay read it). An unreadable link with an **empty** target means "target unknown":
-  no real symlink has an empty target, so this cannot be confused with a real one.
 - **`path` is used only for valid UTF-8 and `path_b64` only for anything else** (likewise
   `link_target`/`link_target_b64`, `scopes`/`scopes_b64`), and base64 is canonical (padding bits
   zero, padding only at the end), so every byte string has exactly one encoding.
 - **The scope is a canonical absolute path** (as `realpath` produces: no empty, `.` or `..`
   component, no trailing slash except `/` itself).
-- **What the header determines, holds.** A regular file carries `sha256` only if its `size` is
-  within `hash_max_bytes`, and a bare `unverified` (no `unstable`, `unreadable` or `mount` giving
-  another reason) only if it is larger. `target_outside_scope` is present exactly when the lexical
-  rule says the target leaves the scope (an absolute target outside it; a relative one whose `..`
-  climbs above the scope root, resolved from the link's own directory; a target the rule cannot
-  judge), and never on an `unreadable` link. Writer and reader share one implementation of that
-  rule, so the annotation has one value per state.
 - **The scope root `.` is present**, exactly once, is a directory and is never a mount. If it is
   `unreadable`, it is the only entry.
 - **Nothing appears below a directory marked `unreadable` or `mount`.**
+
+The rest is generated from the schema the writer and reader both execute, so it cannot drift from
+them. An unreadable symlink with an **empty** target means "target unknown": no real symlink has
+an empty target, so it cannot be confused with one.
+
+<!-- BEGIN GENERATED: schema -->
+<!-- From src/capture/entry.c by tools/gen_schema.c. Edit there, then `make gen`. -->
+
+- **Entry fields appear in one fixed order**, optional ones omitted, never reordered (`a`|`b`: one
+  spelling or the other, never both):
+  `path`|`path_b64`, `type`, `mode`, `uid`, `gid`, `size`, `mtime_ns`, `ctime_ns`, `ino`, `dev`,
+  `nlink`, `iflags`, `caps`, `xattrs`, `xattrs_sha256`, `xattrs_unknown`, `sha256`, `unverified`,
+  `unstable`, `rdev`, `link_target`|`link_target_b64`, `target_outside_scope`, `stored`, `mount`,
+  `unreadable`, `raced`.
+- **Which type carries which field.** `●` on every entry of that type, `○` may appear
+  (subject to the rules below), blank never:
+
+  | field | kind | `reg` | `dir` | `lnk` | `fifo` | `sock` | `blk` | `chr` | meaning |
+  |---|---|:-:|:-:|:-:|:-:|:-:|:-:|:-:|---|
+  | `path` / `path_b64` | string | ● | ● | ● | ● | ● | ● | ● | relative to the scope root; `.` is the root itself |
+  | `type` | string | ● | ● | ● | ● | ● | ● | ● | `reg`, `dir`, `lnk`, `fifo`, `sock`, `blk`, `chr` |
+  | `mode` | int | ● | ● | ● | ● | ● | ● | ● | `st_mode`, type bits included |
+  | `uid` | int | ● | ● | ● | ● | ● | ● | ● | owner |
+  | `gid` | int | ● | ● | ● | ● | ● | ● | ● | group |
+  | `size` | int | ● | ● | ● | ● | ● | ● | ● | `st_size`; for `lnk`, the target length |
+  | `mtime_ns` | int | ● | ● | ● | ● | ● | ● | ● | modification time, nanoseconds |
+  | `ctime_ns` | int | ● | ● | ● | ● | ● | ● | ● | change time, nanoseconds |
+  | `ino` | int | ● | ● | ● | ● | ● | ● | ● | inode number |
+  | `dev` | int | ● | ● | ● | ● | ● | ● | ● | device |
+  | `nlink` | int | ● | ● | ● | ● | ● | ● | ● | link count |
+  | `iflags` | int | ○ | ○ | ○ | ○ | ○ | ○ | ○ | inode flags (`chattr`, `chflags`) |
+  | `caps` | string | ○ |  |  |  |  |  |  | the raw `security.capability` value, hex |
+  | `xattrs` | array | ○ | ○ | ○ | ○ | ○ | ○ | ○ | `name=<sha256 of value>` per attribute, sorted by name |
+  | `xattrs_sha256` | string | ○ | ○ | ○ | ○ | ○ | ○ | ○ | digest of the `xattrs` body, for a set too large to inline |
+  | `xattrs_unknown` | bool | ○ | ○ | ○ | ○ | ○ | ○ | ○ | the attributes could not be read |
+  | `sha256` | string | ○ |  |  |  |  |  |  | content digest, lowercase hex |
+  | `unverified` | bool | ○ |  |  |  |  |  |  | no hash recorded |
+  | `unstable` | bool | ○ | ○ |  |  |  |  |  | changed while being read; a directory's listing is incomplete |
+  | `rdev` | int |  |  |  |  |  | ● | ● | device number of a device node |
+  | `link_target` / `link_target_b64` | string |  |  | ● |  |  |  |  | the symlink's target, verbatim; empty means unknown |
+  | `target_outside_scope` | bool |  |  | ○ |  |  |  |  | advisory: the target leaves the scope lexically |
+  | `stored` | string | ○ |  |  |  |  |  |  | the store key, equal to `sha256` |
+  | `mount` | bool | ○ | ○ | ○ | ○ | ○ | ○ | ○ | a mount root: recorded, never read |
+  | `unreadable` | bool | ○ | ○ | ○ |  |  |  |  | contents could not be captured |
+  | `raced` | bool | ○ | ○ | ○ | ○ | ○ | ○ | ○ | changed after it was recorded, before the walk ended |
+
+  `type`, and the type bits of `mode` (`S_IFMT`, octal) that go with it:
+  `reg` 100000, `dir` 040000, `lnk` 120000, `fifo` 010000, `sock` 140000, `blk` 060000, `chr`
+  020000.
+- **Types, fields and flags agree** -- exactly the combinations the writer produces.
+  A reader applies these rules in this order and reports the first one violated:
+
+  1. `mode`'s type bits match `type` (`S_IFMT`; the same values on Linux and macOS).
+  2. `xattrs` and `xattrs_sha256` are never both present.
+  3. `xattrs_unknown` excludes `xattrs`, `xattrs_sha256` and `caps`.
+  4. `caps` appears only on `reg`.
+  5. A `reg` carries exactly one of `sha256` and `unverified`.
+  6. On a `reg`, `unstable` and `unreadable` each require `unverified`.
+  7. On a `reg`, `unstable` and `unreadable` are never both present.
+  8. A mounted `reg` carries neither `unstable` nor `unreadable`.
+  9. A `dir` carries no `sha256`, `unverified` or `stored`.
+  10. A `dir` carries `raced` only with `unreadable` or `mount` (a listed one that changed is
+      `unstable`).
+  11. A `dir` carries at most one of `unreadable`, `unstable` and `mount`.
+  12. A `lnk` carries no `sha256`, `unverified`, `stored` or `unstable`.
+  13. A `fifo`, `sock`, `blk` or `chr` carries no hash fields, `unstable` or `unreadable`.
+  14. `stored` appears only with `sha256`, and equals it.
+  15. `rdev` appears exactly on `blk` and `chr`.
+  16. `link_target` (or `link_target_b64`) appears exactly on `lnk`.
+  17. `target_outside_scope` appears only on `lnk`.
+  18. A `lnk`'s target is empty only when the link is `unreadable` (empty means unknown).
+  19. A `lnk`'s `size` equals its target's length, unless the link is `unreadable`.
+  20. `target_outside_scope` never accompanies an empty (unknown) target.
+  21. A `mount` carries no `sha256`.
+  22. A `mount` carries no extended metadata (`iflags`, `caps`, `xattrs`, `xattrs_sha256`,
+      `xattrs_unknown`).
+- **What the header determines, holds**, checked after the rules above:
+
+  1. A `reg` carries `sha256` only if its `size` is within `hash_max_bytes`, and a bare `unverified`
+     (no `unstable`, `unreadable` or `mount` giving another reason) only if it is larger.
+  2. A `lnk` carries `target_outside_scope` exactly when the lexical rule says its target leaves the
+     scope (an absolute target outside it; a relative one whose `..` climbs above the scope root,
+     resolved from the link's own directory; a target the rule cannot judge), and never when it is
+     `unreadable`. Writer and reader share one implementation of that rule, so the annotation has
+     one value per state.
+<!-- END GENERATED: schema -->
 
 ### Growing the format
 

@@ -8,12 +8,17 @@
  *  read out of bounds, or hand the callback an entry that violates its own
  *  invariants.
  *
- *  The invariant checks in `check_entry` matter as much as the crash check: a
- *  reader that silently produced a path containing a NUL would pass a
- *  memory-safety-only oracle while breaking the §5.1.1 rule.
+ *  The invariant checks matter as much as the crash check: a reader that
+ *  silently produced a path containing a NUL would pass a memory-safety-only
+ *  oracle while breaking the §5.1.1 rule. The schema's rules (which fields
+ *  and flags go together) are generated from src/capture/entry.c into
+ *  fuzz_invariants.gen.h; what is checked by hand here is decoding: lengths,
+ *  NULs, hex shape and canonical paths, which the schema does not describe.
  */
 #include "belay/manifest.h"
 #include "belay/error.h"
+
+#include "fuzz_invariants.gen.h"
 
 #include <stdint.h>
 #include <stdio.h>
@@ -21,8 +26,8 @@
 #include <string.h>
 #include <unistd.h>
 
-static int check_entry(const struct belay_entry *e, void *ctx) {
-    (void)ctx;
+static void check_entry(const struct belay_manifest_header *h, const struct belay_entry *e) {
+    schema_invariants(h, e);
 
     /* §5.1.1: a path reaching the callback must never contain a NUL. */
     if (memchr(e->path, '\0', e->path_len) != NULL) abort();
@@ -33,9 +38,6 @@ static int check_entry(const struct belay_entry *e, void *ctx) {
     /* path_len must be within the buffer. */
     if (e->path_len >= sizeof e->path) abort();
 
-    /* A hash and the unverified flag are mutually exclusive by construction. */
-    if (e->has_hash && e->unverified) abort();
-
     /* A recorded hash must be exactly 64 lowercase hex characters. */
     if (e->has_hash) {
         if (strlen(e->sha256_hex) != 64) abort();
@@ -45,40 +47,8 @@ static int check_entry(const struct belay_entry *e, void *ctx) {
         }
     }
 
-    /* Extended metadata (W6): a capability only on a regular file; "unknown"
-     * excludes anything recorded; a mount point carries none of it. */
-    if (e->has_caps && e->type != BELAY_T_REG) abort();
-    if (e->xattrs_unknown && (e->has_xattrs || e->has_caps)) abort();
-    if (e->is_mount && (e->has_iflags || e->has_caps || e->has_xattrs || e->xattrs_unknown)) abort();
+    /* An inline xattr set is a decoded set, within the inline limit. */
     if (e->xattrs_inline && (!e->has_xattrs || e->xattrs_len > BELAY_XATTRS_INLINE_MAX)) abort();
-
-    /* rdev exactly on device nodes. */
-    if (e->has_rdev != (e->type == BELAY_T_BLK || e->type == BELAY_T_CHR)) abort();
-
-    /* Flags only in the combinations the writer produces (spec, "Types,
-     * fields and flags agree"). */
-    if (e->has_stored && (!e->has_hash || strcmp(e->stored_hex, e->sha256_hex) != 0)) abort();
-    if (e->is_mount && e->has_hash) abort();
-    switch (e->type) {
-    case BELAY_T_REG:
-        if (e->has_hash == e->unverified) abort();
-        if ((e->unstable || e->unreadable) && !e->unverified) abort();
-        if (e->unstable && e->unreadable) abort();
-        if (e->is_mount && (e->unstable || e->unreadable)) abort();
-        break;
-    case BELAY_T_DIR:
-        if (e->has_hash || e->unverified || e->has_stored) abort();
-        if ((int)e->unreadable + (int)e->unstable + (int)e->is_mount > 1) abort();
-        /* A listed directory that changed is unstable, never raced. */
-        if (e->raced && !e->unreadable && !e->is_mount) abort();
-        break;
-    case BELAY_T_LNK:
-        if (e->has_hash || e->unverified || e->has_stored || e->unstable) abort();
-        break;
-    default:
-        if (e->has_hash || e->unverified || e->has_stored || e->unstable || e->unreadable) abort();
-        break;
-    }
 
     /* Canonical paths only: no empty, "." or ".." component except a lone ".". */
     if (!(e->path_len == 1 && e->path[0] == '.')) {
@@ -94,21 +64,10 @@ static int check_entry(const struct belay_entry *e, void *ctx) {
         }
     }
 
-    /* Only symlinks carry targets, and a symlink must carry one. */
-    if ((e->type == BELAY_T_LNK) != e->has_link_target) abort();
-
     if (e->has_link_target) {
         if (memchr(e->link_target, '\0', e->link_target_len) != NULL) abort();
         if (e->link_target_len >= sizeof e->link_target) abort();
-        /* An empty target means "unknown" and only an unreadable link has
-         * one; any other link's size is its target's length. */
-        if (!e->unreadable && (e->link_target_len == 0 || e->size != e->link_target_len)) abort();
-        if (e->target_outside_scope && e->link_target_len == 0) abort();
-        /* An unreadable link's target is unknown or stale: never annotated. */
-        if (e->unreadable && e->target_outside_scope) abort();
     }
-
-    return 0;
 }
 
 int LLVMFuzzerTestOneInput(const uint8_t *data, size_t size) {
@@ -130,7 +89,12 @@ int LLVMFuzzerTestOneInput(const uint8_t *data, size_t size) {
 
     /* Return value is unconstrained -- success or failure are both fine. What
      * must not happen is a crash or a violated invariant. */
-    belay_manifest_read(path, check_entry, NULL);
+    struct belay_manifest_reader *r;
+    if (belay_manifest_open(path, &r) == 0) {
+        static struct belay_entry e;
+        while (belay_manifest_next(r, &e) == 1) check_entry(belay_manifest_header(r), &e);
+        belay_manifest_close(r);
+    }
     belay_err_clear();
 
     return 0;
