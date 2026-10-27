@@ -141,33 +141,7 @@ int capture_write(const struct fsops *ops, const char *out_path, const char *sco
         if (belay_store_open(opts->store_dir, &wc->store) == -1) goto cleanup;
     }
 
-    /*
-     *  Walk start, for the "changed during the walk" rule. On Linux it is
-     *  read from CLOCK_REALTIME_COARSE -- the clock the kernel stamps files
-     *  with -- so a change made after this instant can never carry an earlier
-     *  ctime, and no margin is needed. False positives are limited to a
-     *  directory changed in the same kernel tick (1-10 ms) just before the
-     *  walk. Elsewhere file timestamps come from the fine clock; a 10 ms
-     *  margin covers any rounding.
-     *
-     *  A clock STEP can blind this rule but never make it flag: a ctime later
-     *  than "now" is not counted. Nothing is lost by that, since the
-     *  end-of-walk re-check catches every change after a listing by equality.
-     *  (Round 2 also flagged the root whenever realtime and monotonic time
-     *  diverged during the walk. On this development machine WSL steps the
-     *  wall clock +108 s and back every 5.4 s, drifting 0.4 s per cycle --
-     *  measured, 45 steps in 2 minutes -- so every check longer than about
-     *  7 s was flagged. With the re-check in place that rule protected
-     *  nothing, and it was removed.)
-     */
-    struct timespec rt0, start;
-    ops->clock(ops->ctx, BELAY_CLOCK_REAL, &rt0);
-    if (ops->clock(ops->ctx, BELAY_CLOCK_COARSE, &start) == 0) {
-        wc->walk_start_ns = ident_ns((int64_t)start.tv_sec, start.tv_nsec);
-    } else {
-        start = rt0;
-        wc->walk_start_ns = ident_ns((int64_t)start.tv_sec, start.tv_nsec) - 10000000LL;
-    }
+    cons_walk_begin(wc);
 
     /* The scope root itself is an entry, path ".". Without it a chmod or
      * chown on the root is invisible. Like every directory it is emitted
@@ -191,12 +165,8 @@ int capture_write(const struct fsops *ops, const char *out_path, const char *sco
         const int wr = cap_walk(root_fd, rel, PATH_CAP, 0, 0, wc);
         if (wr == -1) goto cleanup;
 
-        struct stat post;
-        const struct ident ri = ident_of_entry(&root_e);
-        struct ident pi;
-        const bool changed = wr == W_INCOMPLETE || ops->fstat(ops->ctx, root_fd, &post) == -1 ||
-            (pi = ident_of_stat(&post), !ident_same(&pi, &ri, ID_TIMES));
-        if (changed) outcome_apply(&root_e, FACET_LISTING, OUT_CHANGED, &wc->tally);
+        if (wr == W_INCOMPLETE || !cons_listing_held(wc, root_fd, &root_e))
+            outcome_apply(&root_e, FACET_LISTING, OUT_CHANGED, &wc->tally);
     }
     if (cap_emit(wc, &root_e) == -1) goto cleanup;
 

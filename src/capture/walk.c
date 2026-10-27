@@ -118,28 +118,9 @@ static int visit(int parent_fd, const char *name, char *rel, size_t relsz,
         break;
     }
 
-    /*
-     *  A directory whose ctime falls between the start of the walk and NOW
-     *  changed while belay was walking. Together with the per-directory window
-     *  check below, this covers a file moved between two directories listed
-     *  at different moments -- which otherwise vanishes from both listings
-     *  with a clean trailer (verified).
-     *
-     *  The upper bound matters. A ctime in the FUTURE is not a change during
-     *  the walk: it is left over from a backward clock step before the walk.
-     *  WSL steps its clock back ~100 s at a time (measured twice: 101 s and
-     *  108 s); with only a lower bound, every directory edited in the last
-     *  ~100 s was flagged after each step. "Now" is read after the stat, so a
-     *  change during the walk lands at or below it unless the clock stepped
-     *  back meanwhile -- and then this rule merely misses it: the end-of-walk
-     *  re-check, which compares by equality, does not depend on the clock.
-     */
-    if (cfd != -1 && !e->unstable && e->ctime_ns >= wc->walk_start_ns) {
-        struct timespec now;
-        wc->ops->clock(wc->ops->ctx, BELAY_CLOCK_REAL, &now);
-        if (e->ctime_ns <= ident_ns((int64_t)now.tv_sec, now.tv_nsec))
-            outcome_apply(e, FACET_LISTING, OUT_CHANGED, &wc->tally);
-    }
+    /* Changed during the walk, before belay reached it (consistency.c). */
+    if (cfd != -1 && cons_changed_during_walk(wc, e))
+        outcome_apply(e, FACET_LISTING, OUT_CHANGED, &wc->tally);
 
     if (cfd == -1) return cap_emit_scratch(wc);
 
@@ -162,13 +143,8 @@ static int visit(int parent_fd, const char *name, char *rel, size_t relsz,
 
     int r = cap_walk(cfd, rel, relsz, rel_len, depth + 1, wc);
     if (r == 0 || r == W_INCOMPLETE) {
-        struct stat post;
-        const struct ident di = ident_of_entry(dir);
-        struct ident pi;
-        const bool incomplete = (r == W_INCOMPLETE) ||
-            wc->ops->fstat(wc->ops->ctx, cfd, &post) == -1 ||
-            (pi = ident_of_stat(&post), !ident_same(&pi, &di, ID_TIMES));
-        if (incomplete) outcome_apply(dir, FACET_LISTING, OUT_CHANGED, &wc->tally);
+        if (r == W_INCOMPLETE || !cons_listing_held(wc, cfd, dir))
+            outcome_apply(dir, FACET_LISTING, OUT_CHANGED, &wc->tally);
         r = 0;
     }
     close(cfd);

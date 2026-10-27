@@ -286,9 +286,7 @@ int cap_read_link(int pfd, const char *name, const struct stat *st, const char *
         }
         return V_RACED;
     }
-    const struct ident ai = ident_of_stat(&again), ri = ident_of_stat(st);
-    if (!ident_same(&ai, &ri, ID_OBJECT | ID_CTIME) || ai.size != (uint64_t)n)
-        return V_RACED;
+    if (!cons_link_read(st, &again, (size_t)n)) return V_RACED;
 
     /* Advisory only (§5.1.1): computed lexically, never used to decide. */
     e->target_outside_scope = belay_link_target_outside(wc->scope, e->path, e->path_len,
@@ -328,11 +326,7 @@ int cap_read_file(int pfd, const char *name, const struct stat *st, const char *
         outcome_apply(e, FACET_CONTENT, OUT_DENIED, &wc->tally);
         return V_OK;
     }
-    /* Same file, same moment as the fstatat whose metadata was recorded --
-     * including mtime and ctime, so a same-size rewrite in between cannot
-     * pair the old timestamps with the new content's hash. */
-    const struct ident bi = ident_of_stat(&before), ri = ident_of_stat(st);
-    const bool same = ident_same(&bi, &ri, ID_OBJECT | ID_TYPE | ID_SIZE | ID_TIMES);
+    const bool same = cons_file_opened(st, &before);
     if (!same) {
         outcome_apply(e, FACET_CONTENT, OUT_CHANGED, &wc->tally);
         close(fd);
@@ -391,8 +385,7 @@ int cap_read_file(int pfd, const char *name, const struct stat *st, const char *
     }
     close(fd);
 
-    const struct ident ai = ident_of_stat(&after);
-    const bool stable = ident_same(&ai, &bi, ID_SIZE | ID_TIMES) && nread == bi.size;
+    const bool stable = cons_file_read(&before, &after, nread);
     if (!stable) {
         /* The bytes read -- and any staged copy -- match no state of the file. */
         if (want) belay_store_abort(&tx);
@@ -442,15 +435,10 @@ int cap_open_dir(int pfd, const char *name, const struct stat *st, const char *r
         return V_OK;
     }
 
-    /* The directory opened must be the one stat'ed. Verified before this
-     * check: swapping two directories between the stat and the open recorded
-     * A's mode and inode with B's contents, and lost A's contents, with a
-     * clean trailer. */
     struct stat cs, probe;
-    struct ident ci = { 0 };
-    const struct ident ri = ident_of_stat(st);
-    if (wc->ops->fstat(wc->ops->ctx, cfd, &cs) == -1 ||
-        (ci = ident_of_stat(&cs), !ident_same(&ci, &ri, ID_OBJECT)) ||
+    const enum outcome opened = wc->ops->fstat(wc->ops->ctx, cfd, &cs) == -1
+                              ? OUT_DENIED : cons_dir_opened(st, &cs);
+    if (opened == OUT_DENIED ||
         /* Readable but not searchable (r without x): its names can be listed
          * but none of them can be stat'ed. */
         wc->ops->fstatat(wc->ops->ctx, cfd, ".", &probe, AT_SYMLINK_NOFOLLOW) == -1) {
@@ -458,9 +446,7 @@ int cap_open_dir(int pfd, const char *name, const struct stat *st, const char *r
         outcome_apply(e, FACET_LISTING, OUT_DENIED, &wc->tally);
         return V_OK;
     }
-    /* Changed between its stat and its open: its listing will not describe
-     * the state its metadata records. Still walked, but flagged. */
-    if (!ident_same(&ci, &ri, ID_TIMES)) outcome_apply(e, FACET_LISTING, OUT_CHANGED, &wc->tally);
+    if (opened == OUT_CHANGED) outcome_apply(e, FACET_LISTING, OUT_CHANGED, &wc->tally);
     if (cap_read_extras(wc, cfd, pfd, name, st) == -1) {
         close(cfd);
         return -1;

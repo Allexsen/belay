@@ -106,7 +106,14 @@ int  cap_emit(struct walk_ctx *wc, const struct belay_entry *e);
 /* walk.c */
 int  cap_walk(int dfd, char *rel, size_t relsz, size_t rel_len, int depth, struct walk_ctx *wc);
 
-/* consistency.c */
+/* consistency.c: every judgment of "did it change while belay looked". */
+void cons_walk_begin(struct walk_ctx *wc);
+bool cons_file_opened(const struct stat *recorded, const struct stat *opened);
+bool cons_file_read(const struct stat *opened, const struct stat *after, uint64_t nread);
+bool cons_link_read(const struct stat *recorded, const struct stat *again, size_t target_len);
+enum outcome cons_dir_opened(const struct stat *recorded, const struct stat *opened);
+bool cons_changed_during_walk(const struct walk_ctx *wc, const struct belay_entry *dir);
+bool cons_listing_held(const struct walk_ctx *wc, int dfd, const struct belay_entry *dir);
 int  cap_recheck(struct walk_ctx *wc, int root_fd, struct belay_entry *e, FILE *verdicts);
 
 /* publish.c */

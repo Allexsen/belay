@@ -1,3 +1,8 @@
+/*
+ *  Walk consistency: every judgment of whether something changed while belay
+ *  was looking at it, and the end-of-walk re-check. Capture code reports what
+ *  these decide through outcome_apply; nothing else decides it.
+ */
 #define _GNU_SOURCE
 #include "capture_internal.h"
 
@@ -188,4 +193,107 @@ done:
     rs_pop_to(rs, 0);
     free(rs);
     return rc;
+}
+
+/* ------------------------------------------------------------------------ */
+/* Judgments during the walk                                                 */
+/* ------------------------------------------------------------------------ */
+
+/*
+ *  Walk start, for the "changed during the walk" rule. On Linux it is read
+ *  from CLOCK_REALTIME_COARSE -- the clock the kernel stamps files with -- so
+ *  a change made after this instant can never carry an earlier ctime, and no
+ *  margin is needed. False positives are limited to a directory changed in
+ *  the same kernel tick (1-10 ms) just before the walk. Elsewhere file
+ *  timestamps come from the fine clock; a 10 ms margin covers any rounding.
+ *
+ *  A clock STEP can blind this rule but never make it flag: a ctime later
+ *  than "now" is not counted. Nothing is lost by that, since the end-of-walk
+ *  re-check catches every change after a listing by equality. (Round 2 also
+ *  flagged the root whenever realtime and monotonic time diverged during the
+ *  walk. On this development machine WSL steps the wall clock +108 s and back
+ *  every 5.4 s, drifting 0.4 s per cycle -- measured, 45 steps in 2 minutes --
+ *  so every check longer than about 7 s was flagged. With the re-check in
+ *  place that rule protected nothing, and it was removed.)
+ */
+void cons_walk_begin(struct walk_ctx *wc) {
+    const struct fsops *ops = wc->ops;
+    struct timespec rt0, start;
+    ops->clock(ops->ctx, BELAY_CLOCK_REAL, &rt0);
+    if (ops->clock(ops->ctx, BELAY_CLOCK_COARSE, &start) == 0) {
+        wc->walk_start_ns = ident_ns((int64_t)start.tv_sec, start.tv_nsec);
+    } else {
+        start = rt0;
+        wc->walk_start_ns = ident_ns((int64_t)start.tv_sec, start.tv_nsec) - 10000000LL;
+    }
+}
+
+/* A regular file's open fd against the fstatat whose metadata was recorded:
+ * same file, same moment -- including mtime and ctime, so a same-size
+ * rewrite in between cannot pair the old timestamps with the new content's
+ * hash. */
+bool cons_file_opened(const struct stat *recorded, const struct stat *opened) {
+    const struct ident o = ident_of_stat(opened), r = ident_of_stat(recorded);
+    return ident_same(&o, &r, ID_OBJECT | ID_TYPE | ID_SIZE | ID_TIMES);
+}
+
+/* The read pass: size and timestamps unchanged across it, and every byte the
+ * size promised was read. (Not proof the bytes are one state: a write already
+ * in flight when the read began updates the timestamps first -- see the spec,
+ * "What a hash, and a stored copy, prove".) */
+bool cons_file_read(const struct stat *opened, const struct stat *after, uint64_t nread) {
+    const struct ident a = ident_of_stat(after), b = ident_of_stat(opened);
+    return ident_same(&a, &b, ID_SIZE | ID_TIMES) && nread == b.size;
+}
+
+/* A symlink re-stat'ed after its target was read: the target must belong to
+ * the link whose metadata was recorded (same inode, unchanged ctime, size
+ * equal to the target's length), or a swapped link would record one link's
+ * target with another's metadata. */
+bool cons_link_read(const struct stat *recorded, const struct stat *again, size_t target_len) {
+    const struct ident a = ident_of_stat(again), r = ident_of_stat(recorded);
+    return ident_same(&a, &r, ID_OBJECT | ID_CTIME) && a.size == (uint64_t)target_len;
+}
+
+/* A directory's open fd against its recorded stat. Not the same object:
+ * DENIED -- swapping two directories between the stat and the open recorded
+ * A's mode and inode with B's contents, and lost A's contents, with a clean
+ * trailer (verified). Same object, changed since: CHANGED -- its listing will
+ * not describe the state its metadata records; still walked, but flagged. */
+enum outcome cons_dir_opened(const struct stat *recorded, const struct stat *opened) {
+    const struct ident o = ident_of_stat(opened), r = ident_of_stat(recorded);
+    if (!ident_same(&o, &r, ID_OBJECT)) return OUT_DENIED;
+    return ident_same(&o, &r, ID_TIMES) ? OUT_OK : OUT_CHANGED;
+}
+
+/*
+ *  A directory whose ctime falls between the start of the walk and NOW
+ *  changed while belay was walking. Together with the per-directory window
+ *  check, this covers a file moved between two directories listed at
+ *  different moments -- which otherwise vanishes from both listings with a
+ *  clean trailer (verified).
+ *
+ *  The upper bound matters. A ctime in the FUTURE is not a change during the
+ *  walk: it is left over from a backward clock step before the walk. WSL
+ *  steps its clock back ~100 s at a time (measured twice: 101 s and 108 s);
+ *  with only a lower bound, every directory edited in the last ~100 s was
+ *  flagged after each step. "Now" is read after the stat, so a change during
+ *  the walk lands at or below it unless the clock stepped back meanwhile --
+ *  and then this rule merely misses it: the end-of-walk re-check, which
+ *  compares by equality, does not depend on the clock.
+ */
+bool cons_changed_during_walk(const struct walk_ctx *wc, const struct belay_entry *dir) {
+    if (dir->unstable || dir->ctime_ns < wc->walk_start_ns) return false;
+    struct timespec now;
+    wc->ops->clock(wc->ops->ctx, BELAY_CLOCK_REAL, &now);
+    return dir->ctime_ns <= ident_ns((int64_t)now.tv_sec, now.tv_nsec);
+}
+
+/* After a directory's subtree is walked: its mtime and ctime as recorded, or
+ * its listing describes no single instant. */
+bool cons_listing_held(const struct walk_ctx *wc, int dfd, const struct belay_entry *dir) {
+    struct stat post;
+    if (wc->ops->fstat(wc->ops->ctx, dfd, &post) == -1) return false;
+    const struct ident p = ident_of_stat(&post), d = ident_of_entry(dir);
+    return ident_same(&p, &d, ID_TIMES);
 }
