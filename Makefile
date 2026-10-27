@@ -57,7 +57,7 @@ SAN_FLAGS	= -fsanitize=address,undefined -fno-omit-frame-pointer -g -O1
 SAN_BUILD	= $(BUILD)/san
 SAN_TEST_BIN	= $(TEST_SRC:test/%.c=$(SAN_BUILD)/test/%)
 
-.PHONY: all clean test check check-san fuzz bench platform
+.PHONY: all clean test check check-san fuzz bench platform fs-scenarios
 
 all: $(BIN)
 
@@ -131,6 +131,13 @@ $(BUILD)/bench/%: bench/%.c $(CORE_OBJ)
 	$(CC) $(CFLAGS) $(WARN) $(INC) -MMD -MP -o $@ $< $(CORE_OBJ) $(BENCH_LDFLAGS)
 
 $(BUILD)/bench/spike_torn: BENCH_LDFLAGS = -pthread
+
+# Filesystem scenarios (gap b): run by CI on loopback btrfs, FAT and NFS.
+FS_SCEN		= $(BUILD)/fs_scenarios
+$(FS_SCEN): test/fs/fs_scenarios.c $(CORE_OBJ)
+	@mkdir -p $(dir $@)
+	$(CC) $(CFLAGS) $(WARN) $(INC) -o $@ $< $(CORE_OBJ) -Wl,--wrap=readdir,--wrap=openat
+fs-scenarios: $(FS_SCEN)
 
 bench: $(BENCH_BIN)
 	@echo "built: $(BENCH_BIN)"

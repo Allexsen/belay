@@ -15,7 +15,7 @@
  *      a clean manifest that shows a file twice, not at all, or with bytes it
  *      never held is the defect class this tool exists to prevent.
  *
- *  Fixtures live under /tmp (§0.4d).
+ *  Fixtures live under /tmp, or under $BELAY_TEST_ROOT (§0.4d).
  */
 #define _GNU_SOURCE
 
@@ -160,7 +160,9 @@ TEST(clean_manifest_under_a_mutating_tree_is_a_real_state) {
 }
 
 int main(void) {
-    snprintf(g_base, sizeof g_base, "/tmp/belay_stress_%d", (int)getpid());
+    /* BELAY_TEST_ROOT lets CI run this on other filesystems (btrfs, NFS). */
+    const char *root = getenv("BELAY_TEST_ROOT");
+    snprintf(g_base, sizeof g_base, "%s/belay_stress_%d", root != NULL ? root : "/tmp", (int)getpid());
     snprintf(g_scope, sizeof g_scope, "%s/scope", g_base);
     snprintf(g_out, sizeof g_out, "%s/out", g_base);
     snprintf(g_m, sizeof g_m, "%s/m.ndjson", g_base);
