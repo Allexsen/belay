@@ -46,6 +46,7 @@
 #include "capture.h"
 #include "fsops.h"
 #include "ident.h"
+#include "outcome.h"
 
 #include <dirent.h>
 #include <errno.h>
@@ -185,8 +186,10 @@ struct recmeta {
     struct ident id;
     uint8_t  kind;              /* RC_* */
     uint8_t  mark;              /* MARK_* */
-    uint8_t  pad[6];
+    uint8_t  flags;             /* REC_*: the entry's flags, for the trailer tally */
+    uint8_t  pad[5];
 };
+enum { REC_UNREADABLE = 1, REC_UNSTABLE = 2, REC_MOUNT = 4 };
 enum { RC_NONE, RC_LISTING, RC_ENTRY };
 enum { MARK_NONE, MARK_UNSTABLE, MARK_RACED };
 #define IDENT_BYTES sizeof(struct recmeta)
@@ -204,6 +207,7 @@ struct spill {
      * square of the entry count, 13x the manifest size at 80k entries.) */
     FILE *runs[LEVELS][FANIN];
     size_t nruns[LEVELS];
+    size_t added;               /* records accepted, all runs together */
     const struct fsops *ops;
     char dir[PATH_MAX + 32];    /* the output's directory, for O_TMPFILE runs */
     char tmpl[PATH_MAX + 32];   /* mkstemp template, where O_TMPFILE is missing */
@@ -255,8 +259,17 @@ static FILE *open_tmp(const struct spill *s) {
  *  the flag -- an invariant kept on one path but not its sibling is how a
  *  duplicate name once got through.
  */
-static int write_line(FILE *out, const unsigned char *line, uint32_t llen, uint8_t mark) {
+static int write_line(FILE *out, const unsigned char *line, uint32_t llen,
+                      const struct recmeta *m, struct belay_manifest_stats *tally) {
     static const char *const flag[] = { "", ",\"unstable\":true", ",\"raced\":true" };
+    const uint8_t mark = m->mark;
+    /* Counted as emitted, from the line's final flags. */
+    struct belay_entry emitted;
+    emitted.unreadable = m->flags & REC_UNREADABLE;
+    emitted.unstable   = (m->flags & REC_UNSTABLE) || mark == MARK_UNSTABLE;
+    emitted.is_mount   = m->flags & REC_MOUNT;
+    emitted.raced      = mark == MARK_RACED;
+    outcome_count(tally, &emitted);
     if (mark == MARK_NONE || mark > MARK_RACED || llen < 2)
         return fwrite(line, 1, llen, out) == llen ? 0 : -1;
     const size_t body = llen - 2;                       /* the line ends "}\n" */
@@ -298,12 +311,13 @@ static int cur_cmp(const struct cursor *a, const struct cursor *b) {
 }
 
 /*
- *  K-way merge of `k` runs. With `lines_only` the output is manifest lines;
- *  otherwise it is records, for a cascaded run. Paths are unique by
+ *  K-way merge of `k` runs. With `lines` the output is manifest lines, tallied
+ *  into it; otherwise it is records, for a cascaded run. Paths are unique by
  *  construction, so an equal pair is an internal error, not a tie to break.
  *  `*count` receives the number of records emitted.
  */
-static int merge(FILE **in, size_t k, FILE *out, int lines_only, size_t *count) {
+static int merge(FILE **in, size_t k, FILE *out, struct belay_manifest_stats *lines,
+                 size_t *count) {
     struct cursor cur[FANIN];
     int rc = 0;
     size_t emitted = 0;
@@ -341,8 +355,8 @@ static int merge(FILE **in, size_t k, FILE *out, int lines_only, size_t *count) 
         prev_len = m->plen;
 
         int ok;
-        if (lines_only) {
-            ok = write_line(out, m->buf + PATH_CAP, m->llen, m->id.mark) == 0;
+        if (lines != NULL) {
+            ok = write_line(out, m->buf + PATH_CAP, m->llen, &m->id, lines) == 0;
         } else {
             ok = fwrite(&m->plen, 1, 4, out) == 4 &&
                  fwrite(m->buf, 1, m->plen, out) == m->plen &&
@@ -397,7 +411,7 @@ static int spill_flush(struct spill *s) {
     for (size_t lv = 0; lv + 1 < LEVELS && s->nruns[lv] == FANIN; lv++) {
         FILE *merged = open_tmp(s);
         if (merged == NULL) return -1;
-        if (merge(s->runs[lv], FANIN, merged, 0, NULL) == -1 || fflush(merged) != 0) {
+        if (merge(s->runs[lv], FANIN, merged, NULL, NULL) == -1 || fflush(merged) != 0) {
             fclose(merged);
             return -1;
         }
@@ -424,7 +438,8 @@ static size_t spill_total_runs(const struct spill *s) {
  *  there can be more than FANIN: those are first merged lowest level first
  *  (the smallest runs, so the least data is rewritten) until FANIN remain.
  */
-static int spill_finish(struct spill *s, FILE *out, size_t *count) {
+static int spill_finish(struct spill *s, FILE *out, struct belay_manifest_stats *tally,
+                        size_t *count) {
     FILE *all[LEVELS * FANIN];
     size_t n = 0;
     for (size_t lv = 0; lv < LEVELS; lv++) {
@@ -434,7 +449,7 @@ static int spill_finish(struct spill *s, FILE *out, size_t *count) {
     int rc = 0;
     while (n > FANIN) {
         FILE *merged = open_tmp(s);
-        if (merged == NULL || merge(all, FANIN, merged, 0, NULL) == -1 || fflush(merged) != 0) {
+        if (merged == NULL || merge(all, FANIN, merged, NULL, NULL) == -1 || fflush(merged) != 0) {
             if (merged != NULL) fclose(merged);
             rc = -1;
             break;
@@ -444,7 +459,7 @@ static int spill_finish(struct spill *s, FILE *out, size_t *count) {
         n -= FANIN;
         all[n++] = merged;
     }
-    if (rc == 0) rc = merge(all, n, out, 1, count);
+    if (rc == 0) rc = merge(all, n, out, tally, count);
     for (size_t i = 0; i < n; i++) fclose(all[i]);
     return rc;
 }
@@ -474,6 +489,7 @@ static int spill_add(struct spill *s, const char *path, size_t plen,
     memcpy(r + 8 + plen + llen, id, IDENT_BYTES);
     s->offs[s->n++] = s->used;
     s->used += sz;
+    s->added++;
     return 0;
 nomem:
     belay_err_set(BELAY_ERR_NOMEM, 0, "manifest: out of memory");
@@ -504,12 +520,7 @@ struct walk_ctx {
     char  *xlist;               /* XLIST_CAP + 1: an entry's xattr name list */
     const char **xnames;        /* pointers into xlist, sorted */
     bool   extras_done;         /* this attempt already read the entry's extras */
-    size_t n_entries;
-    size_t n_vanished;
-    size_t n_unreadable;
-    size_t n_unstable;
-    size_t n_mounts;
-    size_t n_raced;
+    struct walk_tally tally;    /* what no emitted entry carries: vanished */
 
     /* Walk start, realtime ns (see belay_manifest_write): a directory whose
      * ctime lies between this and "now" changed during the walk. */
@@ -723,9 +734,7 @@ static int read_extras(struct walk_ctx *wc, int fd, int pfd, const char *name,
     }
     goto done;
 unknown:
-    e->has_caps = e->has_xattrs = e->xattrs_inline = false;
-    e->xattrs_len = 0;
-    e->xattrs_unknown = true;
+    outcome_apply(e, FACET_EXTRAS, OUT_DENIED, &wc->tally);
 done:
     ops->xattr_source_close(ops->ctx, &x);
     return 0;
@@ -761,9 +770,9 @@ static int emit_one(struct walk_ctx *wc, const struct belay_entry *e) {
         id.kind = e->unstable ? RC_NONE : RC_LISTING;
     else
         id.kind = RC_ENTRY;
-    if (spill_add(wc->spill, e->path, e->path_len, wc->line, llen, &id) == -1) return -1;
-    wc->n_entries++;
-    return 0;
+    id.flags = (uint8_t)((e->unreadable ? REC_UNREADABLE : 0) | (e->unstable ? REC_UNSTABLE : 0) |
+                         (e->is_mount ? REC_MOUNT : 0));
+    return spill_add(wc->spill, e->path, e->path_len, wc->line, llen, &id);
 }
 
 static int emit_entry(struct walk_ctx *wc) { return emit_one(wc, &wc->e); }
@@ -853,12 +862,6 @@ static int read_link(int pfd, const char *name, const struct stat *st, const cha
     return V_OK;
 }
 
-static void mark_unreadable_file(struct walk_ctx *wc) {
-    wc->e.unverified = true;
-    wc->e.unreadable = true;
-    wc->n_unreadable++;
-}
-
 /*
  *  Regular file. Hashes by fd and, when content is kept, stages the copy in
  *  the same read. The (size, sha256) pair must describe one real state of the
@@ -881,14 +884,14 @@ static int read_file(int pfd, const char *name, const struct stat *st, const cha
         }
         /* EACCES, EPERM, ELOOP (swapped for a link), EAGAIN (a lease),
          * ETXTBSY, EIO...: one entry's property, recorded on it. */
-        mark_unreadable_file(wc);
+        outcome_apply(e, FACET_CONTENT, OUT_DENIED, &wc->tally);
         return V_OK;
     }
 
     struct stat before, after;
     if (wc->ops->fstat(wc->ops->ctx, fd, &before) == -1) {
         close(fd);
-        mark_unreadable_file(wc);
+        outcome_apply(e, FACET_CONTENT, OUT_DENIED, &wc->tally);
         return V_OK;
     }
     /* Same file, same moment as the fstatat whose metadata was recorded --
@@ -897,9 +900,7 @@ static int read_file(int pfd, const char *name, const struct stat *st, const cha
     const struct ident bi = ident_of_stat(&before), ri = ident_of_stat(st);
     const bool same = ident_same(&bi, &ri, ID_OBJECT | ID_TYPE | ID_SIZE | ID_TIMES);
     if (!same) {
-        e->unverified = true;
-        e->unstable = true;
-        wc->n_unstable++;
+        outcome_apply(e, FACET_CONTENT, OUT_CHANGED, &wc->tally);
         close(fd);
         return V_OK;
     }
@@ -908,7 +909,7 @@ static int read_file(int pfd, const char *name, const struct stat *st, const cha
         return -1;
     }
     if (e->size > wc->opts->hash_max_bytes) {
-        e->unverified = true;
+        outcome_apply(e, FACET_CONTENT, OUT_TOO_LARGE, &wc->tally);
         close(fd);
         return V_OK;
     }
@@ -943,8 +944,7 @@ static int read_file(int pfd, const char *name, const struct stat *st, const cha
         if (h == -2) {
             /* The file could not be read (EIO and friends): record it. */
             belay_err_clear();
-            e->sha256_hex[0] = '\0';
-            mark_unreadable_file(wc);
+            outcome_apply(e, FACET_CONTENT, OUT_DENIED, &wc->tally);
             return V_OK;
         }
         return -1;                                      /* store write failed */
@@ -952,8 +952,7 @@ static int read_file(int pfd, const char *name, const struct stat *st, const cha
     if (wc->ops->fstat(wc->ops->ctx, fd, &after) == -1) {
         if (want) belay_store_abort(&tx);
         close(fd);
-        e->sha256_hex[0] = '\0';
-        mark_unreadable_file(wc);
+        outcome_apply(e, FACET_CONTENT, OUT_DENIED, &wc->tally);
         return V_OK;
     }
     close(fd);
@@ -963,10 +962,7 @@ static int read_file(int pfd, const char *name, const struct stat *st, const cha
     if (!stable) {
         /* The bytes read -- and any staged copy -- match no state of the file. */
         if (want) belay_store_abort(&tx);
-        e->sha256_hex[0] = '\0';
-        e->unverified = true;
-        e->unstable = true;
-        wc->n_unstable++;
+        outcome_apply(e, FACET_CONTENT, OUT_CHANGED, &wc->tally);
         return V_OK;
     }
 
@@ -995,8 +991,7 @@ static int open_dir(int pfd, const char *name, const struct stat *st, const char
     *out_fd = -1;
 
     if (depth >= MAX_DEPTH || rel_len > PATH_CAP - 2 - NAME_BYTES) {
-        e->unreadable = true;
-        wc->n_unreadable++;
+        outcome_apply(e, FACET_LISTING, OUT_DENIED, &wc->tally);
         return V_OK;
     }
 
@@ -1007,11 +1002,9 @@ static int open_dir(int pfd, const char *name, const struct stat *st, const char
             belay_err_set(BELAY_ERR_IO, errno, "manifest: openat dir %s", rel);
             return -1;
         }
-        if (errno == ENOENT) wc->n_vanished++;
         /* ENOENT (gone), ELOOP/ENOTDIR (swapped), EACCES/EPERM: the subtree is
          * absent, and unflagged it would read as an empty directory. */
-        e->unreadable = true;
-        wc->n_unreadable++;
+        outcome_apply(e, FACET_LISTING, errno == ENOENT ? OUT_GONE : OUT_DENIED, &wc->tally);
         return V_OK;
     }
 
@@ -1028,16 +1021,12 @@ static int open_dir(int pfd, const char *name, const struct stat *st, const char
          * but none of them can be stat'ed. */
         wc->ops->fstatat(wc->ops->ctx, cfd, ".", &probe, AT_SYMLINK_NOFOLLOW) == -1) {
         close(cfd);
-        e->unreadable = true;
-        wc->n_unreadable++;
+        outcome_apply(e, FACET_LISTING, OUT_DENIED, &wc->tally);
         return V_OK;
     }
     /* Changed between its stat and its open: its listing will not describe
      * the state its metadata records. Still walked, but flagged. */
-    if (!ident_same(&ci, &ri, ID_TIMES)) {
-        e->unstable = true;
-        wc->n_unstable++;
-    }
+    if (!ident_same(&ci, &ri, ID_TIMES)) outcome_apply(e, FACET_LISTING, OUT_CHANGED, &wc->tally);
     if (read_extras(wc, cfd, pfd, name, st) == -1) {
         close(cfd);
         return -1;
@@ -1061,7 +1050,10 @@ static int visit(int parent_fd, const char *name, char *rel, size_t relsz,
         bool mount_root, mount_known;
         if (stat_entry(wc, parent_fd, name, &st, &mount_root, &mount_known) == -1) {
             /* Vanished between readdir and stat: the tree changed under us. */
-            if (errno == ENOENT) { wc->n_vanished++; return 0; }
+            if (errno == ENOENT) {
+                outcome_apply(NULL, FACET_ENTRY, OUT_GONE, &wc->tally);
+                return 0;
+            }
             if (fatal_errno(errno)) {
                 belay_err_set(BELAY_ERR_IO, errno, "manifest: stat %s", rel);
                 return -1;
@@ -1096,9 +1088,7 @@ static int visit(int parent_fd, const char *name, char *rel, size_t relsz,
 
         int r = V_OK;
         if (crossed) {
-            e->is_mount = true;
-            e->has_iflags = false;              /* a mount point is never read */
-            if (e->type == BELAY_T_REG) e->unverified = true;
+            outcome_apply(e, FACET_ENTRY, OUT_BOUNDARY, &wc->tally);
             if (e->type == BELAY_T_LNK) r = read_link(parent_fd, name, &st, rel, wc);
         } else if (e->type == BELAY_T_LNK) {
             r = read_link(parent_fd, name, &st, rel, wc);
@@ -1109,24 +1099,19 @@ static int visit(int parent_fd, const char *name, char *rel, size_t relsz,
         }
 
         if (r == -1) return -1;
-        if (r == V_VANISHED) { wc->n_vanished++; return 0; }
-        if (r == V_RACED && attempt + 1 < MAX_RACE_RETRIES) continue;   /* stat again */
-        if (r == V_RACED || r == V_UNREADABLE) {
-            /* A symlink whose target could not be read reliably -- an I/O
-             * error, a target too long, or still changing after several
-             * tries -- is recorded unreadable, never dropped: dropping a link
-             * that never went away would read as a deletion. If no target
-             * was read at all, the target is recorded empty, which no real
-             * symlink can have, so "unknown" stays unambiguous. */
-            if (r == V_UNREADABLE || !e->has_link_target) {
-                e->link_target[0] = '\0';
-                e->link_target_len = 0;
-                e->has_link_target = true;
-                e->target_outside_scope = false;
-            }
-            e->unreadable = true;
-            wc->n_unreadable++;
+        if (r == V_VANISHED) {
+            outcome_apply(NULL, FACET_ENTRY, OUT_GONE, &wc->tally);
+            return 0;
         }
+        if (r == V_RACED && attempt + 1 < MAX_RACE_RETRIES) continue;   /* stat again */
+        /* A symlink whose target could not be read reliably -- an I/O error, a
+         * target too long, or still changing after several tries -- is
+         * recorded unreadable, never dropped: dropping a link that never went
+         * away would read as a deletion. Its target is recorded empty, which
+         * no real symlink can have, so "unknown" stays unambiguous -- or, after
+         * the retries ran out, the last one read. */
+        if (r == V_UNREADABLE) outcome_apply(e, FACET_TARGET, OUT_DENIED, &wc->tally);
+        if (r == V_RACED)      outcome_apply(e, FACET_TARGET, OUT_CHANGED, &wc->tally);
         /* Entries not reached through an open fd -- symlinks, FIFOs,
          * devices, anything that could not be opened -- get their extras
          * through O_PATH. Mount points are never read. */
@@ -1137,8 +1122,6 @@ static int visit(int parent_fd, const char *name, char *rel, size_t relsz,
         }
         break;
     }
-    /* Counted after the retry loop: a retried entry is still one entry. */
-    if (e->is_mount) wc->n_mounts++;
 
     /*
      *  A directory whose ctime falls between the start of the walk and NOW
@@ -1159,10 +1142,8 @@ static int visit(int parent_fd, const char *name, char *rel, size_t relsz,
     if (cfd != -1 && !e->unstable && e->ctime_ns >= wc->walk_start_ns) {
         struct timespec now;
         wc->ops->clock(wc->ops->ctx, BELAY_CLOCK_REAL, &now);
-        if (e->ctime_ns <= ident_ns((int64_t)now.tv_sec, now.tv_nsec)) {
-            e->unstable = true;
-            wc->n_unstable++;
-        }
+        if (e->ctime_ns <= ident_ns((int64_t)now.tv_sec, now.tv_nsec))
+            outcome_apply(e, FACET_LISTING, OUT_CHANGED, &wc->tally);
     }
 
     if (cfd == -1) return emit_entry(wc);
@@ -1192,10 +1173,7 @@ static int visit(int parent_fd, const char *name, char *rel, size_t relsz,
         const bool incomplete = (r == W_INCOMPLETE) ||
             wc->ops->fstat(wc->ops->ctx, cfd, &post) == -1 ||
             (pi = ident_of_stat(&post), !ident_same(&pi, &di, ID_TIMES));
-        if (incomplete && !dir->unstable) {
-            dir->unstable = true;
-            wc->n_unstable++;
-        }
+        if (incomplete) outcome_apply(dir, FACET_LISTING, OUT_CHANGED, &wc->tally);
         r = 0;
     }
     close(cfd);
@@ -1389,8 +1367,7 @@ static int recheck_one(struct rstack *rs, struct walk_ctx *wc,
         }
     }
     if (!same) {
-        if (id->kind == RC_LISTING) { id->mark = MARK_UNSTABLE; wc->n_unstable++; }
-        else                        { id->mark = MARK_RACED;  wc->n_raced++;  }
+        id->mark = id->kind == RC_LISTING ? MARK_UNSTABLE : MARK_RACED;
     }
     return 0;
 }
@@ -1619,8 +1596,7 @@ int capture_write(const struct fsops *ops, const char *out_path, const char *sco
      * cannot stat: flag it, rather than fail on its first child. */
     struct stat probe;
     if (ops->fstatat(ops->ctx, root_fd, ".", &probe, AT_SYMLINK_NOFOLLOW) != 0) {
-        root_e.unreadable = true;
-        wc->n_unreadable++;
+        outcome_apply(&root_e, FACET_LISTING, OUT_DENIED, &wc->tally);
     } else {
         rel[0] = '\0';
         const int wr = walk(root_fd, rel, PATH_CAP, 0, 0, wc);
@@ -1631,10 +1607,7 @@ int capture_write(const struct fsops *ops, const char *out_path, const char *sco
         struct ident pi;
         const bool changed = wr == W_INCOMPLETE || ops->fstat(ops->ctx, root_fd, &post) == -1 ||
             (pi = ident_of_stat(&post), !ident_same(&pi, &ri, ID_TIMES));
-        if (changed) {
-            root_e.unstable = true;
-            wc->n_unstable++;
-        }
+        if (changed) outcome_apply(&root_e, FACET_LISTING, OUT_CHANGED, &wc->tally);
     }
     if (emit_one(wc, &root_e) == -1) goto cleanup;
 
@@ -1660,6 +1633,7 @@ int capture_write(const struct fsops *ops, const char *out_path, const char *sco
     }
     if (write_header(ops, out, real, opts, wc->line) == -1) goto cleanup;
 
+    struct belay_manifest_stats tally = { 0 };
     size_t written = 0;
     if (in_memory) {
         /* Everything fit in one run, sorted above: write straight out --
@@ -1678,20 +1652,20 @@ int capture_write(const struct fsops *ops, const char *out_path, const char *sco
             memcpy(&ll, r + 4 + pl, 4);
             struct recmeta id;
             memcpy(&id, r + 8 + pl + ll, IDENT_BYTES);
-            if (write_line(out, r + 8 + pl, ll, id.mark) == -1) {
+            if (write_line(out, r + 8 + pl, ll, &id, &tally) == -1) {
                 belay_err_set(BELAY_ERR_IO, errno, "manifest: write failed");
                 goto cleanup;
             }
         }
         written = sp.n;
     } else {
-        if (spill_finish(&sp, out, &written) == -1) goto cleanup;
+        if (spill_finish(&sp, out, &tally, &written) == -1) goto cleanup;
     }
 
-    if (written != wc->n_entries) {
+    if (written != sp.added || tally.entries != written) {
         belay_err_set(BELAY_ERR_CORRUPT, 0,
                       "manifest: internal error, %zu entries walked but %zu written",
-                      wc->n_entries, written);
+                      sp.added, written);
         goto cleanup;
     }
 
@@ -1701,8 +1675,8 @@ int capture_write(const struct fsops *ops, const char *out_path, const char *sco
     if (fprintf(out,
                 "{\"belay_manifest_end\":%zu,\"vanished\":%zu"
                 ",\"unreadable\":%zu,\"unstable\":%zu,\"mounts\":%zu,\"raced\":%zu}\n",
-                wc->n_entries, wc->n_vanished, wc->n_unreadable, wc->n_unstable,
-                wc->n_mounts, wc->n_raced) < 0) {
+                tally.entries, wc->tally.vanished, tally.unreadable, tally.unstable,
+                tally.mounts, tally.raced) < 0) {
         belay_err_set(BELAY_ERR_IO, errno, "manifest: trailer write failed");
         goto cleanup;
     }
@@ -1724,12 +1698,8 @@ int capture_write(const struct fsops *ops, const char *out_path, const char *sco
     outtmp_live = false;
 
     if (stats != NULL) {
-        stats->entries    = wc->n_entries;
-        stats->vanished   = wc->n_vanished;
-        stats->unreadable = wc->n_unreadable;
-        stats->unstable   = wc->n_unstable;
-        stats->mounts     = wc->n_mounts;
-        stats->raced    = wc->n_raced;
+        *stats = tally;
+        stats->vanished = wc->tally.vanished;
     }
     rc = 0;
 
