@@ -43,6 +43,8 @@
 #include "belay/path.h"
 #include "belay/store.h"
 
+#include "ident.h"
+
 #include <dirent.h>
 #include <errno.h>
 #include <fcntl.h>
@@ -185,17 +187,15 @@ static int serialize(const struct belay_entry *e, char *buf, size_t cap, size_t 
  *  re-check writes its verdict into `mark`, and the line is written out with
  *  the matching flag.
  */
-struct ident {
-    uint64_t ino, dev, size;
-    int64_t  mtime_ns, ctime_ns;
-    uint32_t mode;
+struct recmeta {
+    struct ident id;
     uint8_t  kind;              /* RC_* */
     uint8_t  mark;              /* MARK_* */
-    uint8_t  pad[2];
+    uint8_t  pad[6];
 };
 enum { RC_NONE, RC_LISTING, RC_ENTRY };
 enum { MARK_NONE, MARK_UNSTABLE, MARK_RACED };
-#define IDENT_BYTES sizeof(struct ident)
+#define IDENT_BYTES sizeof(struct recmeta)
 
 struct spill {
     unsigned char *arena;
@@ -297,7 +297,7 @@ struct cursor {
     FILE *f;
     uint32_t plen, llen;
     unsigned char *buf;         /* PATH_CAP bytes of path, then LINE_CAP of line */
-    struct ident id;
+    struct recmeta id;
     int live;
 };
 
@@ -478,7 +478,7 @@ static int spill_finish(struct spill *s, FILE *out, size_t *count) {
 }
 
 static int spill_add(struct spill *s, const char *path, size_t plen,
-                     const char *line, size_t llen, const struct ident *id) {
+                     const char *line, size_t llen, const struct recmeta *id) {
     const size_t sz = 8 + plen + llen + IDENT_BYTES;
     if (s->used + sz > s->budget && spill_flush(s) == -1) return -1;
 
@@ -599,25 +599,6 @@ static int hash_fd(int fd, unsigned char *buf, char hex_out[65], uint64_t *nread
     return 0;
 }
 
-/* Seconds + nanoseconds as int64 nanoseconds, saturating outside 1678..2262
- * rather than overflowing (undefined behaviour; a year-2300 mtime used to wrap
- * to year 1715). Saturation can map two far-future times to one value, but
- * ctime still changes on every metadata change, so no change is hidden. */
-static int64_t ns_of(int64_t sec, long nsec) {
-    if (sec > (INT64_MAX - nsec) / 1000000000) return INT64_MAX;
-    if (sec < INT64_MIN / 1000000000 + 1)      return INT64_MIN;
-    return sec * 1000000000 + nsec;
-}
-
-static int64_t ts_ns(const struct stat *st, int which) {
-#ifdef __APPLE__
-    const struct timespec *t = which ? &st->st_ctimespec : &st->st_mtimespec;
-#else
-    const struct timespec *t = which ? &st->st_ctim : &st->st_mtim;
-#endif
-    return ns_of((int64_t)t->tv_sec, t->tv_nsec);
-}
-
 static void fill_from_stat(struct belay_entry *e, const struct stat *st) {
     e->type     = type_of(st->st_mode);
     e->mode     = (uint32_t)st->st_mode;
@@ -627,8 +608,9 @@ static void fill_from_stat(struct belay_entry *e, const struct stat *st) {
     e->ino      = (uint64_t)st->st_ino;
     e->dev      = (uint64_t)st->st_dev;
     e->nlink    = (uint64_t)st->st_nlink;
-    e->mtime_ns = ts_ns(st, 0);
-    e->ctime_ns = ts_ns(st, 1);
+    const struct ident id = ident_of_stat(st);
+    e->mtime_ns = id.mtime_ns;
+    e->ctime_ns = id.ctime_ns;
     if (e->type == BELAY_T_BLK || e->type == BELAY_T_CHR) {
         e->has_rdev = true;
         e->rdev = (uint64_t)st->st_rdev;
@@ -729,8 +711,9 @@ static int read_extras(struct walk_ctx *wc, int fd, int pfd, const char *name,
             goto unknown;
         }
         struct stat os;
-        if (fstat(own, &os) == -1 || os.st_ino != st->st_ino || os.st_dev != st->st_dev)
-            goto unknown;                            /* not the entry recorded */
+        if (fstat(own, &os) == -1) goto unknown;
+        const struct ident oi = ident_of_stat(&os), ri = ident_of_stat(st);
+        if (!ident_same(&oi, &ri, ID_OBJECT)) goto unknown;  /* not the entry recorded */
         snprintf(proc, sizeof proc, "/proc/self/fd/%d", own);
         x.proc = proc;
     }
@@ -747,8 +730,9 @@ static int read_extras(struct walk_ctx *wc, int fd, int pfd, const char *name,
             goto unknown;
         }
         struct stat os;
-        if (fstat(own, &os) == -1 || os.st_ino != st->st_ino || os.st_dev != st->st_dev)
-            goto unknown;
+        if (fstat(own, &os) == -1) goto unknown;
+        const struct ident oi = ident_of_stat(&os), ri = ident_of_stat(st);
+        if (!ident_same(&oi, &ri, ID_OBJECT)) goto unknown;
         x.fd = own;
     }
 #else
@@ -852,10 +836,9 @@ static int emit_one(struct walk_ctx *wc, const struct belay_entry *e) {
      * recorded is re-checked as a listing (a change flags it unstable),
      * unless it is unstable already; everything else as an entry (a change
      * flags it raced). */
-    struct ident id;
+    struct recmeta id;
     memset(&id, 0, sizeof id);
-    id.ino = e->ino; id.dev = e->dev; id.size = e->size;
-    id.mtime_ns = e->mtime_ns; id.ctime_ns = e->ctime_ns; id.mode = e->mode;
+    id.id = ident_of_entry(e);
     if (e->type == BELAY_T_DIR && !e->unreadable && !e->is_mount)
         id.kind = e->unstable ? RC_NONE : RC_LISTING;
     else
@@ -965,8 +948,8 @@ static int read_link(int pfd, const char *name, const struct stat *st, const cha
         }
         return V_RACED;
     }
-    if (again.st_ino != st->st_ino || again.st_dev != st->st_dev ||
-        ts_ns(&again, 1) != ts_ns(st, 1) || (uint64_t)again.st_size != (uint64_t)n)
+    const struct ident ai = ident_of_stat(&again), ri = ident_of_stat(st);
+    if (!ident_same(&ai, &ri, ID_OBJECT | ID_CTIME) || ai.size != (uint64_t)n)
         return V_RACED;
 
     /* Advisory only (§5.1.1): computed lexically, never used to decide. */
@@ -1015,9 +998,8 @@ static int read_file(int pfd, const char *name, const struct stat *st, const cha
     /* Same file, same moment as the fstatat whose metadata was recorded --
      * including mtime and ctime, so a same-size rewrite in between cannot
      * pair the old timestamps with the new content's hash. */
-    const bool same = before.st_ino == st->st_ino && before.st_dev == st->st_dev &&
-                      S_ISREG(before.st_mode) && before.st_size == st->st_size &&
-                      ts_ns(&before, 0) == ts_ns(st, 0) && ts_ns(&before, 1) == ts_ns(st, 1);
+    const struct ident bi = ident_of_stat(&before), ri = ident_of_stat(st);
+    const bool same = ident_same(&bi, &ri, ID_OBJECT | ID_TYPE | ID_SIZE | ID_TIMES);
     if (!same) {
         e->unverified = true;
         e->unstable = true;
@@ -1080,10 +1062,8 @@ static int read_file(int pfd, const char *name, const struct stat *st, const cha
     }
     close(fd);
 
-    const bool stable = after.st_size == before.st_size &&
-                        ts_ns(&after, 0) == ts_ns(&before, 0) &&
-                        ts_ns(&after, 1) == ts_ns(&before, 1) &&
-                        nread == (uint64_t)before.st_size;
+    const struct ident ai = ident_of_stat(&after);
+    const bool stable = ident_same(&ai, &bi, ID_SIZE | ID_TIMES) && nread == bi.size;
     if (!stable) {
         /* The bytes read -- and any staged copy -- match no state of the file. */
         if (want) belay_store_abort(&tx);
@@ -1143,7 +1123,9 @@ static int open_dir(int pfd, const char *name, const struct stat *st, const char
      * A's mode and inode with B's contents, and lost A's contents, with a
      * clean trailer. */
     struct stat cs, probe;
-    if (fstat(cfd, &cs) == -1 || cs.st_ino != st->st_ino || cs.st_dev != st->st_dev ||
+    struct ident ci = { 0 };
+    const struct ident ri = ident_of_stat(st);
+    if (fstat(cfd, &cs) == -1 || (ci = ident_of_stat(&cs), !ident_same(&ci, &ri, ID_OBJECT)) ||
         /* Readable but not searchable (r without x): its names can be listed
          * but none of them can be stat'ed. */
         fstatat(cfd, ".", &probe, AT_SYMLINK_NOFOLLOW) == -1) {
@@ -1154,7 +1136,7 @@ static int open_dir(int pfd, const char *name, const struct stat *st, const char
     }
     /* Changed between its stat and its open: its listing will not describe
      * the state its metadata records. Still walked, but flagged. */
-    if (ts_ns(&cs, 0) != ts_ns(st, 0) || ts_ns(&cs, 1) != ts_ns(st, 1)) {
+    if (!ident_same(&ci, &ri, ID_TIMES)) {
         e->unstable = true;
         wc->n_unstable++;
     }
@@ -1279,7 +1261,7 @@ static int visit(int parent_fd, const char *name, char *rel, size_t relsz,
     if (cfd != -1 && !e->unstable && e->ctime_ns >= wc->walk_start_ns) {
         struct timespec now;
         clock_gettime(CLOCK_REALTIME, &now);
-        if (e->ctime_ns <= ns_of((int64_t)now.tv_sec, now.tv_nsec)) {
+        if (e->ctime_ns <= ident_ns((int64_t)now.tv_sec, now.tv_nsec)) {
             e->unstable = true;
             wc->n_unstable++;
         }
@@ -1307,8 +1289,10 @@ static int visit(int parent_fd, const char *name, char *rel, size_t relsz,
     int r = walk(cfd, rel, relsz, rel_len, depth + 1, wc);
     if (r == 0 || r == W_INCOMPLETE) {
         struct stat post;
+        const struct ident di = ident_of_entry(dir);
+        struct ident pi;
         const bool incomplete = (r == W_INCOMPLETE) || fstat(cfd, &post) == -1 ||
-            ts_ns(&post, 0) != dir->mtime_ns || ts_ns(&post, 1) != dir->ctime_ns;
+            (pi = ident_of_stat(&post), !ident_same(&pi, &di, ID_TIMES));
         if (incomplete && !dir->unstable) {
             dir->unstable = true;
             wc->n_unstable++;
@@ -1471,15 +1455,14 @@ static int rs_to(struct rstack *rs, const char *dir, size_t dir_len) {
     return 0;
 }
 
-static bool ident_matches(const struct ident *id, const struct stat *st) {
-    return (uint64_t)st->st_ino == id->ino && (uint64_t)st->st_dev == id->dev &&
-           (uint32_t)st->st_mode == id->mode && (uint64_t)st->st_size == id->size &&
-           ts_ns(st, 0) == id->mtime_ns && ts_ns(st, 1) == id->ctime_ns;
+static bool ident_matches(const struct recmeta *m, const struct stat *st) {
+    const struct ident now = ident_of_stat(st);
+    return ident_same(&now, &m->id, ID_ALL);
 }
 
 /* Re-checks one record: sets id->mark and counts it. 0, or -1 if fatal. */
 static int recheck_one(struct rstack *rs, struct walk_ctx *wc,
-                       const unsigned char *path, uint32_t plen, struct ident *id) {
+                       const unsigned char *path, uint32_t plen, struct recmeta *id) {
     id->mark = MARK_NONE;
     if (id->kind == RC_NONE) return 0;
 
@@ -1535,7 +1518,7 @@ static int recheck(struct spill *s, struct walk_ctx *wc, int root_fd) {
         uint32_t pl, ll;
         memcpy(&pl, r, 4);
         memcpy(&ll, r + 4 + pl, 4);
-        struct ident id;
+        struct recmeta id;
         memcpy(&id, r + 8 + pl + ll, IDENT_BYTES);
         if (recheck_one(rs, wc, r + 4, pl, &id) == -1) goto done;
         memcpy(r + 8 + pl + ll, &id, IDENT_BYTES);
@@ -1553,7 +1536,7 @@ static int recheck(struct spill *s, struct walk_ctx *wc, int root_fd) {
                     fread(&ll, 1, 4, f) != 4 || ll == 0 || ll > LINE_CAP ||
                     fseeko(f, (off_t)ll, SEEK_CUR) != 0)
                     goto io;
-                struct ident id;
+                struct recmeta id;
                 if (fread(&id, 1, IDENT_BYTES, f) != IDENT_BYTES) goto io;
                 if (recheck_one(rs, wc, pbuf, pl, &id) == -1) goto done;
                 if (id.mark != MARK_NONE &&
@@ -1580,7 +1563,7 @@ static int write_header(FILE *f, const char *scope_real,
                         const struct belay_manifest_opts *opts, char *buf) {
     struct timespec now;
     clock_gettime(CLOCK_REALTIME, &now);
-    const long long created = (long long)ns_of((int64_t)now.tv_sec, now.tv_nsec);
+    const long long created = (long long)ident_ns((int64_t)now.tv_sec, now.tv_nsec);
 
     /* Same rule as entry paths: JSON for valid UTF-8, base64 otherwise.
      * Before, a non-UTF-8 scope was written raw and the line was not JSON. */
@@ -1726,10 +1709,10 @@ int belay_manifest_write(const char *out_path, const char *scope,
     clock_gettime(CLOCK_REALTIME, &rt0);
 #if defined(__linux__) && defined(CLOCK_REALTIME_COARSE)
     clock_gettime(CLOCK_REALTIME_COARSE, &start);
-    wc->walk_start_ns = ns_of((int64_t)start.tv_sec, start.tv_nsec);
+    wc->walk_start_ns = ident_ns((int64_t)start.tv_sec, start.tv_nsec);
 #else
     start = rt0;
-    wc->walk_start_ns = ns_of((int64_t)start.tv_sec, start.tv_nsec) - 10000000LL;
+    wc->walk_start_ns = ident_ns((int64_t)start.tv_sec, start.tv_nsec) - 10000000LL;
 #endif
 
     /* The scope root itself is an entry, path ".". Without it a chmod or
@@ -1756,9 +1739,10 @@ int belay_manifest_write(const char *out_path, const char *scope,
         if (wr == -1) goto cleanup;
 
         struct stat post;
-        const bool changed = wr == W_INCOMPLETE ||
-            fstat(root_fd, &post) == -1 ||
-            ts_ns(&post, 0) != root_e.mtime_ns || ts_ns(&post, 1) != root_e.ctime_ns;
+        const struct ident ri = ident_of_entry(&root_e);
+        struct ident pi;
+        const bool changed = wr == W_INCOMPLETE || fstat(root_fd, &post) == -1 ||
+            (pi = ident_of_stat(&post), !ident_same(&pi, &ri, ID_TIMES));
         if (changed) {
             root_e.unstable = true;
             wc->n_unstable++;
@@ -1804,7 +1788,7 @@ int belay_manifest_write(const char *out_path, const char *scope,
             uint32_t pl, ll;
             memcpy(&pl, r, 4);
             memcpy(&ll, r + 4 + pl, 4);
-            struct ident id;
+            struct recmeta id;
             memcpy(&id, r + 8 + pl + ll, IDENT_BYTES);
             if (write_line(out, r + 8 + pl, ll, id.mark) == -1) {
                 belay_err_set(BELAY_ERR_IO, errno, "manifest: write failed");
