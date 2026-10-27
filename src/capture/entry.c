@@ -9,6 +9,13 @@
 /* Schema                                                                    */
 /* ------------------------------------------------------------------------ */
 
+const struct entry_type_def ENTRY_TYPES[ENTRY_TYPE_COUNT] = {
+    [BELAY_T_REG]  = { "reg",  0100000u }, [BELAY_T_DIR]  = { "dir",  0040000u },
+    [BELAY_T_LNK]  = { "lnk",  0120000u }, [BELAY_T_FIFO] = { "fifo", 0010000u },
+    [BELAY_T_SOCK] = { "sock", 0140000u }, [BELAY_T_BLK]  = { "blk",  0060000u },
+    [BELAY_T_CHR]  = { "chr",  0020000u },
+};
+
 const struct entry_field_def ENTRY_FIELDS[F_COUNT] = {
     [F_PATH]   = { "path", "path_b64", "string", true,
                    "relative to the scope root; `.` is the root itself" },
@@ -56,16 +63,8 @@ const struct entry_field_def ENTRY_FIELDS[F_COUNT] = {
 #define EXTRAS (FBIT(F_IFLAGS) | FBIT(F_CAPS) | FBIT(F_XATTRS) | FBIT(F_XATTRS_SHA256) | \
                 FBIT(F_XATTRS_UNKNOWN))
 
-static uint32_t mode_type(enum belay_entry_type t) {
-    static const uint32_t ifmt[] = {
-        [BELAY_T_REG] = 0100000u, [BELAY_T_DIR] = 0040000u, [BELAY_T_LNK] = 0120000u,
-        [BELAY_T_FIFO] = 0010000u, [BELAY_T_SOCK] = 0140000u, [BELAY_T_BLK] = 0060000u,
-        [BELAY_T_CHR] = 0020000u,
-    };
-    return ifmt[t];
-}
 static bool mode_disagrees(const struct belay_entry *e) {
-    return (e->mode & 0170000u) != mode_type(e->type);
+    return (e->mode & 0170000u) != ENTRY_TYPES[e->type].ifmt;
 }
 static bool stored_differs(const struct belay_entry *e) {
     return e->has_stored && (!e->has_hash || strcmp(e->stored_hex, e->sha256_hex) != 0);
@@ -199,29 +198,52 @@ int entry_check(const struct belay_entry *e, uint32_t present) {
  *  its size is within hash_max_bytes and nothing else prevents it, and it
  *  computes target_outside_scope from the scope with one shared function, so
  *  both are checked rather than taken on trust: otherwise one state would have
- *  two encodings (review round 3, F7).
+ *  two encodings (review round 3, F7). Each returns its message, or NULL.
  */
+static const char *hash_limit(const struct belay_manifest_header *h, const struct belay_entry *e) {
+    if (e->type != BELAY_T_REG) return NULL;
+    if (e->has_hash && e->size > h->hash_max_bytes)
+        return "hash on a file larger than hash_max_bytes";
+    if (e->unverified && !e->unstable && !e->unreadable && !e->is_mount &&
+        e->size <= h->hash_max_bytes)
+        return "unverified file within hash_max_bytes, with no reason";
+    return NULL;
+}
+static const char *outside_annotation(const struct belay_manifest_header *h,
+                                      const struct belay_entry *e) {
+    if (e->type != BELAY_T_LNK) return NULL;
+    /* An unreadable link's target is unknown or stale: never annotated. */
+    const bool want = !e->unreadable &&
+        belay_link_target_outside(h->scope, e->path, e->path_len,
+                                  e->link_target, e->link_target_len);
+    if (e->target_outside_scope == want) return NULL;
+    return want ? "target_outside_scope missing on a link leaving the scope"
+                : "target_outside_scope on a link that stays in the scope";
+}
+
+const struct entry_header_rule ENTRY_HEADER_RULES[] = {
+    { hash_limit,
+      "A `reg` carries `sha256` only if its `size` is within `hash_max_bytes`, and a bare "
+      "`unverified` (no `unstable`, `unreadable` or `mount` giving another reason) only if it "
+      "is larger." },
+    { outside_annotation,
+      "A `lnk` carries `target_outside_scope` exactly when the lexical rule says its target "
+      "leaves the scope (an absolute target outside it; a relative one whose `..` climbs above "
+      "the scope root, resolved from the link's own directory; a target the rule cannot "
+      "judge), and never when it is `unreadable`. Writer and reader share one implementation "
+      "of that rule, so the annotation has one value per state." },
+};
+const size_t ENTRY_HEADER_RULE_COUNT = sizeof ENTRY_HEADER_RULES / sizeof ENTRY_HEADER_RULES[0];
+
 int entry_check_header(const struct belay_manifest_header *h, const struct belay_entry *e) {
-    const char *msg = NULL;
-    if (e->type == BELAY_T_REG) {
-        if (e->has_hash && e->size > h->hash_max_bytes)
-            msg = "hash on a file larger than hash_max_bytes";
-        else if (e->unverified && !e->unstable && !e->unreadable && !e->is_mount &&
-                 e->size <= h->hash_max_bytes)
-            msg = "unverified file within hash_max_bytes, with no reason";
+    for (size_t i = 0; i < ENTRY_HEADER_RULE_COUNT; i++) {
+        const char *msg = ENTRY_HEADER_RULES[i].check(h, e);
+        if (msg != NULL) {
+            belay_err_set(BELAY_ERR_CORRUPT, 0, "manifest: %s", msg);
+            return -1;
+        }
     }
-    if (msg == NULL && e->type == BELAY_T_LNK) {
-        /* An unreadable link's target is unknown or stale: never annotated. */
-        const bool want = !e->unreadable &&
-            belay_link_target_outside(h->scope, e->path, e->path_len,
-                                      e->link_target, e->link_target_len);
-        if (e->target_outside_scope != want)
-            msg = want ? "target_outside_scope missing on a link leaving the scope"
-                       : "target_outside_scope on a link that stays in the scope";
-    }
-    if (msg == NULL) return 0;
-    belay_err_set(BELAY_ERR_CORRUPT, 0, "manifest: %s", msg);
-    return -1;
+    return 0;
 }
 
 /* Fixed part of a packed entry; variable parts follow in this order: link

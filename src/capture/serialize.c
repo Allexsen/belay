@@ -39,18 +39,6 @@ static int ap_bytes(char *buf, size_t cap, size_t *w, const char *key,
     return ap(buf, cap, w, "\"");
 }
 
-static const char *type_name(enum belay_entry_type t) {
-    switch (t) {
-    case BELAY_T_REG:  return "reg";
-    case BELAY_T_DIR:  return "dir";
-    case BELAY_T_LNK:  return "lnk";
-    case BELAY_T_FIFO: return "fifo";
-    case BELAY_T_SOCK: return "sock";
-    case BELAY_T_BLK:  return "blk";
-    default:           return "chr";
-    }
-}
-
 /* One field, key included. Fields are encoded in the schema's order
  * (entry.c); byte strings use their base64 spelling when not UTF-8. */
 static int put_field(const struct belay_entry *e, enum entry_field f, char *buf, size_t cap,
@@ -60,7 +48,7 @@ static int put_field(const struct belay_entry *e, enum entry_field f, char *buf,
     case F_PATH:   return ap_bytes(buf, cap, w, k, alt, e->path, e->path_len);
     case F_LINK_TARGET:
         return ap_bytes(buf, cap, w, k, alt, e->link_target, e->link_target_len);
-    case F_TYPE:   return ap(buf, cap, w, "\"%s\":\"%s\"", k, type_name(e->type));
+    case F_TYPE:   return ap(buf, cap, w, "\"%s\":\"%s\"", k, ENTRY_TYPES[e->type].name);
     case F_MODE:   return ap(buf, cap, w, "\"%s\":%u", k, e->mode);
     case F_UID:    return ap(buf, cap, w, "\"%s\":%u", k, e->uid);
     case F_GID:    return ap(buf, cap, w, "\"%s\":%u", k, e->gid);

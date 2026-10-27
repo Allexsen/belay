@@ -51,17 +51,6 @@
 #define LINE_MAX_BYTES (64u * 1024u)
 #define MAX_PAIRS      32
 
-/* st_mode type bits. The values are the same on Linux and macOS, so a
- * manifest written on one validates on the other. */
-#define M_IFMT   0170000u
-#define M_IFSOCK 0140000u
-#define M_IFLNK  0120000u
-#define M_IFREG  0100000u
-#define M_IFBLK  0060000u
-#define M_IFDIR  0040000u
-#define M_IFCHR  0020000u
-#define M_IFIFO  0010000u
-
 /* ------------------------------------------------------------------------ */
 /* Lexical layer                                                             */
 /* ------------------------------------------------------------------------ */
@@ -569,18 +558,12 @@ static int check_canonical(const char *path, size_t len) {
     return 0;
 }
 
-static int type_from(const struct pair *p, enum belay_entry_type *t, uint32_t *ifmt) {
-    static const struct { const char *n; enum belay_entry_type t; uint32_t m; } tab[] = {
-        { "reg", BELAY_T_REG, M_IFREG }, { "dir", BELAY_T_DIR, M_IFDIR },
-        { "lnk", BELAY_T_LNK, M_IFLNK }, { "fifo", BELAY_T_FIFO, M_IFIFO },
-        { "sock", BELAY_T_SOCK, M_IFSOCK }, { "blk", BELAY_T_BLK, M_IFBLK },
-        { "chr", BELAY_T_CHR, M_IFCHR },
-    };
+static int type_from(const struct pair *p, enum belay_entry_type *t) {
     if (p->kind != V_STR) return bad_kind("type", "a string");
-    for (size_t i = 0; i < sizeof tab / sizeof tab[0]; i++) {
-        if (strlen(tab[i].n) == p->vlen && memcmp(tab[i].n, p->val, p->vlen) == 0) {
-            *t = tab[i].t;
-            *ifmt = tab[i].m;
+    for (int i = 0; i < ENTRY_TYPE_COUNT; i++) {
+        const char *n = ENTRY_TYPES[i].name;
+        if (strlen(n) == p->vlen && memcmp(n, p->val, p->vlen) == 0) {
+            *t = (enum belay_entry_type)i;
             return 0;
         }
     }
@@ -602,9 +585,7 @@ static int parse_entry(const struct obj *o, struct belay_entry *e) {
 
     const struct pair *tp = get(o, "type");
     if (tp == NULL) return corrupt("entry has no type");
-    uint32_t ifmt = 0;
-    if (type_from(tp, &e->type, &ifmt) == -1) return -1;
-    (void)ifmt;
+    if (type_from(tp, &e->type) == -1) return -1;
 
     if (get_u32(o, "mode", &e->mode) == -1 || get_u32(o, "uid", &e->uid) == -1 ||
         get_u32(o, "gid", &e->gid) == -1 ||

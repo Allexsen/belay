@@ -32,6 +32,15 @@ enum entry_field {
 };
 #define FBIT(f) (1u << (f))
 
+/* Entry types: the manifest's spelling and the S_IFMT bits `mode` carries
+ * (the same values on Linux and macOS). */
+#define ENTRY_TYPE_COUNT (BELAY_T_CHR + 1)
+struct entry_type_def {
+    const char *name;
+    uint32_t ifmt;
+};
+extern const struct entry_type_def ENTRY_TYPES[ENTRY_TYPE_COUNT];
+
 /* Entry types as a bitmask: TBIT(BELAY_T_REG) ... */
 #define TBIT(t)   (1u << (t))
 #define T_ALL     (TBIT(BELAY_T_REG) | TBIT(BELAY_T_DIR) | TBIT(BELAY_T_LNK) | TBIT(BELAY_T_FIFO) | \
@@ -74,7 +83,15 @@ uint32_t entry_present(const struct belay_entry *e);
  * 0, or -1 with belay_err set to the first rule violated. */
 int entry_check(const struct belay_entry *e, uint32_t present);
 
-/* Rules that need the manifest's header (scope, hash limit). */
+/* Rules that need the manifest's header (scope, hash limit): check returns
+ * the reader's message, or NULL. */
+struct entry_header_rule {
+    const char *(*check)(const struct belay_manifest_header *h, const struct belay_entry *e);
+    const char *doc;            /* for the generated spec */
+};
+extern const struct entry_header_rule ENTRY_HEADER_RULES[];
+extern const size_t ENTRY_HEADER_RULE_COUNT;
+
 int entry_check_header(const struct belay_manifest_header *h, const struct belay_entry *e);
 
 /* Bytes written, or 0 when the entry does not fit `cap`. */
