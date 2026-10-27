@@ -198,6 +198,20 @@ int belay_base64_decode(void *out, size_t outsz, size_t *outlen, const char *in)
             }
         }
 
+        /* Canonical form only, so each byte string has exactly one encoding:
+         * "x=" never precedes a non-pad ("//=A"), and the bits a pad leaves
+         * unused must be zero -- otherwise "/w==" and "/x==" would both
+         * decode to 0xff. */
+        if (in[i + 2] == '=' && in[i + 3] != '=') {
+            belay_err_set(BELAY_ERR_CORRUPT, 0, "base64_decode: misplaced padding");
+            return -1;
+        }
+        if ((in[i + 3] == '=' && in[i + 2] != '=' && (q[2] & 0x03) != 0) ||
+            (in[i + 2] == '=' && (q[1] & 0x0f) != 0)) {
+            belay_err_set(BELAY_ERR_CORRUPT, 0, "base64_decode: non-zero padding bits");
+            return -1;
+        }
+
         const uint32_t v = ((uint32_t)q[0] << 18) | ((uint32_t)q[1] << 12) |
                            ((uint32_t)q[2] << 6)  | (uint32_t)q[3];
 

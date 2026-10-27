@@ -139,6 +139,27 @@ TEST(base64_decode_rejects_malformed) {
     belay_err_clear();
 }
 
+/* Found by independent review: two encodings for one byte string. */
+TEST(base64_decode_rejects_non_canonical_forms) {
+    unsigned char out[16];
+    size_t olen;
+    ASSERT_EQ_INT(0, belay_base64_decode(out, sizeof out, &olen, "/w=="));   /* canonical 0xff */
+    ASSERT_TRUE(olen == 1 && out[0] == 0xff);
+    ASSERT_EQ_INT(-1, belay_base64_decode(out, sizeof out, &olen, "/x=="));  /* stray low bits */
+    ASSERT_EQ_INT(-1, belay_base64_decode(out, sizeof out, &olen, "Zm9=")); /* stray bits, 2 bytes */
+    ASSERT_EQ_INT(-1, belay_base64_decode(out, sizeof out, &olen, "//=A")); /* pad then data */
+    belay_err_clear();
+    /* Every canonical encoding still round-trips. */
+    for (int len = 0; len < 8; len++) {
+        unsigned char in[8];
+        for (int i = 0; i < len; i++) in[i] = (unsigned char)(0xff - i * 37);
+        char enc[32];
+        ASSERT_EQ_INT(0, belay_base64_encode(enc, sizeof enc, in, (size_t)len));
+        ASSERT_EQ_INT(0, belay_base64_decode(out, sizeof out, &olen, enc));
+        ASSERT_TRUE(olen == (size_t)len && memcmp(in, out, (size_t)len) == 0);
+    }
+}
+
 TEST(base64_reports_small_output_buffer) {
     char tiny[4];
     ASSERT_EQ_INT(-1, belay_base64_encode(tiny, sizeof tiny, "foobar", 6));
@@ -162,6 +183,7 @@ int main(void) {
     RUN(base64_matches_rfc4648_vectors);
     RUN(base64_round_trips_arbitrary_bytes);
     RUN(base64_decode_rejects_malformed);
+    RUN(base64_decode_rejects_non_canonical_forms);
     RUN(base64_reports_small_output_buffer);
     return belay_test_report();
 }

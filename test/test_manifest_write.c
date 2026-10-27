@@ -14,6 +14,8 @@
 #include "belay_test.h"
 #include "belay/manifest.h"
 #include "belay/error.h"
+#include "belay/hash.h"
+#include "belay/store.h"
 
 #include <errno.h>
 #include <fcntl.h>
@@ -21,6 +23,12 @@
 #include <stdlib.h>
 #include <string.h>
 #include <sys/stat.h>
+#include <sys/wait.h>
+#include <sys/xattr.h>
+#ifdef __linux__
+#include <linux/fs.h>
+#include <sys/ioctl.h>
+#endif
 #include <time.h>
 #include <unistd.h>
 
@@ -91,12 +99,14 @@ struct found {
     bool   seen;
     uint64_t nlink;
     uint32_t mode;
+    uint64_t size;
 };
 
 #define MAX_FOUND 256
 static struct found g_found[MAX_FOUND];
 static size_t g_nfound;
 static char g_header[65600];
+static char g_trailer[65600];
 
 /* Deliberately a crude line scanner rather than the real reader: the writer's
  * tests must not depend on the reader being correct, or a bug in one could
@@ -133,6 +143,7 @@ static uint64_t jnum(const char *line, const char *key) {
 static int load(const char *mpath) {
     g_nfound = 0;
     g_header[0] = '\0';
+    g_trailer[0] = '\0';
 
     FILE *f = fopen(mpath, "rb");
     if (f == NULL) return -1;
@@ -143,6 +154,10 @@ static int load(const char *mpath) {
         if (first) {
             snprintf(g_header, sizeof g_header, "%s", line);
             first = false;
+            continue;
+        }
+        if (strstr(line, "\"belay_manifest_end\":") != NULL) {
+            snprintf(g_trailer, sizeof g_trailer, "%s", line);
             continue;
         }
         if (g_nfound >= MAX_FOUND) break;
@@ -161,6 +176,7 @@ static int load(const char *mpath) {
         e->unreadable = jbool(line, "unreadable");
         e->nlink      = jnum(line, "nlink");
         e->mode       = (uint32_t)jnum(line, "mode");
+        e->size       = jnum(line, "size");
         e->seen       = true;
         g_nfound++;
     }
@@ -180,10 +196,10 @@ static int run_check(const char *scope_rel, size_t *n) {
     else snprintf(scope, sizeof scope, "%s/%s", g_root, scope_rel);
     snprintf(mpath, sizeof mpath, "/tmp/belay_m_%d.ndjson", (int)getpid());
 
-    struct belay_manifest_opts o = {
-        BELAY_HASH_MAX_BYTES_DEFAULT, BELAY_STORE_MAX_BYTES_DEFAULT, NULL
-    };
-    if (belay_manifest_write(mpath, scope, &o, n) == -1) return -1;
+    struct belay_manifest_opts o = { .hash_max_bytes = BELAY_HASH_MAX_BYTES_DEFAULT, .store_max_bytes = BELAY_STORE_MAX_BYTES_DEFAULT };
+    struct belay_manifest_stats st;
+    if (belay_manifest_write(mpath, scope, &o, &st) == -1) return -1;
+    if (n != NULL) *n = st.entries;
     return load(mpath);
 }
 
@@ -435,9 +451,9 @@ TEST(oversized_file_is_unverified_not_skipped) {
     snprintf(mpath, sizeof mpath, "/tmp/belay_m2_%d.ndjson", (int)getpid());
     snprintf(scope, sizeof scope, "%s", g_root);
 
-    struct belay_manifest_opts o = { 4, BELAY_STORE_MAX_BYTES_DEFAULT, NULL };
-    size_t n = 0;
-    ASSERT_EQ_INT(0, belay_manifest_write(mpath, scope, &o, &n));
+    struct belay_manifest_opts o = { .hash_max_bytes = 4, .store_max_bytes = BELAY_STORE_MAX_BYTES_DEFAULT };
+    struct belay_manifest_stats ost;
+    ASSERT_EQ_INT(0, belay_manifest_write(mpath, scope, &o, &ost));
     ASSERT_EQ_INT(0, load(mpath));
 
     struct found *f = get("big");
@@ -497,9 +513,7 @@ TEST(rejects_dotdot_scope_before_touching_fs) {
     snprintf(scope, sizeof scope, "%s/../etc", g_root);
     snprintf(mpath, sizeof mpath, "/tmp/belay_m3_%d.ndjson", (int)getpid());
 
-    struct belay_manifest_opts o = {
-        BELAY_HASH_MAX_BYTES_DEFAULT, BELAY_STORE_MAX_BYTES_DEFAULT, NULL
-    };
+    struct belay_manifest_opts o = { .hash_max_bytes = BELAY_HASH_MAX_BYTES_DEFAULT, .store_max_bytes = BELAY_STORE_MAX_BYTES_DEFAULT };
     ASSERT_EQ_INT(-1, belay_manifest_write(mpath, scope, &o, NULL));
     ASSERT_EQ_INT(BELAY_ERR_INVALID, belay_err_code());
     belay_err_clear();
@@ -510,9 +524,7 @@ TEST(rejects_nonexistent_scope) {
     snprintf(scope, sizeof scope, "%s/no-such-dir", g_root);
     snprintf(mpath, sizeof mpath, "/tmp/belay_m4_%d.ndjson", (int)getpid());
 
-    struct belay_manifest_opts o = {
-        BELAY_HASH_MAX_BYTES_DEFAULT, BELAY_STORE_MAX_BYTES_DEFAULT, NULL
-    };
+    struct belay_manifest_opts o = { .hash_max_bytes = BELAY_HASH_MAX_BYTES_DEFAULT, .store_max_bytes = BELAY_STORE_MAX_BYTES_DEFAULT };
     ASSERT_EQ_INT(-1, belay_manifest_write(mpath, scope, &o, NULL));
     belay_err_clear();
 }
@@ -616,6 +628,871 @@ TEST(unreadable_file_is_flagged) {
     fx_rm("noread");
 }
 
+/* Reads a manifest and returns its body (every line after the header), so two
+ * manifests can be compared without the created_ns timestamp. */
+static char *body_of(const char *mpath, size_t *len) {
+    FILE *f = fopen(mpath, "rb");
+    if (f == NULL) return NULL;
+    int c;
+    while ((c = fgetc(f)) != EOF && c != '\n') { /* skip header */ }
+    size_t cap = 1 << 20, n = 0;
+    char *buf = malloc(cap);
+    while (buf != NULL && (c = fgetc(f)) != EOF) {
+        if (n + 1 >= cap) { cap *= 2; buf = realloc(buf, cap); if (!buf) break; }
+        buf[n++] = (char)c;
+    }
+    fclose(f);
+    if (buf) buf[n] = '\0';
+    *len = n;
+    return buf;
+}
+
+/*
+ *  Defect 4 regression: the writer must hold bounded memory, so large trees
+ *  spill sorted runs to disk and merge them. The strongest check available:
+ *  forcing many spills and several FANIN cascades must produce exactly the
+ *  same entries, in the same order, as a write that never spills.
+ */
+TEST(spilled_output_is_identical_to_in_memory_output) {
+    fx_mkdir("many");
+    char rel[256];
+    /* ~5000 entries across nested dirs: with the minimum budget (~70 KB) that
+     * is ~20 runs, so at least one 16-way cascade plus a final merge. Names
+     * are chosen so walk order and sorted order disagree ("a-x" sorts before
+     * "a/", "A" before "a"). */
+    for (int d = 0; d < 50; d++) {
+        snprintf(rel, sizeof rel, "many/d%02d", d);
+        fx_mkdir(rel);
+        snprintf(rel, sizeof rel, "many/d%02d-x", d);
+        fx_write(rel, "x", 1);
+        for (int i = 0; i < 100; i++) {
+            snprintf(rel, sizeof rel, "many/d%02d/%s%03d", d, (i % 3) ? "f" : "F", i);
+            fx_write(rel, "", 0);
+        }
+    }
+
+    char scope[8192], m_mem[512], m_spill[512];
+    snprintf(scope, sizeof scope, "%s/many", g_root);
+    snprintf(m_mem, sizeof m_mem, "/tmp/belay_sp_mem_%d.ndjson", (int)getpid());
+    snprintf(m_spill, sizeof m_spill, "/tmp/belay_sp_spill_%d.ndjson", (int)getpid());
+
+    struct belay_manifest_opts big = {
+        .hash_max_bytes = BELAY_HASH_MAX_BYTES_DEFAULT,
+        .store_max_bytes = BELAY_STORE_MAX_BYTES_DEFAULT,
+        .run_bytes = 64u * 1024u * 1024u,       /* never spills */
+    };
+    struct belay_manifest_opts tiny = big;
+    tiny.run_bytes = 1;                          /* clamped to the minimum */
+
+    /* The two checks below must see the same tree state. A directory changed
+     * in the same kernel tick as a check's start is legitimately flagged
+     * "changed during the walk" by one check and not the other, so let the
+     * fixture settle first. */
+    usleep(50000);
+
+    size_t n_mem = 0, n_spill = 0;
+    struct belay_manifest_stats s_mem, s_spill;
+    ASSERT_EQ_INT(0, belay_manifest_write(m_mem, scope, &big, &s_mem));
+    ASSERT_EQ_INT(0, belay_manifest_write(m_spill, scope, &tiny, &s_spill));
+    n_mem = s_mem.entries;
+    n_spill = s_spill.entries;
+    ASSERT_EQ_INT(5101, (int)n_mem);   /* 5,100 entries plus the root "." */
+    ASSERT_EQ_INT((int)n_mem, (int)n_spill);
+
+    size_t la = 0, lb = 0;
+    char *a = body_of(m_mem, &la);
+    char *b = body_of(m_spill, &lb);
+    ASSERT_TRUE(a != NULL && b != NULL);
+    if (a && b) {
+        ASSERT_EQ_INT((int)la, (int)lb);
+        ASSERT_TRUE(la == lb && memcmp(a, b, la) == 0);
+        if (la != lb || memcmp(a, b, la) != 0) {
+            /* Say which line differs: a flag on one side only is a timing
+             * event (a clock step flags the root), anything else a bug. */
+            size_t i = 0, line = 0;
+            while (i < la && i < lb && a[i] == b[i]) { if (a[i] == '\n') line++; i++; }
+            size_t s0 = i;
+            while (s0 > 0 && a[s0 - 1] != '\n') s0--;
+            printf("      first difference in body line %zu:\n      mem:   %.160s\n"
+                   "      spill: %.160s\n", line + 1, a + s0, b + s0);
+        }
+    }
+    free(a);
+    free(b);
+
+    /* And the spilled output is strictly sorted, entry by entry. Scanned line
+     * by line rather than loaded, to keep the fixture small. Both outputs share
+     * the sort routine, so equality alone would not catch a wrong sort. */
+    FILE *sf = fopen(m_spill, "rb");
+    ASSERT_TRUE(sf != NULL);
+    if (sf) {
+        char line[65536], prev[4096] = "", cur[4096];
+        size_t lines = 0;
+        while (fgets(line, sizeof line, sf) != NULL) {
+            if (lines++ == 0) continue;            /* header */
+            if (strstr(line, "belay_manifest_end") != NULL) continue;
+            if (jstr(line, "path", cur, sizeof cur) == NULL) {
+                BELAY_FAIL("line %zu has no path", lines);
+                break;
+            }
+            if (prev[0] != '\0' && strcmp(prev, cur) >= 0) {
+                BELAY_FAIL("not strictly sorted: %s then %s", prev, cur);
+                break;
+            }
+            snprintf(prev, sizeof prev, "%s", cur);
+        }
+        fclose(sf);
+    }
+
+    unlink(m_mem);
+    unlink(m_spill);
+    char cmd[8300];
+    snprintf(cmd, sizeof cmd, "rm -rf '%s/many'", g_root);
+    if (system(cmd) != 0) { /* best effort */ }
+}
+
+/* A failed write must leave nothing at out_path: the output is written to a
+ * temporary name and renamed into place only on success. */
+TEST(failed_write_leaves_no_partial_manifest) {
+    char mpath[512], scope[8192];
+    snprintf(mpath, sizeof mpath, "/tmp/belay_partial_%d.ndjson", (int)getpid());
+    snprintf(scope, sizeof scope, "%s/does-not-exist", g_root);
+    unlink(mpath);
+
+    struct belay_manifest_opts o = {
+        .hash_max_bytes = BELAY_HASH_MAX_BYTES_DEFAULT,
+        .store_max_bytes = BELAY_STORE_MAX_BYTES_DEFAULT,
+    };
+    ASSERT_EQ_INT(-1, belay_manifest_write(mpath, scope, &o, NULL));
+    belay_err_clear();
+    ASSERT_TRUE(access(mpath, F_OK) != 0);
+}
+
+/* ===== Defect-class sweep, writer side ===== */
+
+/* W4. The scope root is entry ".". Before, `chmod 700` on the root left the
+ * manifest body byte-identical. */
+TEST(sweep_scope_root_is_recorded) {
+    char root[8192];
+    snprintf(root, sizeof root, "%s/rootcase", g_root);
+    mkdir(root, 0755);
+    size_t n = 0;
+    ASSERT_EQ_INT(0, run_check("rootcase", &n));
+    struct found *r1 = get(".");
+    ASSERT_TRUE(r1 != NULL);
+    const uint32_t mode_before = r1 ? r1->mode : 0;
+    if (r1) ASSERT_EQ_STR("dir", r1->type);
+
+    chmod(root, 0700);
+    ASSERT_EQ_INT(0, run_check("rootcase", &n));
+    chmod(root, 0755);
+    struct found *r2 = get(".");
+    ASSERT_TRUE(r2 != NULL);
+    if (r2) {
+        ASSERT_EQ_INT(0700, (int)(r2->mode & 07777));
+        ASSERT_TRUE(r2->mode != mode_before);
+    }
+    rmdir(root);
+}
+
+/* W8. Relative link targets are analysed too. Before, only absolute targets
+ * were, so "../../etc" carried no annotation at all. Advisory only. */
+TEST(sweep_relative_symlink_escape_is_annotated) {
+    fx_mkdir("lk");
+    fx_symlink("../../etc", "lk/esc");          /* lk -> scope root -> above it */
+    fx_symlink("../sibling", "lk/inside");      /* lk/.. is the scope root: inside */
+    fx_symlink("a/../../..", "lk/sneaky");      /* climbs out through a component */
+    fx_symlink("x/y", "lk/down");
+
+    size_t n = 0;
+    ASSERT_EQ_INT(0, run_check(NULL, &n));
+    struct found *e;
+    e = get("lk/esc");    ASSERT_TRUE(e && e->outside);
+    e = get("lk/inside"); ASSERT_TRUE(e && !e->outside);
+    e = get("lk/sneaky"); ASSERT_TRUE(e && e->outside);
+    e = get("lk/down");   ASSERT_TRUE(e && !e->outside);
+
+    fx_rm("lk/esc"); fx_rm("lk/inside"); fx_rm("lk/sneaky"); fx_rm("lk/down"); fx_rm("lk");
+}
+
+/*
+ *  W5. A recorded (size, sha256) pair must describe one real state of the
+ *  file. Before the fix, a file appended to during `check` was recorded with a
+ *  hash covering more bytes than its recorded size, 5 runs out of 5.
+ *
+ *  The race decides WHICH branch runs (stable hash vs unstable flag), so this
+ *  test asserts the invariant that must hold either way, rather than a
+ *  particular outcome. It cannot pass by luck: an inconsistent pair fails it
+ *  whenever the race is hit.
+ */
+TEST(sweep_hash_always_matches_recorded_size_under_concurrent_append) {
+    fx_mkdir("grow");
+    char fpath[8192];
+    snprintf(fpath, sizeof fpath, "%s/grow/log", g_root);
+    {
+        FILE *f = fopen(fpath, "wb");
+        ASSERT_TRUE(f != NULL);
+        if (!f) return;
+        static char chunk[65536];
+        memset(chunk, 'a', sizeof chunk);
+        for (int i = 0; i < 300; i++) fwrite(chunk, 1, sizeof chunk, f);  /* ~19 MB */
+        fclose(f);
+    }
+
+    const pid_t pid = fork();
+    if (pid == 0) {
+        /* Child: append for ~1.5 s, rate-limited to stay under the hash cap. */
+        FILE *f = fopen(fpath, "ab");
+        if (f == NULL) _exit(0);
+        static char x[4096];
+        memset(x, 'x', sizeof x);
+        for (int i = 0; i < 3000; i++) {
+            fwrite(x, 1, sizeof x, f);
+            fflush(f);
+            usleep(500);
+        }
+        fclose(f);
+        _exit(0);
+    }
+
+    size_t unstable_seen = 0, hashed_seen = 0;
+    for (int run = 0; run < 6; run++) {
+        size_t n = 0;
+        if (run_check("grow", &n) != 0) { BELAY_FAIL("check failed on run %d", run); break; }
+        struct found *e = get("log");
+        if (e == NULL) { BELAY_FAIL("log missing on run %d", run); break; }
+        if (e->sha256[0] == '\0') {
+            ASSERT_TRUE(e->unverified);
+            unstable_seen++;
+            continue;
+        }
+        hashed_seen++;
+        /* Recompute sha256 of the first `size` bytes; it must equal the
+         * recorded hash. Appends only add bytes, so those bytes are fixed. */
+        FILE *f = fopen(fpath, "rb");
+        if (f == NULL) continue;
+        struct belay_sha256 c;
+        belay_sha256_init(&c);
+        static unsigned char buf[65536];
+        uint64_t left = e->size;
+        while (left > 0) {
+            const size_t want = left < sizeof buf ? (size_t)left : sizeof buf;
+            const size_t got = fread(buf, 1, want, f);
+            if (got == 0) break;
+            belay_sha256_update(&c, buf, got);
+            left -= got;
+        }
+        fclose(f);
+        uint8_t d[32];
+        char hex[65];
+        belay_sha256_final(&c, d);
+        belay_hex_encode(hex, d, sizeof d);
+        ASSERT_EQ_STR(e->sha256, hex);
+    }
+    int status;
+    waitpid(pid, &status, 0);
+    ASSERT_TRUE(unstable_seen + hashed_seen == 6);
+
+    unlink(fpath);
+    fx_rm("grow");
+}
+
+/* W3. Device nodes carry rdev. Creating one needs privilege, so this reads the
+ * real /dev/null, which exists on Linux and macOS alike. */
+TEST(sweep_device_nodes_record_rdev) {
+    char mpath[512];
+    snprintf(mpath, sizeof mpath, "/tmp/belay_dev_%d.ndjson", (int)getpid());
+    struct belay_manifest_opts o = {
+        .hash_max_bytes = BELAY_HASH_MAX_BYTES_DEFAULT,
+        .store_max_bytes = BELAY_STORE_MAX_BYTES_DEFAULT,
+    };
+    struct belay_manifest_stats st;
+    if (belay_manifest_write(mpath, "/dev", &o, &st) != 0) {
+        belay_err_clear();
+        return;   /* /dev not walkable here; nothing to assert */
+    }
+    FILE *f = fopen(mpath, "rb");
+    ASSERT_TRUE(f != NULL);
+    bool found = false;
+    char line[65536];
+    while (f && fgets(line, sizeof line, f) != NULL) {
+        if (strstr(line, "\"path\":\"null\",") != NULL) {
+            found = true;
+            ASSERT_TRUE(strstr(line, "\"type\":\"chr\"") != NULL);
+            ASSERT_TRUE(strstr(line, "\"rdev\":") != NULL);
+        }
+    }
+    if (f) fclose(f);
+    ASSERT_TRUE(found);
+    unlink(mpath);
+}
+
+/* W2. The trailer records what the walk could not capture, and stats agree. */
+TEST(sweep_trailer_and_stats_report_unreadable) {
+    fx_mkdir("tr");
+    fx_mkdir("tr/locked");
+    char p[8192];
+    snprintf(p, sizeof p, "%s/tr/locked", g_root);
+    if (chmod(p, 0000) != 0) return;
+
+    char mpath[512], scope[8192];
+    snprintf(mpath, sizeof mpath, "/tmp/belay_tr_%d.ndjson", (int)getpid());
+    snprintf(scope, sizeof scope, "%s/tr", g_root);
+    struct belay_manifest_opts o = {
+        .hash_max_bytes = BELAY_HASH_MAX_BYTES_DEFAULT,
+        .store_max_bytes = BELAY_STORE_MAX_BYTES_DEFAULT,
+    };
+    struct belay_manifest_stats st;
+    const int rc = belay_manifest_write(mpath, scope, &o, &st);
+    chmod(p, 0755);
+    ASSERT_EQ_INT(0, rc);
+    ASSERT_EQ_INT(2, (int)st.entries);      /* "." and "locked" */
+    ASSERT_EQ_INT(1, (int)st.unreadable);
+
+    ASSERT_EQ_INT(0, load(mpath));
+    ASSERT_TRUE(strstr(g_trailer, "\"belay_manifest_end\":2,") != NULL);
+    ASSERT_TRUE(strstr(g_trailer, "\"unreadable\":1,") != NULL);
+    unlink(mpath);
+    fx_rm("tr/locked"); fx_rm("tr");
+}
+
+/* ===== Content store, as driven by the writer (step 2.4) ===== */
+
+static char g_store[512];
+
+/* Runs a check over `scope_rel` with content storage on. */
+static int run_check_store(const char *scope_rel, uint64_t store_max) {
+    char scope[8192], mpath[512];
+    snprintf(scope, sizeof scope, "%s/%s", g_root, scope_rel);
+    snprintf(mpath, sizeof mpath, "/tmp/belay_ms_%d.ndjson", (int)getpid());
+    snprintf(g_store, sizeof g_store, "/tmp/belay_ms_store_%d", (int)getpid());
+    struct belay_manifest_opts o = {
+        .hash_max_bytes = BELAY_HASH_MAX_BYTES_DEFAULT,
+        .store_max_bytes = store_max,
+        .store_dir = g_store,
+    };
+    struct belay_manifest_stats st;
+    if (belay_manifest_write(mpath, scope, &o, &st) == -1) return -1;
+    return load(mpath);
+}
+
+static bool stored(const char *line_path) {
+    /* g_found does not keep the stored key; re-scan the manifest line. */
+    char mpath[512], line[65536], pat[4200];
+    snprintf(mpath, sizeof mpath, "/tmp/belay_ms_%d.ndjson", (int)getpid());
+    snprintf(pat, sizeof pat, "{\"path\":\"%s\",", line_path);
+    FILE *f = fopen(mpath, "rb");
+    bool hit = false;
+    while (f && fgets(line, sizeof line, f) != NULL)
+        if (strncmp(line, pat, strlen(pat)) == 0) hit = strstr(line, "\"stored\":\"") != NULL;
+    if (f) fclose(f);
+    return hit;
+}
+
+static int store_tmp_count(void) {
+    char cmd[700];
+    snprintf(cmd, sizeof cmd, "ls -a '%s' 2>/dev/null | grep -c '^\\.tmp-' > /tmp/belay_tmpc_%d",
+             g_store, (int)getpid());
+    if (system(cmd) == -1) return -1;
+    char p[64];
+    snprintf(p, sizeof p, "/tmp/belay_tmpc_%d", (int)getpid());
+    FILE *f = fopen(p, "rb");
+    int n = -1;
+    if (f) { if (fscanf(f, "%d", &n) != 1) n = -1; fclose(f); }
+    unlink(p);
+    return n;
+}
+
+TEST(store_keeps_small_text_and_skips_binary) {
+    fx_mkdir("st");
+    fx_write("st/note.txt", "plain text\n", 11);
+    fx_write("st/blob.bin", "bin\0ary", 7);
+    fx_write("st/twin_a.txt", "same", 4);
+    fx_write("st/twin_b.txt", "same", 4);
+    fx_symlink("note.txt", "st/link");
+
+    ASSERT_EQ_INT(0, run_check_store("st", BELAY_STORE_MAX_BYTES_DEFAULT));
+    ASSERT_TRUE(stored("note.txt"));
+    ASSERT_FALSE(stored("blob.bin"));       /* NUL in the first 8000 bytes */
+    ASSERT_TRUE(stored("twin_a.txt"));
+    ASSERT_TRUE(stored("twin_b.txt"));
+    ASSERT_FALSE(stored("link"));           /* symlinks are never opened */
+
+    /* The object holds exactly the file's bytes and verifies. */
+    struct found *n = get("note.txt");
+    ASSERT_TRUE(n != NULL);
+    if (n) {
+        struct belay_store *s = NULL;
+        ASSERT_EQ_INT(0, belay_store_open(g_store, &s));
+        ASSERT_EQ_INT(1, belay_store_verify(s, n->sha256));
+        belay_store_close(s);
+    }
+    /* Identical content is one object. */
+    struct found *a = get("twin_a.txt"), *b = get("twin_b.txt");
+    ASSERT_TRUE(a && b && strcmp(a->sha256, b->sha256) == 0);
+    ASSERT_EQ_INT(0, store_tmp_count());    /* the binary's aborted copy is gone */
+
+    fx_rm("st/note.txt"); fx_rm("st/blob.bin"); fx_rm("st/twin_a.txt");
+    fx_rm("st/twin_b.txt"); fx_rm("st/link"); fx_rm("st");
+}
+
+/* Claimed files override the size threshold in both directions. */
+TEST(store_follows_interpreter_claims_not_just_size) {
+    fx_mkdir("cl");
+    fx_mkdir("cl/numpy-2.1.0.dist-info");
+    fx_mkdir("cl/var"); fx_mkdir("cl/var/lib"); fx_mkdir("cl/var/lib/dpkg");
+    fx_mkdir("cl/repo"); fx_mkdir("cl/repo/.git");
+
+    static char big[4096];
+    memset(big, 'r', sizeof big);
+    fx_write("cl/numpy-2.1.0.dist-info/RECORD", big, sizeof big);   /* > threshold, claimed */
+    fx_write("cl/var/lib/dpkg/status", big, sizeof big);            /* > threshold, claimed */
+    fx_write("cl/plain_big.txt", big, sizeof big);                  /* > threshold, unclaimed */
+    fx_write("cl/repo/.git/index", "DIRC", 4);                      /* small, hash-only claim */
+    fx_write("cl/repo/.git/HEAD", "ref: refs/heads/main\n", 21);    /* small, claimed */
+
+    ASSERT_EQ_INT(0, run_check_store("cl", 1024));                  /* threshold 1 KiB */
+    ASSERT_TRUE(stored("numpy-2.1.0.dist-info/RECORD"));
+    ASSERT_TRUE(stored("var/lib/dpkg/status"));
+    ASSERT_FALSE(stored("plain_big.txt"));
+    ASSERT_FALSE(stored("repo/.git/index"));
+    ASSERT_TRUE(stored("repo/.git/HEAD"));
+
+    struct found *ix = get("repo/.git/index");
+    ASSERT_TRUE(ix != NULL && ix->sha256[0] != '\0');   /* hashed, just not kept */
+
+    char cmd[8300];
+    snprintf(cmd, sizeof cmd, "rm -rf '%s/cl'", g_root);
+    if (system(cmd) != 0) { /* best effort */ }
+}
+
+/* A file seen to change while being read is recorded unstable and its staged
+ * copy discarded: the store never keeps a copy belay knows to be torn.
+ * (A write already in flight when the read begins is not seen, on any
+ * kernel; see the spec, "What a hash, and a stored copy, prove".) Asserted
+ * as an invariant over several racing runs. */
+TEST(store_discards_copies_of_unstable_files) {
+    fx_mkdir("race");
+    char fpath[8192];
+    snprintf(fpath, sizeof fpath, "%s/race/f", g_root);
+    FILE *f = fopen(fpath, "wb");
+    if (!f) return;
+    static char chunk[65536];
+    memset(chunk, 'a', sizeof chunk);
+    for (int i = 0; i < 200; i++) fwrite(chunk, 1, sizeof chunk, f);  /* ~13 MB */
+    fclose(f);
+
+    const pid_t pid = fork();
+    if (pid == 0) {
+        FILE *a = fopen(fpath, "ab");
+        if (a == NULL) _exit(0);
+        static char x[4096];
+        memset(x, 'x', sizeof x);
+        for (int i = 0; i < 2500; i++) { fwrite(x, 1, sizeof x, a); fflush(a); usleep(400); }
+        fclose(a);
+        _exit(0);
+    }
+    for (int run = 0; run < 5; run++) {
+        if (run_check_store("race", 64u * 1024u * 1024u) != 0) { BELAY_FAIL("run %d", run); break; }
+        struct found *e = get("f");
+        if (e == NULL) continue;
+        if (e->sha256[0] == '\0') {
+            ASSERT_FALSE(stored("f"));
+        } else if (stored("f")) {
+            struct belay_store *s = NULL;
+            ASSERT_EQ_INT(0, belay_store_open(g_store, &s));
+            ASSERT_EQ_INT(1, belay_store_verify(s, e->sha256));
+            belay_store_close(s);
+        }
+        ASSERT_EQ_INT(0, store_tmp_count());
+    }
+    int status;
+    waitpid(pid, &status, 0);
+    unlink(fpath);
+    fx_rm("race");
+}
+
+/* ===== Independent review, D5 class: "a per-entry condition aborted the whole
+ * check". Each is now recorded on the entry and the check completes. ===== */
+
+TEST(review_readable_but_not_searchable_directory_is_flagged) {
+    fx_mkdir("rx");
+    fx_mkdir("rx/d");
+    fx_write("rx/d/f", "x", 1);
+    char p[8192];
+    snprintf(p, sizeof p, "%s/rx/d", g_root);
+    if (chmod(p, 0444) != 0) return;
+    size_t n = 0;
+    const int rc = run_check("rx", &n);
+    chmod(p, 0755);
+    ASSERT_EQ_INT(0, rc);                        /* used to abort: fstatat d/f EACCES */
+    struct found *d = get("d");
+    ASSERT_TRUE(d != NULL && d->unreadable);
+    ASSERT_TRUE(get("d/f") == NULL);
+    fx_rm("rx/d/f"); fx_rm("rx/d"); fx_rm("rx");
+}
+
+TEST(review_unsearchable_scope_root_is_flagged) {
+    fx_mkdir("rr");
+    fx_write("rr/f", "x", 1);
+    char p[8192];
+    snprintf(p, sizeof p, "%s/rr", g_root);
+    if (chmod(p, 0444) != 0) return;
+    size_t n = 0;
+    const int rc = run_check("rr", &n);
+    chmod(p, 0755);
+    ASSERT_EQ_INT(0, rc);
+    struct found *r = get(".");
+    ASSERT_TRUE(r != NULL && r->unreadable);
+    ASSERT_EQ_INT(1, (int)n);
+    fx_rm("rr/f"); fx_rm("rr");
+}
+
+/* Depth beyond MAX_DEPTH: the deepest directory is flagged and the check
+ * completes, instead of the whole check failing. */
+TEST(review_tree_deeper_than_the_limit_is_flagged_not_fatal) {
+    char rel[1024] = "deep";
+    fx_mkdir(rel);
+    for (int i = 0; i < 130; i++) {
+        strcat(rel, "/x");
+        fx_mkdir(rel);
+    }
+    size_t n = 0;
+    ASSERT_EQ_INT(0, run_check("deep", &n));
+    size_t flagged = 0;
+    for (size_t i = 0; i < g_nfound; i++) if (g_found[i].unreadable) flagged++;
+    ASSERT_EQ_INT(1, (int)flagged);
+    char cmd[8300];
+    snprintf(cmd, sizeof cmd, "rm -rf '%s/deep'", g_root);
+    if (system(cmd) != 0) { /* best effort */ }
+}
+
+/* A 4095-byte link target is the longest Linux allows; it was rejected by an
+ * off-by-one. (macOS caps links lower, so the fixture is skipped there.) */
+TEST(review_longest_legal_link_target_is_recorded) {
+    fx_mkdir("lt");
+    static char target[4096];
+    memset(target, 'a', 4095);
+    target[4095] = '\0';
+    char p[8192];
+    snprintf(p, sizeof p, "%s/lt/l", g_root);
+    if (symlink(target, p) != 0) { fx_rm("lt"); return; }
+    size_t n = 0;
+    ASSERT_EQ_INT(0, run_check("lt", &n));
+    struct found *l = get("l");
+    ASSERT_TRUE(l != NULL && strlen(l->link_target) == 4095);
+    unlink(p);
+    fx_rm("lt");
+}
+
+/* A scope that is not UTF-8 goes in scopes_b64 so the header stays JSON.
+ * (APFS refuses such names, so this is skipped on macOS.) */
+TEST(review_non_utf8_scope_produces_valid_header) {
+    char p[8192];
+    snprintf(p, sizeof p, "%s/s\xff", g_root);
+    if (mkdir(p, 0755) != 0) return;
+    size_t n = 0;
+    ASSERT_EQ_INT(0, run_check("s\xff", &n));
+    ASSERT_TRUE(strstr(g_header, "\"scopes_b64\":[\"") != NULL);
+    ASSERT_TRUE(strstr(g_header, "\xff") == NULL);
+    rmdir(p);
+}
+
+/* R2-8: a timestamp outside int64 nanoseconds (1678..2262) used to overflow --
+ * undefined behaviour; a year-2300 mtime came out as 1715. It now saturates.
+ * The sanitizer build would abort on the overflow itself. */
+TEST(r2_far_future_timestamp_saturates_instead_of_overflowing) {
+    fx_mkdir("ts");
+    fx_write("ts/f", "x", 1);
+    char p[8192];
+    snprintf(p, sizeof p, "%s/ts/f", g_root);
+    struct timespec t[2] = { { 10413792000LL, 0 }, { 10413792000LL, 0 } };  /* year 2300 */
+    if (utimensat(AT_FDCWD, p, t, 0) != 0) { fx_rm("ts/f"); fx_rm("ts"); return; }
+    size_t n = 0;
+    ASSERT_EQ_INT(0, run_check("ts", &n));
+    char mpath[512], line[65536];
+    snprintf(mpath, sizeof mpath, "/tmp/belay_m_%d.ndjson", (int)getpid());
+    FILE *f = fopen(mpath, "rb");
+    bool saturated = false;
+    while (f && fgets(line, sizeof line, f) != NULL)
+        if (strstr(line, "\"path\":\"f\",") && strstr(line, "\"mtime_ns\":9223372036854775807,"))
+            saturated = true;
+    if (f) fclose(f);
+    ASSERT_TRUE(saturated);
+    fx_rm("ts/f"); fx_rm("ts");
+}
+
+/* Review round 3, F8: with the output inside the scope (scope = $HOME, state
+ * directory under it), belay's own temporary runs changed the output's
+ * directory during the walk: it was flagged unstable on every check, so no
+ * check of an unchanged tree was ever clean. Runs are now O_TMPFILE, never
+ * linked into the directory, and the output itself is created only after the
+ * end-of-walk re-check. Two passes: the second also records the first's
+ * manifest. Linux only: elsewhere a named temporary is the fallback. */
+TEST(r3_output_inside_the_scope_is_not_a_change) {
+#ifdef O_TMPFILE
+    fx_mkdir("self");
+    fx_mkdir("self/state");
+    char rel[256];
+    for (int i = 0; i < 400; i++) {              /* ~130 KB of records: spills */
+        snprintf(rel, sizeof rel, "self/f%03d", i);
+        fx_write(rel, "x", 1);
+    }
+    char scope[8192], m[8192];
+    snprintf(scope, sizeof scope, "%s/self", g_root);
+    snprintf(m, sizeof m, "%s/self/state/m.ndjson", g_root);
+    struct belay_manifest_opts tiny = {
+        .hash_max_bytes = BELAY_HASH_MAX_BYTES_DEFAULT,
+        .store_max_bytes = BELAY_STORE_MAX_BYTES_DEFAULT,
+        .run_bytes = 1,                          /* clamped to the minimum */
+    };
+    for (int pass = 0; pass < 2; pass++) {
+        usleep(20000);       /* past the kernel tick of the previous rename */
+        struct belay_manifest_stats st;
+        ASSERT_EQ_INT(0, belay_manifest_write(m, scope, &tiny, &st));
+        ASSERT_EQ_INT(0, (int)st.unstable);
+        ASSERT_EQ_INT(0, (int)st.raced);
+    }
+#else
+    printf("      (skipped: no O_TMPFILE on this platform)\n");
+#endif
+}
+
+/* Gap (c), 2026-10-26: Claude Code issues tool calls in parallel, so M1.5's
+ * hooks will run checks concurrently against one store. Eight processes check
+ * eight trees at once into the same store directory. Half of each tree's
+ * content is shared with every other tree, so the same object is committed by
+ * several processes at nearly the same moment. Every check must succeed,
+ * every object a manifest names must exist and verify, the object count must
+ * be exact, and no staging file may be left. Three rounds into one store. */
+static size_t g_cc_n;
+static char g_cc_hex[2048][65];
+static int cc_collect(const struct belay_entry *e, void *ctx) {
+    (void)ctx;
+    if (e->has_stored && g_cc_n < 2048) snprintf(g_cc_hex[g_cc_n++], 65, "%s", e->stored_hex);
+    return 0;
+}
+
+TEST(concurrent_checks_share_one_store) {
+    enum { P = 8, FILES = 200 };
+    fx_mkdir("cc");
+    char rel[256], content[64];
+    for (int t = 0; t < P; t++) {
+        snprintf(rel, sizeof rel, "cc/t%d", t);
+        fx_mkdir(rel);
+        for (int i = 0; i < FILES; i++) {
+            if (i % 2 == 0) snprintf(content, sizeof content, "shared %d\n", i);
+            else            snprintf(content, sizeof content, "tree %d file %d\n", t, i);
+            snprintf(rel, sizeof rel, "cc/t%d/f%03d.txt", t, i);
+            fx_write(rel, content, strlen(content));
+        }
+    }
+    char store[512];
+    snprintf(store, sizeof store, "/tmp/belay_cc_store_%d", (int)getpid());
+    for (int round = 0; round < 3; round++) {
+        pid_t kid[P];
+        for (int t = 0; t < P; t++) {
+            kid[t] = fork();
+            if (kid[t] == 0) {
+                char scope[8192], m[512];
+                snprintf(scope, sizeof scope, "%s/cc/t%d", g_root, t);
+                snprintf(m, sizeof m, "/tmp/belay_cc_%d_%d.ndjson", (int)getppid(), t);
+                struct belay_manifest_opts o = {
+                    .hash_max_bytes = BELAY_HASH_MAX_BYTES_DEFAULT,
+                    .store_max_bytes = BELAY_STORE_MAX_BYTES_DEFAULT,
+                    .store_dir = store,
+                };
+                _exit(belay_manifest_write(m, scope, &o, NULL) == 0 ? 0 : 1);
+            }
+        }
+        for (int t = 0; t < P; t++) {
+            int status = 0;
+            waitpid(kid[t], &status, 0);
+            if (!WIFEXITED(status) || WEXITSTATUS(status) != 0)
+                BELAY_FAIL("round %d: concurrent check %d failed", round, t);
+        }
+    }
+    struct belay_store *st = NULL;
+    ASSERT_EQ_INT(0, belay_store_open(store, &st));
+    size_t named = 0;
+    for (int t = 0; t < P && st != NULL; t++) {
+        char m[512];
+        snprintf(m, sizeof m, "/tmp/belay_cc_%d_%d.ndjson", (int)getpid(), t);
+        g_cc_n = 0;
+        ASSERT_EQ_INT(0, belay_manifest_read(m, cc_collect, NULL));
+        ASSERT_EQ_INT(FILES, (int)g_cc_n);
+        for (size_t i = 0; i < g_cc_n; i++)
+            if (belay_store_verify(st, g_cc_hex[i]) != 1)
+                BELAY_FAIL("tree %d: object %s missing or wrong (%s)", t, g_cc_hex[i], belay_err_msg());
+        named += g_cc_n;
+        unlink(m);
+    }
+    belay_store_close(st);
+    ASSERT_EQ_INT(P * FILES, (int)named);
+    /* 100 shared contents plus 100 unique ones per tree. */
+    char cmd[1200], out[64] = "";
+    snprintf(cmd, sizeof cmd, "find '%s' -type f ! -name '.tmp-*' | wc -l; "
+             "find '%s' -name '.tmp-*' | wc -l", store, store);
+    FILE *pf = popen(cmd, "r");
+    int objects = -1, staging = -1;
+    if (pf) {
+        if (fgets(out, sizeof out, pf)) objects = atoi(out);
+        if (fgets(out, sizeof out, pf)) staging = atoi(out);
+        pclose(pf);
+    }
+    ASSERT_EQ_INT(FILES / 2 + P * (FILES / 2), objects);
+    ASSERT_EQ_INT(0, staging);
+    snprintf(cmd, sizeof cmd, "rm -rf '%s'", store);
+    if (system(cmd) != 0) { /* best effort */ }
+}
+
+/* ---------- W6: extended metadata (decided 2026-10-26) ---------- */
+
+static int set_x(const char *path, const char *name, const char *value) {
+#ifdef __APPLE__
+    return setxattr(path, name, value, strlen(value), 0, XATTR_NOFOLLOW);
+#else
+    return setxattr(path, name, value, strlen(value), 0);
+#endif
+}
+
+static struct belay_entry g_x_e[16];
+static size_t g_x_n;
+static int x_collect(const struct belay_entry *e, void *ctx) {
+    (void)ctx;
+    if (g_x_n < 16) g_x_e[g_x_n++] = *e;
+    return 0;
+}
+static const struct belay_entry *x_find(const char *p) {
+    for (size_t i = 0; i < g_x_n; i++) if (strcmp(g_x_e[i].path, p) == 0) return &g_x_e[i];
+    return NULL;
+}
+static int x_check(const char *scope) {
+    char m[512];
+    snprintf(m, sizeof m, "/tmp/belay_x_%d.ndjson", (int)getpid());
+    struct belay_manifest_opts o = {
+        .hash_max_bytes = BELAY_HASH_MAX_BYTES_DEFAULT,
+        .store_max_bytes = BELAY_STORE_MAX_BYTES_DEFAULT,
+    };
+    g_x_n = 0;
+    const int rc = belay_manifest_write(m, scope, &o, NULL) == 0 &&
+                   belay_manifest_read(m, x_collect, NULL) == 0 ? 0 : -1;
+    unlink(m);
+    return rc;
+}
+
+/* `setfattr` and ACLs used to change nothing recorded but ctime. Now: each
+ * attribute is recorded by name with the digest of its value, a changed
+ * value changes the record, and a symlink never shows its target's. */
+TEST(w6_xattrs_are_recorded_and_a_symlink_never_shows_its_targets) {
+#ifdef __APPLE__
+    const char *A = "com.belay.alpha", *B = "com.belay.beta";
+#else
+    const char *A = "user.alpha", *B = "user.beta";
+#endif
+    fx_mkdir("xa");
+    fx_mkdir("xa/d");
+    fx_write("xa/f", "content", 7);
+    fx_symlink("f", "xa/l");
+    char f[8192], d[8192], scope[8192];
+    snprintf(f, sizeof f, "%s/xa/f", g_root);
+    snprintf(d, sizeof d, "%s/xa/d", g_root);
+    snprintf(scope, sizeof scope, "%s/xa", g_root);
+    if (set_x(f, A, "1") != 0 || set_x(f, B, "2") != 0 || set_x(d, A, "dir") != 0) {
+        printf("      (skipped: no user xattrs on this filesystem)\n");
+        return;
+    }
+    ASSERT_EQ_INT(0, x_check(scope));
+    const struct belay_entry *ef = x_find("f"), *ed = x_find("d"), *el = x_find("l");
+    ASSERT_TRUE(ef != NULL && ed != NULL && el != NULL);
+    if (!ef || !ed || !el) return;
+    ASSERT_TRUE(ef->has_xattrs && ef->xattrs_inline && !ef->xattrs_unknown);
+    ASSERT_TRUE(strstr(ef->xattrs, A) != NULL && strstr(ef->xattrs, B) != NULL);
+    ASSERT_TRUE(ed->has_xattrs && strstr(ed->xattrs, A) != NULL);
+    ASSERT_TRUE(!el->has_xattrs);                     /* the target's are not the link's */
+    char before[65];
+    snprintf(before, sizeof before, "%s", ef->xattrs_sha256_hex);
+    ASSERT_EQ_INT(0, set_x(f, B, "changed"));
+    ASSERT_EQ_INT(0, x_check(scope));
+    ef = x_find("f");
+    ASSERT_TRUE(ef != NULL && strcmp(ef->xattrs_sha256_hex, before) != 0);
+}
+
+/* `chattr +i` on a grader file used to be invisible. nodump is the flag an
+ * unprivileged owner may set; immutable needs CAP_LINUX_IMMUTABLE but lives
+ * in the same field. */
+TEST(w6_inode_flags_are_recorded) {
+    fx_mkdir("fl");
+    fx_write("fl/f", "x", 1);
+    char f[8192], scope[8192];
+    snprintf(f, sizeof f, "%s/fl/f", g_root);
+    snprintf(scope, sizeof scope, "%s/fl", g_root);
+    ASSERT_EQ_INT(0, x_check(scope));
+    const struct belay_entry *e = x_find("f");
+    if (e == NULL || !e->has_iflags) {
+        printf("      (skipped: no inode flags on this filesystem)\n");
+        return;
+    }
+    const uint64_t before = e->iflags;
+#ifdef __APPLE__
+    const int set = chflags(f, UF_NODUMP);
+    const uint64_t bit = UF_NODUMP;
+#else
+    int set = -1, fl = 0;
+    const int fd = open(f, O_RDONLY);
+    if (fd >= 0 && ioctl(fd, FS_IOC_GETFLAGS, &fl) == 0) {
+        fl |= FS_NODUMP_FL;
+        set = ioctl(fd, FS_IOC_SETFLAGS, &fl);
+    }
+    if (fd >= 0) close(fd);
+    const uint64_t bit = FS_NODUMP_FL;
+#endif
+    if (set != 0) {
+        printf("      (skipped: cannot set nodump here)\n");
+        return;
+    }
+    ASSERT_EQ_INT(0, x_check(scope));
+    e = x_find("f");
+    ASSERT_TRUE(e != NULL && e->has_iflags && (e->iflags & bit) && e->iflags != before);
+}
+
+/* A set too large to inline (8 KiB) is recorded by the digest of its
+ * canonical text alone, which still moves when any value moves. On tmpfs,
+ * which holds more user xattrs than ext4's one block. */
+TEST(w6_large_xattr_set_is_recorded_by_digest) {
+#ifdef __linux__
+    char base[256], f[512], name[128];
+    snprintf(base, sizeof base, "/dev/shm/belay_x_%d", (int)getpid());
+    mkdir(base, 0755);
+    snprintf(f, sizeof f, "%s/f", base);
+    FILE *fp = fopen(f, "wb");
+    if (fp) { fputs("x", fp); fclose(fp); }
+    int ok = 1;
+    for (int i = 0; i < 100 && ok; i++) {
+        snprintf(name, sizeof name, "user.a-fairly-long-attribute-name-number-%03d", i);
+        ok = set_x(f, name, "v") == 0;
+    }
+    if (!ok) {
+        printf("      (skipped: tmpfs here does not hold 100 user xattrs)\n");
+    } else {
+        ASSERT_EQ_INT(0, x_check(base));
+        const struct belay_entry *e = x_find("f");
+        ASSERT_TRUE(e != NULL && e->has_xattrs && !e->xattrs_inline);
+        char before[65] = "";
+        if (e) snprintf(before, sizeof before, "%s", e->xattrs_sha256_hex);
+        ASSERT_EQ_INT(0, set_x(f, "user.a-fairly-long-attribute-name-number-050", "w"));
+        ASSERT_EQ_INT(0, x_check(base));
+        e = x_find("f");
+        ASSERT_TRUE(e != NULL && strcmp(e->xattrs_sha256_hex, before) != 0);
+    }
+    char cmd[400];
+    snprintf(cmd, sizeof cmd, "rm -rf '%s'", base);
+    if (system(cmd) != 0) { /* best effort */ }
+#else
+    printf("      (skipped: Linux tmpfs only)\n");
+#endif
+}
+
 int main(void) {
     fx_init();
 
@@ -639,7 +1516,34 @@ int main(void) {
     RUN(unreadable_directory_is_flagged_not_silently_omitted);
     RUN(unreadable_and_empty_directories_are_distinguishable);
     RUN(unreadable_file_is_flagged);
+    RUN(spilled_output_is_identical_to_in_memory_output);
+    RUN(failed_write_leaves_no_partial_manifest);
+    RUN(sweep_scope_root_is_recorded);
+    RUN(sweep_relative_symlink_escape_is_annotated);
+    RUN(sweep_hash_always_matches_recorded_size_under_concurrent_append);
+    RUN(sweep_device_nodes_record_rdev);
+    RUN(sweep_trailer_and_stats_report_unreadable);
+    RUN(store_keeps_small_text_and_skips_binary);
+    RUN(store_follows_interpreter_claims_not_just_size);
+    RUN(store_discards_copies_of_unstable_files);
+    RUN(review_readable_but_not_searchable_directory_is_flagged);
+    RUN(review_unsearchable_scope_root_is_flagged);
+    RUN(review_tree_deeper_than_the_limit_is_flagged_not_fatal);
+    RUN(review_longest_legal_link_target_is_recorded);
+    RUN(review_non_utf8_scope_produces_valid_header);
+    RUN(r2_far_future_timestamp_saturates_instead_of_overflowing);
+    RUN(r3_output_inside_the_scope_is_not_a_change);
+    RUN(concurrent_checks_share_one_store);
+    RUN(w6_xattrs_are_recorded_and_a_symlink_never_shows_its_targets);
+    RUN(w6_inode_flags_are_recorded);
+    RUN(w6_large_xattr_set_is_recorded_by_digest);
 
     fx_cleanup();
+    {
+        char cmd[700];
+        snprintf(cmd, sizeof cmd, "rm -rf '/tmp/belay_ms_store_%d' /tmp/belay_ms_%d.ndjson",
+                 (int)getpid(), (int)getpid());
+        if (system(cmd) != 0) { /* best effort */ }
+    }
     return belay_test_report();
 }

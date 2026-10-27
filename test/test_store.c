@@ -1,0 +1,262 @@
+/*
+ *  Content store tests. BLAST RADIUS unit: it writes copies of user files.
+ *  Everything here runs in a throwaway directory under /tmp (§0.4d).
+ */
+#define _GNU_SOURCE
+
+#include "belay_test.h"
+#include "belay/store.h"
+#include "belay/hash.h"
+#include "belay/error.h"
+
+#include <dirent.h>
+#include <fcntl.h>
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#include <sys/stat.h>
+#include <unistd.h>
+
+static char g_dir[512];
+
+static void sha_hex(const char *data, size_t n, char out[65]) {
+    struct belay_sha256 c;
+    uint8_t d[32];
+    belay_sha256_init(&c);
+    belay_sha256_update(&c, data, n);
+    belay_sha256_final(&c, d);
+    belay_hex_encode(out, d, sizeof d);
+}
+
+static void obj_path(const char *hex, char *out, size_t n) {
+    snprintf(out, n, "%s/%.2s/%s", g_dir, hex, hex + 2);
+}
+
+/* A staging file left behind is a leak of user content into the state dir
+ * under a name nothing will ever clean up. */
+static int count_tmp(void) {
+    DIR *d = opendir(g_dir);
+    if (d == NULL) return -1;
+    int n = 0;
+    struct dirent *de;
+    while ((de = readdir(d)) != NULL)
+        if (strncmp(de->d_name, ".tmp-", 5) == 0) n++;
+    closedir(d);
+    return n;
+}
+
+static int put(struct belay_store *s, const char *data, const char *hex) {
+    struct belay_store_tx tx;
+    if (belay_store_begin(s, &tx) == -1) return -1;
+    if (belay_store_write(&tx, data, strlen(data)) == -1) { belay_store_abort(&tx); return -1; }
+    return belay_store_commit(&tx, hex);
+}
+
+TEST(open_creates_private_directory) {
+    struct belay_store *s = NULL;
+    ASSERT_EQ_INT(0, belay_store_open(g_dir, &s));
+    struct stat st;
+    ASSERT_EQ_INT(0, stat(g_dir, &st));
+    ASSERT_EQ_INT(0700, (int)(st.st_mode & 07777));
+    belay_store_close(s);
+}
+
+TEST(commit_publishes_exact_content_as_private_object) {
+    struct belay_store *s = NULL;
+    ASSERT_EQ_INT(0, belay_store_open(g_dir, &s));
+    const char *data = "hello store\n";
+    char hex[65];
+    sha_hex(data, strlen(data), hex);
+    ASSERT_EQ_INT(0, put(s, data, hex));
+
+    char p[1024];
+    obj_path(hex, p, sizeof p);
+    struct stat st;
+    ASSERT_EQ_INT(0, stat(p, &st));
+    ASSERT_EQ_INT(0600, (int)(st.st_mode & 07777));
+    ASSERT_EQ_INT((int)strlen(data), (int)st.st_size);
+    ASSERT_EQ_INT(1, belay_store_verify(s, hex));
+    ASSERT_EQ_INT(0, count_tmp());
+    belay_store_close(s);
+}
+
+/* A name that is not 64 lowercase hex must never become a path. */
+TEST(hostile_object_names_are_rejected_and_cleaned_up) {
+    struct belay_store *s = NULL;
+    ASSERT_EQ_INT(0, belay_store_open(g_dir, &s));
+    const char *bad[] = {
+        "../../../../tmp/belay_escape_xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx",
+        "E3B0C44298FC1C149AFBF4C8996FB92427AE41E4649B934CA495991B7852B855",
+        "e3b0c442",
+        "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855ff",
+        "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b85/",
+        "",
+    };
+    for (size_t i = 0; i < sizeof bad / sizeof bad[0]; i++) {
+        if (put(s, "x", bad[i]) != -1) BELAY_FAIL("accepted object name: %s", bad[i]);
+        belay_err_clear();
+    }
+    ASSERT_EQ_INT(-1, put(s, "x", NULL));
+    belay_err_clear();
+    ASSERT_EQ_INT(0, count_tmp());
+    ASSERT_TRUE(access("/tmp/belay_escape_xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx", F_OK) != 0);
+    belay_store_close(s);
+}
+
+/* Dedup keeps the existing object: same inode, not rewritten. */
+TEST(duplicate_content_is_not_rewritten) {
+    struct belay_store *s = NULL;
+    ASSERT_EQ_INT(0, belay_store_open(g_dir, &s));
+    const char *data = "dedup me";
+    char hex[65], p[1024];
+    sha_hex(data, strlen(data), hex);
+    ASSERT_EQ_INT(0, put(s, data, hex));
+    obj_path(hex, p, sizeof p);
+    struct stat a, b;
+    ASSERT_EQ_INT(0, stat(p, &a));
+    ASSERT_EQ_INT(0, put(s, data, hex));
+    ASSERT_EQ_INT(0, stat(p, &b));
+    ASSERT_EQ_INT((long long)a.st_ino, (long long)b.st_ino);
+    ASSERT_EQ_INT(0, count_tmp());
+    belay_store_close(s);
+}
+
+/* Something other than a regular file at an object's name was not put there
+ * by belay. It must be refused, never followed and never moved aside. */
+TEST(planted_symlink_at_object_name_is_refused_not_followed) {
+    struct belay_store *s = NULL;
+    ASSERT_EQ_INT(0, belay_store_open(g_dir, &s));
+    const char *data = "target of a planted link";
+    char hex[65], p[1024], prefix[1024], victim[600];
+    sha_hex(data, strlen(data), hex);
+
+    snprintf(victim, sizeof victim, "%s_victim", g_dir);
+    FILE *f = fopen(victim, "wb");
+    if (f) { fputs("do not touch", f); fclose(f); }
+
+    snprintf(prefix, sizeof prefix, "%s/%.2s", g_dir, hex);
+    mkdir(prefix, 0700);
+    obj_path(hex, p, sizeof p);
+    ASSERT_EQ_INT(0, symlink(victim, p));
+
+    ASSERT_EQ_INT(-1, put(s, data, hex));
+    ASSERT_EQ_INT(BELAY_ERR_CORRUPT, belay_err_code());
+    belay_err_clear();
+
+    /* The victim is untouched and the link is still a link. */
+    char buf[64] = {0};
+    f = fopen(victim, "rb");
+    if (f) { if (fread(buf, 1, sizeof buf - 1, f) == 0) buf[0] = 0; fclose(f); }
+    ASSERT_EQ_STR("do not touch", buf);
+    struct stat st;
+    ASSERT_EQ_INT(0, lstat(p, &st));
+    ASSERT_TRUE(S_ISLNK(st.st_mode));
+    ASSERT_EQ_INT(0, belay_store_verify(s, hex));   /* a symlink is not an object */
+    belay_err_clear();
+    ASSERT_EQ_INT(0, count_tmp());
+
+    unlink(p);
+    unlink(victim);
+    belay_store_close(s);
+}
+
+/* Dedup trusts nothing at write time, so a planted object with the wrong
+ * content survives a commit -- and verify is what must catch it. */
+TEST(planted_wrong_content_is_caught_by_verify) {
+    struct belay_store *s = NULL;
+    ASSERT_EQ_INT(0, belay_store_open(g_dir, &s));
+    const char *data = "the real content";
+    char hex[65], p[1024], prefix[1024];
+    sha_hex(data, strlen(data), hex);
+
+    snprintf(prefix, sizeof prefix, "%s/%.2s", g_dir, hex);
+    mkdir(prefix, 0700);
+    obj_path(hex, p, sizeof p);
+    FILE *f = fopen(p, "wb");
+    if (f) { fputs("forged content", f); fclose(f); }
+
+    ASSERT_EQ_INT(0, put(s, data, hex));        /* kept, not rewritten */
+    ASSERT_EQ_INT(0, belay_store_verify(s, hex));
+    ASSERT_TRUE(strstr(belay_err_msg(), "hashing to") != NULL);
+    belay_err_clear();
+
+    unlink(p);
+    belay_store_close(s);
+}
+
+TEST(abort_leaves_nothing) {
+    struct belay_store *s = NULL;
+    ASSERT_EQ_INT(0, belay_store_open(g_dir, &s));
+    struct belay_store_tx tx;
+    ASSERT_EQ_INT(0, belay_store_begin(s, &tx));
+    ASSERT_EQ_INT(0, belay_store_write(&tx, "partial", 7));
+    ASSERT_EQ_INT(1, count_tmp());
+    belay_store_abort(&tx);
+    ASSERT_EQ_INT(0, count_tmp());
+    belay_store_abort(&tx);                     /* idempotent */
+    ASSERT_EQ_INT(-1, belay_store_write(&tx, "x", 1));
+    ASSERT_EQ_INT(-1, belay_store_commit(&tx, "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"));
+    belay_err_clear();
+    belay_store_close(s);
+}
+
+TEST(verify_reports_missing_object) {
+    struct belay_store *s = NULL;
+    ASSERT_EQ_INT(0, belay_store_open(g_dir, &s));
+    ASSERT_EQ_INT(0, belay_store_verify(s, "0000000000000000000000000000000000000000000000000000000000000000"));
+    belay_err_clear();
+    ASSERT_EQ_INT(-1, belay_store_verify(s, "../x"));
+    belay_err_clear();
+    belay_store_close(s);
+}
+
+/* The store directory itself being a symlink would redirect every write. */
+TEST(store_directory_that_is_a_symlink_is_refused) {
+    char real[600], link[600];
+    snprintf(real, sizeof real, "%s_real", g_dir);
+    snprintf(link, sizeof link, "%s_link", g_dir);
+    mkdir(real, 0700);
+    ASSERT_EQ_INT(0, symlink(real, link));
+    struct belay_store *s = NULL;
+    ASSERT_EQ_INT(-1, belay_store_open(link, &s));
+    ASSERT_TRUE(s == NULL);
+    belay_err_clear();
+    unlink(link);
+    rmdir(real);
+}
+
+/* A store writable by group or others would let another user plant objects. */
+TEST(store_directory_writable_by_others_is_refused) {
+    char d[600];
+    snprintf(d, sizeof d, "%s_open", g_dir);
+    mkdir(d, 0700);
+    chmod(d, 0777);
+    struct belay_store *s = NULL;
+    ASSERT_EQ_INT(-1, belay_store_open(d, &s));
+    ASSERT_TRUE(s == NULL);
+    belay_err_clear();
+    chmod(d, 0750);
+    ASSERT_EQ_INT(0, belay_store_open(d, &s));   /* group-readable is fine */
+    belay_store_close(s);
+    rmdir(d);
+}
+
+int main(void) {
+    snprintf(g_dir, sizeof g_dir, "/tmp/belay_store_%d", (int)getpid());
+
+    RUN(open_creates_private_directory);
+    RUN(commit_publishes_exact_content_as_private_object);
+    RUN(hostile_object_names_are_rejected_and_cleaned_up);
+    RUN(duplicate_content_is_not_rewritten);
+    RUN(planted_symlink_at_object_name_is_refused_not_followed);
+    RUN(planted_wrong_content_is_caught_by_verify);
+    RUN(abort_leaves_nothing);
+    RUN(verify_reports_missing_object);
+    RUN(store_directory_that_is_a_symlink_is_refused);
+    RUN(store_directory_writable_by_others_is_refused);
+
+    char cmd[600];
+    snprintf(cmd, sizeof cmd, "rm -rf '%s'", g_dir);
+    if (system(cmd) != 0) { /* best effort */ }
+    return belay_test_report();
+}

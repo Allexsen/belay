@@ -91,3 +91,67 @@ jobs:
           BASE: ${{ github.event.pull_request.base.sha }}
           HEAD: ${{ github.event.pull_request.head.sha }}
         run: ./scripts/check-dco.sh "$BASE" "$HEAD"
+
+  docker:
+    name: docker
+    runs-on: ubuntu-24.04
+    # M1 done-criterion, gap (a): the portable engine inside a container, and
+    # /usr-in-Docker timing. The image's /usr sits on overlayfs, so this also
+    # exercises the overlay mount rules. Tests run as a non-root user: as root,
+    # permission tests (unreadable directories) cannot fail the way they must.
+    # The CLI does not wire check/diff/mark yet; the test suite and the bench
+    # driver stand in for `check` until it does.
+    steps:
+      - uses: actions/checkout@v5
+      - name: build + test + /usr timing inside ubuntu:24.04
+        run: |
+          docker run --rm -v "$PWD:/src:ro" ubuntu:24.04 bash -euo pipefail -c '
+            apt-get update -qq
+            apt-get install -y -qq --no-install-recommends build-essential >/dev/null
+            useradd -m tester
+            cp -r /src /home/tester/w && chown -R tester /home/tester/w
+            su tester -c "cd /home/tester/w && make check && make bench"
+            cd /home/tester/w
+            for run in first warm warm; do
+              su tester -c "./build/bench/bench_check /usr usr-in-docker-$run" | tail -1
+            done'
+
+  filesystems:
+    name: filesystems
+    runs-on: ubuntu-24.04
+    # Gap (b): every HIGH review finding was about a change during the walk on
+    # filesystems other than local ext4 -- NFS, coarse timestamps, btrfs
+    # subvolumes. Loopback btrfs and FAT images and a loopback NFS export,
+    # with test/fs/fs_scenarios.c on each, and the stress test on btrfs and
+    # NFS. On FAT the "fresh fixture" cases are known issue R4-F1 (XFAIL).
+    steps:
+      - uses: actions/checkout@v5
+      - name: install filesystem tools
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq btrfs-progs dosfstools nfs-kernel-server >/dev/null
+      - name: build
+        run: make fs-scenarios build/test/test_stress
+      - name: btrfs (loopback, with a subvolume inside the scope)
+        run: |
+          truncate -s 512M /tmp/btrfs.img && mkfs.btrfs -q /tmp/btrfs.img
+          sudo mkdir -p /mnt/btrfs && sudo mount -o loop /tmp/btrfs.img /mnt/btrfs
+          sudo btrfs subvolume create /mnt/btrfs/sv
+          sudo chown -R "$(id -u):$(id -g)" /mnt/btrfs
+          ./build/fs_scenarios /mnt/btrfs --subvol sv
+          BELAY_TEST_ROOT=/mnt/btrfs ./build/test/test_stress
+      - name: FAT (loopback, 2 s timestamps)
+        run: |
+          truncate -s 256M /tmp/fat.img && mkfs.vfat -F 32 /tmp/fat.img >/dev/null
+          sudo mkdir -p /mnt/fat
+          sudo mount -o loop,uid="$(id -u)",gid="$(id -g)" /tmp/fat.img /mnt/fat
+          ./build/fs_scenarios /mnt/fat --coarse
+      - name: NFS (loopback export)
+        run: |
+          sudo mkdir -p /srv/nfs && sudo chown "$(id -u):$(id -g)" /srv/nfs
+          echo "/srv/nfs 127.0.0.1(rw,sync,no_subtree_check,insecure)" | sudo tee /etc/exports
+          sudo systemctl restart nfs-kernel-server
+          sudo exportfs -ra
+          sudo mkdir -p /mnt/nfs && sudo mount -t nfs -o vers=4.2 127.0.0.1:/srv/nfs /mnt/nfs
+          ./build/fs_scenarios /mnt/nfs
+          BELAY_TEST_ROOT=/mnt/nfs ./build/test/test_stress

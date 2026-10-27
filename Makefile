@@ -4,7 +4,9 @@
 #
 #   CORE_SRC    portable POSIX C — capture/A, diff/, interp/, util/.
 #               MUST build and pass tests on macOS as well as Linux.
-#               Linux-only fast paths go behind #ifdef inside these files.
+#               It calls the OS only through the platform adapter
+#               (src/capture/fsops.h): src/platform/fsops_posix.c plus the
+#               one fsops_<os>.c for this host. No #ifdef in capture.
 #   SESSION_SRC Linux-only — userns + mountns + overlayfs (M4).
 #               Built only when the host is Linux.
 #
@@ -19,7 +21,12 @@ BIN	= bin/belay
 
 UNAME_S	:= $(shell uname -s)
 
-CORE_SRC	= $(wildcard src/util/*.c src/capture/*.c src/diff/*.c src/interp/*.c)
+ifeq ($(UNAME_S),Linux)
+PLATFORM_SRC	= src/platform/fsops_posix.c src/platform/fsops_linux.c
+else
+PLATFORM_SRC	= src/platform/fsops_posix.c src/platform/fsops_macos.c
+endif
+CORE_SRC	= $(wildcard src/util/*.c src/capture/*.c src/diff/*.c src/interp/*.c) $(PLATFORM_SRC)
 CORE_OBJ	= $(CORE_SRC:src/%.c=$(BUILD)/%.o)
 SAN_CORE_OBJ	= $(CORE_SRC:src/%.c=$(SAN_BUILD)/%.o)
 SESSION_SRC	= $(wildcard src/session/*.c)
@@ -39,6 +46,10 @@ OBJ	= $(SRC:src/%.c=$(BUILD)/%.o)
 # One binary per test/test_*.c. The harness is header-only, so each test
 # links only the units it exercises.
 TEST_SRC	= $(wildcard test/test_*.c)
+
+# Race tests (test/test_races.c) inject failures and changes through a
+# decorated platform adapter, so they build and run on every platform.
+# test_stress.c needs threads.
 TEST_BIN	= $(TEST_SRC:test/%.c=$(BUILD)/test/%)
 
 # Sanitizer builds (§0.4c). Separate object dir so a sanitized object is
@@ -47,7 +58,7 @@ SAN_FLAGS	= -fsanitize=address,undefined -fno-omit-frame-pointer -g -O1
 SAN_BUILD	= $(BUILD)/san
 SAN_TEST_BIN	= $(TEST_SRC:test/%.c=$(SAN_BUILD)/test/%)
 
-.PHONY: all clean test check check-san fuzz bench platform
+.PHONY: all clean test check check-san fuzz bench platform fs-scenarios gen gen-check
 
 all: $(BIN)
 
@@ -67,7 +78,7 @@ $(BUILD)/%.o: src/%.c
 
 $(BUILD)/test/%: test/%.c $(CORE_OBJ)
 	@mkdir -p $(dir $@)
-	$(CC) $(CFLAGS) $(WARN) $(INC) -Itest -MMD -MP -o $@ $< $(CORE_OBJ)
+	$(CC) $(CFLAGS) $(WARN) $(INC) -Itest -MMD -MP -o $@ $< $(CORE_OBJ) $(TEST_LDFLAGS)
 
 $(SAN_BUILD)/%.o: src/%.c
 	@mkdir -p $(dir $@)
@@ -75,7 +86,9 @@ $(SAN_BUILD)/%.o: src/%.c
 
 $(SAN_BUILD)/test/%: test/%.c $(SAN_CORE_OBJ)
 	@mkdir -p $(dir $@)
-	$(CC) $(SAN_FLAGS) $(WARN) $(INC) -Itest -MMD -MP -o $@ $< $(SAN_CORE_OBJ)
+	$(CC) $(SAN_FLAGS) $(WARN) $(INC) -Itest -MMD -MP -o $@ $< $(SAN_CORE_OBJ) $(TEST_LDFLAGS)
+
+$(BUILD)/test/test_stress $(SAN_BUILD)/test/test_stress: TEST_LDFLAGS = -pthread
 
 test: $(TEST_BIN)
 	@fail=0; \
@@ -97,7 +110,29 @@ check-san: $(SAN_TEST_BIN)
 	done; \
 	exit $$fail
 
-check: all test
+check: all gen-check test
+
+# Generated from the entry schema (src/capture/entry.c): the spec's field
+# rules and the fuzz target's invariants. `make gen` rewrites them;
+# `make gen-check` (part of `check`) fails when a committed one is stale.
+GEN_TOOL	= $(BUILD)/tools/gen_schema
+GEN_SPEC	= docs/spec/manifest-v1.md
+GEN_FUZZ	= test/fuzz/fuzz_invariants.gen.h
+
+$(GEN_TOOL): tools/gen_schema.c $(CORE_OBJ)
+	@mkdir -p $(dir $@)
+	$(CC) $(CFLAGS) $(WARN) $(INC) -MMD -MP -o $@ $< $(CORE_OBJ)
+
+gen: $(GEN_TOOL)
+	$(GEN_TOOL) spec $(GEN_SPEC) > $(GEN_SPEC).tmp && mv $(GEN_SPEC).tmp $(GEN_SPEC)
+	$(GEN_TOOL) fuzz > $(GEN_FUZZ).tmp && mv $(GEN_FUZZ).tmp $(GEN_FUZZ)
+
+gen-check: $(GEN_TOOL)
+	@fail=0; \
+	$(GEN_TOOL) spec $(GEN_SPEC) | diff -u $(GEN_SPEC) - || fail=1; \
+	$(GEN_TOOL) fuzz | diff -u $(GEN_FUZZ) - || fail=1; \
+	if [ $$fail = 1 ]; then echo "gen-check: generated files are stale; run make gen"; exit 1; fi; \
+	echo "gen-check: generated files are current"
 
 # Fuzz targets (§0.4c). libFuzzer needs clang; `make fuzz CC=clang`.
 # FUZZ_SECS bounds each target so CI stays fast.
@@ -105,7 +140,7 @@ FUZZ_SRC	= $(wildcard test/fuzz/fuzz_*.c)
 FUZZ_BIN	= $(FUZZ_SRC:test/fuzz/%.c=$(BUILD)/fuzz/%)
 FUZZ_SECS	?= 30
 
-$(BUILD)/fuzz/%: test/fuzz/%.c $(CORE_SRC)
+$(BUILD)/fuzz/%: test/fuzz/%.c $(CORE_SRC) $(GEN_FUZZ)
 	@mkdir -p $(dir $@)
 	$(CC) -fsanitize=fuzzer,address,undefined -g -O1 $(INC) -o $@ $< $(CORE_SRC)
 
@@ -115,7 +150,16 @@ BENCH_BIN	= $(BENCH_SRC:bench/%.c=$(BUILD)/bench/%)
 
 $(BUILD)/bench/%: bench/%.c $(CORE_OBJ)
 	@mkdir -p $(dir $@)
-	$(CC) $(CFLAGS) $(WARN) $(INC) -MMD -MP -o $@ $< $(CORE_OBJ)
+	$(CC) $(CFLAGS) $(WARN) $(INC) -MMD -MP -o $@ $< $(CORE_OBJ) $(BENCH_LDFLAGS)
+
+$(BUILD)/bench/spike_torn: BENCH_LDFLAGS = -pthread
+
+# Filesystem scenarios (gap b): run by CI on loopback btrfs, FAT and NFS.
+FS_SCEN		= $(BUILD)/fs_scenarios
+$(FS_SCEN): test/fs/fs_scenarios.c $(CORE_OBJ)
+	@mkdir -p $(dir $@)
+	$(CC) $(CFLAGS) $(WARN) $(INC) -o $@ $< $(CORE_OBJ)
+fs-scenarios: $(FS_SCEN)
 
 bench: $(BENCH_BIN)
 	@echo "built: $(BENCH_BIN)"

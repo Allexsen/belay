@@ -8,12 +8,17 @@
  *  read out of bounds, or hand the callback an entry that violates its own
  *  invariants.
  *
- *  The invariant checks in `check_entry` matter as much as the crash check: a
- *  reader that silently produced a path containing a NUL would pass a
- *  memory-safety-only oracle while breaking the §5.1.1 rule.
+ *  The invariant checks matter as much as the crash check: a reader that
+ *  silently produced a path containing a NUL would pass a memory-safety-only
+ *  oracle while breaking the §5.1.1 rule. The schema's rules (which fields
+ *  and flags go together) are generated from src/capture/entry.c into
+ *  fuzz_invariants.gen.h; what is checked by hand here is decoding: lengths,
+ *  NULs, hex shape and canonical paths, which the schema does not describe.
  */
 #include "belay/manifest.h"
 #include "belay/error.h"
+
+#include "fuzz_invariants.gen.h"
 
 #include <stdint.h>
 #include <stdio.h>
@@ -21,8 +26,8 @@
 #include <string.h>
 #include <unistd.h>
 
-static int check_entry(const struct belay_entry *e, void *ctx) {
-    (void)ctx;
+static void check_entry(const struct belay_manifest_header *h, const struct belay_entry *e) {
+    schema_invariants(h, e);
 
     /* §5.1.1: a path reaching the callback must never contain a NUL. */
     if (memchr(e->path, '\0', e->path_len) != NULL) abort();
@@ -33,9 +38,6 @@ static int check_entry(const struct belay_entry *e, void *ctx) {
     /* path_len must be within the buffer. */
     if (e->path_len >= sizeof e->path) abort();
 
-    /* A hash and the unverified flag are mutually exclusive by construction. */
-    if (e->has_hash && e->unverified) abort();
-
     /* A recorded hash must be exactly 64 lowercase hex characters. */
     if (e->has_hash) {
         if (strlen(e->sha256_hex) != 64) abort();
@@ -45,15 +47,27 @@ static int check_entry(const struct belay_entry *e, void *ctx) {
         }
     }
 
-    /* Only symlinks carry targets, and a symlink must carry one. */
-    if ((e->type == BELAY_T_LNK) != e->has_link_target) abort();
+    /* An inline xattr set is a decoded set, within the inline limit. */
+    if (e->xattrs_inline && (!e->has_xattrs || e->xattrs_len > BELAY_XATTRS_INLINE_MAX)) abort();
+
+    /* Canonical paths only: no empty, "." or ".." component except a lone ".". */
+    if (!(e->path_len == 1 && e->path[0] == '.')) {
+        if (e->path[0] == '/' || e->path[e->path_len - 1] == '/') abort();
+        for (size_t i = 0; i < e->path_len; ) {
+            size_t j = i;
+            while (j < e->path_len && e->path[j] != '/') j++;
+            const size_t n = j - i;
+            if (n == 0) abort();
+            if (n == 1 && e->path[i] == '.') abort();
+            if (n == 2 && e->path[i] == '.' && e->path[i + 1] == '.') abort();
+            i = j + 1;
+        }
+    }
 
     if (e->has_link_target) {
         if (memchr(e->link_target, '\0', e->link_target_len) != NULL) abort();
         if (e->link_target_len >= sizeof e->link_target) abort();
     }
-
-    return 0;
 }
 
 int LLVMFuzzerTestOneInput(const uint8_t *data, size_t size) {
@@ -75,7 +89,12 @@ int LLVMFuzzerTestOneInput(const uint8_t *data, size_t size) {
 
     /* Return value is unconstrained -- success or failure are both fine. What
      * must not happen is a crash or a violated invariant. */
-    belay_manifest_read(path, check_entry, NULL);
+    struct belay_manifest_reader *r;
+    if (belay_manifest_open(path, &r) == 0) {
+        static struct belay_entry e;
+        while (belay_manifest_next(r, &e) == 1) check_entry(belay_manifest_header(r), &e);
+        belay_manifest_close(r);
+    }
     belay_err_clear();
 
     return 0;
