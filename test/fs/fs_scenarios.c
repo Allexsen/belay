@@ -1,6 +1,6 @@
 /*
- *  Filesystem scenarios (gap b, 2026-10-26). Linux only; built with GNU ld
- *  --wrap so each race fires at an exact point, like test_races_linux.c.
+ *  Filesystem scenarios (gap b, 2026-10-26). Each race fires at an exact
+ *  point through a decorated platform adapter, as in test/test_races.c.
  *
  *  The class that produced every HIGH review finding -- a change during the
  *  walk that the manifest does not show -- was fixed for NFS, SMB, FUSE and
@@ -23,10 +23,9 @@
 #define _GNU_SOURCE
 #include "belay/manifest.h"
 #include "belay/error.h"
+#include "capture/capture.h"
 
-#include <dirent.h>
 #include <fcntl.h>
-#include <stdarg.h>
 #include <stdbool.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -39,37 +38,36 @@ static enum { NONE, MOVE_INTO_LISTED, CHANGE_AFTER_READ } g_arm;
 static bool g_append, g_fired;
 static int g_fail;
 
-/* ---- interposition ---- */
+/* ---- interposition: a decorated platform adapter ---- */
 
-struct dirent *__real_readdir(DIR *);
-static DIR *g_root;
+static const struct fsops *g_real;
+static struct fsops g_ops;
+
+static void *g_root;
 static char g_walked[8];
-struct dirent *__wrap_readdir(DIR *d) {
-    struct dirent *e = __real_readdir(d);
+static const char *t_dir_next(void *ctx, void *d) {
+    (void)ctx;
+    const char *e = g_real->dir_next(g_real->ctx, d);
     if (g_root == NULL) g_root = d;
     /* When the root listing returns the second of A/B, move its file into the
      * first, which is fully walked by now. */
     if (g_arm == MOVE_INTO_LISTED && !g_fired && e != NULL && d == g_root &&
-        (strcmp(e->d_name, "A") == 0 || strcmp(e->d_name, "B") == 0)) {
+        (strcmp(e, "A") == 0 || strcmp(e, "B") == 0)) {
         if (g_walked[0] == '\0') {
-            snprintf(g_walked, sizeof g_walked, "%.7s", e->d_name);
+            snprintf(g_walked, sizeof g_walked, "%.7s", e);
         } else {
             char from[1600], to[1600];
-            snprintf(from, sizeof from, "%s/%s/m_%s", g_scope, e->d_name, e->d_name);
-            snprintf(to, sizeof to, "%s/%s/m_%s", g_scope, g_walked, e->d_name);
+            snprintf(from, sizeof from, "%s/%s/m_%s", g_scope, e, e);
+            snprintf(to, sizeof to, "%s/%s/m_%s", g_scope, g_walked, e);
             if (rename(from, to) == 0) g_fired = true;
         }
     }
     return e;
 }
 
-int __real_openat(int, const char *, int, ...);
 static char g_first[256];
-int __wrap_openat(int fd, const char *name, int flags, ...) {
-    va_list ap;
-    va_start(ap, flags);
-    const int mode = va_arg(ap, int);
-    va_end(ap);
+static int t_openat(void *ctx, int fd, const char *name, int flags) {
+    (void)ctx;
     /* On the second regular file opened, change the first one. */
     if (g_arm == CHANGE_AFTER_READ && !g_fired && !(flags & O_DIRECTORY) &&
         (flags & O_ACCMODE) == O_RDONLY) {
@@ -78,14 +76,14 @@ int __wrap_openat(int fd, const char *name, int flags, ...) {
         } else {
             char p[1600];
             snprintf(p, sizeof p, "%s/%s", g_scope, g_first);
-            const int w = __real_openat(AT_FDCWD, p, O_WRONLY | (g_append ? O_APPEND : 0), 0);
+            const int w = openat(AT_FDCWD, p, O_WRONLY | (g_append ? O_APPEND : 0), 0);
             if (w >= 0) {
                 if (write(w, "Z", 1) == 1) g_fired = true;   /* same size unless appending */
                 close(w);
             }
         }
     }
-    return __real_openat(fd, name, flags, mode);
+    return g_real->openat(g_real->ctx, fd, name, flags);
 }
 
 /* ---- helpers ---- */
@@ -119,7 +117,7 @@ static bool check(void) {
         .store_max_bytes = BELAY_STORE_MAX_BYTES_DEFAULT,
     };
     g_root = NULL;
-    const int rc = belay_manifest_write(g_m, g_scope, &o, &g_st);
+    const int rc = capture_write(&g_ops, g_m, g_scope, &o, &g_st);
     g_arm = NONE;
     if (rc != 0) { printf("    write failed: %s\n", belay_err_msg()); belay_err_clear(); return false; }
     if (belay_manifest_read(g_m, noop, NULL) != 0) {           /* must read back */
@@ -204,6 +202,10 @@ static void s_subvol(const char *name) {
 int main(int argc, char **argv) {
     if (argc < 2) { fprintf(stderr, "usage: fs_scenarios <dir> [--coarse] [--subvol NAME]\n"); return 2; }
     snprintf(g_dir, sizeof g_dir, "%s", argv[1]);
+    g_real = fsops_default();
+    g_ops = *g_real;
+    g_ops.dir_next = t_dir_next;
+    g_ops.openat = t_openat;
     bool coarse = false;
     const char *subvol = NULL;
     for (int i = 2; i < argc; i++) {

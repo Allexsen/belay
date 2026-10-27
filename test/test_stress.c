@@ -1,5 +1,5 @@
 /*
- *  Stress test (gap d, 2026-10-26). Linux only.
+ *  Stress test (gap d, 2026-10-26).
  *
  *  Every race in test_races_linux.c is forced at one exact point. This one is
  *  not: a background thread hammers the tree for the whole duration of many

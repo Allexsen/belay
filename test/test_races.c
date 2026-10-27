@@ -1,12 +1,14 @@
 /*
- *  Race tests for the manifest writer. Linux only.
+ *  Race tests for the manifest writer.
  *
  *  Each race found by independent review fires in a window of microseconds,
- *  so waiting for it by luck would make a flaky test. Instead GNU ld's --wrap
- *  (see RACE_WRAP in the Makefile) interposes the libc calls the writer makes,
- *  and a wrapper performs the hostile change at the exact moment between two
- *  of the writer's own calls. The wrappers are disarmed except while one test
- *  runs, and fire at most once.
+ *  so waiting for it by luck would make a flaky test. Instead the writer runs
+ *  on a decorated platform adapter (src/capture/fsops.h): the default table
+ *  with some calls replaced by hooks that perform the hostile change at the
+ *  exact moment between two of the writer's own calls, then pass through.
+ *  The hooks are disarmed except while one test runs, and fire at most once.
+ *  Portable: tests that need a Linux facility (namespaces, statx, file
+ *  capabilities) say so and skip elsewhere.
  *
  *  Fixtures live under /tmp (§0.4d).
  */
@@ -15,11 +17,13 @@
 #include "belay_test.h"
 #include "belay/manifest.h"
 #include "belay/error.h"
+#include "capture/capture.h"
 
-#include <dirent.h>
 #include <errno.h>
+#ifdef __linux__
 #include <sched.h>
 #include <sys/mount.h>
+#endif
 #include <sys/wait.h>
 #include <fcntl.h>
 #include <stdarg.h>
@@ -55,12 +59,21 @@ static enum arm g_arm;
 static const char *g_x, *g_y;
 static int g_fired;
 
-int __real_openat(int, const char *, int, ...);
-int __wrap_openat(int fd, const char *name, int flags, ...) {
-    va_list ap;
-    va_start(ap, flags);
-    const int mode = va_arg(ap, int);
-    va_end(ap);
+/* The default adapter, and the decorated copy the writer runs on. */
+static const struct fsops *g_real;
+static struct fsops g_ops;
+
+/* Two names in one directory exchanged atomically. */
+static int swap_at(int fd, const char *a, const char *b) {
+#ifdef __linux__
+    return renameat2(fd, a, fd, b, RENAME_EXCHANGE);
+#else
+    return renameatx_np(fd, a, fd, b, RENAME_SWAP);
+#endif
+}
+
+static int t_openat(void *ctx, int fd, const char *name, int flags) {
+    (void)ctx;
     /* MOVE_BETWEEN_DIRS: when the second of A/B is opened, move its file into
      * the first, already-listed one -- so the file is in neither listing. */
     if (g_arm == MOVE_BETWEEN_DIRS && !g_fired && (flags & O_DIRECTORY) &&
@@ -83,7 +96,7 @@ int __wrap_openat(int fd, const char *name, int flags, ...) {
         } else {
             char p[600];
             snprintf(p, sizeof p, "%s/%s", g_root, g_first);
-            const int w = __real_openat(AT_FDCWD, p, O_WRONLY | O_APPEND, 0);
+            const int w = openat(AT_FDCWD, p, O_WRONLY | O_APPEND, 0);
             if (w >= 0) { if (write(w, "!", 1) == 1) g_fired = 1; close(w); }
         }
     }
@@ -92,25 +105,25 @@ int __wrap_openat(int fd, const char *name, int flags, ...) {
         g_fired = 1;
         char p[600];
         snprintf(p, sizeof p, "%s/created_mid_walk", g_root);
-        const int w = __real_openat(AT_FDCWD, p, O_WRONLY | O_CREAT | O_EXCL, 0644);
+        const int w = openat(AT_FDCWD, p, O_WRONLY | O_CREAT | O_EXCL, 0644);
         if (w >= 0) close(w);
     }
     if (!g_fired && g_x != NULL && strcmp(name, g_x) == 0) {
         if (g_arm == SWAP_ON_DIR_OPEN && (flags & O_DIRECTORY)) {
             g_fired = 1;
-            renameat2(fd, g_x, fd, g_y, RENAME_EXCHANGE);
+            swap_at(fd, g_x, g_y);
         } else if (g_arm == REWRITE_ON_FILE_OPEN && !(flags & O_DIRECTORY)) {
             g_fired = 1;
             /* Same size, new content, between the stat and this open. */
-            const int w = __real_openat(fd, name, O_WRONLY, 0);
+            const int w = openat(fd, name, O_WRONLY, 0);
             if (w >= 0) { if (write(w, "NEW!", 4) != 4) { /* best effort */ } close(w); }
         }
     }
-    return __real_openat(fd, name, flags, mode);
+    return g_real->openat(g_real->ctx, fd, name, flags);
 }
 
-ssize_t __real_readlinkat(int, const char *, char *, size_t);
-ssize_t __wrap_readlinkat(int fd, const char *name, char *buf, size_t n) {
+static ssize_t t_readlinkat(void *ctx, int fd, const char *name, char *buf, size_t n) {
+    (void)ctx;
     if (g_x != NULL && strcmp(name, g_x) == 0) {
         if (g_arm == LINK_EMPTY) {
             g_fired = 1;
@@ -131,9 +144,9 @@ ssize_t __wrap_readlinkat(int fd, const char *name, char *buf, size_t n) {
              * symlink again afterwards: it never went away. */
             g_fired = 1;
             unlinkat(fd, g_x, 0);
-            const int w = __real_openat(fd, g_x, O_WRONLY | O_CREAT | O_EXCL, 0644);
+            const int w = openat(fd, g_x, O_WRONLY | O_CREAT | O_EXCL, 0644);
             if (w >= 0) close(w);
-            const ssize_t r = __real_readlinkat(fd, name, buf, n);
+            const ssize_t r = readlinkat(fd, name, buf, n);
             const int saved = errno;
             unlinkat(fd, g_x, 0);
             if (symlinkat("target", fd, g_x) != 0) { /* fixture */ }
@@ -144,30 +157,20 @@ ssize_t __wrap_readlinkat(int fd, const char *name, char *buf, size_t n) {
     if (!g_fired && g_x != NULL && strcmp(name, g_x) == 0) {
         if (g_arm == SWAP_ON_READLINK) {
             g_fired = 1;
-            renameat2(fd, g_x, fd, g_y, RENAME_EXCHANGE);
+            swap_at(fd, g_x, g_y);
         } else if (g_arm == REPLACE_LINK_WITH_FILE) {
             g_fired = 1;
             unlinkat(fd, g_x, 0);
-            const int w = __real_openat(fd, g_x, O_WRONLY | O_CREAT | O_EXCL, 0644);
+            const int w = openat(fd, g_x, O_WRONLY | O_CREAT | O_EXCL, 0644);
             if (w >= 0) close(w);
         }
     }
-    return __real_readlinkat(fd, name, buf, n);
-}
-
-/* With _FORTIFY_SOURCE the writer's readlinkat call is compiled to the checked
- * variant, so it needs the same interposition or the race never fires. */
-ssize_t __real___readlinkat_chk(int, const char *, char *, size_t, size_t);
-ssize_t __wrap___readlinkat_chk(int fd, const char *name, char *buf, size_t n, size_t buflen) {
-    /* Run the full hooked path, injected errors included. The buffer check
-     * the _chk variant adds is irrelevant in a test that owns the buffer. */
-    (void)buflen;
-    return __wrap_readlinkat(fd, name, buf, n);
+    return g_real->readlinkat(g_real->ctx, fd, name, buf, n);
 }
 
 /*
  *  The wall clock as the writer sees it; monotonic time is never touched.
- *  CLOCK_STEP: once the walk's first readdir has run, every CLOCK_REALTIME
+ *  CLOCK_STEP: once the walk's first directory read has run, every realtime
  *  read is off by g_step_s -- the clock stepped during the walk. CLOCK_BEHIND:
  *  every realtime read, fine and coarse, is 100 s behind the clock that
  *  stamped the files -- the clock was stepped back before the walk, so
@@ -177,28 +180,34 @@ static int g_step_s, g_stepped;
 /* g_skew_s: every realtime read is off by this much, whatever is armed -- as
  * on a filesystem whose timestamps come from another machine's clock. */
 static int g_skew_s;
-int __real_clock_gettime(clockid_t, struct timespec *);
-int __wrap_clock_gettime(clockid_t id, struct timespec *ts) {
-    const int r = __real_clock_gettime(id, ts);
+static int t_clock(void *ctx, enum belay_clock which, struct timespec *ts) {
+    (void)ctx;
+    const int r = g_real->clock(g_real->ctx, which, ts);
     if (r != 0) return r;
-    if (id == CLOCK_REALTIME || id == CLOCK_REALTIME_COARSE) ts->tv_sec += g_skew_s;
-    if (g_arm == CLOCK_STEP && g_stepped && id == CLOCK_REALTIME) {
+    ts->tv_sec += g_skew_s;
+    if (g_arm == CLOCK_STEP && g_stepped && which == BELAY_CLOCK_REAL) {
         ts->tv_sec += g_step_s;
         g_fired = 1;
     }
-    if (g_arm == CLOCK_BEHIND && (id == CLOCK_REALTIME || id == CLOCK_REALTIME_COARSE)) {
+    if (g_arm == CLOCK_BEHIND) {
         ts->tv_sec -= 100;
         g_fired = 1;
     }
     return r;
 }
 
-/* statx: calls are counted, and those after an armed failure separately --
- * so a test can see that one entry's error did not switch statx off. */
+/* Mount-aware stat (statx on Linux): calls are counted, and those after an
+ * armed failure separately -- so a test can see that one entry's error did
+ * not switch statx off. */
 static size_t g_statx_calls, g_statx_after;
-int __real_statx(int, const char *, int, unsigned int, struct statx *);
-int __wrap_statx(int dfd, const char *name, int flags, unsigned int mask, struct statx *sx) {
-    if (g_arm == STATX_ENOSYS) { errno = ENOSYS; return -1; }
+static int t_stat_mount(void *ctx, int dfd, const char *name, struct stat *st,
+                        bool *mount_root, bool *mount_known) {
+    (void)ctx;
+    if (g_arm == STATX_ENOSYS) {
+        *mount_root = *mount_known = false;
+        errno = ENOSYS;
+        return -1;
+    }
     if (g_arm == STATX_EPERM_ONCE && !g_fired && g_x != NULL && strcmp(name, g_x) == 0) {
         g_fired = 1;
         errno = EPERM;
@@ -206,32 +215,41 @@ int __wrap_statx(int dfd, const char *name, int flags, unsigned int mask, struct
     }
     g_statx_calls++;
     if (g_fired) g_statx_after++;
-    const int r = __real_statx(dfd, name, flags, mask, sx);
+    const int r = g_real->stat_mount(g_real->ctx, dfd, name, st, mount_root, mount_known);
     /* LINK_EMPTY: the filesystem presents the link as empty, size included. */
-    if (r == 0 && g_arm == LINK_EMPTY && g_x != NULL && strcmp(name, g_x) == 0) sx->stx_size = 0;
+    if (r == 0 && g_arm == LINK_EMPTY && g_x != NULL && strcmp(name, g_x) == 0) st->st_size = 0;
     return r;
 }
 
-ssize_t __real_flistxattr(int, char *, size_t);
-ssize_t __wrap_flistxattr(int fd, char *buf, size_t n) {
-    if (g_arm == XATTR_EIO && !g_fired) {
+/* The plain stat path (no statx, as on macOS) presents the same empty link. */
+static int t_fstatat(void *ctx, int dfd, const char *name, struct stat *st, int flags) {
+    (void)ctx;
+    const int r = g_real->fstatat(g_real->ctx, dfd, name, st, flags);
+    if (r == 0 && g_arm == LINK_EMPTY && g_x != NULL && strcmp(name, g_x) == 0) st->st_size = 0;
+    return r;
+}
+
+/* XATTR_EIO: the first attribute listing through an open fd fails. */
+static ssize_t t_xattr_list(void *ctx, const struct xsrc *x, char *buf, size_t n) {
+    (void)ctx;
+    if (g_arm == XATTR_EIO && !g_fired && x->path == NULL) {
         g_fired = 1;
         errno = EIO;
         return -1;
     }
-    return __real_flistxattr(fd, buf, n);
+    return g_real->xattr_list(g_real->ctx, x, buf, n);
 }
 
-struct dirent *__real_readdir(DIR *);
-static DIR *g_rootdir;
-static const char *g_walked;   /* first of A/B returned by the root's readdir */
-static struct dirent g_saved;
+static void *g_rootdir;
+static const char *g_walked;   /* first of A/B returned by the root's listing */
+static char g_saved[256];
 static int g_replay;
-static DIR *g_dir;
-struct dirent *__wrap_readdir(DIR *d) {
+static void *g_dir;
+static const char *t_dir_next(void *ctx, void *d) {
+    (void)ctx;
     if (g_arm == DUP_READDIR && g_replay == 1 && d == g_dir) {
         g_replay = 2;
-        return &g_saved;                  /* the same name, a second time */
+        return g_saved;                   /* the same name, a second time */
     }
     if (g_arm == SUBDIR_READDIR_EIO && !g_fired && g_rootdir != NULL && d != g_rootdir) {
         g_fired = 1;
@@ -239,29 +257,41 @@ struct dirent *__wrap_readdir(DIR *d) {
         return NULL;
     }
     if (g_arm == CLOCK_STEP) g_stepped = 1;
-    struct dirent *e = __real_readdir(d);
-    if (g_rootdir == NULL) g_rootdir = d;     /* the first DIR opened is the root's */
+    const char *e = g_real->dir_next(g_real->ctx, d);
+    if (g_rootdir == NULL) g_rootdir = d;     /* the first stream opened is the root's */
     /* The reviewer's ordering: when the root listing returns the SECOND of
      * A/B, move that one's file into the first, which is fully walked by now
      * and will not be re-checked. The second is not stat'ed yet. */
     if (g_arm == MOVE_ON_ROOT_READDIR && !g_fired && e != NULL && d == g_rootdir &&
-        (strcmp(e->d_name, "A") == 0 || strcmp(e->d_name, "B") == 0)) {
+        (strcmp(e, "A") == 0 || strcmp(e, "B") == 0)) {
         if (g_walked == NULL) {
-            g_walked = e->d_name[0] == 'A' ? "A" : "B";
+            g_walked = e[0] == 'A' ? "A" : "B";
         } else {
             char from[1200], to[1200];
-            snprintf(from, sizeof from, "%s/%s/m_%s", g_root, e->d_name, e->d_name);
-            snprintf(to, sizeof to, "%s/%s/m_%s", g_root, g_walked, e->d_name);
+            snprintf(from, sizeof from, "%s/%s/m_%s", g_root, e, e);
+            snprintf(to, sizeof to, "%s/%s/m_%s", g_root, g_walked, e);
             if (rename(from, to) == 0) g_fired = 1;
         }
     }
     if (g_arm == DUP_READDIR && e != NULL && g_replay == 0 && g_x != NULL &&
-        strcmp(e->d_name, g_x) == 0) {
-        g_saved = *e;
+        strcmp(e, g_x) == 0) {
+        snprintf(g_saved, sizeof g_saved, "%s", e);
         g_replay = 1;
         g_dir = d;
     }
     return e;
+}
+
+static void decorate(void) {
+    g_real = fsops_default();
+    g_ops = *g_real;
+    g_ops.openat = t_openat;
+    g_ops.readlinkat = t_readlinkat;
+    g_ops.clock = t_clock;
+    g_ops.stat_mount = t_stat_mount;
+    g_ops.fstatat = t_fstatat;
+    g_ops.xattr_list = t_xattr_list;
+    g_ops.dir_next = t_dir_next;
 }
 
 static void arm(enum arm a, const char *x, const char *y) {
@@ -313,7 +343,7 @@ static int check(struct belay_manifest_stats *st) {
         .hash_max_bytes = BELAY_HASH_MAX_BYTES_DEFAULT,
         .store_max_bytes = BELAY_STORE_MAX_BYTES_DEFAULT,
     };
-    const int rc = belay_manifest_write(g_m, g_root, &o, st);
+    const int rc = capture_write(&g_ops, g_m, g_root, &o, st);
     g_arm = NONE;                 /* disarm, but keep g_fired for the assertions */
     g_skew_s = 0;
     if (rc != 0) return rc;
@@ -555,6 +585,7 @@ TEST(r2_readdir_eio_marks_the_directory_unstable_not_fatal) {
  *  forbids it (e.g. Ubuntu 24.04's AppArmor default). Runs in a child so the
  *  mounts die with it.
  */
+#ifdef __linux__
 /* Enters a new user + mount namespace with ourselves mapped to root, as
  * `unshare -r` does (an unmapped user cannot mount). 0, or 77 to skip. */
 static int enter_userns(void) {
@@ -589,7 +620,7 @@ static int caps_child(void) {
         .hash_max_bytes = BELAY_HASH_MAX_BYTES_DEFAULT,
         .store_max_bytes = BELAY_STORE_MAX_BYTES_DEFAULT,
     };
-    if (belay_manifest_write(g_m, g_root, &o, NULL) != 0) return 1;
+    if (capture_write(&g_ops, g_m, g_root, &o, NULL) != 0) return 1;
     g_n = 0;
     if (belay_manifest_read(g_m, collect, NULL) != 0) return 2;
     const struct belay_entry *e = find("capfile");
@@ -622,7 +653,7 @@ static int overlay_child(void) {
      * st_dev fallback must still exempt an overlay's files). */
     for (int pass = 0; pass < 2; pass++) {
         g_arm = pass ? STATX_ENOSYS : NONE;
-        const int w = belay_manifest_write(g_m, merged, &o, NULL);
+        const int w = capture_write(&g_ops, g_m, merged, &o, NULL);
         g_arm = NONE;
         if (w != 0) return 1;
         g_n = 0;
@@ -661,7 +692,7 @@ static int bind_child(void) {
     };
     for (int pass = 0; pass < 2; pass++) {
         g_arm = pass ? STATX_ENOSYS : NONE;
-        const int w = belay_manifest_write(g_m, scope, &o, NULL);
+        const int w = capture_write(&g_ops, g_m, scope, &o, NULL);
         g_arm = NONE;
         if (w != 0) return 1;
         g_n = 0;
@@ -673,7 +704,13 @@ static int bind_child(void) {
     return 0;
 }
 
+#endif
+
 TEST(w6_file_capability_is_recorded) {
+#ifndef __linux__
+    printf("      (skipped: Linux only -- file capabilities need a user namespace)\n");
+    return;
+#else
     reset();
     touch("capfile", "#!/bin/true\n");
     const pid_t pid = fork();
@@ -683,6 +720,7 @@ TEST(w6_file_capability_is_recorded) {
     const int rc = WIFEXITED(status) ? WEXITSTATUS(status) : 99;
     if (rc == 77) { printf("      (skipped: cannot set a file capability here)\n"); return; }
     ASSERT_EQ_INT(0, rc);
+#endif
 }
 
 /* W6: attributes that could not be read are recorded as unknown, never as
@@ -699,6 +737,10 @@ TEST(w6_unreadable_xattrs_are_unknown_not_none) {
 }
 
 TEST(r2_overlay_scope_files_are_hashed_not_flagged_as_mounts) {
+#ifndef __linux__
+    printf("      (skipped: Linux only -- overlayfs in a user namespace)\n");
+    return;
+#else
     reset();
     mk("lower"); mk("up"); mk("merged");
     touch("lower/lower.txt", "lower");
@@ -709,9 +751,14 @@ TEST(r2_overlay_scope_files_are_hashed_not_flagged_as_mounts) {
     const int rc = WIFEXITED(status) ? WEXITSTATUS(status) : 99;
     if (rc == 77) { printf("      (skipped: no unprivileged user+mount namespace here)\n"); return; }
     ASSERT_EQ_INT(0, rc);
+#endif
 }
 
 TEST(r3_file_bind_mounted_from_another_fs_is_a_boundary_with_or_without_statx) {
+#ifndef __linux__
+    printf("      (skipped: Linux only -- bind mounts in a user namespace)\n");
+    return;
+#else
     reset();
     mk("fs"); mk("scope");
     touch("scope/f", "local");
@@ -722,6 +769,7 @@ TEST(r3_file_bind_mounted_from_another_fs_is_a_boundary_with_or_without_statx) {
     const int rc = WIFEXITED(status) ? WEXITSTATUS(status) : 99;
     if (rc == 77) { printf("      (skipped: no unprivileged user+mount namespace here)\n"); return; }
     ASSERT_EQ_INT(0, rc);
+#endif
 }
 
 /* R3-F1: the round-2 rule needed file timestamps from this machine's clock.
@@ -772,6 +820,10 @@ TEST(r3_file_changed_after_it_was_read_is_raced) {
  * entry is not recorded (its directory is flagged, as for any entry that
  * cannot be stat'ed), and statx stays in use, in this walk and the next. */
 TEST(r3_one_statx_eperm_is_recorded_and_does_not_switch_statx_off) {
+#ifndef __linux__
+    printf("      (skipped: Linux only -- statx)\n");
+    return;
+#else
     reset();
     mk("d");
     touch("d/denied", "x");
@@ -788,6 +840,7 @@ TEST(r3_one_statx_eperm_is_recorded_and_does_not_switch_statx_off) {
     arm(NONE, NULL, NULL);
     ASSERT_EQ_INT(0, check(&st));
     ASSERT_TRUE(g_statx_calls > 0);
+#endif
 }
 
 /* R3-F6: a filesystem presenting an empty symlink (FUSE, NFS) made the writer
@@ -804,6 +857,7 @@ TEST(r3_empty_link_target_is_recorded_unreadable) {
 }
 
 int main(void) {
+    decorate();
     snprintf(g_root, sizeof g_root, "/tmp/belay_races_%d", (int)getpid());
     snprintf(g_m, sizeof g_m, "/tmp/belay_races_%d.ndjson", (int)getpid());
 

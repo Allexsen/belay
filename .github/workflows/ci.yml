@@ -131,7 +131,7 @@ jobs:
           sudo apt-get update -qq
           sudo apt-get install -y -qq btrfs-progs dosfstools nfs-kernel-server >/dev/null
       - name: build
-        run: make fs-scenarios build/test/test_stress_linux
+        run: make fs-scenarios build/test/test_stress
       - name: btrfs (loopback, with a subvolume inside the scope)
         run: |
           truncate -s 512M /tmp/btrfs.img && mkfs.btrfs -q /tmp/btrfs.img
@@ -139,7 +139,7 @@ jobs:
           sudo btrfs subvolume create /mnt/btrfs/sv
           sudo chown -R "$(id -u):$(id -g)" /mnt/btrfs
           ./build/fs_scenarios /mnt/btrfs --subvol sv
-          BELAY_TEST_ROOT=/mnt/btrfs ./build/test/test_stress_linux
+          BELAY_TEST_ROOT=/mnt/btrfs ./build/test/test_stress
       - name: FAT (loopback, 2 s timestamps)
         run: |
           truncate -s 256M /tmp/fat.img && mkfs.vfat -F 32 /tmp/fat.img >/dev/null
@@ -154,4 +154,4 @@ jobs:
           sudo exportfs -ra
           sudo mkdir -p /mnt/nfs && sudo mount -t nfs -o vers=4.2 127.0.0.1:/srv/nfs /mnt/nfs
           ./build/fs_scenarios /mnt/nfs
-          BELAY_TEST_ROOT=/mnt/nfs ./build/test/test_stress_linux
+          BELAY_TEST_ROOT=/mnt/nfs ./build/test/test_stress
