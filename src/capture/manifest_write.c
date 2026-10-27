@@ -198,6 +198,8 @@ int capture_write(const struct fsops *ops, const char *out_path, const char *sco
     /* The output pass: each entry with its re-check verdict applied, counted
      * as emitted, serialized once. */
     struct belay_manifest_stats tally = { 0 };
+    struct belay_manifest_header hdr = { .hash_max_bytes = opts->hash_max_bytes };
+    snprintf(hdr.scope, sizeof hdr.scope, "%s", real);
     if (runs_rewind(wc->runs) == -1) goto cleanup;
     const unsigned char *key, *val;
     uint32_t klen, vlen;
@@ -207,6 +209,15 @@ int capture_write(const struct fsops *ops, const char *out_path, const char *sco
         const int v = fgetc(verdicts);
         if (v == VERDICT_LISTING) outcome_apply(ebuf, FACET_LISTING, OUT_CHANGED, &wc->tally);
         if (v == VERDICT_ENTRY)   outcome_apply(ebuf, FACET_ENTRY, OUT_CHANGED, &wc->tally);
+        /* The schema the reader enforces, enforced here first: a writer bug
+         * fails this write instead of producing a manifest nothing can read. */
+        if (entry_check(ebuf, entry_present(ebuf)) == -1 || entry_check_header(&hdr, ebuf) == -1) {
+            char why[512];
+            snprintf(why, sizeof why, "%s", belay_err_msg());
+            belay_err_set(BELAY_ERR_CORRUPT, 0, "manifest: internal error, entry \"%.*s\": %s",
+                          (int)ebuf->path_len, ebuf->path, why);
+            goto cleanup;
+        }
         outcome_count(&tally, ebuf);
         size_t llen;
         if (entry_serialize(ebuf, wc->line, LINE_CAP, &llen) == -1) goto cleanup;

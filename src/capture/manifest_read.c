@@ -32,6 +32,7 @@
 #define _GNU_SOURCE
 
 #include "belay/manifest.h"
+#include "capture/entry.h"
 #include "belay/path.h"
 #include "belay/error.h"
 #include "belay/hash.h"
@@ -261,11 +262,28 @@ static int check_order(const struct obj *o, const char *const *order, size_t n) 
     return 0;
 }
 
-static const char *const ENTRY_ORDER[] = {
-    "path", "path_b64", "type", "mode", "uid", "gid", "size", "mtime_ns", "ctime_ns",
-    "ino", "dev", "nlink", "iflags", "caps", "xattrs", "xattrs_sha256", "xattrs_unknown", "sha256", "unverified", "unstable", "rdev", "link_target",
-    "link_target_b64", "target_outside_scope", "stored", "mount", "unreadable", "raced"
-};
+/* Entry keys in canonical order: the schema's fields, each followed by its
+ * base64 spelling where it has one. */
+static size_t entry_keys(const char *keys[2 * F_COUNT]) {
+    size_t n = 0;
+    for (size_t f = 0; f < F_COUNT; f++) {
+        keys[n++] = ENTRY_FIELDS[f].name;
+        if (ENTRY_FIELDS[f].alt != NULL) keys[n++] = ENTRY_FIELDS[f].alt;
+    }
+    return n;
+}
+
+static const struct pair *get(const struct obj *o, const char *key);
+
+/* Which schema fields the line carries, by key. */
+static uint32_t present_fields(const struct obj *o) {
+    uint32_t p = 0;
+    for (size_t f = 0; f < F_COUNT; f++)
+        if (get(o, ENTRY_FIELDS[f].name) != NULL ||
+            (ENTRY_FIELDS[f].alt != NULL && get(o, ENTRY_FIELDS[f].alt) != NULL))
+            p |= FBIT(f);
+    return p;
+}
 static const char *const HEADER_ORDER[] = {
     "belay_manifest", "created_ns", "scopes", "scopes_b64", "hash", "hash_max_bytes",
     "store_max_bytes"
@@ -517,15 +535,11 @@ static int parse_extras(const struct obj *o, struct belay_entry *e) {
     if (x != NULL && parse_xattrs(x, e) == -1) return -1;
     char digest[65];
     if (get_hex64(o, "xattrs_sha256", digest, &have_digest) == -1) return -1;
-    if (have_digest) {
-        if (x != NULL) return corrupt("both xattrs and xattrs_sha256");
+    if (have_digest && x == NULL) {         /* both forms: the schema rejects it */
         memcpy(e->xattrs_sha256_hex, digest, sizeof digest);
         e->has_xattrs = true;
     }
-    if (get_flag(o, "xattrs_unknown", &e->xattrs_unknown) == -1) return -1;
-    if (e->xattrs_unknown && (e->has_xattrs || e->has_caps))
-        return corrupt("xattrs_unknown with recorded attributes");
-    return 0;
+    return get_flag(o, "xattrs_unknown", &e->xattrs_unknown);
 }
 
 /* ------------------------------------------------------------------------ */
@@ -576,7 +590,8 @@ static int type_from(const struct pair *p, enum belay_entry_type *t, uint32_t *i
 
 static int parse_entry(const struct obj *o, struct belay_entry *e) {
     memset(e, 0, sizeof *e);
-    if (check_order(o, ENTRY_ORDER, sizeof ENTRY_ORDER / sizeof ENTRY_ORDER[0]) == -1) return -1;
+    const char *keys[2 * F_COUNT];
+    if (check_order(o, keys, entry_keys(keys)) == -1) return -1;
 
     bool have_path;
     if (get_bytes(o, "path", "path_b64", e->path, sizeof e->path, &e->path_len, &have_path) == -1)
@@ -589,6 +604,7 @@ static int parse_entry(const struct obj *o, struct belay_entry *e) {
     if (tp == NULL) return corrupt("entry has no type");
     uint32_t ifmt = 0;
     if (type_from(tp, &e->type, &ifmt) == -1) return -1;
+    (void)ifmt;
 
     if (get_u32(o, "mode", &e->mode) == -1 || get_u32(o, "uid", &e->uid) == -1 ||
         get_u32(o, "gid", &e->gid) == -1 ||
@@ -600,8 +616,6 @@ static int parse_entry(const struct obj *o, struct belay_entry *e) {
         get_i64(o, "ctime_ns", &e->ctime_ns) == -1)
         return -1;
 
-    /* The mode's type bits must agree with the declared type. */
-    if ((e->mode & M_IFMT) != ifmt) return corrupt("mode's type bits disagree with type");
 
     bool have_sha, have_stored, have_target;
     if (get_hex64(o, "sha256", e->sha256_hex, &have_sha) == -1) return -1;
@@ -621,9 +635,6 @@ static int parse_entry(const struct obj *o, struct belay_entry *e) {
     if (get_u64(o, "rdev", false, &e->rdev, &have_rdev) == -1) return -1;
     e->has_rdev = have_rdev;
     if (parse_extras(o, e) == -1) return -1;
-    /* A file capability can only be set on a regular file; a mount point is
-     * never read, so it carries no extended metadata at all. */
-    if (e->has_caps && e->type != BELAY_T_REG) return corrupt("caps on a non-regular file");
 
     if (get_bytes(o, "link_target", "link_target_b64", e->link_target, sizeof e->link_target,
                   &e->link_target_len, &have_target) == -1)
@@ -631,69 +642,8 @@ static int parse_entry(const struct obj *o, struct belay_entry *e) {
     e->has_link_target = have_target;
 
     /* Which fields and flags belong to which types -- exactly the
-     * combinations the writer can produce, and no others. */
-    switch (e->type) {
-    case BELAY_T_REG:
-        /* A hash or "unverified", never both and never neither. */
-        if (e->has_hash == e->unverified)
-            return corrupt(e->has_hash ? "both sha256 and unverified"
-                                       : "regular file with neither sha256 nor unverified");
-        if ((e->unstable || e->unreadable) && !e->unverified)
-            return corrupt("unstable or unreadable file without unverified");
-        if (e->unstable && e->unreadable) return corrupt("file both unstable and unreadable");
-        if (e->is_mount && (e->unstable || e->unreadable)) return corrupt("mounted file with read flags");
-        break;
-    case BELAY_T_DIR:
-        if (e->has_hash || e->unverified || e->has_stored)
-            return corrupt("hash fields on a directory");
-        /* A directory whose listing was recorded and then changed is flagged
-         * unstable; raced is only for one recorded without its listing. */
-        if (e->raced && !e->unreadable && !e->is_mount)
-            return corrupt("raced on a listed directory");
-        /* unreadable: contents absent. unstable: listing changed while read.
-         * mount: not descended. At most one applies. */
-        if ((int)e->unreadable + (int)e->unstable + (int)e->is_mount > 1)
-            return corrupt("directory flags unreadable, unstable and mount are exclusive");
-        break;
-    case BELAY_T_LNK:
-        if (e->has_hash || e->unverified || e->has_stored || e->unstable)
-            return corrupt("file-only fields on a symlink");
-        break;
-    default:   /* fifo, socket, block and character devices: nothing is read */
-        if (e->has_hash || e->unverified || e->has_stored || e->unstable || e->unreadable)
-            return corrupt("read flags on a node that is never read");
-        break;
-    }
-    if (e->has_stored && (!e->has_hash || strcmp(e->stored_hex, e->sha256_hex) != 0))
-        return corrupt("stored key does not match sha256");
-
-    const bool is_dev = (e->type == BELAY_T_BLK || e->type == BELAY_T_CHR);
-    if (is_dev != e->has_rdev)
-        return corrupt(is_dev ? "device without rdev" : "rdev on a non-device");
-
-    if ((e->type == BELAY_T_LNK) != e->has_link_target)
-        return corrupt(e->has_link_target ? "non-symlink with a link target"
-                                          : "symlink without a target");
-    if (e->target_outside_scope && e->type != BELAY_T_LNK)
-        return corrupt("target_outside_scope on a non-symlink");
-    /* A symlink's size is its target's length; the writer re-stats the link
-     * after reading it to guarantee the two belong together. An unreadable
-     * link is the exception: its target could not be read reliably, and an
-     * empty target (which no real symlink has) means "unknown". */
-    if (e->type == BELAY_T_LNK && !e->unreadable) {
-        if (e->link_target_len == 0) return corrupt("symlink with an empty target");
-        if (e->size != e->link_target_len)
-            return corrupt("symlink size disagrees with its target's length");
-    }
-    if (e->target_outside_scope && e->link_target_len == 0)
-        return corrupt("target_outside_scope on an unknown target");
-
-    /* A mount point is recorded, never read: no hash on a mounted file, and
-     * no extended metadata. */
-    if (e->is_mount && e->has_hash) return corrupt("hash on a mount point");
-    if (e->is_mount && (e->has_iflags || e->has_caps || e->has_xattrs || e->xattrs_unknown))
-        return corrupt("extended metadata on a mount point");
-    return 0;
+     * combinations the writer can produce, and no others: the schema. */
+    return entry_check(e, present_fields(o));
 }
 
 static int parse_header(const struct obj *o, struct belay_manifest_header *h) {
@@ -771,34 +721,6 @@ static int parse_header(const struct obj *o, struct belay_manifest_header *h) {
  *  and scanning the list made 40k sealed directories take 1.9 s.)
  */
 #define SEALED_MAX 4096     /* > the longest path, so the stack cannot fill */
-
-/*
- *  Rules that need the header. The writer hashes a regular file exactly when
- *  its size is within hash_max_bytes and nothing else prevents it, and it
- *  computes target_outside_scope from the scope with one shared function, so
- *  both are checked rather than taken on trust: otherwise one state would have
- *  two encodings (review round 3, F7).
- */
-static int check_against_header(const struct belay_manifest_header *h,
-                                 const struct belay_entry *e) {
-    if (e->type == BELAY_T_REG) {
-        if (e->has_hash && e->size > h->hash_max_bytes)
-            return corrupt("hash on a file larger than hash_max_bytes");
-        if (e->unverified && !e->unstable && !e->unreadable && !e->is_mount &&
-            e->size <= h->hash_max_bytes)
-            return corrupt("unverified file within hash_max_bytes, with no reason");
-    }
-    if (e->type == BELAY_T_LNK) {
-        /* An unreadable link's target is unknown or stale: never annotated. */
-        const bool want = !e->unreadable &&
-            belay_link_target_outside(h->scope, e->path, e->path_len,
-                                      e->link_target, e->link_target_len);
-        if (e->target_outside_scope != want)
-            return corrupt(want ? "target_outside_scope missing on a link leaving the scope"
-                                : "target_outside_scope on a link that stays in the scope");
-    }
-    return 0;
-}
 
 struct belay_manifest_reader {
     FILE  *f;
@@ -998,7 +920,7 @@ int belay_manifest_next(struct belay_manifest_reader *r, struct belay_entry *e) 
     }
 
     if (parse_entry(&o, e) == -1) return fail(r);
-    if (check_against_header(&r->header, e) == -1) return fail(r);
+    if (entry_check_header(&r->header, e) == -1) return fail(r);
 
     /* Strictly increasing raw-path order: the comparator merges two
      * manifests and would mis-pair out-of-order or duplicated entries. */

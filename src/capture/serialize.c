@@ -2,6 +2,7 @@
  *  One entry as one canonical NDJSON line (manifest format v1).
  */
 #include "serialize.h"
+#include "entry.h"
 
 #include "belay/error.h"
 #include "belay/json.h"
@@ -50,50 +51,45 @@ static const char *type_name(enum belay_entry_type t) {
     }
 }
 
-/* One entry as one NDJSON line, newline included. */
+/* One field, key included. Fields are encoded in the schema's order
+ * (entry.c); byte strings use their base64 spelling when not UTF-8. */
+static int put_field(const struct belay_entry *e, enum entry_field f, char *buf, size_t cap,
+                     size_t *w) {
+    const char *k = ENTRY_FIELDS[f].name, *alt = ENTRY_FIELDS[f].alt;
+    switch (f) {
+    case F_PATH:   return ap_bytes(buf, cap, w, k, alt, e->path, e->path_len);
+    case F_LINK_TARGET:
+        return ap_bytes(buf, cap, w, k, alt, e->link_target, e->link_target_len);
+    case F_TYPE:   return ap(buf, cap, w, "\"%s\":\"%s\"", k, type_name(e->type));
+    case F_MODE:   return ap(buf, cap, w, "\"%s\":%u", k, e->mode);
+    case F_UID:    return ap(buf, cap, w, "\"%s\":%u", k, e->uid);
+    case F_GID:    return ap(buf, cap, w, "\"%s\":%u", k, e->gid);
+    case F_SIZE:   return ap(buf, cap, w, "\"%s\":%llu", k, (unsigned long long)e->size);
+    case F_MTIME:  return ap(buf, cap, w, "\"%s\":%lld", k, (long long)e->mtime_ns);
+    case F_CTIME:  return ap(buf, cap, w, "\"%s\":%lld", k, (long long)e->ctime_ns);
+    case F_INO:    return ap(buf, cap, w, "\"%s\":%llu", k, (unsigned long long)e->ino);
+    case F_DEV:    return ap(buf, cap, w, "\"%s\":%llu", k, (unsigned long long)e->dev);
+    case F_NLINK:  return ap(buf, cap, w, "\"%s\":%llu", k, (unsigned long long)e->nlink);
+    case F_IFLAGS: return ap(buf, cap, w, "\"%s\":%llu", k, (unsigned long long)e->iflags);
+    case F_RDEV:   return ap(buf, cap, w, "\"%s\":%llu", k, (unsigned long long)e->rdev);
+    case F_CAPS:   return ap(buf, cap, w, "\"%s\":\"%s\"", k, e->caps_hex);
+    case F_XATTRS: return ap(buf, cap, w, "\"%s\":[%s]", k, e->xattrs);
+    case F_XATTRS_SHA256: return ap(buf, cap, w, "\"%s\":\"%s\"", k, e->xattrs_sha256_hex);
+    case F_SHA256: return ap(buf, cap, w, "\"%s\":\"%s\"", k, e->sha256_hex);
+    case F_STORED: return ap(buf, cap, w, "\"%s\":\"%s\"", k, e->stored_hex);
+    default:       return ap(buf, cap, w, "\"%s\":true", k);   /* the flags */
+    }
+}
+
 int entry_serialize(const struct belay_entry *e, char *buf, size_t cap, size_t *len) {
+    const uint32_t present = entry_present(e);
     size_t w = 0;
     if (ap(buf, cap, &w, "{") == -1) return -1;
-    if (ap_bytes(buf, cap, &w, "path", "path_b64", e->path, e->path_len) == -1) return -1;
-
-    if (ap(buf, cap, &w,
-           ",\"type\":\"%s\",\"mode\":%u,\"uid\":%u,\"gid\":%u"
-           ",\"size\":%llu,\"mtime_ns\":%lld,\"ctime_ns\":%lld"
-           ",\"ino\":%llu,\"dev\":%llu,\"nlink\":%llu",
-           type_name(e->type), e->mode, e->uid, e->gid,
-           (unsigned long long)e->size, (long long)e->mtime_ns, (long long)e->ctime_ns,
-           (unsigned long long)e->ino, (unsigned long long)e->dev,
-           (unsigned long long)e->nlink) == -1) return -1;
-
-    if (e->has_iflags &&
-        ap(buf, cap, &w, ",\"iflags\":%llu", (unsigned long long)e->iflags) == -1) return -1;
-    if (e->has_caps && ap(buf, cap, &w, ",\"caps\":\"%s\"", e->caps_hex) == -1) return -1;
-    if (e->has_xattrs) {
-        if (e->xattrs_inline ? ap(buf, cap, &w, ",\"xattrs\":[%s]", e->xattrs)
-                             : ap(buf, cap, &w, ",\"xattrs_sha256\":\"%s\"", e->xattrs_sha256_hex))
-            return -1;
+    for (int f = 0; f < F_COUNT; f++) {
+        if (!(present & FBIT(f))) continue;
+        if (f > 0 && ap(buf, cap, &w, ",") == -1) return -1;
+        if (put_field(e, (enum entry_field)f, buf, cap, &w) == -1) return -1;
     }
-    if (e->xattrs_unknown && ap(buf, cap, &w, ",\"xattrs_unknown\":true") == -1) return -1;
-
-    if (e->has_hash && ap(buf, cap, &w, ",\"sha256\":\"%s\"", e->sha256_hex) == -1) return -1;
-    if (e->unverified && ap(buf, cap, &w, ",\"unverified\":true") == -1) return -1;
-    if (e->unstable && ap(buf, cap, &w, ",\"unstable\":true") == -1) return -1;
-    if (e->has_rdev &&
-        ap(buf, cap, &w, ",\"rdev\":%llu", (unsigned long long)e->rdev) == -1) return -1;
-
-    if (e->has_link_target) {
-        if (ap(buf, cap, &w, ",") == -1) return -1;
-        if (ap_bytes(buf, cap, &w, "link_target", "link_target_b64",
-                     e->link_target, e->link_target_len) == -1) return -1;
-        if (e->target_outside_scope &&
-            ap(buf, cap, &w, ",\"target_outside_scope\":true") == -1) return -1;
-    }
-
-    if (e->has_stored && ap(buf, cap, &w, ",\"stored\":\"%s\"", e->stored_hex) == -1) return -1;
-    if (e->is_mount && ap(buf, cap, &w, ",\"mount\":true") == -1) return -1;
-    if (e->unreadable && ap(buf, cap, &w, ",\"unreadable\":true") == -1) return -1;
-    if (e->raced && ap(buf, cap, &w, ",\"raced\":true") == -1) return -1;
-
     if (ap(buf, cap, &w, "}\n") == -1) return -1;
     *len = w;
     return 0;
