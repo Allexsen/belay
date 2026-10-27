@@ -63,7 +63,10 @@ static void *mutator(void *arg) {
          * mutations fully, partly, or not at all -- the partial overlaps are
          * where a walk could be fooled into a clean claim. */
         if (burst-- <= 0) {
-            usleep((useconds_t)(rand_r(&seed) % 8000));
+            /* Now and then a long quiet window, so checks on slow filesystems
+             * (NFS: every check overlapped a burst, so none could claim a
+             * clean walk and the main assertion never ran) get some too. */
+            usleep((useconds_t)(rand_r(&seed) % 40 == 0 ? 300000 : rand_r(&seed) % 8000));
             burst = (int)(rand_r(&seed) % 40);
         }
         const int f = (int)(rand_r(&seed) % FILES);
