@@ -77,36 +77,38 @@ owner is invisible.
 {"path":"src/main.c","type":"reg","mode":33188,"uid":1000,"gid":1000,"size":1234,"mtime_ns":1760...,"ctime_ns":1760...,"ino":8612,"dev":2096,"nlink":1,"sha256":"e3b0...","stored":"e3b0..."}
 ```
 
-The table describes each field; where it and the generated rules under "Field rules a reader MUST
-enforce" differ, the rules are normative.
+<!-- BEGIN GENERATED: entries -->
+<!-- From src/capture/entry.c by tools/gen_schema.c. Edit there, then `make gen`. -->
 
-| field | type | present when | meaning |
+| field | kind | carried by | meaning |
 |---|---|---|---|
-| `path` | string | always, unless `path_b64` | path relative to its scope root, `/`-separated |
-| `path_b64` | string | instead of `path` | base64 of the raw path bytes, when they are not valid UTF-8 |
-| `type` | string | always | `reg` `dir` `lnk` `fifo` `sock` `blk` `chr` |
-| `mode` | int | always | `st_mode`, full value including type bits |
-| `uid`, `gid` | int | always | owner |
-| `size` | int | always | `st_size`. For `lnk`, the target length -- except on an `unreadable` link, whose target is unknown or stale. |
-| `mtime_ns`, `ctime_ns` | int | always | nanosecond timestamps. **`ctime_ns` is the change prefilter**: an unprivileged process can set mtime but not ctime (§6.3). Never the sole evidence for a protected path — hash those. Times outside the int64 range (before 1678, after 2262) saturate at its bounds. |
-| `ino`, `dev` | int | always | identity. On a directory, `dev` differing from the scope root's means a mount boundary; on other types it need not (see `mount`). |
-| `nlink` | int | always | link count. `> 1` on a regular file means hard links exist. |
-| `iflags` | int | where the filesystem has inode flags | Linux: `FS_IOC_GETFLAGS` (`chattr`: immutable, append-only, nodump...), on regular files and directories. macOS: `st_flags` (`chflags`), on every type. Absent on a mount point. |
-| `caps` | string | `reg` with a file capability | the raw `security.capability` value, lowercase hex. `setcap` on an interpreter is a privilege change; this is where it shows. |
-| `xattrs` | array | when the entry has extended attributes | one string per attribute other than `security.capability`, `"<name>=<sha256 of value>"`, sorted strictly by name bytes. POSIX ACLs appear here as `system.posix_acl_access` / `system.posix_acl_default`. A name is written as itself when it is printable ASCII without `"`, `\` or `=` and does not start `x:`; otherwise as `x:` followed by its bytes in hex. At most 8192 bytes of array body; a larger set is recorded as `xattrs_sha256` instead. |
-| `xattrs_sha256` | string | instead of `xattrs`, for a large set | the sha256 of the array body that `xattrs` would have held, so a set recorded inline in one manifest and by digest in another still compares. |
-| `xattrs_unknown` | bool | when the attributes could not be read | `true`. Excludes `xattrs`, `xattrs_sha256` and `caps`: an absent field means "none", so failing to read must say so. `diff` reports the entry's metadata as `unknown`, never unchanged. |
-| `sha256` | string | `reg`, size ≤ `hash_max_bytes`, read in one stable pass | lowercase hex content digest |
-| `unverified` | bool | `reg` without a hash | `true`. No hash is recorded: the file is larger than `hash_max_bytes`, or it is also flagged `unstable`, `unreadable` or `mount`, which say why. `diff` must report any change to it as **modified (unverified)**, never as unchanged. |
-| `link_target` | string | `lnk` | the link's bytes, verbatim and unresolved |
-| `link_target_b64` | string | `lnk`, non-UTF-8 | base64 of the target bytes |
-| `target_outside_scope` | bool | `lnk`, advisory | `true` when the target resolves lexically outside the scope. **Advisory only** — never drives a decision (§5.1.1). |
-| `unstable` | bool | `reg` (with `unverified`) or `dir` | `true`. On a regular file: it changed while being read (size, mtime or ctime moved, or the inode opened was not the one stat'ed); no hash is recorded, because the bytes read describe no state the file ever had. On a directory: **its listing is not a complete, single-instant listing** -- it changed during the walk (its ctime lies between the walk's start and the moment belay reached it; its mtime or ctime moved between its stat and the end of its subtree's walk; or the end-of-walk re-check found it changed since it was recorded), or the listing failed part way (it could not be read as a directory stream, a `readdir` error, a child that could not be stat'ed at all, or a child name too long to fit the path limit). Entries may be missing from it or recorded under another directory; the comparator MUST NOT read its children as a complete listing. |
-| `rdev` | int | `blk` and `chr` only, required | the device number. Without it a replaced device node, or an overlayfs whiteout (char 0,0), is indistinguishable from the original. A reader MUST reject a device without `rdev` and `rdev` on anything else. |
-| `stored` | string | when content was copied | the `store/` key, which is the content's sha256 |
-| `mount` | bool | any type, at a boundary | `true`. The entry is the root of another mount. Where statx can say so (`STATX_ATTR_MOUNT_ROOT`, Linux 5.8+), its answer is used alone: it catches bind mounts from the same filesystem, and it does not mistake a btrfs subvolume (a directory with its own `dev`, not a mount) for one. Without it, an entry whose `dev` differs from the scope root's is a mount -- except a non-directory in an overlayfs scope, where every file carries its layer's device. A mount is recorded and **never read or descended** (§5.1.1): a mounted regular file carries `unverified` and no hash, and **for a directory the subtree below it is ABSENT**: `diff` MUST report it as *not captured*, never as *unchanged*. |
-| `unreadable` | bool | when capture failed for this entry | `true`. belay could not capture this entry's contents: a directory it could not open or search (permission, or readable-but-not-searchable), a directory swapped for another between its stat and its open, a directory beyond the depth limit (128) or whose path leaves no room for a child name, a file it could not open or read, or a symlink whose target could not be read or kept changing while being read. **For a directory, the entire subtree below it is ABSENT.** `diff` MUST report such a subtree as *contents unknown* and never as *unchanged*. Without this field an unreadable directory is byte-identical to an empty one. |
-| `raced` | bool | any type except a listed directory | `true`. The entry changed after it was recorded, before the walk ended: re-stat'ed at the end of the walk, its inode, mode, size, mtime or ctime differed, or it could not be reached. What is recorded held when belay read it, but not at the end. (A listed directory that changed is flagged `unstable` instead, since its listing is what no longer holds; `raced` appears on a directory only when it is `unreadable` or a `mount`.) |
+| `path` / `path_b64` | string | every entry | Path relative to its scope root, `/`-separated; `.` is the root itself. Written as `path_b64`, base64 of the raw bytes, when they are not valid UTF-8. |
+| `type` | string | every entry | The entry's type. The spellings, and the `mode` bits that go with each, are listed under the field rules. |
+| `mode` | int | every entry | `st_mode`, full value including type bits. |
+| `uid` | int | every entry | Owner. |
+| `gid` | int | every entry | Group. |
+| `size` | int | every entry | `st_size`. For `lnk`, the target length -- except on an `unreadable` link, whose target is unknown or stale. |
+| `mtime_ns` | int | every entry | Modification time, nanoseconds. Times outside the int64 range (before 1678, after 2262) saturate at its bounds. |
+| `ctime_ns` | int | every entry | Change time, nanoseconds, saturating like `mtime_ns`. **`ctime_ns` is the change prefilter**: an unprivileged process can set mtime but not ctime (§6.3). Never the sole evidence for a protected path — hash those. |
+| `ino` | int | every entry | Inode number; with `dev`, the entry's identity. |
+| `dev` | int | every entry | Device. On a directory, `dev` differing from the scope root's means a mount boundary; on other types it need not (see `mount`). |
+| `nlink` | int | every entry | Link count. `> 1` on a regular file means hard links exist. |
+| `iflags` | int | any type | Inode flags, where the filesystem has them. Linux: `FS_IOC_GETFLAGS` (`chattr`: immutable, append-only, nodump...), on regular files and directories. macOS: `st_flags` (`chflags`), on every type. |
+| `caps` | string | `reg` | The file capability: the raw `security.capability` value, lowercase hex. `setcap` on an interpreter is a privilege change; this is where it shows. |
+| `xattrs` | array | any type | One string per extended attribute other than `security.capability`, `"<name>=<sha256 of value>"`, sorted strictly by name bytes; absent when there are none. POSIX ACLs appear here as `system.posix_acl_access` / `system.posix_acl_default`. A name is written as itself when it is printable ASCII without `"`, `\` or `=` and does not start `x:`; otherwise as `x:` followed by its bytes in hex. At most 8192 bytes of array body; a larger set is recorded as `xattrs_sha256` instead. |
+| `xattrs_sha256` | string | any type | For a set too large for `xattrs`: the sha256 of the array body `xattrs` would have held, so a set recorded inline in one manifest and by digest in another still compares. |
+| `xattrs_unknown` | bool | any type | `true`: the attributes could not be read. An absent `xattrs` means "none", so failing to read must say so. `diff` reports the entry's metadata as `unknown`, never unchanged. |
+| `sha256` | string | `reg` | Lowercase hex content digest, of a file within `hash_max_bytes` read in one stable pass (see "What a hash, and a stored copy, prove"). |
+| `unverified` | bool | `reg` | `true`: no hash is recorded. The file is larger than `hash_max_bytes`, or it is also flagged `unstable`, `unreadable` or `mount`, which say why. `diff` must report any change to it as **modified (unverified)**, never as unchanged. |
+| `unstable` | bool | `reg`, `dir` | `true`. On a regular file: it changed while being read (size, mtime or ctime moved, or the inode opened was not the one stat'ed); no hash is recorded, because the bytes read describe no state the file ever had. On a directory: **its listing is not a complete, single-instant listing** -- it changed during the walk (its ctime lies between the walk's start and the moment belay reached it; its mtime or ctime moved between its stat and the end of its subtree's walk; or the end-of-walk re-check found it changed since it was recorded), or the listing failed part way (it could not be read as a directory stream, a `readdir` error, a child that could not be stat'ed at all, or a child name too long to fit the path limit). Entries may be missing from it or recorded under another directory; the comparator MUST NOT read its children as a complete listing. |
+| `rdev` | int | every `blk`, `chr` | The device number. Without it a replaced device node, or an overlayfs whiteout (char 0,0), is indistinguishable from the original. |
+| `link_target` / `link_target_b64` | string | every `lnk` | The link's bytes, verbatim and unresolved; `link_target_b64`, base64, when they are not valid UTF-8. Empty only on an `unreadable` link, meaning the target is unknown. |
+| `target_outside_scope` | bool | `lnk` | `true` when the target resolves lexically outside the scope. **Advisory only** — never drives a decision (§5.1.1). |
+| `stored` | string | `reg` | Present when content was copied: the `store/` key, which is the content's sha256. |
+| `mount` | bool | any type | `true`. The entry is the root of another mount. Where statx can say so (`STATX_ATTR_MOUNT_ROOT`, Linux 5.8+), its answer is used alone: it catches bind mounts from the same filesystem, and it does not mistake a btrfs subvolume (a directory with its own `dev`, not a mount) for one. Without it, an entry whose `dev` differs from the scope root's is a mount -- except a non-directory in an overlayfs scope, where every file carries its layer's device. A mount is recorded and **never read or descended** (§5.1.1): a mounted regular file carries `unverified` and no hash, and **for a directory the subtree below it is ABSENT**: `diff` MUST report it as *not captured*, never as *unchanged*. |
+| `unreadable` | bool | `reg`, `dir`, `lnk` | `true`. belay could not capture this entry's contents: a directory it could not open or search (permission, or readable-but-not-searchable), a directory swapped for another between its stat and its open, a directory beyond the depth limit (128) or whose path leaves no room for a child name, a file it could not open or read, or a symlink whose target could not be read or kept changing while being read. **For a directory, the entire subtree below it is ABSENT.** `diff` MUST report such a subtree as *contents unknown* and never as *unchanged*. Without this field an unreadable directory is byte-identical to an empty one. |
+| `raced` | bool | any type | `true`. The entry changed after it was recorded, before the walk ended: re-stat'ed at the end of the walk, its inode, mode, size, mtime or ctime differed, or it could not be reached. What is recorded held when belay read it, but not at the end. (A listed directory that changed is flagged `unstable` instead, since its listing is what no longer holds.) |
+<!-- END GENERATED: entries -->
 
 ### Field rules a reader MUST enforce
 
@@ -145,39 +147,7 @@ an empty target, so it cannot be confused with one.
   `nlink`, `iflags`, `caps`, `xattrs`, `xattrs_sha256`, `xattrs_unknown`, `sha256`, `unverified`,
   `unstable`, `rdev`, `link_target`|`link_target_b64`, `target_outside_scope`, `stored`, `mount`,
   `unreadable`, `raced`.
-- **Which type carries which field.** `●` on every entry of that type, `○` may appear
-  (subject to the rules below), blank never:
-
-  | field | kind | `reg` | `dir` | `lnk` | `fifo` | `sock` | `blk` | `chr` | meaning |
-  |---|---|:-:|:-:|:-:|:-:|:-:|:-:|:-:|---|
-  | `path` / `path_b64` | string | ● | ● | ● | ● | ● | ● | ● | relative to the scope root; `.` is the root itself |
-  | `type` | string | ● | ● | ● | ● | ● | ● | ● | `reg`, `dir`, `lnk`, `fifo`, `sock`, `blk`, `chr` |
-  | `mode` | int | ● | ● | ● | ● | ● | ● | ● | `st_mode`, type bits included |
-  | `uid` | int | ● | ● | ● | ● | ● | ● | ● | owner |
-  | `gid` | int | ● | ● | ● | ● | ● | ● | ● | group |
-  | `size` | int | ● | ● | ● | ● | ● | ● | ● | `st_size`; for `lnk`, the target length |
-  | `mtime_ns` | int | ● | ● | ● | ● | ● | ● | ● | modification time, nanoseconds |
-  | `ctime_ns` | int | ● | ● | ● | ● | ● | ● | ● | change time, nanoseconds |
-  | `ino` | int | ● | ● | ● | ● | ● | ● | ● | inode number |
-  | `dev` | int | ● | ● | ● | ● | ● | ● | ● | device |
-  | `nlink` | int | ● | ● | ● | ● | ● | ● | ● | link count |
-  | `iflags` | int | ○ | ○ | ○ | ○ | ○ | ○ | ○ | inode flags (`chattr`, `chflags`) |
-  | `caps` | string | ○ |  |  |  |  |  |  | the raw `security.capability` value, hex |
-  | `xattrs` | array | ○ | ○ | ○ | ○ | ○ | ○ | ○ | `name=<sha256 of value>` per attribute, sorted by name |
-  | `xattrs_sha256` | string | ○ | ○ | ○ | ○ | ○ | ○ | ○ | digest of the `xattrs` body, for a set too large to inline |
-  | `xattrs_unknown` | bool | ○ | ○ | ○ | ○ | ○ | ○ | ○ | the attributes could not be read |
-  | `sha256` | string | ○ |  |  |  |  |  |  | content digest, lowercase hex |
-  | `unverified` | bool | ○ |  |  |  |  |  |  | no hash recorded |
-  | `unstable` | bool | ○ | ○ |  |  |  |  |  | changed while being read; a directory's listing is incomplete |
-  | `rdev` | int |  |  |  |  |  | ● | ● | device number of a device node |
-  | `link_target` / `link_target_b64` | string |  |  | ● |  |  |  |  | the symlink's target, verbatim; empty means unknown |
-  | `target_outside_scope` | bool |  |  | ○ |  |  |  |  | advisory: the target leaves the scope lexically |
-  | `stored` | string | ○ |  |  |  |  |  |  | the store key, equal to `sha256` |
-  | `mount` | bool | ○ | ○ | ○ | ○ | ○ | ○ | ○ | a mount root: recorded, never read |
-  | `unreadable` | bool | ○ | ○ | ○ |  |  |  |  | contents could not be captured |
-  | `raced` | bool | ○ | ○ | ○ | ○ | ○ | ○ | ○ | changed after it was recorded, before the walk ended |
-
-  `type`, and the type bits of `mode` (`S_IFMT`, octal) that go with it:
+- **`type` is one of these, and `mode`'s type bits (`S_IFMT`, octal) match it:**
   `reg` 100000, `dir` 040000, `lnk` 120000, `fifo` 010000, `sock` 140000, `blk` 060000, `chr`
   020000.
 - **Types, fields and flags agree** -- exactly the combinations the writer produces.

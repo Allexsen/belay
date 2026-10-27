@@ -2,9 +2,10 @@
  *  Generates, from the entry schema (src/capture/entry.c), the two artifacts
  *  that would otherwise restate it by hand:
  *
- *    gen_schema spec <file>   <file> with the block between the markers
- *                             replaced by the field order, the field/type
- *                             table and the rules (docs/spec/manifest-v1.md)
+ *    gen_schema spec <file>   <file> with each generated block replaced
+ *                             (docs/spec/manifest-v1.md): "entries", the
+ *                             Entries table; "schema", the field order, the
+ *                             types and the rules
  *    gen_schema fuzz          the fuzz target's schema invariants, as
  *                             straight-line checks (test/fuzz/fuzz_invariants.gen.h)
  *
@@ -17,8 +18,9 @@
 #include <stdlib.h>
 #include <string.h>
 
-#define BEGIN_MARK "<!-- BEGIN GENERATED: schema -->"
-#define END_MARK   "<!-- END GENERATED: schema -->"
+#define BEGIN_MARK "<!-- BEGIN GENERATED: "
+#define END_MARK   "<!-- END GENERATED: "
+#define MARK_TAIL  " -->"
 #define WIDTH      100
 
 /* ------------------------------------------------------------------------ */
@@ -95,12 +97,40 @@ static unsigned required_on(int f) {
     return 0;
 }
 
-static void spec_block(void) {
+/* Which types carry field `f`, in words, from the rules. */
+static void carried_by(char *out, size_t cap, int f) {
+    const unsigned on = allowed_on(f), req = required_on(f);
+    char ty[128];
+    if (req == T_ALL) {
+        snprintf(out, cap, "every entry");
+    } else if (req != 0) {
+        if (on & ~req) abort();     /* required on some types, optional on others: say how */
+        type_names(ty, sizeof ty, req, "`, `");
+        snprintf(out, cap, "every `%s`", ty);
+    } else if (on == T_ALL) {
+        snprintf(out, cap, "any type");
+    } else {
+        type_names(ty, sizeof ty, on, "`, `");
+        snprintf(out, cap, "`%s`", ty);
+    }
+}
+
+static void entries_block(void) {
+    printf("| field | kind | carried by | meaning |\n|---|---|---|---|\n");
+    for (int f = 0; f < F_COUNT; f++) {
+        const struct entry_field_def *d = &ENTRY_FIELDS[f];
+        char by[160];
+        if (strchr(d->description, '|') != NULL || strchr(d->description, '\n') != NULL)
+            abort();                /* would break the table row */
+        carried_by(by, sizeof by, f);
+        printf("| `%s`%s%s%s | %s | %s | %s |\n", d->name, d->alt ? " / `" : "",
+               d->alt ? d->alt : "", d->alt ? "`" : "", d->kind, by, d->description);
+    }
+}
+
+static void schema_block(void) {
     char buf[1024];
     size_t n = 0;
-
-    printf("%s\n", BEGIN_MARK);
-    printf("<!-- From src/capture/entry.c by tools/gen_schema.c. Edit there, then `make gen`. -->\n\n");
 
     for (int f = 0; f < F_COUNT; f++) {
         const struct entry_field_def *d = &ENTRY_FIELDS[f];
@@ -112,29 +142,12 @@ static void spec_block(void) {
          "reordered (`a`|`b`: one spelling or the other, never both):", 2);
     wrap("  ", buf, 2);
 
-    printf("- **Which type carries which field.** `●` on every entry of that type, `○` may "
-           "appear\n  (subject to the rules below), blank never:\n\n");
-    printf("  | field | kind |");
-    for (int t = 0; t < ENTRY_TYPE_COUNT; t++) printf(" `%s` |", ENTRY_TYPES[t].name);
-    printf(" meaning |\n  |---|---|");
-    for (int t = 0; t < ENTRY_TYPE_COUNT; t++) printf(":-:|");
-    printf("---|\n");
-    for (int f = 0; f < F_COUNT; f++) {
-        const struct entry_field_def *d = &ENTRY_FIELDS[f];
-        const unsigned on = allowed_on(f), req = required_on(f);
-        printf("  | `%s`%s%s%s | %s |", d->name, d->alt ? " / `" : "", d->alt ? d->alt : "",
-               d->alt ? "`" : "", d->kind);
-        for (int t = 0; t < ENTRY_TYPE_COUNT; t++)
-            printf(" %s |", (req & TBIT(t)) ? "●" : (on & TBIT(t)) ? "○" : "");
-        printf(" %s |\n", d->doc);
-    }
     n = 0;
     for (int t = 0; t < ENTRY_TYPE_COUNT; t++)
         n += (size_t)snprintf(buf + n, sizeof buf - n, "%s`%s` %06o", t ? ", " : "",
                               ENTRY_TYPES[t].name, ENTRY_TYPES[t].ifmt);
     n += (size_t)snprintf(buf + n, sizeof buf - n, ".");
-    printf("\n");
-    wrap("  ", "`type`, and the type bits of `mode` (`S_IFMT`, octal) that go with it:", 2);
+    wrap("- ", "**`type` is one of these, and `mode`'s type bits (`S_IFMT`, octal) match it:**", 2);
     wrap("  ", buf, 2);
 
     printf("- **Types, fields and flags agree** -- exactly the combinations the writer produces.\n"
@@ -150,30 +163,65 @@ static void spec_block(void) {
         snprintf(lead, sizeof lead, "  %zu. ", i + 1);
         wrap(lead, ENTRY_HEADER_RULES[i].doc, (int)strlen(lead));
     }
-    printf("%s\n", END_MARK);
 }
 
+static const struct { const char *name; void (*emit)(void); } BLOCKS[] = {
+    { "entries", entries_block },
+    { "schema", schema_block },
+};
+#define NBLOCKS (sizeof BLOCKS / sizeof BLOCKS[0])
+
+/* The block a marker line names, or -1. */
+static int marker(const char *line, const char *mark) {
+    if (strncmp(line, mark, strlen(mark)) != 0) return -1;
+    const char *name = line + strlen(mark);
+    for (size_t i = 0; i < NBLOCKS; i++) {
+        const size_t len = strlen(BLOCKS[i].name);
+        if (strncmp(name, BLOCKS[i].name, len) == 0 &&
+            strncmp(name + len, MARK_TAIL, strlen(MARK_TAIL)) == 0)
+            return (int)i;
+    }
+    return -1;
+}
+
+/* Copies `path` to stdout with every block regenerated. Each block must
+ * appear exactly once, so a lost marker is an error, not a silent no-op. */
 static int spec(const char *path) {
     FILE *f = fopen(path, "r");
     if (f == NULL) { perror(path); return 1; }
     char line[4096];
-    int state = 0;              /* 0 before, 1 inside, 2 after the block */
+    int inside = -1, seen[NBLOCKS] = { 0 }, bad = 0;
     while (fgets(line, sizeof line, f) != NULL) {
-        if (state == 0 && strncmp(line, BEGIN_MARK, strlen(BEGIN_MARK)) == 0) {
-            spec_block();
-            state = 1;
-        } else if (state == 1) {
-            if (strncmp(line, END_MARK, strlen(END_MARK)) == 0) state = 2;
+        int b;
+        if (inside == -1 && (b = marker(line, BEGIN_MARK)) != -1) {
+            fputs(line, stdout);
+            printf("<!-- From src/capture/entry.c by tools/gen_schema.c. "
+                   "Edit there, then `make gen`. -->\n\n");
+            BLOCKS[b].emit();
+            seen[b]++;
+            inside = b;
+        } else if (inside != -1) {
+            if (marker(line, END_MARK) == inside) {
+                fputs(line, stdout);
+                inside = -1;
+            }
         } else {
             fputs(line, stdout);
         }
     }
     fclose(f);
-    if (state != 2) {
-        fprintf(stderr, "%s: no complete %s ... %s block\n", path, BEGIN_MARK, END_MARK);
+    if (inside != -1) {
+        fprintf(stderr, "%s: block \"%s\" has no end marker\n", path, BLOCKS[inside].name);
         return 1;
     }
-    return 0;
+    for (size_t i = 0; i < NBLOCKS; i++) {
+        if (seen[i] != 1) {
+            fprintf(stderr, "%s: block \"%s\" appears %d times, want 1\n", path,
+                    BLOCKS[i].name, seen[i]);
+            bad = 1;
+        }
+    }
+    return bad;
 }
 
 /* ------------------------------------------------------------------------ */

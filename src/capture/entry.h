@@ -52,7 +52,7 @@ struct entry_field_def {
     const char *alt;            /* base64 spelling, or NULL */
     const char *kind;           /* "string", "int", "bool", "array" */
     bool required;              /* on every entry */
-    const char *doc;            /* for the generated spec */
+    const char *description;    /* the spec's Entries table (generated) */
 };
 extern const struct entry_field_def ENTRY_FIELDS[F_COUNT];
 

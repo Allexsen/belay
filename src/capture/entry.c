@@ -16,42 +16,112 @@ const struct entry_type_def ENTRY_TYPES[ENTRY_TYPE_COUNT] = {
     [BELAY_T_CHR]  = { "chr",  0020000u },
 };
 
+/* Each description is the field's row in the spec's Entries table. Which
+ * types carry it is derived from the rules; don't restate them here. */
 const struct entry_field_def ENTRY_FIELDS[F_COUNT] = {
-    [F_PATH]   = { "path", "path_b64", "string", true,
-                   "relative to the scope root; `.` is the root itself" },
-    [F_TYPE]   = { "type", NULL, "string", true,
-                   "`reg`, `dir`, `lnk`, `fifo`, `sock`, `blk`, `chr`" },
-    [F_MODE]   = { "mode", NULL, "int", true, "`st_mode`, type bits included" },
-    [F_UID]    = { "uid", NULL, "int", true, "owner" },
-    [F_GID]    = { "gid", NULL, "int", true, "group" },
-    [F_SIZE]   = { "size", NULL, "int", true, "`st_size`; for `lnk`, the target length" },
-    [F_MTIME]  = { "mtime_ns", NULL, "int", true, "modification time, nanoseconds" },
-    [F_CTIME]  = { "ctime_ns", NULL, "int", true, "change time, nanoseconds" },
-    [F_INO]    = { "ino", NULL, "int", true, "inode number" },
-    [F_DEV]    = { "dev", NULL, "int", true, "device" },
-    [F_NLINK]  = { "nlink", NULL, "int", true, "link count" },
-    [F_IFLAGS] = { "iflags", NULL, "int", false, "inode flags (`chattr`, `chflags`)" },
-    [F_CAPS]   = { "caps", NULL, "string", false, "the raw `security.capability` value, hex" },
+    [F_PATH] = { "path", "path_b64", "string", true,
+        "Path relative to its scope root, `/`-separated; `.` is the root itself. Written as "
+        "`path_b64`, base64 of the raw bytes, when they are not valid UTF-8." },
+    [F_TYPE] = { "type", NULL, "string", true,
+        "The entry's type. The spellings, and the `mode` bits that go with each, are listed "
+        "under the field rules." },
+    [F_MODE] = { "mode", NULL, "int", true, "`st_mode`, full value including type bits." },
+    [F_UID] = { "uid", NULL, "int", true, "Owner." },
+    [F_GID] = { "gid", NULL, "int", true, "Group." },
+    [F_SIZE] = { "size", NULL, "int", true,
+        "`st_size`. For `lnk`, the target length -- except on an `unreadable` link, whose "
+        "target is unknown or stale." },
+    [F_MTIME] = { "mtime_ns", NULL, "int", true,
+        "Modification time, nanoseconds. Times outside the int64 range (before 1678, after "
+        "2262) saturate at its bounds." },
+    [F_CTIME] = { "ctime_ns", NULL, "int", true,
+        "Change time, nanoseconds, saturating like `mtime_ns`. **`ctime_ns` is the change "
+        "prefilter**: an unprivileged process can set mtime but not ctime (§6.3). Never the "
+        "sole evidence for a protected path — hash those." },
+    [F_INO] = { "ino", NULL, "int", true, "Inode number; with `dev`, the entry's identity." },
+    [F_DEV] = { "dev", NULL, "int", true,
+        "Device. On a directory, `dev` differing from the scope root's means a mount boundary; "
+        "on other types it need not (see `mount`)." },
+    [F_NLINK] = { "nlink", NULL, "int", true,
+        "Link count. `> 1` on a regular file means hard links exist." },
+    [F_IFLAGS] = { "iflags", NULL, "int", false,
+        "Inode flags, where the filesystem has them. Linux: `FS_IOC_GETFLAGS` (`chattr`: "
+        "immutable, append-only, nodump...), on regular files and directories. macOS: "
+        "`st_flags` (`chflags`), on every type." },
+    [F_CAPS] = { "caps", NULL, "string", false,
+        "The file capability: the raw `security.capability` value, lowercase hex. `setcap` on "
+        "an interpreter is a privilege change; this is where it shows." },
     [F_XATTRS] = { "xattrs", NULL, "array", false,
-                   "`name=<sha256 of value>` per attribute, sorted by name" },
+        "One string per extended attribute other than `security.capability`, "
+        "`\"<name>=<sha256 of value>\"`, sorted strictly by name bytes; absent when there are "
+        "none. POSIX ACLs appear here as `system.posix_acl_access` / "
+        "`system.posix_acl_default`. A name is written as itself when it is printable ASCII "
+        "without `\"`, `\\` or `=` and does not start `x:`; otherwise as `x:` followed by its "
+        "bytes in hex. At most 8192 bytes of array body; a larger set is recorded as "
+        "`xattrs_sha256` instead." },
     [F_XATTRS_SHA256] = { "xattrs_sha256", NULL, "string", false,
-                   "digest of the `xattrs` body, for a set too large to inline" },
+        "For a set too large for `xattrs`: the sha256 of the array body `xattrs` would have "
+        "held, so a set recorded inline in one manifest and by digest in another still "
+        "compares." },
     [F_XATTRS_UNKNOWN] = { "xattrs_unknown", NULL, "bool", false,
-                   "the attributes could not be read" },
-    [F_SHA256] = { "sha256", NULL, "string", false, "content digest, lowercase hex" },
-    [F_UNVERIFIED] = { "unverified", NULL, "bool", false, "no hash recorded" },
+        "`true`: the attributes could not be read. An absent `xattrs` means \"none\", so "
+        "failing to read must say so. `diff` reports the entry's metadata as `unknown`, never "
+        "unchanged." },
+    [F_SHA256] = { "sha256", NULL, "string", false,
+        "Lowercase hex content digest, of a file within `hash_max_bytes` read in one stable "
+        "pass (see \"What a hash, and a stored copy, prove\")." },
+    [F_UNVERIFIED] = { "unverified", NULL, "bool", false,
+        "`true`: no hash is recorded. The file is larger than `hash_max_bytes`, or it is also "
+        "flagged `unstable`, `unreadable` or `mount`, which say why. `diff` must report any "
+        "change to it as **modified (unverified)**, never as unchanged." },
     [F_UNSTABLE] = { "unstable", NULL, "bool", false,
-                   "changed while being read; a directory's listing is incomplete" },
-    [F_RDEV]   = { "rdev", NULL, "int", false, "device number of a device node" },
+        "`true`. On a regular file: it changed while being read (size, mtime or ctime moved, "
+        "or the inode opened was not the one stat'ed); no hash is recorded, because the bytes "
+        "read describe no state the file ever had. On a directory: **its listing is not a "
+        "complete, single-instant listing** -- it changed during the walk (its ctime lies "
+        "between the walk's start and the moment belay reached it; its mtime or ctime moved "
+        "between its stat and the end of its subtree's walk; or the end-of-walk re-check found "
+        "it changed since it was recorded), or the listing failed part way (it could not be "
+        "read as a directory stream, a `readdir` error, a child that could not be stat'ed at "
+        "all, or a child name too long to fit the path limit). Entries may be missing from it "
+        "or recorded under another directory; the comparator MUST NOT read its children as a "
+        "complete listing." },
+    [F_RDEV] = { "rdev", NULL, "int", false,
+        "The device number. Without it a replaced device node, or an overlayfs whiteout (char "
+        "0,0), is indistinguishable from the original." },
     [F_LINK_TARGET] = { "link_target", "link_target_b64", "string", false,
-                   "the symlink's target, verbatim; empty means unknown" },
+        "The link's bytes, verbatim and unresolved; `link_target_b64`, base64, when they are "
+        "not valid UTF-8. Empty only on an `unreadable` link, meaning the target is unknown." },
     [F_TARGET_OUTSIDE] = { "target_outside_scope", NULL, "bool", false,
-                   "advisory: the target leaves the scope lexically" },
-    [F_STORED] = { "stored", NULL, "string", false, "the store key, equal to `sha256`" },
-    [F_MOUNT]  = { "mount", NULL, "bool", false, "a mount root: recorded, never read" },
-    [F_UNREADABLE] = { "unreadable", NULL, "bool", false, "contents could not be captured" },
-    [F_RACED]  = { "raced", NULL, "bool", false,
-                   "changed after it was recorded, before the walk ended" },
+        "`true` when the target resolves lexically outside the scope. **Advisory only** — "
+        "never drives a decision (§5.1.1)." },
+    [F_STORED] = { "stored", NULL, "string", false,
+        "Present when content was copied: the `store/` key, which is the content's sha256." },
+    [F_MOUNT] = { "mount", NULL, "bool", false,
+        "`true`. The entry is the root of another mount. Where statx can say so "
+        "(`STATX_ATTR_MOUNT_ROOT`, Linux 5.8+), its answer is used alone: it catches bind "
+        "mounts from the same filesystem, and it does not mistake a btrfs subvolume (a "
+        "directory with its own `dev`, not a mount) for one. Without it, an entry whose `dev` "
+        "differs from the scope root's is a mount -- except a non-directory in an overlayfs "
+        "scope, where every file carries its layer's device. A mount is recorded and **never "
+        "read or descended** (§5.1.1): a mounted regular file carries `unverified` and no "
+        "hash, and **for a directory the subtree below it is ABSENT**: `diff` MUST report it "
+        "as *not captured*, never as *unchanged*." },
+    [F_UNREADABLE] = { "unreadable", NULL, "bool", false,
+        "`true`. belay could not capture this entry's contents: a directory it could not open "
+        "or search (permission, or readable-but-not-searchable), a directory swapped for "
+        "another between its stat and its open, a directory beyond the depth limit (128) or "
+        "whose path leaves no room for a child name, a file it could not open or read, or a "
+        "symlink whose target could not be read or kept changing while being read. **For a "
+        "directory, the entire subtree below it is ABSENT.** `diff` MUST report such a subtree "
+        "as *contents unknown* and never as *unchanged*. Without this field an unreadable "
+        "directory is byte-identical to an empty one." },
+    [F_RACED] = { "raced", NULL, "bool", false,
+        "`true`. The entry changed after it was recorded, before the walk ended: re-stat'ed "
+        "at the end of the walk, its inode, mode, size, mtime or ctime differed, or it could "
+        "not be reached. What is recorded held when belay read it, but not at the end. (A "
+        "listed directory that changed is flagged `unstable` instead, since its listing is "
+        "what no longer holds.)" },
 };
 
 #define T_REG  TBIT(BELAY_T_REG)
