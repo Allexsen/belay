@@ -43,6 +43,8 @@
 #include "belay/path.h"
 #include "belay/store.h"
 
+#include "capture.h"
+#include "fsops.h"
 #include "ident.h"
 
 #include <dirent.h>
@@ -55,14 +57,6 @@
 #include <stdlib.h>
 #include <string.h>
 #include <sys/stat.h>
-#include <sys/xattr.h>
-#ifdef __linux__
-#include <linux/fs.h>                   /* FS_IOC_GETFLAGS */
-#include <sys/ioctl.h>
-#include <sys/sysmacros.h>
-#include <sys/vfs.h>
-#define OVERLAYFS_MAGIC 0x794c7630      /* <linux/magic.h> OVERLAYFS_SUPER_MAGIC */
-#endif
 #include <time.h>
 #include <unistd.h>
 
@@ -210,6 +204,7 @@ struct spill {
      * square of the entry count, 13x the manifest size at 80k entries.) */
     FILE *runs[LEVELS][FANIN];
     size_t nruns[LEVELS];
+    const struct fsops *ops;
     char dir[PATH_MAX + 32];    /* the output's directory, for O_TMPFILE runs */
     char tmpl[PATH_MAX + 32];   /* mkstemp template, where O_TMPFILE is missing */
 };
@@ -241,36 +236,13 @@ static void sort_offs(const unsigned char *base, size_t *a, size_t *tmp, size_t 
     }
 }
 
-/* Creates an anonymous temporary file beside the output. With O_TMPFILE it
- * is never linked into the directory at all, so the directory does not
- * change -- which matters when the output lies inside the scope being
- * walked: a named temporary, even unlinked at once, changes the directory,
- * and the walk then sees belay's own writes (review round 3, F8). Elsewhere
- * it is created and unlinked at once; nothing is left behind on a crash. */
+/* An anonymous temporary file beside the output, never visible in the
+ * directory where the platform allows (see fsops tmpfile_in): a named
+ * temporary changes the directory, and when the output lies inside the scope
+ * the walk then sees belay's own writes (review round 3, F8). */
 static FILE *open_tmp(const struct spill *s) {
-    int fd = -1;
-#ifdef O_TMPFILE
-    fd = open(s->dir, O_TMPFILE | O_RDWR | O_CLOEXEC, 0600);
-    if (fd == -1 && (errno == EMFILE || errno == ENFILE || errno == ENOMEM)) {
-        belay_err_set(BELAY_ERR_IO, errno, "manifest: cannot create temporary file");
-        return NULL;
-    }
-#endif
-    if (fd == -1) {
-        char name[PATH_MAX + 32];
-        snprintf(name, sizeof name, "%s", s->tmpl);
-        fd = mkstemp(name);
-        if (fd == -1) {
-            belay_err_set(BELAY_ERR_IO, errno, "manifest: cannot create temporary file");
-            return NULL;
-        }
-        unlink(name);
-    }
-    FILE *f = fdopen(fd, "w+b");
-    if (f == NULL) {
-        belay_err_set(BELAY_ERR_IO, errno, "manifest: fdopen");
-        close(fd);
-    }
+    FILE *f = s->ops->tmpfile_in(s->ops->ctx, s->dir, s->tmpl);
+    if (f == NULL) belay_err_set(BELAY_ERR_IO, errno, "manifest: cannot create temporary file");
     return f;
 }
 
@@ -521,6 +493,7 @@ static void spill_free(struct spill *s) {
 /* ------------------------------------------------------------------------ */
 
 struct walk_ctx {
+    const struct fsops *ops;
     const struct belay_manifest_opts *opts;
     uint64_t root_dev;
     const char *scope;
@@ -570,14 +543,14 @@ static enum belay_entry_type type_of(mode_t m) {
 /* Hashes by fd, and when `tx` is non-NULL stages the same bytes into the
  * store in the same pass: what is stored is exactly what was hashed. `*binary`
  * reports a NUL within the first SNIFF_BYTES. */
-static int hash_fd(int fd, unsigned char *buf, char hex_out[65], uint64_t *nread,
-                   struct belay_store_tx *tx, bool *binary) {
+static int hash_fd(const struct fsops *ops, int fd, unsigned char *buf, char hex_out[65],
+                   uint64_t *nread, struct belay_store_tx *tx, bool *binary) {
     struct belay_sha256 c;
     belay_sha256_init(&c);
     *nread = 0;
     *binary = false;
     for (;;) {
-        const ssize_t n = read(fd, buf, READ_CHUNK);
+        const ssize_t n = ops->read(ops->ctx, fd, buf, READ_CHUNK);
         if (n == 0) break;
         if (n < 0) {
             if (errno == EINTR) continue;
@@ -615,10 +588,6 @@ static void fill_from_stat(struct belay_entry *e, const struct stat *st) {
         e->has_rdev = true;
         e->rdev = (uint64_t)st->st_rdev;
     }
-#ifdef __APPLE__
-    e->has_iflags = true;                  /* chflags: uchg, schg, hidden... */
-    e->iflags = (uint64_t)st->st_flags;
-#endif
 }
 
 /* ------------------------------------------------------------------------ */
@@ -635,24 +604,6 @@ static void fill_from_stat(struct belay_entry *e, const struct stat *st) {
  *  resolved from a path string, so containment holds as for the walk.
  */
 static bool fatal_errno(int err);
-
-struct xsrc { int fd; const char *proc; };
-
-static ssize_t x_list(const struct xsrc *x, char *buf, size_t n) {
-#if defined(__APPLE__)
-    return flistxattr(x->fd, buf, n, XATTR_NOFOLLOW);
-#else
-    return x->proc != NULL ? listxattr(x->proc, buf, n) : flistxattr(x->fd, buf, n);
-#endif
-}
-
-static ssize_t x_get(const struct xsrc *x, const char *name, void *buf, size_t n) {
-#if defined(__APPLE__)
-    return fgetxattr(x->fd, name, buf, n, 0, XATTR_NOFOLLOW);
-#else
-    return x->proc != NULL ? getxattr(x->proc, name, buf, n) : fgetxattr(x->fd, name, buf, n);
-#endif
-}
 
 /* Names written as themselves: printable ASCII without '"', '\\' or '=',
  * not starting "x:". Anything else is written "x:" + hex, so every name has
@@ -690,57 +641,24 @@ static void xo_put(struct xout *o, const char *s, size_t l) {
 static int read_extras(struct walk_ctx *wc, int fd, int pfd, const char *name,
                        const struct stat *st) {
     struct belay_entry *e = &wc->e;
+    const struct fsops *ops = wc->ops;
     wc->extras_done = true;
-    int own = -1;
-    struct xsrc x = { fd, NULL };
-#ifdef __linux__
-    char proc[64];
-    if (fd != -1) {
-        int fl;
-        if (ioctl(fd, FS_IOC_GETFLAGS, &fl) == 0) {
-            e->has_iflags = true;
-            e->iflags = (uint32_t)fl;
-        }
-    } else {
-        own = openat(pfd, name, O_PATH | O_NOFOLLOW | O_CLOEXEC);
-        if (own == -1) {
-            if (fatal_errno(errno)) {
-                belay_err_set(BELAY_ERR_IO, errno, "manifest: openat (O_PATH)");
-                return -1;
-            }
-            goto unknown;
-        }
-        struct stat os;
-        if (fstat(own, &os) == -1) goto unknown;
-        const struct ident oi = ident_of_stat(&os), ri = ident_of_stat(st);
-        if (!ident_same(&oi, &ri, ID_OBJECT)) goto unknown;  /* not the entry recorded */
-        snprintf(proc, sizeof proc, "/proc/self/fd/%d", own);
-        x.proc = proc;
+    uint64_t flags;
+    if (ops->inode_flags(ops->ctx, fd, st, &flags) == 0) {
+        e->has_iflags = true;
+        e->iflags = flags;
     }
-#elif defined(__APPLE__)
-    if (fd == -1) {
-        /* Opening a FIFO or a device has side effects; symlinks open safely. */
-        if (!S_ISLNK(st->st_mode)) goto unknown;
-        own = openat(pfd, name, O_RDONLY | O_SYMLINK | O_CLOEXEC);
-        if (own == -1) {
-            if (fatal_errno(errno)) {
-                belay_err_set(BELAY_ERR_IO, errno, "manifest: openat (O_SYMLINK)");
-                return -1;
-            }
-            goto unknown;
+    struct xsrc x = { .fd = fd, .path = NULL, .own = -1 };
+    if (fd == -1 && ops->xattr_source_open(ops->ctx, pfd, name, st, &x) == -1) {
+        if (fatal_errno(errno)) {
+            belay_err_set(BELAY_ERR_IO, errno, "manifest: cannot reach %s for its attributes", name);
+            ops->xattr_source_close(ops->ctx, &x);
+            return -1;
         }
-        struct stat os;
-        if (fstat(own, &os) == -1) goto unknown;
-        const struct ident oi = ident_of_stat(&os), ri = ident_of_stat(st);
-        if (!ident_same(&oi, &ri, ID_OBJECT)) goto unknown;
-        x.fd = own;
+        goto unknown;
     }
-#else
-    (void)pfd; (void)name; (void)st;
-    if (fd == -1) goto unknown;
-#endif
     {
-        const ssize_t ln = x_list(&x, wc->xlist, XLIST_CAP);
+        const ssize_t ln = ops->xattr_list(ops->ctx, &x, wc->xlist, XLIST_CAP);
         if (ln < 0) {
             if (errno == ENOTSUP || errno == EOPNOTSUPP) goto done;   /* none here */
             goto unknown;
@@ -758,7 +676,7 @@ static int read_extras(struct walk_ctx *wc, int fd, int pfd, const char *name,
         belay_sha256_init(&o.h);
         for (size_t i = 0; i < n; i++) {
             const char *nm = wc->xnames[i];
-            const ssize_t vl = x_get(&x, nm, wc->readbuf, READ_CHUNK);
+            const ssize_t vl = ops->xattr_get(ops->ctx, &x, nm, wc->readbuf, READ_CHUNK);
             if (vl < 0) goto unknown;                /* removed meanwhile, or denied */
             if (strcmp(nm, "security.capability") == 0) {
                 if ((size_t)vl * 2 >= sizeof e->caps_hex) goto unknown;
@@ -809,7 +727,7 @@ unknown:
     e->xattrs_len = 0;
     e->xattrs_unknown = true;
 done:
-    if (own != -1) close(own);
+    ops->xattr_source_close(ops->ctx, &x);
     return 0;
 }
 
@@ -867,34 +785,10 @@ static int walk(int dfd, char *rel, size_t relsz, size_t rel_len,
  */
 static int stat_entry(const struct walk_ctx *wc, int dfd, const char *name, struct stat *st,
                       bool *mount_root, bool *mount_known) {
-    *mount_root = false;
-    *mount_known = false;
-#if defined(__linux__) && defined(STATX_ATTR_MOUNT_ROOT)
-    if (wc->statx_ok) {
-        struct statx sx;
-        if (statx(dfd, name, AT_SYMLINK_NOFOLLOW | AT_NO_AUTOMOUNT, STATX_BASIC_STATS, &sx) != 0)
-            return -1;
-        memset(st, 0, sizeof *st);
-        st->st_mode  = sx.stx_mode;
-        st->st_ino   = sx.stx_ino;
-        st->st_dev   = makedev(sx.stx_dev_major, sx.stx_dev_minor);
-        st->st_rdev  = makedev(sx.stx_rdev_major, sx.stx_rdev_minor);
-        st->st_nlink = sx.stx_nlink;
-        st->st_uid   = sx.stx_uid;
-        st->st_gid   = sx.stx_gid;
-        st->st_size  = (off_t)sx.stx_size;
-        st->st_mtim.tv_sec  = sx.stx_mtime.tv_sec;
-        st->st_mtim.tv_nsec = sx.stx_mtime.tv_nsec;
-        st->st_ctim.tv_sec  = sx.stx_ctime.tv_sec;
-        st->st_ctim.tv_nsec = sx.stx_ctime.tv_nsec;
-        *mount_known = (sx.stx_attributes_mask & STATX_ATTR_MOUNT_ROOT) != 0;
-        *mount_root  = *mount_known && (sx.stx_attributes & STATX_ATTR_MOUNT_ROOT);
-        return 0;
-    }
-#else
-    (void)wc;
-#endif
-    return fstatat(dfd, name, st, AT_SYMLINK_NOFOLLOW);
+    *mount_root = *mount_known = false;
+    if (wc->statx_ok)
+        return wc->ops->stat_mount(wc->ops->ctx, dfd, name, st, mount_root, mount_known);
+    return wc->ops->fstatat(wc->ops->ctx, dfd, name, st, AT_SYMLINK_NOFOLLOW);
 }
 
 /* Errors that are belay's own resource exhaustion rather than a property of
@@ -919,7 +813,8 @@ static int read_link(int pfd, const char *name, const struct stat *st, const cha
     struct belay_entry *e = &wc->e;
     /* Buffer of PATH_CAP: a target of exactly PATH_CAP-1 (4095, the most
      * Linux allows) fits with its NUL. A full buffer means truncation. */
-    const ssize_t n = readlinkat(pfd, name, e->link_target, sizeof e->link_target);
+    const ssize_t n = wc->ops->readlinkat(wc->ops->ctx, pfd, name, e->link_target,
+                                          sizeof e->link_target);
     if (n < 0) {
         if (errno == ENOENT) return V_VANISHED;
         if (errno == EINVAL) return V_RACED;           /* no longer a symlink */
@@ -976,7 +871,8 @@ static int read_file(int pfd, const char *name, const struct stat *st, const cha
 
     /* O_NOFOLLOW closes the swap window; O_NONBLOCK stops a FIFO swapped in
      * from blocking the open forever. */
-    const int fd = openat(pfd, name, O_RDONLY | O_NOFOLLOW | O_NONBLOCK | O_CLOEXEC);
+    const int fd = wc->ops->openat(wc->ops->ctx, pfd, name,
+                                   O_RDONLY | O_NOFOLLOW | O_NONBLOCK | O_CLOEXEC);
     if (fd == -1) {
         if (errno == ENOENT) return V_VANISHED;
         if (fatal_errno(errno)) {
@@ -990,7 +886,7 @@ static int read_file(int pfd, const char *name, const struct stat *st, const cha
     }
 
     struct stat before, after;
-    if (fstat(fd, &before) == -1) {
+    if (wc->ops->fstat(wc->ops->ctx, fd, &before) == -1) {
         close(fd);
         mark_unreadable_file(wc);
         return V_OK;
@@ -1040,7 +936,7 @@ static int read_file(int pfd, const char *name, const struct stat *st, const cha
 
     uint64_t nread = 0;
     bool binary = false;
-    const int h = hash_fd(fd, wc->readbuf, e->sha256_hex, &nread, want ? &tx : NULL, &binary);
+    const int h = hash_fd(wc->ops, fd, wc->readbuf, e->sha256_hex, &nread, want ? &tx : NULL, &binary);
     if (h != 0) {
         if (want) belay_store_abort(&tx);
         close(fd);
@@ -1053,7 +949,7 @@ static int read_file(int pfd, const char *name, const struct stat *st, const cha
         }
         return -1;                                      /* store write failed */
     }
-    if (fstat(fd, &after) == -1) {
+    if (wc->ops->fstat(wc->ops->ctx, fd, &after) == -1) {
         if (want) belay_store_abort(&tx);
         close(fd);
         e->sha256_hex[0] = '\0';
@@ -1104,7 +1000,8 @@ static int open_dir(int pfd, const char *name, const struct stat *st, const char
         return V_OK;
     }
 
-    const int cfd = openat(pfd, name, O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC);
+    const int cfd = wc->ops->openat(wc->ops->ctx, pfd, name,
+                                    O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC);
     if (cfd == -1) {
         if (fatal_errno(errno)) {
             belay_err_set(BELAY_ERR_IO, errno, "manifest: openat dir %s", rel);
@@ -1125,10 +1022,11 @@ static int open_dir(int pfd, const char *name, const struct stat *st, const char
     struct stat cs, probe;
     struct ident ci = { 0 };
     const struct ident ri = ident_of_stat(st);
-    if (fstat(cfd, &cs) == -1 || (ci = ident_of_stat(&cs), !ident_same(&ci, &ri, ID_OBJECT)) ||
+    if (wc->ops->fstat(wc->ops->ctx, cfd, &cs) == -1 ||
+        (ci = ident_of_stat(&cs), !ident_same(&ci, &ri, ID_OBJECT)) ||
         /* Readable but not searchable (r without x): its names can be listed
          * but none of them can be stat'ed. */
-        fstatat(cfd, ".", &probe, AT_SYMLINK_NOFOLLOW) == -1) {
+        wc->ops->fstatat(wc->ops->ctx, cfd, ".", &probe, AT_SYMLINK_NOFOLLOW) == -1) {
         close(cfd);
         e->unreadable = true;
         wc->n_unreadable++;
@@ -1260,7 +1158,7 @@ static int visit(int parent_fd, const char *name, char *rel, size_t relsz,
      */
     if (cfd != -1 && !e->unstable && e->ctime_ns >= wc->walk_start_ns) {
         struct timespec now;
-        clock_gettime(CLOCK_REALTIME, &now);
+        wc->ops->clock(wc->ops->ctx, BELAY_CLOCK_REAL, &now);
         if (e->ctime_ns <= ident_ns((int64_t)now.tv_sec, now.tv_nsec)) {
             e->unstable = true;
             wc->n_unstable++;
@@ -1291,7 +1189,8 @@ static int visit(int parent_fd, const char *name, char *rel, size_t relsz,
         struct stat post;
         const struct ident di = ident_of_entry(dir);
         struct ident pi;
-        const bool incomplete = (r == W_INCOMPLETE) || fstat(cfd, &post) == -1 ||
+        const bool incomplete = (r == W_INCOMPLETE) ||
+            wc->ops->fstat(wc->ops->ctx, cfd, &post) == -1 ||
             (pi = ident_of_stat(&post), !ident_same(&pi, &di, ID_TIMES));
         if (incomplete && !dir->unstable) {
             dir->unstable = true;
@@ -1314,18 +1213,11 @@ static int visit(int parent_fd, const char *name, char *rel, size_t relsz,
  */
 static int walk(int dfd, char *rel, size_t relsz, size_t rel_len,
                 int depth, struct walk_ctx *wc) {
-    /* closedir closes the fd it was given; dup so the caller's stays valid. */
-    const int ddup = dup(dfd);
-    if (ddup == -1) {
-        belay_err_set(BELAY_ERR_IO, errno, "manifest: dup");
-        return -1;
-    }
-    DIR *d = fdopendir(ddup);
+    const struct fsops *ops = wc->ops;
+    void *d = ops->dir_open(ops->ctx, dfd);
     if (d == NULL) {
-        const int err = errno;
-        close(ddup);
-        if (fatal_errno(err)) {
-            belay_err_set(BELAY_ERR_IO, err, "manifest: fdopendir");
+        if (fatal_errno(errno)) {
+            belay_err_set(BELAY_ERR_IO, errno, "manifest: fdopendir");
             return -1;
         }
         return W_INCOMPLETE;
@@ -1334,9 +1226,8 @@ static int walk(int dfd, char *rel, size_t relsz, size_t rel_len,
     int rc = 0;
     bool incomplete = false;
     for (;;) {
-        errno = 0;
-        const struct dirent *de = readdir(d);
-        if (de == NULL) {
+        const char *dname = ops->dir_next(ops->ctx, d);
+        if (dname == NULL) {
             if (errno != 0) {
                 if (fatal_errno(errno)) {
                     belay_err_set(BELAY_ERR_IO, errno, "manifest: readdir");
@@ -1347,22 +1238,22 @@ static int walk(int dfd, char *rel, size_t relsz, size_t rel_len,
             }
             break;
         }
-        if (strcmp(de->d_name, ".") == 0 || strcmp(de->d_name, "..") == 0) continue;
+        if (strcmp(dname, ".") == 0 || strcmp(dname, "..") == 0) continue;
 
-        const ssize_t nlen = rel_join(rel, relsz, rel_len, de->d_name);
+        const ssize_t nlen = rel_join(rel, relsz, rel_len, dname);
         if (nlen == -1) {
             belay_err_clear();
             incomplete = true;                 /* cannot be named within PATH_CAP */
             continue;
         }
 
-        const int v = visit(dfd, de->d_name, rel, relsz, (size_t)nlen, depth, wc);
+        const int v = visit(dfd, dname, rel, relsz, (size_t)nlen, depth, wc);
         rel[rel_len] = '\0';
         if (v == W_INCOMPLETE) { incomplete = true; continue; }
         if (v != 0) { rc = v; break; }
     }
 
-    closedir(d);
+    ops->dir_close(ops->ctx, d);
     if (rc != 0) return rc;
     return incomplete ? W_INCOMPLETE : 0;
 }
@@ -1404,6 +1295,7 @@ static int walk(int dfd, char *rel, size_t relsz, size_t rel_len,
  *  change. The window rule covers part of that for local filesystems.
  */
 struct rstack {
+    const struct fsops *ops;
     int    root_fd;
     int    fd[MAX_DEPTH + 1];
     size_t end[MAX_DEPTH + 1];      /* fd[i] is the directory path[0..end[i]) */
@@ -1437,7 +1329,8 @@ static int rs_to(struct rstack *rs, const char *dir, size_t dir_len) {
         memcpy(name, dir + pos, nl);
         name[nl] = '\0';
         const int parent = rs->n ? rs->fd[rs->n - 1] : rs->root_fd;
-        const int fd = openat(parent, name, O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC);
+        const int fd = rs->ops->openat(rs->ops->ctx, parent, name,
+                                       O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC);
         if (fd == -1) {
             if (fatal_errno(errno)) {
                 belay_err_set(BELAY_ERR_IO, errno, "manifest: re-check: openat");
@@ -1469,11 +1362,12 @@ static int recheck_one(struct rstack *rs, struct walk_ctx *wc,
     struct stat st;
     bool same = false;
     if (plen == 1 && path[0] == '.') {
-        same = fstat(rs->root_fd, &st) == 0 && ident_matches(id, &st);
+        same = wc->ops->fstat(wc->ops->ctx, rs->root_fd, &st) == 0 && ident_matches(id, &st);
     } else if (id->kind == RC_LISTING) {
         const int r = rs_to(rs, (const char *)path, plen);
         if (r == -1) return -1;
-        same = r == 0 && fstat(rs->fd[rs->n - 1], &st) == 0 && ident_matches(id, &st);
+        same = r == 0 && wc->ops->fstat(wc->ops->ctx, rs->fd[rs->n - 1], &st) == 0 &&
+               ident_matches(id, &st);
     } else {
         size_t base = plen;                             /* start of the last component */
         while (base > 0 && path[base - 1] != '/') base--;
@@ -1512,6 +1406,7 @@ static int recheck(struct spill *s, struct walk_ctx *wc, int root_fd) {
         goto done;
     }
     rs->root_fd = root_fd;
+    rs->ops = wc->ops;
 
     for (size_t i = 0; i < s->n; i++) {
         unsigned char *r = s->arena + s->offs[i];
@@ -1559,10 +1454,10 @@ done:
     return rc;
 }
 
-static int write_header(FILE *f, const char *scope_real,
+static int write_header(const struct fsops *ops, FILE *f, const char *scope_real,
                         const struct belay_manifest_opts *opts, char *buf) {
     struct timespec now;
-    clock_gettime(CLOCK_REALTIME, &now);
+    ops->clock(ops->ctx, BELAY_CLOCK_REAL, &now);
     const long long created = (long long)ident_ns((int64_t)now.tv_sec, now.tv_nsec);
 
     /* Same rule as entry paths: JSON for valid UTF-8, base64 otherwise.
@@ -1584,9 +1479,8 @@ static int write_header(FILE *f, const char *scope_real,
     return 0;
 }
 
-int belay_manifest_write(const char *out_path, const char *scope,
-                         const struct belay_manifest_opts *opts,
-                         struct belay_manifest_stats *stats) {
+int capture_write(const struct fsops *ops, const char *out_path, const char *scope,
+                  const struct belay_manifest_opts *opts, struct belay_manifest_stats *stats) {
     if (out_path == NULL || scope == NULL || opts == NULL) {
         belay_err_set(BELAY_ERR_INVALID, 0, "manifest_write: null argument");
         return -1;
@@ -1605,14 +1499,14 @@ int belay_manifest_write(const char *out_path, const char *scope,
         belay_err_set(BELAY_ERR_IO, errno, "manifest: cannot resolve scope %s", nscope);
         return -1;
     }
-    const int root_fd = open(real, O_RDONLY | O_DIRECTORY | O_CLOEXEC);
+    const int root_fd = ops->openat(ops->ctx, AT_FDCWD, real, O_RDONLY | O_DIRECTORY | O_CLOEXEC);
     if (root_fd == -1) {
         belay_err_set(BELAY_ERR_IO, errno, "manifest: cannot open scope %s", real);
         free(real);
         return -1;
     }
     struct stat rst;
-    if (fstat(root_fd, &rst) == -1) {
+    if (ops->fstat(ops->ctx, root_fd, &rst) == -1) {
         belay_err_set(BELAY_ERR_IO, errno, "manifest: fstat scope");
         close(root_fd);
         free(real);
@@ -1622,6 +1516,7 @@ int belay_manifest_write(const char *out_path, const char *scope,
     int rc = -1;
     struct spill sp;
     memset(&sp, 0, sizeof sp);
+    sp.ops = ops;
     snprintf(sp.tmpl, sizeof sp.tmpl, "%s.run.XXXXXX", out_path);
     {
         const char *slash = strrchr(out_path, '/');
@@ -1654,6 +1549,7 @@ int belay_manifest_write(const char *out_path, const char *scope,
         belay_err_set(BELAY_ERR_NOMEM, 0, "manifest: out of memory");
         goto cleanup;
     }
+    wc->ops = ops;
     wc->opts = opts;
     wc->root_dev = (uint64_t)rst.st_dev;
     wc->scope = real;
@@ -1662,19 +1558,12 @@ int belay_manifest_write(const char *out_path, const char *scope,
 
     /* Once per walk: can statx be used here, and is the scope on overlayfs?
      * (See stat_entry and the crossing rule in visit.) */
-#if defined(__linux__) && defined(STATX_ATTR_MOUNT_ROOT)
     {
-        struct statx sx;
-        wc->statx_ok = statx(root_fd, "", AT_EMPTY_PATH | AT_SYMLINK_NOFOLLOW | AT_NO_AUTOMOUNT,
-                             STATX_BASIC_STATS, &sx) == 0;
+        struct stat probe_st;
+        bool mr, mk;
+        wc->statx_ok = ops->stat_mount(ops->ctx, root_fd, "", &probe_st, &mr, &mk) == 0;
+        wc->scope_overlay = ops->is_overlay(ops->ctx, root_fd);
     }
-#endif
-#ifdef __linux__
-    {
-        struct statfs sfs;
-        wc->scope_overlay = fstatfs(root_fd, &sfs) == 0 && sfs.f_type == OVERLAYFS_MAGIC;
-    }
-#endif
 
     if (opts->store_dir != NULL) {
         wc->abs = malloc(PATH_MAX * 2);
@@ -1706,14 +1595,13 @@ int belay_manifest_write(const char *out_path, const char *scope,
      *  nothing, and it was removed.)
      */
     struct timespec rt0, start;
-    clock_gettime(CLOCK_REALTIME, &rt0);
-#if defined(__linux__) && defined(CLOCK_REALTIME_COARSE)
-    clock_gettime(CLOCK_REALTIME_COARSE, &start);
-    wc->walk_start_ns = ident_ns((int64_t)start.tv_sec, start.tv_nsec);
-#else
-    start = rt0;
-    wc->walk_start_ns = ident_ns((int64_t)start.tv_sec, start.tv_nsec) - 10000000LL;
-#endif
+    ops->clock(ops->ctx, BELAY_CLOCK_REAL, &rt0);
+    if (ops->clock(ops->ctx, BELAY_CLOCK_COARSE, &start) == 0) {
+        wc->walk_start_ns = ident_ns((int64_t)start.tv_sec, start.tv_nsec);
+    } else {
+        start = rt0;
+        wc->walk_start_ns = ident_ns((int64_t)start.tv_sec, start.tv_nsec) - 10000000LL;
+    }
 
     /* The scope root itself is an entry, path ".". Without it a chmod or
      * chown on the root is invisible. Like every directory it is emitted
@@ -1730,7 +1618,7 @@ int belay_manifest_write(const char *out_path, const char *scope,
     /* A scope root that can be listed but not searched has contents belay
      * cannot stat: flag it, rather than fail on its first child. */
     struct stat probe;
-    if (fstatat(root_fd, ".", &probe, AT_SYMLINK_NOFOLLOW) != 0) {
+    if (ops->fstatat(ops->ctx, root_fd, ".", &probe, AT_SYMLINK_NOFOLLOW) != 0) {
         root_e.unreadable = true;
         wc->n_unreadable++;
     } else {
@@ -1741,7 +1629,7 @@ int belay_manifest_write(const char *out_path, const char *scope,
         struct stat post;
         const struct ident ri = ident_of_entry(&root_e);
         struct ident pi;
-        const bool changed = wr == W_INCOMPLETE || fstat(root_fd, &post) == -1 ||
+        const bool changed = wr == W_INCOMPLETE || ops->fstat(ops->ctx, root_fd, &post) == -1 ||
             (pi = ident_of_stat(&post), !ident_same(&pi, &ri, ID_TIMES));
         if (changed) {
             root_e.unstable = true;
@@ -1770,7 +1658,7 @@ int belay_manifest_write(const char *out_path, const char *scope,
         close(ofd);
         goto cleanup;
     }
-    if (write_header(out, real, opts, wc->line) == -1) goto cleanup;
+    if (write_header(ops, out, real, opts, wc->line) == -1) goto cleanup;
 
     size_t written = 0;
     if (in_memory) {
@@ -1862,4 +1750,10 @@ cleanup:
     close(root_fd);
     free(real);
     return rc;
+}
+
+int belay_manifest_write(const char *out_path, const char *scope,
+                         const struct belay_manifest_opts *opts,
+                         struct belay_manifest_stats *stats) {
+    return capture_write(fsops_default(), out_path, scope, opts, stats);
 }

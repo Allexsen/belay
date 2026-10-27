@@ -4,7 +4,9 @@
 #
 #   CORE_SRC    portable POSIX C — capture/A, diff/, interp/, util/.
 #               MUST build and pass tests on macOS as well as Linux.
-#               Linux-only fast paths go behind #ifdef inside these files.
+#               It calls the OS only through the platform adapter
+#               (src/capture/fsops.h): src/platform/fsops_posix.c plus the
+#               one fsops_<os>.c for this host. No #ifdef in capture.
 #   SESSION_SRC Linux-only — userns + mountns + overlayfs (M4).
 #               Built only when the host is Linux.
 #
@@ -19,7 +21,12 @@ BIN	= bin/belay
 
 UNAME_S	:= $(shell uname -s)
 
-CORE_SRC	= $(wildcard src/util/*.c src/capture/*.c src/diff/*.c src/interp/*.c)
+ifeq ($(UNAME_S),Linux)
+PLATFORM_SRC	= src/platform/fsops_posix.c src/platform/fsops_linux.c
+else
+PLATFORM_SRC	= src/platform/fsops_posix.c src/platform/fsops_macos.c
+endif
+CORE_SRC	= $(wildcard src/util/*.c src/capture/*.c src/diff/*.c src/interp/*.c) $(PLATFORM_SRC)
 CORE_OBJ	= $(CORE_SRC:src/%.c=$(BUILD)/%.o)
 SAN_CORE_OBJ	= $(CORE_SRC:src/%.c=$(SAN_BUILD)/%.o)
 SESSION_SRC	= $(wildcard src/session/*.c)
