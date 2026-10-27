@@ -46,7 +46,10 @@
 #include "capture.h"
 #include "fsops.h"
 #include "ident.h"
+#include "entry.h"
 #include "outcome.h"
+#include "runs.h"
+#include "serialize.h"
 
 #include <dirent.h>
 #include <errno.h>
@@ -79,431 +82,6 @@
 /* Serialization                                                             */
 /* ------------------------------------------------------------------------ */
 
-static int ap(char *buf, size_t cap, size_t *w, const char *fmt, ...) {
-    va_list a;
-    va_start(a, fmt);
-    const int n = vsnprintf(buf + *w, cap - *w, fmt, a);
-    va_end(a);
-    if (n < 0 || (size_t)n >= cap - *w) {
-        belay_err_set(BELAY_ERR_RANGE, 0, "manifest: entry exceeds %zu bytes", cap);
-        return -1;
-    }
-    *w += (size_t)n;
-    return 0;
-}
-
-/* Appends `len` raw bytes as a JSON string value under `key`, or as base64
- * under `key_b64` when they are not valid UTF-8. */
-static int ap_bytes(char *buf, size_t cap, size_t *w, const char *key,
-                    const char *key_b64, const char *bytes, size_t len) {
-    if (belay_utf8_valid(bytes, len)) {
-        if (ap(buf, cap, w, "\"%s\":\"", key) == -1) return -1;
-        if (belay_json_escape(buf + *w, cap - *w, bytes, len) == -1) return -1;
-    } else {
-        if (ap(buf, cap, w, "\"%s\":\"", key_b64) == -1) return -1;
-        if (belay_base64_encode(buf + *w, cap - *w, bytes, len) == -1) return -1;
-    }
-    *w += strlen(buf + *w);
-    return ap(buf, cap, w, "\"");
-}
-
-static const char *type_name(enum belay_entry_type t) {
-    switch (t) {
-    case BELAY_T_REG:  return "reg";
-    case BELAY_T_DIR:  return "dir";
-    case BELAY_T_LNK:  return "lnk";
-    case BELAY_T_FIFO: return "fifo";
-    case BELAY_T_SOCK: return "sock";
-    case BELAY_T_BLK:  return "blk";
-    default:           return "chr";
-    }
-}
-
-/* One entry as one NDJSON line, newline included. */
-static int serialize(const struct belay_entry *e, char *buf, size_t cap, size_t *len) {
-    size_t w = 0;
-    if (ap(buf, cap, &w, "{") == -1) return -1;
-    if (ap_bytes(buf, cap, &w, "path", "path_b64", e->path, e->path_len) == -1) return -1;
-
-    if (ap(buf, cap, &w,
-           ",\"type\":\"%s\",\"mode\":%u,\"uid\":%u,\"gid\":%u"
-           ",\"size\":%llu,\"mtime_ns\":%lld,\"ctime_ns\":%lld"
-           ",\"ino\":%llu,\"dev\":%llu,\"nlink\":%llu",
-           type_name(e->type), e->mode, e->uid, e->gid,
-           (unsigned long long)e->size, (long long)e->mtime_ns, (long long)e->ctime_ns,
-           (unsigned long long)e->ino, (unsigned long long)e->dev,
-           (unsigned long long)e->nlink) == -1) return -1;
-
-    if (e->has_iflags &&
-        ap(buf, cap, &w, ",\"iflags\":%llu", (unsigned long long)e->iflags) == -1) return -1;
-    if (e->has_caps && ap(buf, cap, &w, ",\"caps\":\"%s\"", e->caps_hex) == -1) return -1;
-    if (e->has_xattrs) {
-        if (e->xattrs_inline ? ap(buf, cap, &w, ",\"xattrs\":[%s]", e->xattrs)
-                             : ap(buf, cap, &w, ",\"xattrs_sha256\":\"%s\"", e->xattrs_sha256_hex))
-            return -1;
-    }
-    if (e->xattrs_unknown && ap(buf, cap, &w, ",\"xattrs_unknown\":true") == -1) return -1;
-
-    if (e->has_hash && ap(buf, cap, &w, ",\"sha256\":\"%s\"", e->sha256_hex) == -1) return -1;
-    if (e->unverified && ap(buf, cap, &w, ",\"unverified\":true") == -1) return -1;
-    if (e->unstable && ap(buf, cap, &w, ",\"unstable\":true") == -1) return -1;
-    if (e->has_rdev &&
-        ap(buf, cap, &w, ",\"rdev\":%llu", (unsigned long long)e->rdev) == -1) return -1;
-
-    if (e->has_link_target) {
-        if (ap(buf, cap, &w, ",") == -1) return -1;
-        if (ap_bytes(buf, cap, &w, "link_target", "link_target_b64",
-                     e->link_target, e->link_target_len) == -1) return -1;
-        if (e->target_outside_scope &&
-            ap(buf, cap, &w, ",\"target_outside_scope\":true") == -1) return -1;
-    }
-
-    if (e->has_stored && ap(buf, cap, &w, ",\"stored\":\"%s\"", e->stored_hex) == -1) return -1;
-    if (e->is_mount && ap(buf, cap, &w, ",\"mount\":true") == -1) return -1;
-    if (e->unreadable && ap(buf, cap, &w, ",\"unreadable\":true") == -1) return -1;
-
-    if (ap(buf, cap, &w, "}\n") == -1) return -1;
-    *len = w;
-    return 0;
-}
-
-/* ------------------------------------------------------------------------ */
-/* Spill: bounded-memory external sort                                      */
-/* ------------------------------------------------------------------------ */
-
-/*
- *  A record is [u32 path_len][path bytes][u32 line_len][line bytes]. The raw
- *  path travels with the line because the sort key is the raw path, which the
- *  serialized line may hold only as escaped JSON or base64.
- */
-/*
- *  Each record is [u32 path length][path][u32 line length][line][ident]. The
- *  ident is what the end-of-walk re-check compares the entry against; the
- *  re-check writes its verdict into `mark`, and the line is written out with
- *  the matching flag.
- */
-struct recmeta {
-    struct ident id;
-    uint8_t  kind;              /* RC_* */
-    uint8_t  mark;              /* MARK_* */
-    uint8_t  flags;             /* REC_*: the entry's flags, for the trailer tally */
-    uint8_t  pad[5];
-};
-enum { REC_UNREADABLE = 1, REC_UNSTABLE = 2, REC_MOUNT = 4 };
-enum { RC_NONE, RC_LISTING, RC_ENTRY };
-enum { MARK_NONE, MARK_UNSTABLE, MARK_RACED };
-#define IDENT_BYTES sizeof(struct recmeta)
-
-struct spill {
-    unsigned char *arena;
-    size_t budget;
-    size_t used;
-    size_t *offs, *scratch;
-    size_t n, cap;
-    /* Runs by level: level k holds runs merged from 16^k first-level runs. A
-     * full level merges into ONE run at the next level, so each byte is
-     * rewritten about log16(runs) times. (The first version re-merged a
-     * single ever-growing run at every cascade: temporary I/O grew with the
-     * square of the entry count, 13x the manifest size at 80k entries.) */
-    FILE *runs[LEVELS][FANIN];
-    size_t nruns[LEVELS];
-    size_t added;               /* records accepted, all runs together */
-    const struct fsops *ops;
-    char dir[PATH_MAX + 32];    /* the output's directory, for O_TMPFILE runs */
-    char tmpl[PATH_MAX + 32];   /* mkstemp template, where O_TMPFILE is missing */
-};
-
-static int rec_cmp(const unsigned char *a, const unsigned char *b) {
-    uint32_t la, lb;
-    memcpy(&la, a, 4);
-    memcpy(&lb, b, 4);
-    const int r = memcmp(a + 4, b + 4, la < lb ? la : lb);
-    if (r != 0) return r;
-    return (la > lb) - (la < lb);
-}
-
-/* Bottom-up merge sort of record offsets. Written out rather than qsort()
- * because the comparator needs the arena base and qsort_r differs between
- * glibc and macOS; a file-static context would make the writer non-reentrant. */
-static void sort_offs(const unsigned char *base, size_t *a, size_t *tmp, size_t n) {
-    for (size_t width = 1; width < n; width *= 2) {
-        for (size_t lo = 0; lo < n; lo += 2 * width) {
-            const size_t mid = lo + width < n ? lo + width : n;
-            const size_t hi  = lo + 2 * width < n ? lo + 2 * width : n;
-            size_t i = lo, j = mid, k = lo;
-            while (i < mid && j < hi)
-                tmp[k++] = rec_cmp(base + a[i], base + a[j]) <= 0 ? a[i++] : a[j++];
-            while (i < mid) tmp[k++] = a[i++];
-            while (j < hi)  tmp[k++] = a[j++];
-        }
-        memcpy(a, tmp, n * sizeof *a);
-    }
-}
-
-/* An anonymous temporary file beside the output, never visible in the
- * directory where the platform allows (see fsops tmpfile_in): a named
- * temporary changes the directory, and when the output lies inside the scope
- * the walk then sees belay's own writes (review round 3, F8). */
-static FILE *open_tmp(const struct spill *s) {
-    FILE *f = s->ops->tmpfile_in(s->ops->ctx, s->dir, s->tmpl);
-    if (f == NULL) belay_err_set(BELAY_ERR_IO, errno, "manifest: cannot create temporary file");
-    return f;
-}
-
-/*
- *  Writes one manifest line, with the flag the end-of-walk re-check set.
- *  Either flag goes at the end of the object, which is its canonical place:
- *  "raced" is the last known field, and "unstable" is only ever added to a
- *  directory that carries no "mount" or "unreadable" after it. The single
- *  writer for both output paths (in-memory and merged), so neither can drop
- *  the flag -- an invariant kept on one path but not its sibling is how a
- *  duplicate name once got through.
- */
-static int write_line(FILE *out, const unsigned char *line, uint32_t llen,
-                      const struct recmeta *m, struct belay_manifest_stats *tally) {
-    static const char *const flag[] = { "", ",\"unstable\":true", ",\"raced\":true" };
-    const uint8_t mark = m->mark;
-    /* Counted as emitted, from the line's final flags. */
-    struct belay_entry emitted;
-    emitted.unreadable = m->flags & REC_UNREADABLE;
-    emitted.unstable   = (m->flags & REC_UNSTABLE) || mark == MARK_UNSTABLE;
-    emitted.is_mount   = m->flags & REC_MOUNT;
-    emitted.raced      = mark == MARK_RACED;
-    outcome_count(tally, &emitted);
-    if (mark == MARK_NONE || mark > MARK_RACED || llen < 2)
-        return fwrite(line, 1, llen, out) == llen ? 0 : -1;
-    const size_t body = llen - 2;                       /* the line ends "}\n" */
-    const size_t fl = strlen(flag[mark]);
-    return fwrite(line, 1, body, out) == body && fwrite(flag[mark], 1, fl, out) == fl &&
-           fwrite("}\n", 1, 2, out) == 2 ? 0 : -1;
-}
-
-struct cursor {
-    FILE *f;
-    uint32_t plen, llen;
-    unsigned char *buf;         /* PATH_CAP bytes of path, then LINE_CAP of line */
-    struct recmeta id;
-    int live;
-};
-
-static int cur_next(struct cursor *c) {
-    uint32_t pl, ll;
-    const size_t r = fread(&pl, 1, 4, c->f);
-    if (r == 0 && feof(c->f)) { c->live = 0; return 0; }
-    if (r != 4 || pl == 0 || pl >= PATH_CAP) goto bad;
-    if (fread(c->buf, 1, pl, c->f) != pl) goto bad;
-    if (fread(&ll, 1, 4, c->f) != 4 || ll == 0 || ll > LINE_CAP) goto bad;
-    if (fread(c->buf + PATH_CAP, 1, ll, c->f) != ll) goto bad;
-    if (fread(&c->id, 1, IDENT_BYTES, c->f) != IDENT_BYTES) goto bad;
-    c->plen = pl;
-    c->llen = ll;
-    c->live = 1;
-    return 0;
-bad:
-    belay_err_set(BELAY_ERR_IO, errno, "manifest: temporary run is unreadable");
-    return -1;
-}
-
-static int cur_cmp(const struct cursor *a, const struct cursor *b) {
-    const int r = memcmp(a->buf, b->buf, a->plen < b->plen ? a->plen : b->plen);
-    if (r != 0) return r;
-    return (a->plen > b->plen) - (a->plen < b->plen);
-}
-
-/*
- *  K-way merge of `k` runs. With `lines` the output is manifest lines, tallied
- *  into it; otherwise it is records, for a cascaded run. Paths are unique by
- *  construction, so an equal pair is an internal error, not a tie to break.
- *  `*count` receives the number of records emitted.
- */
-static int merge(FILE **in, size_t k, FILE *out, struct belay_manifest_stats *lines,
-                 size_t *count) {
-    struct cursor cur[FANIN];
-    int rc = 0;
-    size_t emitted = 0;
-    unsigned char prev[PATH_CAP];
-    uint32_t prev_len = 0;
-
-    memset(cur, 0, sizeof cur);
-    for (size_t i = 0; i < k; i++) {
-        cur[i].f = in[i];
-        cur[i].buf = malloc(PATH_CAP + LINE_CAP);
-        if (cur[i].buf == NULL) {
-            belay_err_set(BELAY_ERR_NOMEM, 0, "manifest: out of memory in merge");
-            rc = -1;
-            goto done;
-        }
-        if (fseek(in[i], 0, SEEK_SET) != 0 || cur_next(&cur[i]) == -1) { rc = -1; goto done; }
-    }
-
-    for (;;) {
-        struct cursor *m = NULL;
-        for (size_t i = 0; i < k; i++)
-            if (cur[i].live && (m == NULL || cur_cmp(&cur[i], m) < 0)) m = &cur[i];
-        if (m == NULL) break;
-
-        if (emitted > 0) {
-            const int c = memcmp(prev, m->buf, prev_len < m->plen ? prev_len : m->plen);
-            if (c > 0 || (c == 0 && prev_len >= m->plen)) {
-                belay_err_set(BELAY_ERR_CORRUPT, 0,
-                              "manifest: the filesystem listed one name twice; refusing");
-                rc = -1;
-                goto done;
-            }
-        }
-        memcpy(prev, m->buf, m->plen);
-        prev_len = m->plen;
-
-        int ok;
-        if (lines != NULL) {
-            ok = write_line(out, m->buf + PATH_CAP, m->llen, &m->id, lines) == 0;
-        } else {
-            ok = fwrite(&m->plen, 1, 4, out) == 4 &&
-                 fwrite(m->buf, 1, m->plen, out) == m->plen &&
-                 fwrite(&m->llen, 1, 4, out) == 4 &&
-                 fwrite(m->buf + PATH_CAP, 1, m->llen, out) == m->llen &&
-                 fwrite(&m->id, 1, IDENT_BYTES, out) == IDENT_BYTES;
-        }
-        if (!ok) {
-            belay_err_set(BELAY_ERR_IO, errno, "manifest: write failed during merge");
-            rc = -1;
-            goto done;
-        }
-        emitted++;
-        if (cur_next(m) == -1) { rc = -1; goto done; }
-    }
-
-    if (count != NULL) *count = emitted;
-done:
-    for (size_t i = 0; i < k; i++) free(cur[i].buf);
-    return rc;
-}
-
-static int spill_flush(struct spill *s) {
-    if (s->n == 0) return 0;
-    sort_offs(s->arena, s->offs, s->scratch, s->n);
-
-    FILE *f = open_tmp(s);
-    if (f == NULL) return -1;
-    for (size_t i = 0; i < s->n; i++) {
-        const unsigned char *r = s->arena + s->offs[i];
-        uint32_t pl, ll;
-        memcpy(&pl, r, 4);
-        memcpy(&ll, r + 4 + pl, 4);
-        const size_t sz = 8 + (size_t)pl + ll + IDENT_BYTES;
-        if (fwrite(r, 1, sz, f) != sz) {
-            belay_err_set(BELAY_ERR_IO, errno, "manifest: temporary run write failed");
-            fclose(f);
-            return -1;
-        }
-    }
-    if (fflush(f) != 0) {
-        belay_err_set(BELAY_ERR_IO, errno, "manifest: temporary run write failed");
-        fclose(f);
-        return -1;
-    }
-    s->runs[0][s->nruns[0]++] = f;
-    s->used = 0;
-    s->n = 0;
-
-    /* Cascade: a full level becomes one run one level up. Open descriptors
-     * stay bounded by FANIN per level. */
-    for (size_t lv = 0; lv + 1 < LEVELS && s->nruns[lv] == FANIN; lv++) {
-        FILE *merged = open_tmp(s);
-        if (merged == NULL) return -1;
-        if (merge(s->runs[lv], FANIN, merged, NULL, NULL) == -1 || fflush(merged) != 0) {
-            fclose(merged);
-            return -1;
-        }
-        for (size_t i = 0; i < FANIN; i++) fclose(s->runs[lv][i]);
-        s->nruns[lv] = 0;
-        s->runs[lv + 1][s->nruns[lv + 1]++] = merged;
-    }
-    if (s->nruns[LEVELS - 1] == FANIN) {
-        belay_err_set(BELAY_ERR_RANGE, 0, "manifest: too many entries to sort");
-        return -1;
-    }
-    return 0;
-}
-
-static size_t spill_total_runs(const struct spill *s) {
-    size_t t = 0;
-    for (size_t lv = 0; lv < LEVELS; lv++) t += s->nruns[lv];
-    return t;
-}
-
-/*
- *  Merges whatever runs remain, across levels, into `out` as manifest lines.
- *  At most FANIN-1 runs per level remain, so with several levels populated
- *  there can be more than FANIN: those are first merged lowest level first
- *  (the smallest runs, so the least data is rewritten) until FANIN remain.
- */
-static int spill_finish(struct spill *s, FILE *out, struct belay_manifest_stats *tally,
-                        size_t *count) {
-    FILE *all[LEVELS * FANIN];
-    size_t n = 0;
-    for (size_t lv = 0; lv < LEVELS; lv++) {
-        for (size_t i = 0; i < s->nruns[lv]; i++) all[n++] = s->runs[lv][i];
-        s->nruns[lv] = 0;
-    }
-    int rc = 0;
-    while (n > FANIN) {
-        FILE *merged = open_tmp(s);
-        if (merged == NULL || merge(all, FANIN, merged, NULL, NULL) == -1 || fflush(merged) != 0) {
-            if (merged != NULL) fclose(merged);
-            rc = -1;
-            break;
-        }
-        for (size_t i = 0; i < FANIN; i++) fclose(all[i]);
-        memmove(all, all + FANIN, (n - FANIN) * sizeof *all);
-        n -= FANIN;
-        all[n++] = merged;
-    }
-    if (rc == 0) rc = merge(all, n, out, tally, count);
-    for (size_t i = 0; i < n; i++) fclose(all[i]);
-    return rc;
-}
-
-static int spill_add(struct spill *s, const char *path, size_t plen,
-                     const char *line, size_t llen, const struct recmeta *id) {
-    const size_t sz = 8 + plen + llen + IDENT_BYTES;
-    if (s->used + sz > s->budget && spill_flush(s) == -1) return -1;
-
-    if (s->n == s->cap) {
-        const size_t ncap = s->cap ? s->cap * 2 : 4096;
-        size_t *no = realloc(s->offs, ncap * sizeof *no);
-        if (no == NULL) goto nomem;
-        s->offs = no;
-        size_t *ns = realloc(s->scratch, ncap * sizeof *ns);
-        if (ns == NULL) goto nomem;
-        s->scratch = ns;
-        s->cap = ncap;
-    }
-
-    unsigned char *r = s->arena + s->used;
-    const uint32_t pl = (uint32_t)plen, ll = (uint32_t)llen;
-    memcpy(r, &pl, 4);
-    memcpy(r + 4, path, plen);
-    memcpy(r + 4 + plen, &ll, 4);
-    memcpy(r + 8 + plen, line, llen);
-    memcpy(r + 8 + plen + llen, id, IDENT_BYTES);
-    s->offs[s->n++] = s->used;
-    s->used += sz;
-    s->added++;
-    return 0;
-nomem:
-    belay_err_set(BELAY_ERR_NOMEM, 0, "manifest: out of memory");
-    return -1;
-}
-
-static void spill_free(struct spill *s) {
-    for (size_t lv = 0; lv < LEVELS; lv++)
-        for (size_t i = 0; i < s->nruns[lv]; i++) fclose(s->runs[lv][i]);
-    free(s->arena);
-    free(s->offs);
-    free(s->scratch);
-}
-
 /* ------------------------------------------------------------------------ */
 /* Walk                                                                      */
 /* ------------------------------------------------------------------------ */
@@ -513,7 +91,8 @@ struct walk_ctx {
     const struct belay_manifest_opts *opts;
     uint64_t root_dev;
     const char *scope;
-    struct spill *spill;
+    struct runs *runs;          /* every entry, packed, sorted by path */
+    unsigned char *pack;        /* ENTRY_PACK_MAX: one entry being packed */
     struct belay_entry e;       /* scratch; finished before any recursion */
     char *line;                 /* LINE_CAP */
     unsigned char *readbuf;     /* READ_CHUNK; also holds one xattr value */
@@ -756,23 +335,12 @@ static ssize_t rel_join(char *rel, size_t relsz, size_t rel_len, const char *nam
 }
 
 static int emit_one(struct walk_ctx *wc, const struct belay_entry *e) {
-    size_t llen = 0;
-    if (serialize(e, wc->line, LINE_CAP, &llen) == -1) return -1;
-
-    /* What the end-of-walk re-check compares. A directory whose listing was
-     * recorded is re-checked as a listing (a change flags it unstable),
-     * unless it is unstable already; everything else as an entry (a change
-     * flags it raced). */
-    struct recmeta id;
-    memset(&id, 0, sizeof id);
-    id.id = ident_of_entry(e);
-    if (e->type == BELAY_T_DIR && !e->unreadable && !e->is_mount)
-        id.kind = e->unstable ? RC_NONE : RC_LISTING;
-    else
-        id.kind = RC_ENTRY;
-    id.flags = (uint8_t)((e->unreadable ? REC_UNREADABLE : 0) | (e->unstable ? REC_UNSTABLE : 0) |
-                         (e->is_mount ? REC_MOUNT : 0));
-    return spill_add(wc->spill, e->path, e->path_len, wc->line, llen, &id);
+    const size_t n = entry_pack(e, wc->pack, ENTRY_PACK_MAX);
+    if (n == 0) {
+        belay_err_set(BELAY_ERR_RANGE, 0, "manifest: entry exceeds %u bytes", ENTRY_PACK_MAX);
+        return -1;
+    }
+    return runs_add(wc->runs, e->path, (uint32_t)e->path_len, wc->pack, (uint32_t)n);
 }
 
 static int emit_entry(struct walk_ctx *wc) { return emit_one(wc, &wc->e); }
@@ -1326,26 +894,37 @@ static int rs_to(struct rstack *rs, const char *dir, size_t dir_len) {
     return 0;
 }
 
-static bool ident_matches(const struct recmeta *m, const struct stat *st) {
-    const struct ident now = ident_of_stat(st);
-    return ident_same(&now, &m->id, ID_ALL);
+/* How the end-of-walk re-check treats an entry: a directory whose listing
+ * was recorded is re-checked as a listing (a change flags it unstable),
+ * unless it is unstable already; everything else as an entry (a change flags
+ * it raced). The verdict of each record goes, one byte per record in sorted
+ * order, to a side stream the output pass reads back. */
+enum { RC_NONE, RC_LISTING, RC_ENTRY };
+enum { VERDICT_NONE, VERDICT_LISTING, VERDICT_ENTRY };
+
+static int recheck_kind(const struct belay_entry *e) {
+    if (e->type == BELAY_T_DIR && !e->unreadable && !e->is_mount)
+        return e->unstable ? RC_NONE : RC_LISTING;
+    return RC_ENTRY;
 }
 
-/* Re-checks one record: sets id->mark and counts it. 0, or -1 if fatal. */
-static int recheck_one(struct rstack *rs, struct walk_ctx *wc,
-                       const unsigned char *path, uint32_t plen, struct recmeta *id) {
-    id->mark = MARK_NONE;
-    if (id->kind == RC_NONE) return 0;
+/* Re-checks one entry: *changed set. 0, or -1 if fatal. */
+static int recheck_one(struct rstack *rs, struct walk_ctx *wc, const struct belay_entry *e,
+                       int kind, bool *changed) {
+    *changed = false;
+    if (kind == RC_NONE) return 0;
+    const struct ident rec = ident_of_entry(e);
+    const unsigned char *path = (const unsigned char *)e->path;
+    const size_t plen = e->path_len;
 
     struct stat st;
     bool same = false;
     if (plen == 1 && path[0] == '.') {
-        same = wc->ops->fstat(wc->ops->ctx, rs->root_fd, &st) == 0 && ident_matches(id, &st);
-    } else if (id->kind == RC_LISTING) {
+        same = wc->ops->fstat(wc->ops->ctx, rs->root_fd, &st) == 0;
+    } else if (kind == RC_LISTING) {
         const int r = rs_to(rs, (const char *)path, plen);
         if (r == -1) return -1;
-        same = r == 0 && wc->ops->fstat(wc->ops->ctx, rs->fd[rs->n - 1], &st) == 0 &&
-               ident_matches(id, &st);
+        same = r == 0 && wc->ops->fstat(wc->ops->ctx, rs->fd[rs->n - 1], &st) == 0;
     } else {
         size_t base = plen;                             /* start of the last component */
         while (base > 0 && path[base - 1] != '/') base--;
@@ -1359,76 +938,68 @@ static int recheck_one(struct rstack *rs, struct walk_ctx *wc,
             bool mr, mk;
             const int parent = rs->n ? rs->fd[rs->n - 1] : rs->root_fd;
             if (stat_entry(wc, parent, name, &st, &mr, &mk) == 0) {
-                same = ident_matches(id, &st);
+                same = true;
             } else if (fatal_errno(errno)) {
                 belay_err_set(BELAY_ERR_IO, errno, "manifest: re-check: stat");
                 return -1;
             }
         }
     }
-    if (!same) {
-        id->mark = id->kind == RC_LISTING ? MARK_UNSTABLE : MARK_RACED;
+    if (same) {
+        const struct ident now = ident_of_stat(&st);
+        same = ident_same(&now, &rec, ID_ALL);
     }
+    *changed = !same;
     return 0;
 }
 
-/* Re-checks every record: in the arena (sorted already) when nothing was
- * spilled, else in each run file, whose marks are rewritten in place. */
-static int recheck(struct spill *s, struct walk_ctx *wc, int root_fd) {
+/* Re-checks every recorded entry, in sorted order, into `verdicts`. */
+static int recheck(struct walk_ctx *wc, int root_fd, struct belay_entry *e, FILE *verdicts) {
     struct rstack *rs = calloc(1, sizeof *rs);
-    unsigned char *pbuf = malloc(PATH_CAP);
     int rc = -1;
-    if (rs == NULL || pbuf == NULL) {
+    if (rs == NULL) {
         belay_err_set(BELAY_ERR_NOMEM, 0, "manifest: out of memory");
-        goto done;
+        return -1;
     }
     rs->root_fd = root_fd;
     rs->ops = wc->ops;
-
-    for (size_t i = 0; i < s->n; i++) {
-        unsigned char *r = s->arena + s->offs[i];
-        uint32_t pl, ll;
-        memcpy(&pl, r, 4);
-        memcpy(&ll, r + 4 + pl, 4);
-        struct recmeta id;
-        memcpy(&id, r + 8 + pl + ll, IDENT_BYTES);
-        if (recheck_one(rs, wc, r + 4, pl, &id) == -1) goto done;
-        memcpy(r + 8 + pl + ll, &id, IDENT_BYTES);
-    }
-
-    for (size_t lv = 0; lv < LEVELS; lv++) {
-        for (size_t k = 0; k < s->nruns[lv]; k++) {
-            FILE *f = s->runs[lv][k];
-            if (fseeko(f, 0, SEEK_SET) != 0) goto io;
-            for (;;) {
-                uint32_t pl, ll;
-                const size_t got = fread(&pl, 1, 4, f);
-                if (got == 0 && feof(f)) break;
-                if (got != 4 || pl == 0 || pl >= PATH_CAP || fread(pbuf, 1, pl, f) != pl ||
-                    fread(&ll, 1, 4, f) != 4 || ll == 0 || ll > LINE_CAP ||
-                    fseeko(f, (off_t)ll, SEEK_CUR) != 0)
-                    goto io;
-                struct recmeta id;
-                if (fread(&id, 1, IDENT_BYTES, f) != IDENT_BYTES) goto io;
-                if (recheck_one(rs, wc, pbuf, pl, &id) == -1) goto done;
-                if (id.mark != MARK_NONE &&
-                    (fseeko(f, -(off_t)IDENT_BYTES, SEEK_CUR) != 0 ||
-                     fwrite(&id, 1, IDENT_BYTES, f) != IDENT_BYTES ||
-                     fseeko(f, 0, SEEK_CUR) != 0))      /* switch back to reading */
-                    goto io;
-            }
-            if (fflush(f) != 0) goto io;
+    if (runs_rewind(wc->runs) == -1) goto done;
+    const unsigned char *key, *val;
+    uint32_t klen, vlen;
+    int got;
+    while ((got = runs_next(wc->runs, &key, &klen, &val, &vlen)) == 1) {
+        if (entry_unpack(val, vlen, key, klen, e) == -1) goto done;
+        const int kind = recheck_kind(e);
+        bool changed;
+        if (recheck_one(rs, wc, e, kind, &changed) == -1) goto done;
+        const int v = !changed ? VERDICT_NONE : kind == RC_LISTING ? VERDICT_LISTING : VERDICT_ENTRY;
+        if (fputc(v, verdicts) == EOF) {
+            belay_err_set(BELAY_ERR_IO, errno, "manifest: re-check: write failed");
+            goto done;
         }
     }
+    if (got == -1) goto done;
+    if (fflush(verdicts) != 0 || fseek(verdicts, 0, SEEK_SET) != 0) {
+        belay_err_set(BELAY_ERR_IO, errno, "manifest: re-check: write failed");
+        goto done;
+    }
     rc = 0;
-    goto done;
-io:
-    belay_err_set(BELAY_ERR_IO, errno, "manifest: re-check of a temporary run failed");
 done:
-    if (rs != NULL) rs_pop_to(rs, 0);
+    rs_pop_to(rs, 0);
     free(rs);
-    free(pbuf);
     return rc;
+}
+
+/* Anonymous temporaries beside the output, through the platform adapter. */
+struct tmpdir {
+    const struct fsops *ops;
+    char dir[PATH_MAX + 32];
+    char tmpl[PATH_MAX + 32];
+};
+
+static FILE *tmp_in_outdir(void *ctx) {
+    const struct tmpdir *t = ctx;
+    return t->ops->tmpfile_in(t->ops->ctx, t->dir, t->tmpl);
 }
 
 static int write_header(const struct fsops *ops, FILE *f, const char *scope_real,
@@ -1491,16 +1062,16 @@ int capture_write(const struct fsops *ops, const char *out_path, const char *sco
     }
 
     int rc = -1;
-    struct spill sp;
-    memset(&sp, 0, sizeof sp);
-    sp.ops = ops;
-    snprintf(sp.tmpl, sizeof sp.tmpl, "%s.run.XXXXXX", out_path);
+    struct tmpdir td = { .ops = ops };
+    snprintf(td.tmpl, sizeof td.tmpl, "%s.run.XXXXXX", out_path);
     {
         const char *slash = strrchr(out_path, '/');
-        if (slash == NULL)            snprintf(sp.dir, sizeof sp.dir, ".");
-        else if (slash == out_path)   snprintf(sp.dir, sizeof sp.dir, "/");
-        else snprintf(sp.dir, sizeof sp.dir, "%.*s", (int)(slash - out_path), out_path);
+        if (slash == NULL)            snprintf(td.dir, sizeof td.dir, ".");
+        else if (slash == out_path)   snprintf(td.dir, sizeof td.dir, "/");
+        else snprintf(td.dir, sizeof td.dir, "%.*s", (int)(slash - out_path), out_path);
     }
+    FILE *verdicts = NULL;
+    struct belay_entry *ebuf = malloc(sizeof *ebuf);
 
     struct walk_ctx *wc = calloc(1, sizeof *wc);
     char *rel = malloc(PATH_CAP);
@@ -1509,20 +1080,21 @@ int capture_write(const struct fsops *ops, const char *out_path, const char *sco
     FILE *out = NULL;
     snprintf(outtmp, sizeof outtmp, "%s.tmp.XXXXXX", out_path);
 
-    /* The budget must hold at least one maximal record. */
-    const size_t min_budget = 8 + PATH_CAP + LINE_CAP + IDENT_BYTES;
-    sp.budget = opts->run_bytes == 0 ? RUN_BYTES
-              : opts->run_bytes < min_budget ? min_budget : opts->run_bytes;
-    sp.arena = malloc(sp.budget);
-    if (wc == NULL || rel == NULL || sp.arena == NULL) {
+    if (wc == NULL || rel == NULL || ebuf == NULL) {
         belay_err_set(BELAY_ERR_NOMEM, 0, "manifest: out of memory");
         goto cleanup;
     }
+    /* The budget is raised to hold at least one maximal record. */
+    wc->runs = runs_new(opts->run_bytes == 0 ? RUN_BYTES : opts->run_bytes, PATH_CAP,
+                        ENTRY_PACK_MAX, tmp_in_outdir, &td);
+    if (wc->runs == NULL) goto cleanup;
+    wc->pack = malloc(ENTRY_PACK_MAX);
     wc->line = malloc(LINE_CAP);
     wc->readbuf = malloc(READ_CHUNK);
     wc->xlist = malloc(XLIST_CAP + 1);
     wc->xnames = malloc((XLIST_CAP / 2 + 1) * sizeof *wc->xnames);
-    if (wc->line == NULL || wc->readbuf == NULL || wc->xlist == NULL || wc->xnames == NULL) {
+    if (wc->pack == NULL || wc->line == NULL || wc->readbuf == NULL || wc->xlist == NULL ||
+        wc->xnames == NULL) {
         belay_err_set(BELAY_ERR_NOMEM, 0, "manifest: out of memory");
         goto cleanup;
     }
@@ -1530,7 +1102,6 @@ int capture_write(const struct fsops *ops, const char *out_path, const char *sco
     wc->opts = opts;
     wc->root_dev = (uint64_t)rst.st_dev;
     wc->scope = real;
-    wc->spill = &sp;
     wc->scope_len = strlen(real);
 
     /* Once per walk: can statx be used here, and is the scope on overlayfs?
@@ -1611,12 +1182,15 @@ int capture_write(const struct fsops *ops, const char *out_path, const char *sco
     }
     if (emit_one(wc, &root_e) == -1) goto cleanup;
 
-    /* Every record is now in the arena (sorted here) or in runs (the arena
-     * spilled first). Re-check them all before the output file exists. */
-    const bool in_memory = spill_total_runs(&sp) == 0;
-    if (in_memory) sort_offs(sp.arena, sp.offs, sp.scratch, sp.n);
-    else if (spill_flush(&sp) == -1) goto cleanup;
-    if (recheck(&sp, wc, root_fd) == -1) goto cleanup;
+    /* Every entry is recorded. Re-check them all before the output file
+     * exists, so belay's own output is never seen as a change. */
+    if (runs_seal(wc->runs) == -1) goto cleanup;
+    verdicts = tmp_in_outdir(&td);
+    if (verdicts == NULL) {
+        belay_err_set(BELAY_ERR_IO, errno, "manifest: cannot create temporary file");
+        goto cleanup;
+    }
+    if (recheck(wc, root_fd, ebuf, verdicts) == -1) goto cleanup;
 
     /* Output goes to a temporary name and is renamed into place. */
     const int ofd = mkstemp(outtmp);
@@ -1633,39 +1207,31 @@ int capture_write(const struct fsops *ops, const char *out_path, const char *sco
     }
     if (write_header(ops, out, real, opts, wc->line) == -1) goto cleanup;
 
+    /* The output pass: each entry with its re-check verdict applied, counted
+     * as emitted, serialized once. */
     struct belay_manifest_stats tally = { 0 };
-    size_t written = 0;
-    if (in_memory) {
-        /* Everything fit in one run, sorted above: write straight out --
-         * with the same strict-order check merge() applies, so a name the
-         * filesystem returns twice fails here too instead of producing a
-         * manifest the reader rejects. */
-        for (size_t i = 0; i < sp.n; i++) {
-            const unsigned char *r = sp.arena + sp.offs[i];
-            if (i > 0 && rec_cmp(sp.arena + sp.offs[i - 1], r) >= 0) {
-                belay_err_set(BELAY_ERR_CORRUPT, 0,
-                              "manifest: the filesystem listed one name twice; refusing");
-                goto cleanup;
-            }
-            uint32_t pl, ll;
-            memcpy(&pl, r, 4);
-            memcpy(&ll, r + 4 + pl, 4);
-            struct recmeta id;
-            memcpy(&id, r + 8 + pl + ll, IDENT_BYTES);
-            if (write_line(out, r + 8 + pl, ll, &id, &tally) == -1) {
-                belay_err_set(BELAY_ERR_IO, errno, "manifest: write failed");
-                goto cleanup;
-            }
+    if (runs_rewind(wc->runs) == -1) goto cleanup;
+    const unsigned char *key, *val;
+    uint32_t klen, vlen;
+    int got;
+    while ((got = runs_next(wc->runs, &key, &klen, &val, &vlen)) == 1) {
+        if (entry_unpack(val, vlen, key, klen, ebuf) == -1) goto cleanup;
+        const int v = fgetc(verdicts);
+        if (v == VERDICT_LISTING) outcome_apply(ebuf, FACET_LISTING, OUT_CHANGED, &wc->tally);
+        if (v == VERDICT_ENTRY)   outcome_apply(ebuf, FACET_ENTRY, OUT_CHANGED, &wc->tally);
+        outcome_count(&tally, ebuf);
+        size_t llen;
+        if (entry_serialize(ebuf, wc->line, LINE_CAP, &llen) == -1) goto cleanup;
+        if (fwrite(wc->line, 1, llen, out) != llen) {
+            belay_err_set(BELAY_ERR_IO, errno, "manifest: write failed");
+            goto cleanup;
         }
-        written = sp.n;
-    } else {
-        if (spill_finish(&sp, out, &tally, &written) == -1) goto cleanup;
     }
-
-    if (written != sp.added || tally.entries != written) {
+    if (got == -1) goto cleanup;
+    if (tally.entries != runs_count(wc->runs)) {
         belay_err_set(BELAY_ERR_CORRUPT, 0,
                       "manifest: internal error, %zu entries walked but %zu written",
-                      sp.added, written);
+                      runs_count(wc->runs), tally.entries);
         goto cleanup;
     }
 
@@ -1706,8 +1272,11 @@ int capture_write(const struct fsops *ops, const char *out_path, const char *sco
 cleanup:
     if (out != NULL) fclose(out);
     if (outtmp_live) unlink(outtmp);
-    spill_free(&sp);
+    if (verdicts != NULL) fclose(verdicts);
+    free(ebuf);
     if (wc != NULL) {
+        runs_free(wc->runs);
+        free(wc->pack);
         free(wc->line);
         free(wc->readbuf);
         free(wc->xlist);
