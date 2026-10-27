@@ -55,13 +55,13 @@ static void macos_xattr_source_close(void *ctx, struct xsrc *x) {
 
 static ssize_t macos_xattr_list(void *ctx, const struct xsrc *x, char *buf, size_t n) {
     (void)ctx;
-    return flistxattr(x->fd, buf, n, XATTR_NOFOLLOW);
+    return flistxattr(x->fd, buf, n, 0);
 }
 
 static ssize_t macos_xattr_get(void *ctx, const struct xsrc *x, const char *name, void *buf,
                                size_t n) {
     (void)ctx;
-    return fgetxattr(x->fd, name, buf, n, 0, XATTR_NOFOLLOW);
+    return fgetxattr(x->fd, name, buf, n, 0, 0);
 }
 
 static int macos_inode_flags(void *ctx, int fd, const struct stat *st, uint64_t *out) {
