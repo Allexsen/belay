@@ -153,7 +153,14 @@ struct belay_entry {
 struct belay_manifest_opts {
     uint64_t hash_max_bytes;
     uint64_t store_max_bytes;
-    const char *store_dir;              /* NULL disables content storage */
+    /*
+     *  NULL disables content storage. On Linux a copy is kept only if no
+     *  process has the file open for writing at the start and end of its
+     *  read (a lease probe; nothing is held). If SIGIO still has its default
+     *  action, the probe sets it to ignored: a writer opening the file
+     *  during the probe makes the kernel send SIGIO to belay's process.
+     */
+    const char *store_dir;
 
     /*
      *  Memory budget for the writer's sort buffer. 0 selects the default

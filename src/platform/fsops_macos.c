@@ -75,6 +75,14 @@ static bool macos_is_overlay(void *ctx, int root_fd) {
     return false;
 }
 
+/* No lease API: macOS cannot tell whether a writer has the file open, so
+ * the content store is unguarded here (spec, "What a hash, and a stored
+ * copy, prove"). */
+static int macos_writer_present(void *ctx, int fd) {
+    (void)ctx; (void)fd;
+    return -1;
+}
+
 static int macos_clock(void *ctx, struct timespec *ts) {
     (void)ctx;
     return clock_gettime(CLOCK_REALTIME, ts);
@@ -102,6 +110,7 @@ static const struct fsops macos_ops = {
     .xattr_get = macos_xattr_get,
     .inode_flags = macos_inode_flags,
     .is_overlay = macos_is_overlay,
+    .writer_present = macos_writer_present,
     .clock = macos_clock,
     .tmpfile_in = macos_tmpfile_in,
 };

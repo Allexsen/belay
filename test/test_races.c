@@ -50,6 +50,8 @@ enum arm { NONE, SWAP_ON_DIR_OPEN, SWAP_ON_READLINK, REPLACE_LINK_WITH_FILE,
            STATX_ENOSYS,             /* statx missing altogether */
            LINK_EMPTY,               /* readlinkat returns an empty target */
            XATTR_EIO,                /* the first fd xattr listing fails with EIO */
+           WRITER_DURING_READ,       /* a writer opens g_x while belay reads it */
+           WRITER_LEAVES_DURING_READ,  /* g_x's writer closes while belay reads it */
            MOUNT_AFTER_WALK };       /* tmpfs over g_x once the walk is done */
 static int g_flip;
 
@@ -76,6 +78,8 @@ static int swap_at(int fd, const char *a, const char *b) {
 static dev_t g_watch_dev;
 static int g_entered;
 
+/* WRITER_DURING_READ: the fd belay read g_x through, and the writer's. */
+static int g_target_fd = -1, g_writer = -1;
 
 static void watch(int dfd);
 static int t_openat(void *ctx, int fd, const char *name, int flags) {
@@ -126,7 +130,12 @@ static int t_openat(void *ctx, int fd, const char *name, int flags) {
             if (w >= 0) { if (write(w, "NEW!", 4) != 4) { /* best effort */ } close(w); }
         }
     }
-    return g_real->openat(g_real->ctx, fd, name, flags);
+    const int r = g_real->openat(g_real->ctx, fd, name, flags);
+    if ((g_arm == WRITER_DURING_READ || g_arm == WRITER_LEAVES_DURING_READ) && r >= 0 &&
+        !(flags & O_DIRECTORY) && g_x != NULL &&
+        strcmp(name, g_x) == 0)
+        g_target_fd = r;
+    return r;
 }
 
 static ssize_t t_readlinkat(void *ctx, int fd, const char *name, char *buf, size_t n) {
@@ -317,6 +326,25 @@ static const char *t_dir_next(void *ctx, void *d) {
     return e;
 }
 
+/* WRITER_DURING_READ: once belay has started reading g_x, some other
+ * process opens it for writing and keeps it open -- after the probe at open,
+ * before the one at EOF. */
+static ssize_t t_read(void *ctx, int fd, void *buf, size_t n) {
+    (void)ctx;
+    if (g_arm == WRITER_DURING_READ && !g_fired && fd == g_target_fd) {
+        char p[600];
+        snprintf(p, sizeof p, "%s/%s", g_root, g_x);
+        g_writer = open(p, O_WRONLY);
+        if (g_writer != -1) g_fired = 1;
+    }
+    if (g_arm == WRITER_LEAVES_DURING_READ && !g_fired && fd == g_target_fd && g_writer != -1) {
+        close(g_writer);                         /* the in-flight write completed */
+        g_writer = -1;
+        g_fired = 1;
+    }
+    return g_real->read(g_real->ctx, fd, buf, n);
+}
+
 static void decorate(void) {
     g_real = fsops_default();
     g_ops = *g_real;
@@ -327,12 +355,13 @@ static void decorate(void) {
     g_ops.fstatat = t_fstatat;
     g_ops.xattr_list = t_xattr_list;
     g_ops.dir_next = t_dir_next;
+    g_ops.read = t_read;
 }
 
 static void arm(enum arm a, const char *x, const char *y) {
     g_arm = a; g_x = x; g_y = y; g_fired = 0; g_replay = 0; g_dir = NULL; g_first = NULL;
     g_rootdir = NULL; g_walked = NULL; g_flip = 0; g_stepped = 0; g_step_s = 0; g_skew_s = 0; g_clock_reads = 0;
-    g_statx_calls = 0; g_statx_after = 0; g_watch_dev = 0; g_entered = 0;
+    g_statx_calls = 0; g_statx_after = 0; g_target_fd = -1; g_watch_dev = 0; g_entered = 0;
 }
 
 static void path(char *out, size_t n, const char *rel) { snprintf(out, n, "%s/%s", g_root, rel); }
@@ -384,6 +413,22 @@ static int check(struct belay_manifest_stats *st) {
     if (rc != 0) return rc;
     g_n = 0;
     return belay_manifest_read(g_m, collect, NULL);   /* the reader must accept it */
+}
+
+/* As check(), with the content store on. */
+static char g_store[300];
+static int check_store(struct belay_manifest_stats *st) {
+    snprintf(g_store, sizeof g_store, "/tmp/belay_races_store_%d", (int)getpid());
+    struct belay_manifest_opts o = {
+        .hash_max_bytes = BELAY_HASH_MAX_BYTES_DEFAULT,
+        .store_max_bytes = BELAY_STORE_MAX_BYTES_DEFAULT,
+        .store_dir = g_store,
+    };
+    const int rc = capture_write(&g_ops, g_m, g_root, &o, st);
+    g_arm = NONE;
+    if (rc != 0) return rc;
+    g_n = 0;
+    return belay_manifest_read(g_m, collect, NULL);
 }
 
 /* D1: a directory swapped between its stat and its open. Before, A's mode and
@@ -601,6 +646,63 @@ TEST(walk_consistency_reads_no_clock) {
     struct belay_manifest_stats st;
     ASSERT_EQ_INT(0, check(&st));
     ASSERT_EQ_INT(1, g_clock_reads);
+}
+
+/* A writer that opens the file while belay reads it -- after the probe at
+ * open -- is seen by the probe at EOF: the hash is recorded, the copy is not
+ * kept (Linux; macOS cannot tell and stores unguarded, as documented). */
+TEST(store_keeps_no_copy_when_a_writer_opens_during_the_read) {
+#ifdef __linux__
+    const bool guarded = true;
+#else
+    const bool guarded = false;
+#endif
+    reset();
+    touch("f", "text a writer is about to change\n");
+    arm(WRITER_DURING_READ, "f", NULL);
+    struct belay_manifest_stats st;
+    ASSERT_EQ_INT(0, check_store(&st));
+    ASSERT_TRUE(g_fired);
+    const struct belay_entry *e = find("f");
+    ASSERT_TRUE(e != NULL && e->has_hash);
+    ASSERT_EQ_INT(!guarded, e != NULL && e->has_stored);
+    if (g_writer != -1) { close(g_writer); g_writer = -1; }
+
+    arm(NONE, NULL, NULL);                       /* writer gone: kept */
+    ASSERT_EQ_INT(0, check_store(&st));
+    e = find("f");
+    ASSERT_TRUE(e != NULL && e->has_stored);
+    char cmd[400];
+    snprintf(cmd, sizeof cmd, "rm -rf '%s'", g_store);
+    if (system(cmd) != 0) { /* best effort */ }
+}
+
+/* The shape of a torn read: a writer whose write(2) is in flight when belay
+ * starts reading, and which finishes and closes before belay reaches EOF.
+ * Only the probe at open can see it. */
+TEST(store_keeps_no_copy_when_a_writer_leaves_during_the_read) {
+#ifdef __linux__
+    const bool guarded = true;
+#else
+    const bool guarded = false;
+#endif
+    reset();
+    touch("f", "text a writer is still writing\n");
+    char p[600];
+    snprintf(p, sizeof p, "%s/f", g_root);
+    arm(WRITER_LEAVES_DURING_READ, "f", NULL);
+    g_writer = open(p, O_WRONLY);
+    ASSERT_TRUE(g_writer != -1);
+    struct belay_manifest_stats st;
+    ASSERT_EQ_INT(0, check_store(&st));
+    ASSERT_TRUE(g_fired);
+    const struct belay_entry *e = find("f");
+    ASSERT_TRUE(e != NULL && e->has_hash);
+    ASSERT_EQ_INT(!guarded, e != NULL && e->has_stored);
+    if (g_writer != -1) { close(g_writer); g_writer = -1; }
+    char cmd[400];
+    snprintf(cmd, sizeof cmd, "rm -rf '%s'", g_store);
+    if (system(cmd) != 0) { /* best effort */ }
 }
 
 /* R2-5: I/O errors on one entry are recorded on it, not fatal. */
@@ -1029,6 +1131,8 @@ int main(void) {
     RUN(r3_clock_step_during_the_walk_is_not_a_change);
     RUN(r3_clock_behind_the_files_flags_nothing);
     RUN(walk_consistency_reads_no_clock);
+    RUN(store_keeps_no_copy_when_a_writer_opens_during_the_read);
+    RUN(store_keeps_no_copy_when_a_writer_leaves_during_the_read);
     RUN(r4_validator_never_enters_a_mount_that_appeared);
     RUN(r4_mount_over_the_scope_root_flags_the_root);
     RUN(r3_file_bind_mounted_from_another_fs_is_a_boundary_with_or_without_statx);

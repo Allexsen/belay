@@ -104,7 +104,7 @@ owner is invisible.
 | `rdev` | int | every `blk`, `chr` | The device number. Without it a replaced device node, or an overlayfs whiteout (char 0,0), is indistinguishable from the original. |
 | `link_target` / `link_target_b64` | string | every `lnk` | The link's bytes, verbatim and unresolved; `link_target_b64`, base64, when they are not valid UTF-8. Empty only on an `unreadable` link, meaning the target is unknown. |
 | `target_outside_scope` | bool | `lnk` | `true` when the target resolves lexically outside the scope. **Advisory only** — never drives a decision (§5.1.1). |
-| `stored` | string | `reg` | Present when content was copied: the `store/` key, which is the content's sha256. |
+| `stored` | string | `reg` | Present when content was copied: the `store/` key, which is the content's sha256. On Linux no copy is kept of a file another process had open for writing while belay read it (see "What a hash, and a stored copy, prove"). |
 | `mount` | bool | any type | `true`. The entry is the root of another mount. Where statx can say so (`STATX_ATTR_MOUNT_ROOT`, Linux 5.8+), its answer is used alone: it catches bind mounts from the same filesystem, and it does not mistake a btrfs subvolume (a directory with its own `dev`, not a mount) for one. Without it, an entry whose `dev` differs from the scope root's is a mount -- except a non-directory in an overlayfs scope, where every file carries its layer's device. A mount is recorded and **never read or descended** (§5.1.1): a mounted regular file carries `unverified` and no hash, and **for a directory the subtree below it is ABSENT**: `diff` MUST report it as *not captured*, never as *unchanged*. |
 | `unreadable` | bool | `reg`, `dir`, `lnk` | `true`. belay could not capture this entry's contents: a directory it could not open or search (permission, or readable-but-not-searchable), a directory swapped for another between its stat and its open, a directory beyond the depth limit (128) or whose path leaves no room for a child name, a file it could not open or read, or a symlink whose target could not be read or kept changing while being read. **For a directory, the entire subtree below it is ABSENT.** `diff` MUST report such a subtree as *contents unknown* and never as *unchanged*. Without this field an unreadable directory is byte-identical to an empty one. |
 | `raced` | bool | any type | `true`. The entry changed after it was recorded, before the walk ended: re-stat'ed at the end of the walk, its inode, device, mode, size, mtime or ctime differed, or it could not be reached without entering a mount. What is recorded held when belay read it, but not at the end. (A listed directory that changed is flagged `unstable` instead, since its listing is what no longer holds.) |
@@ -276,24 +276,47 @@ Equality compares timestamps, which bounds what it can see:
 
 ## What a hash, and a stored copy, prove
 
-A recorded `sha256`, and the copy under `store/` when there is one, are the bytes of one read
-pass during which the file's size, mtime and ctime did not change (checked on the open file
-before and after the read, and against the stat that was recorded). **That does not prove the
-bytes are a state the file really had.** It catches a write that starts during the read, but not
-one already in flight when the read began: `write(2)` updates the timestamps first and copies the
-data afterwards, so a read that overlaps the copy sees part old and part new bytes with timestamps
-that no longer move. Measured on Linux 6.18 (fine-grained timestamps) with a 4 MiB in-place
-rewrite racing the read: 56 of 2,000 reads were torn and passed the check on ext4, 11 of 2,000 on
-tmpfs (`bench/spike_torn.c`). On kernels before 6.13, which stamp files once per timer tick, and
-on filesystems with coarse timestamps, two writes inside one tick widen the window further.
+A recorded `sha256` is the hash of one read pass during which the file's size, mtime and ctime
+did not change (checked on the open file before and after the read, and against the stat that
+was recorded). **That alone does not prove the bytes are a state the file really had.** It
+catches a write that starts during the read, but not one already in flight when the read began:
+`write(2)` updates the timestamps first and copies the data afterwards, so a read that overlaps
+the copy can see part old and part new bytes while the timestamps no longer move. Measured on
+Linux 6.18 with a 4 MiB in-place rewrite racing the read: 56 of 2,000 reads were torn and passed
+the check on ext4, 11 of 2,000 on tmpfs (`bench/spike_torn.c`). Against a writer storing through
+a shared mapping, which moves no timestamp at all, an independent review measured 634 of 1,000
+on ext4.
 
-So whenever something writes to a file during the check, its hash -- and its stored copy -- can be
-of bytes the file never held, on any kernel. belay does not yet detect this. git's racy rule
-(decided) narrows it; closing it is part of the design-level review of walk consistency.
+**A stored copy is held to a stricter rule**, because a restore from a torn copy would write a
+file that never existed. On Linux, belay keeps a copy only if no process had the file open for
+writing, or mapped shared-writable, when the read began and when it ended. It asks the kernel
+with a lease probe: a read lease taken and released at once, so nothing is held and a writer is
+never delayed by more than those two calls. A `write(2)` in flight holds its file open, so the
+case above is always seen. The hash is still recorded, without a copy: at worst a wrong line in
+a diff, never corrupted data.
 
-The window exists only while something writes to the tree during the check. In RL mode the
+What the store rule does not cover:
+
+- On kernels before 6.13 and on coarse-timestamp filesystems, a writer that opens the file,
+  writes in place and closes it entirely within one read, inside one timestamp tick, is seen by
+  neither probe nor the stability check. (This follows from the kernel's rules; it was not
+  observed.)
+- Where the probe cannot tell, the copy is kept unguarded: on macOS, which has no lease API; on
+  filesystems without lease support; and for files belay's user does not own, unless it runs
+  with `CAP_LEASE` (root does).
+- On Linux, if SIGIO still has its default action, belay sets it to ignored: a writer opening
+  the file during the probe makes the kernel send SIGIO, whose default action would end the
+  process.
+
+The hash itself carries no such guarantee. On real workloads (a build-and-test loop, and large
+npm installs, measured with `bench/measure`) no torn hash was found among about 1.5 million
+checked against the files' final content; the files read while a writer held them open showed
+real, partly written states. **That means none of those workloads had an in-place overwriter or
+a shared-mapping writer, not that torn reads do not happen**: both tear reads, as measured above.
+
+All of this applies only while something writes to the tree during the check. In RL mode the
 policy's processes are killed before the scan, and host-reader mode reads from outside the
-sandbox, so this is a limit of dev-tier and live checks, not of the trust model.
+sandbox, so these are limits of dev-tier and live checks, not of the trust model.
 
 (Two earlier statements were wrong. The commit that introduced the store said "the store never
 holds bytes that match no state of the file"; its first correction said that holds on Linux

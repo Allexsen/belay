@@ -95,7 +95,9 @@ const struct entry_field_def ENTRY_FIELDS[F_COUNT] = {
         "`true` when the target resolves lexically outside the scope. **Advisory only** — "
         "never drives a decision (§5.1.1)." },
     [F_STORED] = { "stored", NULL, "string", false,
-        "Present when content was copied: the `store/` key, which is the content's sha256." },
+        "Present when content was copied: the `store/` key, which is the content's sha256. "
+        "On Linux no copy is kept of a file another process had open for writing while belay "
+        "read it (see \"What a hash, and a stored copy, prove\")." },
     [F_MOUNT] = { "mount", NULL, "bool", false,
         "`true`. The entry is the root of another mount. Where statx can say so "
         "(`STATX_ATTR_MOUNT_ROOT`, Linux 5.8+), its answer is used alone: it catches bind "

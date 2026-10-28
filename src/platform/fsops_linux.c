@@ -14,6 +14,7 @@
 
 #include <errno.h>
 #include <fcntl.h>
+#include <signal.h>
 #include <linux/fs.h>                   /* FS_IOC_GETFLAGS */
 #include <stdio.h>
 #include <string.h>
@@ -107,6 +108,42 @@ static bool linux_is_overlay(void *ctx, int root_fd) {
     return fstatfs(root_fd, &sfs) == 0 && sfs.f_type == OVERLAYFS_MAGIC;
 }
 
+/*
+ *  A read lease is granted only while no process has the file open for
+ *  writing or mapped shared-writable (both keep the inode's write count up),
+ *  so taking one and releasing it at once answers the question without
+ *  holding anything: a writer is never blocked by more than these two calls.
+ *  A write(2) in flight holds its file open, so one already copying data
+ *  when the read begins is always seen.
+ *
+ *  A writer opening inside that window breaks the lease, and the kernel tells
+ *  the holder with SIGIO, whose default action terminates the process. So if
+ *  SIGIO still has its default disposition it is set to ignored, once; a
+ *  handler the host installed is left alone (it may see a spurious SIGIO).
+ *
+ *  Any other error means "cannot tell": EACCES (the file is not ours and we
+ *  lack CAP_LEASE), EINVAL (a filesystem that does not support leases).
+ */
+static int linux_writer_present(void *ctx, int fd) {
+    (void)ctx;
+    static int sigio_checked;
+    if (!sigio_checked) {
+        struct sigaction cur;
+        if (sigaction(SIGIO, NULL, &cur) == 0 && cur.sa_handler == SIG_DFL) {
+            struct sigaction ign = { 0 };
+            ign.sa_handler = SIG_IGN;
+            sigemptyset(&ign.sa_mask);
+            sigaction(SIGIO, &ign, NULL);
+        }
+        sigio_checked = 1;
+    }
+    if (fcntl(fd, F_SETLEASE, F_RDLCK) == 0) {
+        fcntl(fd, F_SETLEASE, F_UNLCK);
+        return 0;
+    }
+    return errno == EAGAIN ? 1 : -1;
+}
+
 static int linux_clock(void *ctx, struct timespec *ts) {
     (void)ctx;
     return clock_gettime(CLOCK_REALTIME, ts);
@@ -147,6 +184,7 @@ static const struct fsops linux_ops = {
     .xattr_get = linux_xattr_get,
     .inode_flags = linux_inode_flags,
     .is_overlay = linux_is_overlay,
+    .writer_present = linux_writer_present,
     .clock = linux_clock,
     .tmpfile_in = linux_tmpfile_in,
 };

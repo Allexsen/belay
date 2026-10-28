@@ -64,6 +64,12 @@ struct fsops {
     /* Scope properties, asked once per walk. */
     bool (*is_overlay)(void *ctx, int root_fd);
 
+    /* Whether, at this instant, some process has the regular file open for
+     * writing or mapped shared-writable: 1 yes, 0 no, -1 cannot tell (no
+     * facility on this platform or filesystem, or not permitted). Must not
+     * leave anything held on the file. Gates the content store (capture.c). */
+    int (*writer_present)(void *ctx, int fd);
+
     /* Wall-clock time, for the header's created_ns only: walk consistency
      * reads no clock (consistency.c). */
     int (*clock)(void *ctx, struct timespec *ts);
