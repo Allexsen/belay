@@ -25,8 +25,6 @@
  * handle the platform opened for the purpose (see xattr_source_open). */
 struct xsrc { int fd; const char *path; int own; char buf[64]; };
 
-enum belay_clock { BELAY_CLOCK_REAL, BELAY_CLOCK_COARSE };
-
 struct fsops {
     void *ctx;
 
@@ -66,8 +64,20 @@ struct fsops {
     /* Scope properties, asked once per walk. */
     bool (*is_overlay)(void *ctx, int root_fd);
 
-    /* -1 for a clock the platform does not have (BELAY_CLOCK_COARSE). */
-    int (*clock)(void *ctx, enum belay_clock which, struct timespec *ts);
+    /* Whether, at this instant, some process has the regular file open for
+     * writing or mapped shared-writable: 1 yes, 0 no, -1 cannot tell (no
+     * facility on this platform or filesystem, or not permitted). Must not
+     * leave anything held on the file. Gates the content store (capture.c). */
+    int (*writer_present)(void *ctx, int fd);
+    /* Bracket every writer_present call of one capture: begin prepares what
+     * the probe needs, end puts it back (Linux: SIGIO, see fsops_linux.c).
+     * Captures may overlap in one process; the platform counts them. */
+    void (*probe_begin)(void *ctx);
+    void (*probe_end)(void *ctx);
+
+    /* Wall-clock time, for the header's created_ns only: walk consistency
+     * reads no clock (consistency.c). */
+    int (*clock)(void *ctx, struct timespec *ts);
 
     /* An anonymous temporary file in `dir`, never linked into it where the
      * platform allows (so the directory does not change), else created from

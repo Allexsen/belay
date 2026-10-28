@@ -58,10 +58,6 @@ struct walk_ctx {
     bool   extras_done;         /* this attempt already read the entry's extras */
     struct walk_tally tally;    /* what no emitted entry carries: vanished */
 
-    /* Walk start, realtime ns (see belay_manifest_write): a directory whose
-     * ctime lies between this and "now" changed during the walk. */
-    int64_t walk_start_ns;
-
     /* Decided once per walk, never by one entry's error: whether statx works
      * here (a seccomp profile may answer EPERM for it), and whether the scope
      * root is on overlayfs, where non-directories carry their layer's
@@ -88,10 +84,21 @@ struct tmpdir {
     char tmpl[PATH_MAX + 32];
 };
 
+/* What a directory's listing held, in any order: the number of names and two
+ * independent 64-bit sums of a per-name hash. It detects a listing that
+ * differs; it is not an integrity check against someone crafting names. */
+struct listing { uint64_t n, a, b; };
+
+/* A record in the sorter: the packed entry, then the listing its directory
+ * had during the walk (zero for anything else). */
+#define RECORD_MAX (ENTRY_PACK_MAX + sizeof(struct listing))
+
 /* capture.c */
 bool cap_fatal_errno(int err);
 int  cap_stat_entry(const struct walk_ctx *wc, int dfd, const char *name, struct stat *st,
                     bool *mount_root, bool *mount_known);
+bool cap_crossed(const struct walk_ctx *wc, const struct stat *st, bool mount_root,
+                 bool mount_known);
 void cap_fill_from_stat(struct belay_entry *e, const struct stat *st);
 int  cap_read_extras(struct walk_ctx *wc, int fd, int pfd, const char *name,
                      const struct stat *st);
@@ -101,19 +108,20 @@ int  cap_read_file(int pfd, const char *name, const struct stat *st, const char 
                    size_t rel_len, struct walk_ctx *wc);
 int  cap_open_dir(int pfd, const char *name, const struct stat *st, const char *rel,
                   size_t rel_len, int depth, struct walk_ctx *wc, int *out_fd);
-int  cap_emit(struct walk_ctx *wc, const struct belay_entry *e);
+int  cap_emit(struct walk_ctx *wc, const struct belay_entry *e, const struct listing *l);
+int  cap_record_unpack(const unsigned char *val, uint32_t vlen, const unsigned char *key,
+                       uint32_t klen, struct belay_entry *e, struct listing *l);
 
 /* walk.c */
-int  cap_walk(int dfd, char *rel, size_t relsz, size_t rel_len, int depth, struct walk_ctx *wc);
+int  cap_walk(int dfd, char *rel, size_t relsz, size_t rel_len, int depth, struct walk_ctx *wc,
+              struct listing *seen);
 
 /* consistency.c: every judgment of "did it change while belay looked". */
-void cons_walk_begin(struct walk_ctx *wc);
+void cons_listing_add(struct listing *l, const char *name);
 bool cons_file_opened(const struct stat *recorded, const struct stat *opened);
 bool cons_file_read(const struct stat *opened, const struct stat *after, uint64_t nread);
 bool cons_link_read(const struct stat *recorded, const struct stat *again, size_t target_len);
 enum outcome cons_dir_opened(const struct stat *recorded, const struct stat *opened);
-bool cons_changed_during_walk(const struct walk_ctx *wc, const struct belay_entry *dir);
-bool cons_listing_held(const struct walk_ctx *wc, int dfd, const struct belay_entry *dir);
 int  cap_recheck(struct walk_ctx *wc, int root_fd, struct belay_entry *e, FILE *verdicts);
 
 /* publish.c */

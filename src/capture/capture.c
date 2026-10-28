@@ -237,6 +237,26 @@ int cap_stat_entry(const struct walk_ctx *wc, int dfd, const char *name, struct 
     return wc->ops->fstatat(wc->ops->ctx, dfd, name, st, AT_SYMLINK_NOFOLLOW);
 }
 
+/*
+ *  Whether an entry stat'ed by cap_stat_entry is a capture boundary: the
+ *  root of another mount, of ANY type -- recorded, never read or descended.
+ *  Where statx can say whether this is a mount root, its answer is used
+ *  alone: st_dev is only a proxy, and a wrong one both ways -- a btrfs
+ *  subvolume is a directory with its own st_dev but no mount, and on
+ *  overlayfs (xino off) every non-directory carries its layer's device.
+ *  Without statx (kernels before 5.8, or statx blocked), st_dev decides for
+ *  every type, except non-directories of an overlayfs scope.
+ *  (Directories-only everywhere hashed a file bind-mounted from another
+ *  filesystem as a local file -- verified.) The walk and the end-of-walk
+ *  validator both decide by this, so the validator never enters a mount the
+ *  walk would not have.
+ */
+bool cap_crossed(const struct walk_ctx *wc, const struct stat *st, bool mount_root,
+                 bool mount_known) {
+    if (mount_known) return mount_root;
+    return (uint64_t)st->st_dev != wc->root_dev && (S_ISDIR(st->st_mode) || !wc->scope_overlay);
+}
+
 /* Errors that are belay's own resource exhaustion rather than a property of
  * one entry: these stay fatal, loudly. Everything else about one entry is
  * recorded on that entry and the walk goes on. */
@@ -354,8 +374,22 @@ int cap_read_file(int pfd, const char *name, const struct stat *st, const char *
             belay_interp_classify(wc->abs, wc->scope_len + sep + rel_len, &claim);
         }
     }
-    const bool want = wc->store != NULL && claim.keep != BELAY_KEEP_HASH &&
-                      (claim.keep == BELAY_KEEP_STORE || e->size <= wc->opts->store_max_bytes);
+    bool want = wc->store != NULL && claim.keep != BELAY_KEEP_HASH &&
+                (claim.keep == BELAY_KEEP_STORE || e->size <= wc->opts->store_max_bytes);
+
+    /*
+     *  A copy is kept only if no writer had the file open when the read
+     *  began, nor when it ended (fsops writer_present). The stability check
+     *  cannot see a write(2) already in flight -- it stamps the file before
+     *  copying data -- so the bytes read may be a mix no state of the file
+     *  ever held, and a restore from that copy would write a file that never
+     *  existed. A writer in flight holds the file open, so the probe sees it.
+     *  The hash is still recorded: at worst a wrong line in a diff, never
+     *  corrupted data. Where the platform cannot tell (-1: macOS, a
+     *  filesystem without leases, a file not ours) the copy is kept
+     *  unguarded, as the spec says.
+     */
+    if (want && wc->ops->writer_present(wc->ops->ctx, fd) == 1) want = false;
 
     struct belay_store_tx tx;
     if (want && belay_store_begin(wc->store, &tx) == -1) {
@@ -366,6 +400,10 @@ int cap_read_file(int pfd, const char *name, const struct stat *st, const char *
     uint64_t nread = 0;
     bool binary = false;
     const int h = hash_fd(wc->ops, fd, wc->readbuf, e->sha256_hex, &nread, want ? &tx : NULL, &binary);
+    if (h == 0 && want && wc->ops->writer_present(wc->ops->ctx, fd) == 1) {
+        belay_store_abort(&tx);                 /* a writer opened during the read */
+        want = false;
+    }
     if (h != 0) {
         if (want) belay_store_abort(&tx);
         close(fd);
@@ -456,11 +494,24 @@ int cap_open_dir(int pfd, const char *name, const struct stat *st, const char *r
     return V_OK;
 }
 
-int cap_emit(struct walk_ctx *wc, const struct belay_entry *e) {
+int cap_emit(struct walk_ctx *wc, const struct belay_entry *e, const struct listing *l) {
     const size_t n = entry_pack(e, wc->pack, ENTRY_PACK_MAX);
     if (n == 0) {
         belay_err_set(BELAY_ERR_RANGE, 0, "manifest: entry exceeds %u bytes", ENTRY_PACK_MAX);
         return -1;
     }
-    return runs_add(wc->runs, e->path, (uint32_t)e->path_len, wc->pack, (uint32_t)n);
+    const struct listing none = { 0, 0, 0 };
+    memcpy(wc->pack + n, l != NULL ? l : &none, sizeof none);
+    return runs_add(wc->runs, e->path, (uint32_t)e->path_len, wc->pack,
+                    (uint32_t)(n + sizeof none));
+}
+
+int cap_record_unpack(const unsigned char *val, uint32_t vlen, const unsigned char *key,
+                      uint32_t klen, struct belay_entry *e, struct listing *l) {
+    if (vlen < sizeof *l) {
+        belay_err_set(BELAY_ERR_IO, 0, "manifest: temporary record is malformed");
+        return -1;
+    }
+    memcpy(l, val + vlen - sizeof *l, sizeof *l);
+    return entry_unpack(val, vlen - sizeof *l, key, klen, e);
 }

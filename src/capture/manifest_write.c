@@ -95,6 +95,7 @@ int capture_write(const struct fsops *ops, const char *out_path, const char *sco
     char *rel = malloc(PATH_CAP);
     char outtmp[PATH_MAX + 32];
     bool outtmp_live = false;   /* a temp output exists on disk and must go */
+    bool probing = false;       /* ops->probe_begin ran: end it */
     FILE *out = NULL;
     snprintf(outtmp, sizeof outtmp, "%s.tmp.XXXXXX", out_path);
 
@@ -104,9 +105,9 @@ int capture_write(const struct fsops *ops, const char *out_path, const char *sco
     }
     /* The budget is raised to hold at least one maximal record. */
     wc->runs = runs_new(opts->run_bytes == 0 ? RUN_BYTES : opts->run_bytes, PATH_CAP,
-                        ENTRY_PACK_MAX, cap_tmpfile, &td);
+                        RECORD_MAX, cap_tmpfile, &td);
     if (wc->runs == NULL) goto cleanup;
-    wc->pack = malloc(ENTRY_PACK_MAX);
+    wc->pack = malloc(RECORD_MAX);
     wc->line = malloc(LINE_CAP);
     wc->readbuf = malloc(READ_CHUNK);
     wc->xlist = malloc(XLIST_CAP + 1);
@@ -139,13 +140,15 @@ int capture_write(const struct fsops *ops, const char *out_path, const char *sco
         }
         memcpy(wc->abs, real, wc->scope_len);
         if (belay_store_open(opts->store_dir, &wc->store) == -1) goto cleanup;
+        /* Copies are gated by the writer probe (capture.c), which needs
+         * the platform prepared for it until the capture is over. */
+        ops->probe_begin(ops->ctx);
+        probing = true;
     }
-
-    cons_walk_begin(wc);
 
     /* The scope root itself is an entry, path ".". Without it a chmod or
      * chown on the root is invisible. Like every directory it is emitted
-     * after its listing, so a change during the walk can be recorded on it. */
+     * after its listing, so a listing that failed part way is recorded on it. */
     memset(&wc->e, 0, sizeof wc->e);
     cap_fill_from_stat(&wc->e, &rst);
     wc->extras_done = false;
@@ -154,6 +157,7 @@ int capture_write(const struct fsops *ops, const char *out_path, const char *sco
     wc->e.path_len = 1;
     struct belay_entry root_e;
     memcpy(&root_e, &wc->e, sizeof root_e);
+    struct listing root_seen = { 0, 0, 0 };
 
     /* A scope root that can be listed but not searched has contents belay
      * cannot stat: flag it, rather than fail on its first child. */
@@ -162,13 +166,12 @@ int capture_write(const struct fsops *ops, const char *out_path, const char *sco
         outcome_apply(&root_e, FACET_LISTING, OUT_DENIED, &wc->tally);
     } else {
         rel[0] = '\0';
-        const int wr = cap_walk(root_fd, rel, PATH_CAP, 0, 0, wc);
+        const int wr = cap_walk(root_fd, rel, PATH_CAP, 0, 0, wc, &root_seen);
         if (wr == -1) goto cleanup;
 
-        if (wr == W_INCOMPLETE || !cons_listing_held(wc, root_fd, &root_e))
-            outcome_apply(&root_e, FACET_LISTING, OUT_CHANGED, &wc->tally);
+        if (wr == W_INCOMPLETE) outcome_apply(&root_e, FACET_LISTING, OUT_CHANGED, &wc->tally);
     }
-    if (cap_emit(wc, &root_e) == -1) goto cleanup;
+    if (cap_emit(wc, &root_e, &root_seen) == -1) goto cleanup;
 
     /* Every entry is recorded. Re-check them all before the output file
      * exists, so belay's own output is never seen as a change. */
@@ -205,7 +208,8 @@ int capture_write(const struct fsops *ops, const char *out_path, const char *sco
     uint32_t klen, vlen;
     int got;
     while ((got = runs_next(wc->runs, &key, &klen, &val, &vlen)) == 1) {
-        if (entry_unpack(val, vlen, key, klen, ebuf) == -1) goto cleanup;
+        struct listing unused;
+        if (cap_record_unpack(val, vlen, key, klen, ebuf, &unused) == -1) goto cleanup;
         const int v = fgetc(verdicts);
         if (v == VERDICT_LISTING) outcome_apply(ebuf, FACET_LISTING, OUT_CHANGED, &wc->tally);
         if (v == VERDICT_ENTRY)   outcome_apply(ebuf, FACET_ENTRY, OUT_CHANGED, &wc->tally);
@@ -269,6 +273,7 @@ int capture_write(const struct fsops *ops, const char *out_path, const char *sco
     rc = 0;
 
 cleanup:
+    if (probing) ops->probe_end(ops->ctx);
     if (out != NULL) fclose(out);
     if (outtmp_live) unlink(outtmp);
     if (verdicts != NULL) fclose(verdicts);

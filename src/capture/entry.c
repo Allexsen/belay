@@ -77,11 +77,10 @@ const struct entry_field_def ENTRY_FIELDS[F_COUNT] = {
     [F_UNSTABLE] = { "unstable", NULL, "bool", false,
         "`true`. On a regular file: it changed while being read (size, mtime or ctime moved, "
         "or the inode opened was not the one stat'ed); no hash is recorded, because the bytes "
-        "read describe no state the file ever had. On a directory: **its listing is not a "
-        "complete, single-instant listing** -- it changed during the walk (its ctime lies "
-        "between the walk's start and the moment belay reached it; its mtime or ctime moved "
-        "between its stat and the end of its subtree's walk; or the end-of-walk re-check found "
-        "it changed since it was recorded), or the listing failed part way (it could not be "
+        "read describe no state the file ever had. On a directory: **its listing is not its "
+        "listing at the end of the walk** -- the end-of-walk validator found it changed since "
+        "it was recorded (its inode, device, mode, mtime or ctime differ, it is now a mount, or "
+        "it can no longer be reached), or the listing failed part way (it could not be "
         "read as a directory stream, a `readdir` error, a child that could not be stat'ed at "
         "all, or a child name too long to fit the path limit). Entries may be missing from it "
         "or recorded under another directory; the comparator MUST NOT read its children as a "
@@ -96,7 +95,9 @@ const struct entry_field_def ENTRY_FIELDS[F_COUNT] = {
         "`true` when the target resolves lexically outside the scope. **Advisory only** — "
         "never drives a decision (§5.1.1)." },
     [F_STORED] = { "stored", NULL, "string", false,
-        "Present when content was copied: the `store/` key, which is the content's sha256." },
+        "Present when content was copied: the `store/` key, which is the content's sha256. "
+        "On Linux no copy is kept of a file another process had open for writing while belay "
+        "read it (see \"What a hash, and a stored copy, prove\")." },
     [F_MOUNT] = { "mount", NULL, "bool", false,
         "`true`. The entry is the root of another mount. Where statx can say so "
         "(`STATX_ATTR_MOUNT_ROOT`, Linux 5.8+), its answer is used alone: it catches bind "
@@ -118,8 +119,9 @@ const struct entry_field_def ENTRY_FIELDS[F_COUNT] = {
         "directory is byte-identical to an empty one." },
     [F_RACED] = { "raced", NULL, "bool", false,
         "`true`. The entry changed after it was recorded, before the walk ended: re-stat'ed "
-        "at the end of the walk, its inode, mode, size, mtime or ctime differed, or it could "
-        "not be reached. What is recorded held when belay read it, but not at the end. (A "
+        "at the end of the walk, its inode, device, mode, size, mtime or ctime differed, or it "
+        "could not be reached without entering a mount. What is recorded held when belay read "
+        "it, but not at the end. (A "
         "listed directory that changed is flagged `unstable` instead, since its listing is "
         "what no longer holds.)" },
 };

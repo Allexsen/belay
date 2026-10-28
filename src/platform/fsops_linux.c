@@ -14,6 +14,9 @@
 
 #include <errno.h>
 #include <fcntl.h>
+#include <pthread.h>
+#include <signal.h>
+#include <stdbool.h>
 #include <linux/fs.h>                   /* FS_IOC_GETFLAGS */
 #include <stdio.h>
 #include <string.h>
@@ -107,13 +110,73 @@ static bool linux_is_overlay(void *ctx, int root_fd) {
     return fstatfs(root_fd, &sfs) == 0 && sfs.f_type == OVERLAYFS_MAGIC;
 }
 
-static int linux_clock(void *ctx, enum belay_clock which, struct timespec *ts) {
+/*
+ *  A read lease is granted only while no process has the file open for
+ *  writing or mapped shared-writable (both keep the inode's write count up),
+ *  so taking one and releasing it at once answers the question without
+ *  holding anything: a writer is never blocked by more than these two calls.
+ *  A write(2) in flight holds its file open, so one already copying data
+ *  when the read begins is always seen.
+ *
+ *  Any other error means "cannot tell": EACCES (the file is not ours and we
+ *  lack CAP_LEASE), EINVAL (a filesystem that does not support leases).
+ */
+static int linux_writer_present(void *ctx, int fd) {
     (void)ctx;
-#ifdef CLOCK_REALTIME_COARSE
-    if (which == BELAY_CLOCK_COARSE) return clock_gettime(CLOCK_REALTIME_COARSE, ts);
-#else
-    if (which == BELAY_CLOCK_COARSE) return -1;
-#endif
+    if (fcntl(fd, F_SETLEASE, F_RDLCK) == 0) {
+        fcntl(fd, F_SETLEASE, F_UNLCK);
+        return 0;
+    }
+    return errno == EAGAIN ? 1 : -1;
+}
+
+/*
+ *  A writer opening the file inside the probe's window breaks the lease, and
+ *  the kernel tells the holder with SIGIO, whose default action ends the
+ *  process. So while a capture probes, SIGIO at its default action is set to
+ *  ignored; a handler the host installed is left alone (it may see a
+ *  spurious SIGIO). When the last overlapping capture ends, the disposition
+ *  is put back -- unless the host changed it meanwhile. libbelay is a
+ *  library: the host must not inherit a process-wide signal change.
+ */
+static pthread_mutex_t sigio_lock = PTHREAD_MUTEX_INITIALIZER;
+static int sigio_captures;
+static bool sigio_changed;
+static struct sigaction sigio_saved;
+
+static void linux_probe_begin(void *ctx) {
+    (void)ctx;
+    pthread_mutex_lock(&sigio_lock);
+    if (sigio_captures++ == 0) {
+        struct sigaction cur;
+        sigio_changed = false;
+        if (sigaction(SIGIO, NULL, &cur) == 0 && !(cur.sa_flags & SA_SIGINFO) &&
+            cur.sa_handler == SIG_DFL) {
+            struct sigaction ign;
+            memset(&ign, 0, sizeof ign);
+            ign.sa_handler = SIG_IGN;
+            sigemptyset(&ign.sa_mask);
+            sigio_changed = sigaction(SIGIO, &ign, &sigio_saved) == 0;
+        }
+    }
+    pthread_mutex_unlock(&sigio_lock);
+}
+
+static void linux_probe_end(void *ctx) {
+    (void)ctx;
+    pthread_mutex_lock(&sigio_lock);
+    if (sigio_captures > 0 && --sigio_captures == 0 && sigio_changed) {
+        struct sigaction cur;
+        if (sigaction(SIGIO, NULL, &cur) == 0 && !(cur.sa_flags & SA_SIGINFO) &&
+            cur.sa_handler == SIG_IGN)
+            sigaction(SIGIO, &sigio_saved, NULL);
+        sigio_changed = false;
+    }
+    pthread_mutex_unlock(&sigio_lock);
+}
+
+static int linux_clock(void *ctx, struct timespec *ts) {
+    (void)ctx;
     return clock_gettime(CLOCK_REALTIME, ts);
 }
 
@@ -152,6 +215,9 @@ static const struct fsops linux_ops = {
     .xattr_get = linux_xattr_get,
     .inode_flags = linux_inode_flags,
     .is_overlay = linux_is_overlay,
+    .writer_present = linux_writer_present,
+    .probe_begin = linux_probe_begin,
+    .probe_end = linux_probe_end,
     .clock = linux_clock,
     .tmpfile_in = linux_tmpfile_in,
 };

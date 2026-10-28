@@ -22,12 +22,14 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/mman.h>
 #include <sys/stat.h>
 #include <sys/wait.h>
 #include <sys/xattr.h>
 #ifdef __linux__
 #include <linux/fs.h>
 #include <sys/ioctl.h>
+#include <sys/vfs.h>
 #endif
 #include <time.h>
 #include <unistd.h>
@@ -1112,6 +1114,58 @@ TEST(store_discards_copies_of_unstable_files) {
     fx_rm("race");
 }
 
+/* The store keeps no copy of a file some process had open for writing, or
+ * mapped shared-writable, while belay read it: a write already in flight
+ * stamps the file before its data lands, so the stability check cannot see
+ * it, and a torn copy would restore as a file that never existed. The hash
+ * is still recorded. Linux decides with a lease probe; macOS has no lease
+ * API and stores unguarded, as the spec says -- asserted here too, so the
+ * documented behaviour is the tested one. On overlayfs (Docker's /tmp) a
+ * mapping whose fd was closed holds the upper file, not the overlay one, so
+ * the probe cannot see it (measured 2026-10-28; the spec lists it). */
+TEST(store_keeps_no_copy_of_a_file_a_writer_holds_open) {
+#ifdef __linux__
+    const bool guarded = true;
+    struct statfs sfs;
+    const bool overlay = statfs(g_root, &sfs) == 0 && sfs.f_type == 0x794c7630; /* OVERLAYFS_SUPER_MAGIC */
+#else
+    const bool guarded = false;
+    const bool overlay = false;
+#endif
+    fx_mkdir("wo");
+    fx_write("wo/idle.txt", "nobody writes this\n", 19);
+    fx_write("wo/held.txt", "open for writing\n", 17);
+    fx_write("wo/mapped.txt", "mapped shared, writable\n", 24);
+    char p[8192];
+    snprintf(p, sizeof p, "%s/wo/held.txt", g_root);
+    const int w = open(p, O_WRONLY);
+    snprintf(p, sizeof p, "%s/wo/mapped.txt", g_root);
+    const int mfd = open(p, O_RDWR);
+    void *map = mfd == -1 ? MAP_FAILED : mmap(NULL, 24, PROT_READ | PROT_WRITE, MAP_SHARED, mfd, 0);
+    if (mfd != -1) close(mfd);                  /* only the mapping holds it now */
+    ASSERT_TRUE(w != -1 && map != MAP_FAILED);
+
+    ASSERT_EQ_INT(0, run_check_store("wo", BELAY_STORE_MAX_BYTES_DEFAULT));
+    struct found *idle = get("idle.txt"), *held = get("held.txt"), *mapped = get("mapped.txt");
+    ASSERT_TRUE(idle && held && mapped);
+    ASSERT_TRUE(idle && idle->sha256[0] != '\0');
+    ASSERT_TRUE(held && held->sha256[0] != '\0');      /* hashed either way */
+    ASSERT_TRUE(mapped && mapped->sha256[0] != '\0');
+    ASSERT_TRUE(stored("idle.txt"));
+    ASSERT_EQ_INT(!guarded, stored("held.txt"));
+    ASSERT_EQ_INT(!guarded || overlay, stored("mapped.txt"));
+    ASSERT_EQ_INT(0, store_tmp_count());                /* refused copies leave nothing */
+
+    /* The writer gone, the next check keeps the copy. */
+    if (w != -1) close(w);
+    if (map != MAP_FAILED) munmap(map, 24);
+    ASSERT_EQ_INT(0, run_check_store("wo", BELAY_STORE_MAX_BYTES_DEFAULT));
+    ASSERT_TRUE(stored("held.txt"));
+    ASSERT_TRUE(stored("mapped.txt"));
+
+    fx_rm("wo/idle.txt"); fx_rm("wo/held.txt"); fx_rm("wo/mapped.txt"); fx_rm("wo");
+}
+
 /* ===== Independent review, D5 class: "a per-entry condition aborted the whole
  * check". Each is now recorded on the entry and the check completes. ===== */
 
@@ -1526,6 +1580,7 @@ int main(void) {
     RUN(store_keeps_small_text_and_skips_binary);
     RUN(store_follows_interpreter_claims_not_just_size);
     RUN(store_discards_copies_of_unstable_files);
+    RUN(store_keeps_no_copy_of_a_file_a_writer_holds_open);
     RUN(review_readable_but_not_searchable_directory_is_flagged);
     RUN(review_unsearchable_scope_root_is_flagged);
     RUN(review_tree_deeper_than_the_limit_is_flagged_not_fatal);
