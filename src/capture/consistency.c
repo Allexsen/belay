@@ -33,6 +33,15 @@
  *  raced. This runs before the output file is created, so belay's own output
  *  is never seen as a change.
  *
+ *  A listed directory is also LISTED again and its names compared with the
+ *  ones the walk saw (struct listing). Equal attributes do not prove an
+ *  equal listing: an NFS client served a listing older than the attributes
+ *  it reported for the same directory, so a file moved between two
+ *  directories was in neither, with every timestamp equal (measured in CI,
+ *  2026-10-28: 6 such clean manifests in 3,400 under a same-client writer;
+ *  a fresh listing right after showed the file). The comparison checks the
+ *  listing itself, so it needs no timestamp and no clock.
+ *
  *  This one pass replaced two earlier rules whose catches it also makes: a
  *  ctime window ("changed between the walk's start and now", which read the
  *  wall clock and misfired when WSL stepped it) and a per-directory check
@@ -128,6 +137,43 @@ static int rs_to(struct rstack *rs, const char *dir, size_t dir_len) {
     return 0;
 }
 
+/* Two FNV-1a lanes with different offsets, summed over names so that the
+ * order readdir returns them in does not matter. */
+void cons_listing_add(struct listing *l, const char *name) {
+    uint64_t a = 0xcbf29ce484222325ull, b = 0x84222325cbf29ce4ull;
+    for (const unsigned char *p = (const unsigned char *)name; *p; p++) {
+        a = (a ^ *p) * 0x100000001b3ull;
+        b = (b ^ *p) * 0x100000001b3ull;
+        b ^= b >> 29;
+    }
+    l->n++;
+    l->a += a;
+    l->b += b;
+}
+
+/* The names in directory `fd` now, through a new open of it: a stream
+ * shares its file offset with every dup of the fd, and the walk's ran to
+ * the end. 0, 1 if it can no longer be listed, -1 if fatal. */
+static int relist(const struct fsops *ops, int fd, struct listing *now) {
+    const int d = ops->openat(ops->ctx, fd, ".", O_RDONLY | O_DIRECTORY | O_CLOEXEC);
+    if (d == -1) {
+        if (cap_fatal_errno(errno)) {
+            belay_err_set(BELAY_ERR_IO, errno, "manifest: re-check: openat");
+            return -1;
+        }
+        return 1;
+    }
+    void *dir = ops->dir_open(ops->ctx, d);
+    close(d);
+    if (dir == NULL) return cap_fatal_errno(errno) ? -1 : 1;
+    const char *name;
+    while ((name = ops->dir_next(ops->ctx, dir)) != NULL)
+        if (strcmp(name, ".") != 0 && strcmp(name, "..") != 0) cons_listing_add(now, name);
+    const int err = errno;
+    ops->dir_close(ops->ctx, dir);
+    return err != 0 ? 1 : 0;
+}
+
 /* How the end-of-walk re-check treats an entry: a directory whose listing
  * was recorded is re-checked as a listing (a change flags it unstable),
  * unless it is unstable already; everything else as an entry (a change flags
@@ -141,9 +187,10 @@ static int recheck_kind(const struct belay_entry *e) {
     return RC_ENTRY;
 }
 
-/* Re-checks one entry: *changed set. 0, or -1 if fatal. */
+/* Re-checks one entry: *changed set. 0, or -1 if fatal. `seen` is the
+ * listing the walk recorded for a directory. */
 static int recheck_one(struct rstack *rs, struct walk_ctx *wc, const struct belay_entry *e,
-                       int kind, bool *changed) {
+                       const struct listing *seen, int kind, bool *changed) {
     *changed = false;
     if (kind == RC_NONE) return 0;
     const struct ident rec = ident_of_entry(e);
@@ -191,6 +238,13 @@ static int recheck_one(struct rstack *rs, struct walk_ctx *wc, const struct bela
         const struct ident now = ident_of_stat(&st);
         same = ident_same(&now, &rec, ID_ALL);
     }
+    if (same && kind == RC_LISTING) {
+        const int fd = rs->n && !(plen == 1 && path[0] == '.') ? rs->fd[rs->n - 1] : rs->root_fd;
+        struct listing now = { 0, 0, 0 };
+        const int r = relist(wc->ops, fd, &now);
+        if (r == -1) return -1;
+        same = r == 0 && now.n == seen->n && now.a == seen->a && now.b == seen->b;
+    }
     *changed = !same;
     return 0;
 }
@@ -210,10 +264,11 @@ int cap_recheck(struct walk_ctx *wc, int root_fd, struct belay_entry *e, FILE *v
     uint32_t klen, vlen;
     int got;
     while ((got = runs_next(wc->runs, &key, &klen, &val, &vlen)) == 1) {
-        if (entry_unpack(val, vlen, key, klen, e) == -1) goto done;
+        struct listing seen;
+        if (cap_record_unpack(val, vlen, key, klen, e, &seen) == -1) goto done;
         const int kind = recheck_kind(e);
         bool changed;
-        if (recheck_one(rs, wc, e, kind, &changed) == -1) goto done;
+        if (recheck_one(rs, wc, e, &seen, kind, &changed) == -1) goto done;
         const int v = !changed ? VERDICT_NONE : kind == RC_LISTING ? VERDICT_LISTING : VERDICT_ENTRY;
         if (fputc(v, verdicts) == EOF) {
             belay_err_set(BELAY_ERR_IO, errno, "manifest: re-check: write failed");

@@ -494,11 +494,24 @@ int cap_open_dir(int pfd, const char *name, const struct stat *st, const char *r
     return V_OK;
 }
 
-int cap_emit(struct walk_ctx *wc, const struct belay_entry *e) {
+int cap_emit(struct walk_ctx *wc, const struct belay_entry *e, const struct listing *l) {
     const size_t n = entry_pack(e, wc->pack, ENTRY_PACK_MAX);
     if (n == 0) {
         belay_err_set(BELAY_ERR_RANGE, 0, "manifest: entry exceeds %u bytes", ENTRY_PACK_MAX);
         return -1;
     }
-    return runs_add(wc->runs, e->path, (uint32_t)e->path_len, wc->pack, (uint32_t)n);
+    const struct listing none = { 0, 0, 0 };
+    memcpy(wc->pack + n, l != NULL ? l : &none, sizeof none);
+    return runs_add(wc->runs, e->path, (uint32_t)e->path_len, wc->pack,
+                    (uint32_t)(n + sizeof none));
+}
+
+int cap_record_unpack(const unsigned char *val, uint32_t vlen, const unsigned char *key,
+                      uint32_t klen, struct belay_entry *e, struct listing *l) {
+    if (vlen < sizeof *l) {
+        belay_err_set(BELAY_ERR_IO, 0, "manifest: temporary record is malformed");
+        return -1;
+    }
+    memcpy(l, val + vlen - sizeof *l, sizeof *l);
+    return entry_unpack(val, vlen - sizeof *l, key, klen, e);
 }

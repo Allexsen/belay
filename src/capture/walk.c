@@ -29,7 +29,7 @@ static ssize_t rel_join(char *rel, size_t relsz, size_t rel_len, const char *nam
     return (ssize_t)w;
 }
 
-int cap_emit_scratch(struct walk_ctx *wc) { return cap_emit(wc, &wc->e); }
+int cap_emit_scratch(struct walk_ctx *wc) { return cap_emit(wc, &wc->e, NULL); }
 
 
 
@@ -125,26 +125,28 @@ static int visit(int parent_fd, const char *name, char *rel, size_t relsz,
     }
     memcpy(dir, e, sizeof *dir);
 
-    int r = cap_walk(cfd, rel, relsz, rel_len, depth + 1, wc);
+    struct listing seen = { 0, 0, 0 };
+    int r = cap_walk(cfd, rel, relsz, rel_len, depth + 1, wc, &seen);
     if (r == W_INCOMPLETE) {
         outcome_apply(dir, FACET_LISTING, OUT_CHANGED, &wc->tally);
         r = 0;
     }
     close(cfd);
-    if (r == 0) r = cap_emit(wc, dir);
+    if (r == 0) r = cap_emit(wc, dir, &seen);
     free(dir);
     return r;
 }
 
 /*
- *  Lists one directory and visits each entry. Returns 0, -1 (fatal: belay's
+ *  Lists one directory and visits each entry, adding every name to `seen`.
+ *  Returns 0, -1 (fatal: belay's
  *  own resource exhaustion or an output error), or W_INCOMPLETE when the
  *  listing could not be fully captured -- a readdir error part way through,
  *  or a child that could not even be stat'ed. The caller then flags the
  *  directory unstable rather than failing the whole check.
  */
 int cap_walk(int dfd, char *rel, size_t relsz, size_t rel_len,
-                int depth, struct walk_ctx *wc) {
+                int depth, struct walk_ctx *wc, struct listing *seen) {
     const struct fsops *ops = wc->ops;
     void *d = ops->dir_open(ops->ctx, dfd);
     if (d == NULL) {
@@ -171,6 +173,7 @@ int cap_walk(int dfd, char *rel, size_t relsz, size_t rel_len,
             break;
         }
         if (strcmp(dname, ".") == 0 || strcmp(dname, "..") == 0) continue;
+        cons_listing_add(seen, dname);          /* what the validator re-lists */
 
         const ssize_t nlen = rel_join(rel, relsz, rel_len, dname);
         if (nlen == -1) {

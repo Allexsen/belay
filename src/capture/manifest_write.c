@@ -104,9 +104,9 @@ int capture_write(const struct fsops *ops, const char *out_path, const char *sco
     }
     /* The budget is raised to hold at least one maximal record. */
     wc->runs = runs_new(opts->run_bytes == 0 ? RUN_BYTES : opts->run_bytes, PATH_CAP,
-                        ENTRY_PACK_MAX, cap_tmpfile, &td);
+                        RECORD_MAX, cap_tmpfile, &td);
     if (wc->runs == NULL) goto cleanup;
-    wc->pack = malloc(ENTRY_PACK_MAX);
+    wc->pack = malloc(RECORD_MAX);
     wc->line = malloc(LINE_CAP);
     wc->readbuf = malloc(READ_CHUNK);
     wc->xlist = malloc(XLIST_CAP + 1);
@@ -152,6 +152,7 @@ int capture_write(const struct fsops *ops, const char *out_path, const char *sco
     wc->e.path_len = 1;
     struct belay_entry root_e;
     memcpy(&root_e, &wc->e, sizeof root_e);
+    struct listing root_seen = { 0, 0, 0 };
 
     /* A scope root that can be listed but not searched has contents belay
      * cannot stat: flag it, rather than fail on its first child. */
@@ -160,12 +161,12 @@ int capture_write(const struct fsops *ops, const char *out_path, const char *sco
         outcome_apply(&root_e, FACET_LISTING, OUT_DENIED, &wc->tally);
     } else {
         rel[0] = '\0';
-        const int wr = cap_walk(root_fd, rel, PATH_CAP, 0, 0, wc);
+        const int wr = cap_walk(root_fd, rel, PATH_CAP, 0, 0, wc, &root_seen);
         if (wr == -1) goto cleanup;
 
         if (wr == W_INCOMPLETE) outcome_apply(&root_e, FACET_LISTING, OUT_CHANGED, &wc->tally);
     }
-    if (cap_emit(wc, &root_e) == -1) goto cleanup;
+    if (cap_emit(wc, &root_e, &root_seen) == -1) goto cleanup;
 
     /* Every entry is recorded. Re-check them all before the output file
      * exists, so belay's own output is never seen as a change. */
@@ -202,7 +203,8 @@ int capture_write(const struct fsops *ops, const char *out_path, const char *sco
     uint32_t klen, vlen;
     int got;
     while ((got = runs_next(wc->runs, &key, &klen, &val, &vlen)) == 1) {
-        if (entry_unpack(val, vlen, key, klen, ebuf) == -1) goto cleanup;
+        struct listing unused;
+        if (cap_record_unpack(val, vlen, key, klen, ebuf, &unused) == -1) goto cleanup;
         const int v = fgetc(verdicts);
         if (v == VERDICT_LISTING) outcome_apply(ebuf, FACET_LISTING, OUT_CHANGED, &wc->tally);
         if (v == VERDICT_ENTRY)   outcome_apply(ebuf, FACET_ENTRY, OUT_CHANGED, &wc->tally);

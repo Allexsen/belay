@@ -52,7 +52,8 @@ enum arm { NONE, SWAP_ON_DIR_OPEN, SWAP_ON_READLINK, REPLACE_LINK_WITH_FILE,
            XATTR_EIO,                /* the first fd xattr listing fails with EIO */
            WRITER_DURING_READ,       /* a writer opens g_x while belay reads it */
            WRITER_LEAVES_DURING_READ,  /* g_x's writer closes while belay reads it */
-           MOUNT_AFTER_WALK };       /* tmpfs over g_x once the walk is done */
+           MOUNT_AFTER_WALK,         /* tmpfs over g_x once the walk is done */
+           STALE_LISTING };          /* the walk's listing of g_x omits g_y, once */
 static int g_flip;
 
 static char g_root[256], g_m[300];
@@ -82,9 +83,13 @@ static int g_entered;
 static int g_target_fd = -1, g_writer = -1;
 
 static void watch(int dfd);
+static int g_last_open_was_x;
+static void *g_stale_dir;
 static int t_openat(void *ctx, int fd, const char *name, int flags) {
     (void)ctx;
     watch(fd);
+    if (g_arm == STALE_LISTING && (flags & O_DIRECTORY) && g_x != NULL && strcmp(name, g_x) == 0)
+        g_last_open_was_x = 1;
     /* MOVE_BETWEEN_DIRS: when the second of A/B is opened, move its file into
      * the first, already-listed one -- so the file is in neither listing. */
     if (g_arm == MOVE_BETWEEN_DIRS && !g_fired && (flags & O_DIRECTORY) &&
@@ -292,6 +297,13 @@ static const char *t_dir_next(void *ctx, void *d) {
     if (g_arm == CLOCK_STEP) g_stepped = 1;
     const char *e = g_real->dir_next(g_real->ctx, d);
     if (g_rootdir == NULL) g_rootdir = d;     /* the first stream opened is the root's */
+    /* STALE_LISTING: the walk is served a listing of g_x without g_y, as an
+     * NFS client served one older than the directory's own attributes. */
+    if (g_arm == STALE_LISTING && !g_fired && e != NULL && g_y != NULL && strcmp(e, g_y) == 0 &&
+        g_stale_dir == d) {
+        g_fired = 1;
+        e = g_real->dir_next(g_real->ctx, d);
+    }
 #ifdef __linux__
     if (g_arm == MOUNT_AFTER_WALK && !g_fired && e == NULL && d == g_rootdir && g_x != NULL) {
         char p[600];
@@ -345,6 +357,14 @@ static ssize_t t_read(void *ctx, int fd, void *buf, size_t n) {
     return g_real->read(g_real->ctx, fd, buf, n);
 }
 
+static void *t_dir_open(void *ctx, int dfd) {
+    (void)ctx;
+    void *d = g_real->dir_open(g_real->ctx, dfd);
+    if (g_arm == STALE_LISTING && g_last_open_was_x && g_stale_dir == NULL) g_stale_dir = d;
+    g_last_open_was_x = 0;
+    return d;
+}
+
 static void decorate(void) {
     g_real = fsops_default();
     g_ops = *g_real;
@@ -356,12 +376,14 @@ static void decorate(void) {
     g_ops.xattr_list = t_xattr_list;
     g_ops.dir_next = t_dir_next;
     g_ops.read = t_read;
+    g_ops.dir_open = t_dir_open;
 }
 
 static void arm(enum arm a, const char *x, const char *y) {
     g_arm = a; g_x = x; g_y = y; g_fired = 0; g_replay = 0; g_dir = NULL; g_first = NULL;
     g_rootdir = NULL; g_walked = NULL; g_flip = 0; g_stepped = 0; g_step_s = 0; g_skew_s = 0; g_clock_reads = 0;
     g_statx_calls = 0; g_statx_after = 0; g_target_fd = -1; g_watch_dev = 0; g_entered = 0;
+    g_stale_dir = NULL; g_last_open_was_x = 0;
 }
 
 static void path(char *out, size_t n, const char *rel) { snprintf(out, n, "%s/%s", g_root, rel); }
@@ -703,6 +725,25 @@ TEST(store_keeps_no_copy_when_a_writer_leaves_during_the_read) {
     char cmd[400];
     snprintf(cmd, sizeof cmd, "rm -rf '%s'", g_store);
     if (system(cmd) != 0) { /* best effort */ }
+}
+
+/* A listing older than the directory's own attributes (an NFS client did
+ * this under a same-client writer, CI 2026-10-28): the walk is served A's
+ * listing without A/f, while A's mtime and ctime stay as recorded. f is in
+ * no listing, and every timestamp agrees. The validator lists A again and
+ * compares names, so A is unstable. */
+TEST(listing_older_than_its_directory_is_flagged) {
+    reset();
+    mk("A");
+    touch("A/f", "x");
+    touch("A/g", "y");
+    arm(STALE_LISTING, "A", "f");
+    struct belay_manifest_stats st;
+    ASSERT_EQ_INT(0, check(&st));
+    ASSERT_TRUE(g_fired);
+    ASSERT_TRUE(find("A/f") == NULL);           /* the walk really missed it */
+    const struct belay_entry *a = find("A");
+    ASSERT_TRUE(a != NULL && a->unstable);
 }
 
 /* R2-5: I/O errors on one entry are recorded on it, not fatal. */
@@ -1131,6 +1172,7 @@ int main(void) {
     RUN(r3_clock_step_during_the_walk_is_not_a_change);
     RUN(r3_clock_behind_the_files_flags_nothing);
     RUN(walk_consistency_reads_no_clock);
+    RUN(listing_older_than_its_directory_is_flagged);
     RUN(store_keeps_no_copy_when_a_writer_opens_during_the_read);
     RUN(store_keeps_no_copy_when_a_writer_leaves_during_the_read);
     RUN(r4_validator_never_enters_a_mount_that_appeared);
