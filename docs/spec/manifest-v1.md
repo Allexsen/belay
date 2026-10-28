@@ -260,9 +260,11 @@ A walk takes time, and the tree may change while it runs. When the walk is over,
 entry is stat'ed again and compared, by equality, with what was recorded; the manifest describes
 that instant, the end of the walk. An entry carrying none of `raced`, `unstable` and `unreadable`
 was found unchanged, so what is recorded for it held at the end of the walk. A directory carrying
-none of `unstable`, `unreadable` and `mount` lists exactly the entries it held then. No clock is
-read: every judgment compares two observations of the same entry, so a stepped or skewed clock
-changes nothing.
+none of `unstable`, `unreadable` and `mount` lists exactly the entries it held then: every listed
+directory is also listed again and its names compared, because equal attributes do not prove an
+equal listing (an NFS client was measured serving a listing older than the attributes it reported
+for the same directory). No clock is read: every judgment compares two observations of the same
+entry, so a stepped or skewed clock changes nothing.
 
 Equality compares timestamps, which bounds what it can see:
 
