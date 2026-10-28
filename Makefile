@@ -58,7 +58,7 @@ SAN_FLAGS	= -fsanitize=address,undefined -fno-omit-frame-pointer -g -O1
 SAN_BUILD	= $(BUILD)/san
 SAN_TEST_BIN	= $(TEST_SRC:test/%.c=$(SAN_BUILD)/test/%)
 
-.PHONY: all clean test check check-san fuzz bench platform fs-scenarios gen gen-check
+.PHONY: all clean test check check-san fuzz bench platform fs-scenarios gen gen-check measure
 
 all: $(BIN)
 
@@ -110,7 +110,7 @@ check-san: $(SAN_TEST_BIN)
 	done; \
 	exit $$fail
 
-check: all gen-check test
+check: all gen-check measure test
 
 # Generated from the entry schema (src/capture/entry.c): the spec's field
 # rules and the fuzz target's invariants. `make gen` rewrites them;
@@ -160,6 +160,14 @@ $(FS_SCEN): test/fs/fs_scenarios.c $(CORE_OBJ)
 	@mkdir -p $(dir $@)
 	$(CC) $(CFLAGS) $(WARN) $(INC) -o $@ $< $(CORE_OBJ)
 fs-scenarios: $(FS_SCEN)
+
+# The measurement driver (bench/measure/README.md). Built by `check`, so it
+# keeps compiling on every platform.
+MEASURE		= $(BUILD)/bench/measure
+$(MEASURE): bench/measure/measure.c $(CORE_OBJ)
+	@mkdir -p $(dir $@)
+	$(CC) $(CFLAGS) $(WARN) $(INC) -MMD -MP -o $@ $< $(CORE_OBJ)
+measure: $(MEASURE)
 
 bench: $(BENCH_BIN)
 	@echo "built: $(BENCH_BIN)"
