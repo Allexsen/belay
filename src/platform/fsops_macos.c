@@ -75,9 +75,8 @@ static bool macos_is_overlay(void *ctx, int root_fd) {
     return false;
 }
 
-static int macos_clock(void *ctx, enum belay_clock which, struct timespec *ts) {
+static int macos_clock(void *ctx, struct timespec *ts) {
     (void)ctx;
-    if (which == BELAY_CLOCK_COARSE) return -1;
     return clock_gettime(CLOCK_REALTIME, ts);
 }
 

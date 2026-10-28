@@ -107,13 +107,8 @@ static bool linux_is_overlay(void *ctx, int root_fd) {
     return fstatfs(root_fd, &sfs) == 0 && sfs.f_type == OVERLAYFS_MAGIC;
 }
 
-static int linux_clock(void *ctx, enum belay_clock which, struct timespec *ts) {
+static int linux_clock(void *ctx, struct timespec *ts) {
     (void)ctx;
-#ifdef CLOCK_REALTIME_COARSE
-    if (which == BELAY_CLOCK_COARSE) return clock_gettime(CLOCK_REALTIME_COARSE, ts);
-#else
-    if (which == BELAY_CLOCK_COARSE) return -1;
-#endif
     return clock_gettime(CLOCK_REALTIME, ts);
 }
 

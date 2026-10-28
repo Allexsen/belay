@@ -25,8 +25,6 @@
  * handle the platform opened for the purpose (see xattr_source_open). */
 struct xsrc { int fd; const char *path; int own; char buf[64]; };
 
-enum belay_clock { BELAY_CLOCK_REAL, BELAY_CLOCK_COARSE };
-
 struct fsops {
     void *ctx;
 
@@ -66,8 +64,9 @@ struct fsops {
     /* Scope properties, asked once per walk. */
     bool (*is_overlay)(void *ctx, int root_fd);
 
-    /* -1 for a clock the platform does not have (BELAY_CLOCK_COARSE). */
-    int (*clock)(void *ctx, enum belay_clock which, struct timespec *ts);
+    /* Wall-clock time, for the header's created_ns only: walk consistency
+     * reads no clock (consistency.c). */
+    int (*clock)(void *ctx, struct timespec *ts);
 
     /* An anonymous temporary file in `dir`, never linked into it where the
      * platform allows (so the directory does not change), else created from

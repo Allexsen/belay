@@ -19,7 +19,7 @@ FILE *cap_tmpfile(void *ctx) {
 int cap_write_header(const struct fsops *ops, FILE *f, const char *scope_real,
                         const struct belay_manifest_opts *opts, char *buf) {
     struct timespec now;
-    ops->clock(ops->ctx, BELAY_CLOCK_REAL, &now);
+    ops->clock(ops->ctx, &now);
     const long long created = (long long)ident_ns((int64_t)now.tv_sec, now.tv_nsec);
 
     /* Same rule as entry paths: JSON for valid UTF-8, base64 otherwise.

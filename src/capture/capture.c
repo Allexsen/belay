@@ -237,6 +237,26 @@ int cap_stat_entry(const struct walk_ctx *wc, int dfd, const char *name, struct 
     return wc->ops->fstatat(wc->ops->ctx, dfd, name, st, AT_SYMLINK_NOFOLLOW);
 }
 
+/*
+ *  Whether an entry stat'ed by cap_stat_entry is a capture boundary: the
+ *  root of another mount, of ANY type -- recorded, never read or descended.
+ *  Where statx can say whether this is a mount root, its answer is used
+ *  alone: st_dev is only a proxy, and a wrong one both ways -- a btrfs
+ *  subvolume is a directory with its own st_dev but no mount, and on
+ *  overlayfs (xino off) every non-directory carries its layer's device.
+ *  Without statx (kernels before 5.8, or statx blocked), st_dev decides for
+ *  every type, except non-directories of an overlayfs scope.
+ *  (Directories-only everywhere hashed a file bind-mounted from another
+ *  filesystem as a local file -- verified.) The walk and the end-of-walk
+ *  validator both decide by this, so the validator never enters a mount the
+ *  walk would not have.
+ */
+bool cap_crossed(const struct walk_ctx *wc, const struct stat *st, bool mount_root,
+                 bool mount_known) {
+    if (mount_known) return mount_root;
+    return (uint64_t)st->st_dev != wc->root_dev && (S_ISDIR(st->st_mode) || !wc->scope_overlay);
+}
+
 /* Errors that are belay's own resource exhaustion rather than a property of
  * one entry: these stay fatal, loudly. Everything else about one entry is
  * recorded on that entry and the walk goes on. */

@@ -49,7 +49,8 @@ enum arm { NONE, SWAP_ON_DIR_OPEN, SWAP_ON_READLINK, REPLACE_LINK_WITH_FILE,
            STATX_EPERM_ONCE,         /* statx of one name fails with EPERM, once */
            STATX_ENOSYS,             /* statx missing altogether */
            LINK_EMPTY,               /* readlinkat returns an empty target */
-           XATTR_EIO };              /* the first fd xattr listing fails with EIO */
+           XATTR_EIO,                /* the first fd xattr listing fails with EIO */
+           MOUNT_AFTER_WALK };       /* tmpfs over g_x once the walk is done */
 static int g_flip;
 
 static char g_root[256], g_m[300];
@@ -72,8 +73,14 @@ static int swap_at(int fd, const char *a, const char *b) {
 #endif
 }
 
+static dev_t g_watch_dev;
+static int g_entered;
+
+
+static void watch(int dfd);
 static int t_openat(void *ctx, int fd, const char *name, int flags) {
     (void)ctx;
+    watch(fd);
     /* MOVE_BETWEEN_DIRS: when the second of A/B is opened, move its file into
      * the first, already-listed one -- so the file is in neither listing. */
     if (g_arm == MOVE_BETWEEN_DIRS && !g_fired && (flags & O_DIRECTORY) &&
@@ -172,20 +179,22 @@ static ssize_t t_readlinkat(void *ctx, int fd, const char *name, char *buf, size
  *  The wall clock as the writer sees it; monotonic time is never touched.
  *  CLOCK_STEP: once the walk's first directory read has run, every realtime
  *  read is off by g_step_s -- the clock stepped during the walk. CLOCK_BEHIND:
- *  every realtime read, fine and coarse, is 100 s behind the clock that
- *  stamped the files -- the clock was stepped back before the walk, so
- *  directories changed just before it carry ctimes "in the future".
+ *  every realtime read is 100 s behind the clock that stamped the files --
+ *  the clock was stepped back before the walk, so directories changed just
+ *  before it carry ctimes "in the future". Walk consistency reads no clock
+ *  any more (only the header's created_ns does); g_clock_reads counts.
  */
-static int g_step_s, g_stepped;
+static int g_step_s, g_stepped, g_clock_reads;
 /* g_skew_s: every realtime read is off by this much, whatever is armed -- as
  * on a filesystem whose timestamps come from another machine's clock. */
 static int g_skew_s;
-static int t_clock(void *ctx, enum belay_clock which, struct timespec *ts) {
+static int t_clock(void *ctx, struct timespec *ts) {
     (void)ctx;
-    const int r = g_real->clock(g_real->ctx, which, ts);
+    g_clock_reads++;
+    const int r = g_real->clock(g_real->ctx, ts);
     if (r != 0) return r;
     ts->tv_sec += g_skew_s;
-    if (g_arm == CLOCK_STEP && g_stepped && which == BELAY_CLOCK_REAL) {
+    if (g_arm == CLOCK_STEP && g_stepped) {
         ts->tv_sec += g_step_s;
         g_fired = 1;
     }
@@ -200,10 +209,24 @@ static int t_clock(void *ctx, enum belay_clock which, struct timespec *ts) {
  * armed failure separately -- so a test can see that one entry's error did
  * not switch statx off. */
 static size_t g_statx_calls, g_statx_after;
+/* MOUNT_AFTER_WALK: the new mount's device (g_watch_dev), and how many
+ * stats and opens were made inside it, from a directory fd on it
+ * (g_entered). The walk never enters a mount; neither may the end-of-walk
+ * validator (R4-F4a). */
+static void watch(int dfd) {
+    struct stat ds;
+    if (g_watch_dev != 0 && dfd >= 0 && fstat(dfd, &ds) == 0 && ds.st_dev == g_watch_dev)
+        g_entered++;
+}
+
+/* As STATX_ENOSYS, but alongside another arm. */
+static int g_no_statx;
+
 static int t_stat_mount(void *ctx, int dfd, const char *name, struct stat *st,
                         bool *mount_root, bool *mount_known) {
     (void)ctx;
-    if (g_arm == STATX_ENOSYS) {
+    watch(dfd);
+    if (g_arm == STATX_ENOSYS || g_no_statx) {
         *mount_root = *mount_known = false;
         errno = ENOSYS;
         return -1;
@@ -224,6 +247,7 @@ static int t_stat_mount(void *ctx, int dfd, const char *name, struct stat *st,
 /* The plain stat path (no statx, as on macOS) presents the same empty link. */
 static int t_fstatat(void *ctx, int dfd, const char *name, struct stat *st, int flags) {
     (void)ctx;
+    watch(dfd);
     const int r = g_real->fstatat(g_real->ctx, dfd, name, st, flags);
     if (r == 0 && g_arm == LINK_EMPTY && g_x != NULL && strcmp(name, g_x) == 0) st->st_size = 0;
     return r;
@@ -259,6 +283,17 @@ static const char *t_dir_next(void *ctx, void *d) {
     if (g_arm == CLOCK_STEP) g_stepped = 1;
     const char *e = g_real->dir_next(g_real->ctx, d);
     if (g_rootdir == NULL) g_rootdir = d;     /* the first stream opened is the root's */
+#ifdef __linux__
+    if (g_arm == MOUNT_AFTER_WALK && !g_fired && e == NULL && d == g_rootdir && g_x != NULL) {
+        char p[600];
+        struct stat ms;
+        snprintf(p, sizeof p, "%s/%s", g_root, g_x);
+        if (mount("none", p, "tmpfs", 0, NULL) == 0 && stat(p, &ms) == 0) {
+            g_watch_dev = ms.st_dev;
+            g_fired = 1;
+        }
+    }
+#endif
     /* The reviewer's ordering: when the root listing returns the SECOND of
      * A/B, move that one's file into the first, which is fully walked by now
      * and will not be re-checked. The second is not stat'ed yet. */
@@ -296,8 +331,8 @@ static void decorate(void) {
 
 static void arm(enum arm a, const char *x, const char *y) {
     g_arm = a; g_x = x; g_y = y; g_fired = 0; g_replay = 0; g_dir = NULL; g_first = NULL;
-    g_rootdir = NULL; g_walked = NULL; g_flip = 0; g_stepped = 0; g_step_s = 0; g_skew_s = 0;
-    g_statx_calls = 0; g_statx_after = 0;
+    g_rootdir = NULL; g_walked = NULL; g_flip = 0; g_stepped = 0; g_step_s = 0; g_skew_s = 0; g_clock_reads = 0;
+    g_statx_calls = 0; g_statx_after = 0; g_watch_dev = 0; g_entered = 0;
 }
 
 static void path(char *out, size_t n, const char *rel) { snprintf(out, n, "%s/%s", g_root, rel); }
@@ -553,6 +588,21 @@ TEST(r3_clock_behind_the_files_flags_nothing) {
     ASSERT_EQ_INT(0, (int)st.unstable);
 }
 
+/* Walk consistency reads no clock: the only read in a whole check is the
+ * header's created_ns, whatever the tree holds. (The window rule read it
+ * once per directory and misfired when WSL stepped it; deleted with the
+ * end-of-walk validator in its place.) */
+TEST(walk_consistency_reads_no_clock) {
+    reset();
+    mk("A"); mk("A/B"); mk("C");
+    touch("A/B/f", "x");
+    touch("C/g", "y");
+    arm(NONE, NULL, NULL);
+    struct belay_manifest_stats st;
+    ASSERT_EQ_INT(0, check(&st));
+    ASSERT_EQ_INT(1, g_clock_reads);
+}
+
 /* R2-5: I/O errors on one entry are recorded on it, not fatal. */
 TEST(r2_readlink_eio_is_recorded_not_fatal) {
     reset();
@@ -704,7 +754,109 @@ static int bind_child(void) {
     return 0;
 }
 
+/*
+ *  R4-F4a: a mount that appears over an already-walked directory before the
+ *  end-of-walk validator runs. The validator used to open it and stat the
+ *  recorded children inside (could hang on a dead network mount; §5.1.1
+ *  says mounts are never descended). It must stat the directory, as the walk
+ *  stat'ed every mount root, and stop there: the directory is unstable, its
+ *  children raced, nothing inside the mount touched. With statx and without.
+ */
+static int mount_after_walk_child(void) {
+    char scope[300];
+    snprintf(scope, sizeof scope, "%s/scope", g_root);
+    if (enter_userns() != 0) return 77;
+    struct belay_manifest_opts o = {
+        .hash_max_bytes = BELAY_HASH_MAX_BYTES_DEFAULT,
+        .store_max_bytes = BELAY_STORE_MAX_BYTES_DEFAULT,
+    };
+    for (int pass = 0; pass < 2; pass++) {
+        char p[400];
+        snprintf(p, sizeof p, "%s/D", scope);
+        umount2(p, MNT_DETACH);
+        arm(MOUNT_AFTER_WALK, "scope/D", NULL);
+        g_rootdir = NULL;
+        g_no_statx = pass;                      /* pass 1: the st_dev fallback */
+        const int w = capture_write(&g_ops, g_m, scope, &o, NULL);
+        g_arm = NONE;
+        g_no_statx = 0;
+        if (w != 0) return 1;
+        if (!g_fired) return 2;
+        if (g_entered != 0) return 3;
+        g_n = 0;
+        if (belay_manifest_read(g_m, collect, NULL) != 0) return 4;
+        const struct belay_entry *d = find("D"), *in = find("D/inner.txt");
+        if (d == NULL || in == NULL) return 5;
+        if (!d->unstable) return 6;
+        if (!in->raced) return 7;
+    }
+    return 0;
+}
+
+/* R4-F4b: a mount placed over the scope root itself during the walk. The
+ * root used to be re-checked only through the fd held since the start,
+ * which still sees the old directory -- a clean manifest of a scope whose
+ * path now shows something else. The validator also resolves the scope
+ * path: the root is flagged. */
+static int mount_over_scope_child(void) {
+    char scope[300];
+    snprintf(scope, sizeof scope, "%s/scope", g_root);
+    if (enter_userns() != 0) return 77;
+    struct belay_manifest_opts o = {
+        .hash_max_bytes = BELAY_HASH_MAX_BYTES_DEFAULT,
+        .store_max_bytes = BELAY_STORE_MAX_BYTES_DEFAULT,
+    };
+    arm(MOUNT_AFTER_WALK, "scope", NULL);
+    g_rootdir = NULL;
+    const int w = capture_write(&g_ops, g_m, scope, &o, NULL);
+    g_arm = NONE;
+    if (w != 0) return 1;
+    if (!g_fired) return 2;
+    g_n = 0;
+    if (belay_manifest_read(g_m, collect, NULL) != 0) return 4;
+    const struct belay_entry *root = find(".");
+    if (root == NULL) return 5;
+    if (!root->unstable) return 6;
+    return 0;
+}
+
 #endif
+
+static void run_child(int (*child)(void)) {
+#ifdef __linux__
+    const pid_t pid = fork();
+    if (pid == 0) _exit(child());
+    int status = 0;
+    waitpid(pid, &status, 0);
+    const int rc = WIFEXITED(status) ? WEXITSTATUS(status) : 99;
+    if (rc == 77) { printf("      (skipped: no unprivileged user+mount namespace here)\n"); return; }
+    ASSERT_EQ_INT(0, rc);
+#else
+    (void)child;
+#endif
+}
+
+TEST(r4_validator_never_enters_a_mount_that_appeared) {
+#ifndef __linux__
+    printf("      (skipped: Linux only -- mounts in a user namespace)\n");
+#else
+    reset();
+    mk("scope"); mk("scope/D");
+    touch("scope/D/inner.txt", "recorded before the mount");
+    run_child(mount_after_walk_child);
+#endif
+}
+
+TEST(r4_mount_over_the_scope_root_flags_the_root) {
+#ifndef __linux__
+    printf("      (skipped: Linux only -- mounts in a user namespace)\n");
+#else
+    reset();
+    mk("scope"); mk("scope/A");
+    touch("scope/A/f", "x");
+    run_child(mount_over_scope_child);
+#endif
+}
 
 TEST(w6_file_capability_is_recorded) {
 #ifndef __linux__
@@ -876,6 +1028,9 @@ int main(void) {
     RUN(r2_overlay_scope_files_are_hashed_not_flagged_as_mounts);
     RUN(r3_clock_step_during_the_walk_is_not_a_change);
     RUN(r3_clock_behind_the_files_flags_nothing);
+    RUN(walk_consistency_reads_no_clock);
+    RUN(r4_validator_never_enters_a_mount_that_appeared);
+    RUN(r4_mount_over_the_scope_root_flags_the_root);
     RUN(r3_file_bind_mounted_from_another_fs_is_a_boundary_with_or_without_statx);
     RUN(r3_move_into_a_listed_directory_is_caught_whatever_the_file_clock);
     RUN(r3_file_changed_after_it_was_read_is_raced);

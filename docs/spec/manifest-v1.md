@@ -100,14 +100,14 @@ owner is invisible.
 | `xattrs_unknown` | bool | any type | `true`: the attributes could not be read. An absent `xattrs` means "none", so failing to read must say so. `diff` reports the entry's metadata as `unknown`, never unchanged. |
 | `sha256` | string | `reg` | Lowercase hex content digest, of a file within `hash_max_bytes` read in one stable pass (see "What a hash, and a stored copy, prove"). |
 | `unverified` | bool | `reg` | `true`: no hash is recorded. The file is larger than `hash_max_bytes`, or it is also flagged `unstable`, `unreadable` or `mount`, which say why. `diff` must report any change to it as **modified (unverified)**, never as unchanged. |
-| `unstable` | bool | `reg`, `dir` | `true`. On a regular file: it changed while being read (size, mtime or ctime moved, or the inode opened was not the one stat'ed); no hash is recorded, because the bytes read describe no state the file ever had. On a directory: **its listing is not a complete, single-instant listing** -- it changed during the walk (its ctime lies between the walk's start and the moment belay reached it; its mtime or ctime moved between its stat and the end of its subtree's walk; or the end-of-walk re-check found it changed since it was recorded), or the listing failed part way (it could not be read as a directory stream, a `readdir` error, a child that could not be stat'ed at all, or a child name too long to fit the path limit). Entries may be missing from it or recorded under another directory; the comparator MUST NOT read its children as a complete listing. |
+| `unstable` | bool | `reg`, `dir` | `true`. On a regular file: it changed while being read (size, mtime or ctime moved, or the inode opened was not the one stat'ed); no hash is recorded, because the bytes read describe no state the file ever had. On a directory: **its listing is not its listing at the end of the walk** -- the end-of-walk validator found it changed since it was recorded (its inode, device, mode, mtime or ctime differ, it is now a mount, or it can no longer be reached), or the listing failed part way (it could not be read as a directory stream, a `readdir` error, a child that could not be stat'ed at all, or a child name too long to fit the path limit). Entries may be missing from it or recorded under another directory; the comparator MUST NOT read its children as a complete listing. |
 | `rdev` | int | every `blk`, `chr` | The device number. Without it a replaced device node, or an overlayfs whiteout (char 0,0), is indistinguishable from the original. |
 | `link_target` / `link_target_b64` | string | every `lnk` | The link's bytes, verbatim and unresolved; `link_target_b64`, base64, when they are not valid UTF-8. Empty only on an `unreadable` link, meaning the target is unknown. |
 | `target_outside_scope` | bool | `lnk` | `true` when the target resolves lexically outside the scope. **Advisory only** — never drives a decision (§5.1.1). |
 | `stored` | string | `reg` | Present when content was copied: the `store/` key, which is the content's sha256. |
 | `mount` | bool | any type | `true`. The entry is the root of another mount. Where statx can say so (`STATX_ATTR_MOUNT_ROOT`, Linux 5.8+), its answer is used alone: it catches bind mounts from the same filesystem, and it does not mistake a btrfs subvolume (a directory with its own `dev`, not a mount) for one. Without it, an entry whose `dev` differs from the scope root's is a mount -- except a non-directory in an overlayfs scope, where every file carries its layer's device. A mount is recorded and **never read or descended** (§5.1.1): a mounted regular file carries `unverified` and no hash, and **for a directory the subtree below it is ABSENT**: `diff` MUST report it as *not captured*, never as *unchanged*. |
 | `unreadable` | bool | `reg`, `dir`, `lnk` | `true`. belay could not capture this entry's contents: a directory it could not open or search (permission, or readable-but-not-searchable), a directory swapped for another between its stat and its open, a directory beyond the depth limit (128) or whose path leaves no room for a child name, a file it could not open or read, or a symlink whose target could not be read or kept changing while being read. **For a directory, the entire subtree below it is ABSENT.** `diff` MUST report such a subtree as *contents unknown* and never as *unchanged*. Without this field an unreadable directory is byte-identical to an empty one. |
-| `raced` | bool | any type | `true`. The entry changed after it was recorded, before the walk ended: re-stat'ed at the end of the walk, its inode, mode, size, mtime or ctime differed, or it could not be reached. What is recorded held when belay read it, but not at the end. (A listed directory that changed is flagged `unstable` instead, since its listing is what no longer holds.) |
+| `raced` | bool | any type | `true`. The entry changed after it was recorded, before the walk ended: re-stat'ed at the end of the walk, its inode, device, mode, size, mtime or ctime differed, or it could not be reached without entering a mount. What is recorded held when belay read it, but not at the end. (A listed directory that changed is flagged `unstable` instead, since its listing is what no longer holds.) |
 <!-- END GENERATED: entries -->
 
 ### Field rules a reader MUST enforce
@@ -253,6 +253,26 @@ Each rule below closes a way for a state the format records to be rendered as "n
   turns its absence into a visible, if unspecific, change.
 - **Compare under the same `hash_max_bytes`**, or report entries hashed on one side and unverified
   on the other as unverified rather than changed.
+
+## What a manifest of a live tree promises
+
+A walk takes time, and the tree may change while it runs. When the walk is over, every recorded
+entry is stat'ed again and compared, by equality, with what was recorded; the manifest describes
+that instant, the end of the walk. An entry carrying none of `raced`, `unstable` and `unreadable`
+was found unchanged, so what is recorded for it held at the end of the walk. A directory carrying
+none of `unstable`, `unreadable` and `mount` lists exactly the entries it held then. No clock is
+read: every judgment compares two observations of the same entry, so a stepped or skewed clock
+changes nothing.
+
+Equality compares timestamps, which bounds what it can see:
+
+- A change within one timestamp tick of the recorded stat can go unseen where timestamps are
+  coarser than the change: FAT (2 s), HFS+ and some network or FUSE filesystems (1 s), and Linux
+  before 6.13 (one timer tick, a few ms). From 6.13, filesystems with multigrain timestamps give
+  a file whose timestamps were read a new one on its next change (measured on ext4 and tmpfs).
+- A change made through another machine (NFS, SMB, a FUSE backend) is seen only once this
+  machine's attribute cache shows it.
+- Content has its own limits, below.
 
 ## What a hash, and a stored copy, prove
 

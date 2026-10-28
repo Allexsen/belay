@@ -141,11 +141,9 @@ int capture_write(const struct fsops *ops, const char *out_path, const char *sco
         if (belay_store_open(opts->store_dir, &wc->store) == -1) goto cleanup;
     }
 
-    cons_walk_begin(wc);
-
     /* The scope root itself is an entry, path ".". Without it a chmod or
      * chown on the root is invisible. Like every directory it is emitted
-     * after its listing, so a change during the walk can be recorded on it. */
+     * after its listing, so a listing that failed part way is recorded on it. */
     memset(&wc->e, 0, sizeof wc->e);
     cap_fill_from_stat(&wc->e, &rst);
     wc->extras_done = false;
@@ -165,8 +163,7 @@ int capture_write(const struct fsops *ops, const char *out_path, const char *sco
         const int wr = cap_walk(root_fd, rel, PATH_CAP, 0, 0, wc);
         if (wr == -1) goto cleanup;
 
-        if (wr == W_INCOMPLETE || !cons_listing_held(wc, root_fd, &root_e))
-            outcome_apply(&root_e, FACET_LISTING, OUT_CHANGED, &wc->tally);
+        if (wr == W_INCOMPLETE) outcome_apply(&root_e, FACET_LISTING, OUT_CHANGED, &wc->tally);
     }
     if (cap_emit(wc, &root_e) == -1) goto cleanup;
 

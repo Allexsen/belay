@@ -1,6 +1,6 @@
 /*
  *  Traversal: lists each directory and visits each name, depth first; a
- *  directory is emitted after its subtree, so a change during its own listing
+ *  directory is emitted after its subtree, so a listing that failed part way
  *  can still be recorded on it.
  */
 #define _GNU_SOURCE
@@ -68,18 +68,8 @@ static int visit(int parent_fd, const char *name, char *rel, size_t relsz,
         e->path_len = rel_len;
         cap_fill_from_stat(e, &st);
 
-        /* A mount root of ANY type is a capture boundary: recorded, never read
-         * or descended. Where statx can say whether this is a mount root, its
-         * answer is used alone: st_dev is only a proxy, and a wrong one both
-         * ways -- a btrfs subvolume is a directory with its own st_dev but no
-         * mount, and on overlayfs (xino off) every non-directory carries its
-         * layer's device. Without statx (kernels before 5.8, or statx
-         * blocked), st_dev decides for every type, except non-directories of
-         * an overlayfs scope. (Directories-only everywhere hashed a file
-         * bind-mounted from another filesystem as a local file -- verified.) */
-        const bool crossed = mount_known ? mount_root
-            : (uint64_t)st.st_dev != wc->root_dev &&
-              (e->type == BELAY_T_DIR || !wc->scope_overlay);
+        /* A mount root of any type is a capture boundary (cap_crossed). */
+        const bool crossed = cap_crossed(wc, &st, mount_root, mount_known);
 
         int r = V_OK;
         if (crossed) {
@@ -118,20 +108,14 @@ static int visit(int parent_fd, const char *name, char *rel, size_t relsz,
         break;
     }
 
-    /* Changed during the walk, before belay reached it (consistency.c). */
-    if (cfd != -1 && cons_changed_during_walk(wc, e))
-        outcome_apply(e, FACET_LISTING, OUT_CHANGED, &wc->tally);
-
     if (cfd == -1) return cap_emit_scratch(wc);
 
     /*
      *  A walked directory is emitted AFTER its subtree (order is fixed by the
-     *  sort, so this costs nothing) so that a change during its own listing
-     *  can still be recorded on it. Verified before this: a file moved, mid-
-     *  walk, from a not-yet-listed directory into an already-listed one was
-     *  recorded nowhere while the trailer claimed a clean walk. Now the
-     *  directory it left is flagged unstable: its listing describes no single
-     *  instant. The scratch entry is reused by the children, so keep a copy.
+     *  sort, so this costs nothing) so that a listing that failed part way can
+     *  still be recorded on it. Whether it changed after it was recorded is
+     *  the end-of-walk validator's question (consistency.c). The scratch
+     *  entry is reused by the children, so keep a copy.
      */
     struct belay_entry *dir = malloc(sizeof *dir);
     if (dir == NULL) {
@@ -142,9 +126,8 @@ static int visit(int parent_fd, const char *name, char *rel, size_t relsz,
     memcpy(dir, e, sizeof *dir);
 
     int r = cap_walk(cfd, rel, relsz, rel_len, depth + 1, wc);
-    if (r == 0 || r == W_INCOMPLETE) {
-        if (r == W_INCOMPLETE || !cons_listing_held(wc, cfd, dir))
-            outcome_apply(dir, FACET_LISTING, OUT_CHANGED, &wc->tally);
+    if (r == W_INCOMPLETE) {
+        outcome_apply(dir, FACET_LISTING, OUT_CHANGED, &wc->tally);
         r = 0;
     }
     close(cfd);
