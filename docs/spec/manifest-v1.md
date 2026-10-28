@@ -260,11 +260,18 @@ A walk takes time, and the tree may change while it runs. When the walk is over,
 entry is stat'ed again and compared, by equality, with what was recorded; the manifest describes
 that instant, the end of the walk. An entry carrying none of `raced`, `unstable` and `unreadable`
 was found unchanged, so what is recorded for it held at the end of the walk. A directory carrying
-none of `unstable`, `unreadable` and `mount` lists exactly the entries it held then: every listed
-directory is also listed again and its names compared, because equal attributes do not prove an
-equal listing (an NFS client was measured serving a listing older than the attributes it reported
-for the same directory). No clock is read: every judgment compares two observations of the same
-entry, so a stepped or skewed clock changes nothing.
+none of `unstable`, `unreadable` and `mount` lists exactly the entries it held then. No clock is
+read: every judgment compares two observations of the same entry, so a stepped or skewed clock
+changes nothing.
+
+**Every directory is listed twice, on purpose.** The validator lists each recorded directory again
+and compares its names with the walk's listing, besides comparing its attributes. This is not
+redundant: a listing can be stale while the directory's attributes are current. An NFS client was
+measured serving a listing older than the attributes it reported for the same directory, so a file
+moved between two directories was in neither listing with every timestamp equal; a fresh listing
+showed it. Only the second listing catches that. It costs about 1% of a check (a 110,000-file
+tree). Removing it reopens the hole; a timestamp rule that used to cover it read the wall clock
+and was deleted.
 
 Equality compares timestamps, which bounds what it can see:
 
@@ -306,13 +313,21 @@ What the store rule does not cover:
 - Where the probe cannot tell, the copy is kept unguarded: on macOS, which has no lease API; on
   filesystems without lease support; and for files belay's user does not own, unless it runs
   with `CAP_LEASE` (root does).
+- Files belay does not own are stored anyway, by decision. Interpreter-claimed files (dpkg's
+  `status`, a wheel's `RECORD`) are root-owned and stored whatever their size; refusing them
+  would break those interpreters for every run that is not root. The risk is low for exactly
+  this class: package managers write a new file and rename it over the old one rather than
+  overwriting in place. A rename replaces the inode, so belay either read the old file whole --
+  a real state, and the end-of-walk validator flags the entry `raced` -- or sees the inode
+  change between its stat and its open and records the file `unstable`, with no hash.
 - On overlayfs (a container's root, Docker's `/tmp`), a shared writable mapping whose file
   descriptor was closed holds the upper layer's file, not the overlay's, so the probe does not
   see it (measured). A writer holding the file open is seen. Reading the upper layer directly,
   as host-reader mode does, sees both.
-- On Linux, if SIGIO still has its default action, belay sets it to ignored: a writer opening
-  the file during the probe makes the kernel send SIGIO, whose default action would end the
-  process.
+- On Linux, a writer opening the file during the probe makes the kernel send SIGIO, whose
+  default action would end the process. While a capture that stores content runs, SIGIO at its
+  default action is set to ignored, and put back when the capture ends; a handler the host
+  installed is never touched.
 
 The hash itself carries no such guarantee. On real workloads (a build-and-test loop, and large
 npm installs, measured with `bench/measure`) no torn hash was found among about 1.5 million

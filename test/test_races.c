@@ -20,6 +20,7 @@
 #include "capture/capture.h"
 
 #include <errno.h>
+#include <signal.h>
 #ifdef __linux__
 #include <sched.h>
 #include <sys/mount.h>
@@ -357,6 +358,15 @@ static ssize_t t_read(void *ctx, int fd, void *buf, size_t n) {
     return g_real->read(g_real->ctx, fd, buf, n);
 }
 
+/* The SIGIO disposition each writer probe ran under. */
+static void (*g_sigio_during)(int);
+static int t_writer_present(void *ctx, int fd) {
+    (void)ctx;
+    struct sigaction cur;
+    if (sigaction(SIGIO, NULL, &cur) == 0) g_sigio_during = cur.sa_handler;
+    return g_real->writer_present(g_real->ctx, fd);
+}
+
 static void *t_dir_open(void *ctx, int dfd) {
     (void)ctx;
     void *d = g_real->dir_open(g_real->ctx, dfd);
@@ -377,6 +387,7 @@ static void decorate(void) {
     g_ops.dir_next = t_dir_next;
     g_ops.read = t_read;
     g_ops.dir_open = t_dir_open;
+    g_ops.writer_present = t_writer_present;
 }
 
 static void arm(enum arm a, const char *x, const char *y) {
@@ -744,6 +755,49 @@ TEST(listing_older_than_its_directory_is_flagged) {
     ASSERT_TRUE(find("A/f") == NULL);           /* the walk really missed it */
     const struct belay_entry *a = find("A");
     ASSERT_TRUE(a != NULL && a->unstable);
+}
+
+/* The writer probe's lease can make the kernel send SIGIO, whose default
+ * action ends the process, so on Linux SIGIO at its default is ignored while
+ * a capture probes -- and put back when it ends: libbelay is a library, and
+ * its host must not inherit a process-wide signal change. A handler the
+ * host installed is never touched. (macOS: no probe, nothing changes.) */
+static void host_sigio(int sig) { (void)sig; }
+TEST(sigio_is_ignored_only_while_a_capture_probes) {
+#ifdef __linux__
+    const bool probes = true;
+#else
+    const bool probes = false;
+#endif
+    reset();
+    touch("f", "kept\n");
+    struct sigaction dfl, mine, cur;
+    memset(&dfl, 0, sizeof dfl);
+    dfl.sa_handler = SIG_DFL;
+    sigemptyset(&dfl.sa_mask);
+    mine = dfl;
+    mine.sa_handler = host_sigio;
+    struct belay_manifest_stats st;
+
+    ASSERT_EQ_INT(0, sigaction(SIGIO, &dfl, NULL));
+    g_sigio_during = NULL;
+    arm(NONE, NULL, NULL);
+    ASSERT_EQ_INT(0, check_store(&st));
+    ASSERT_TRUE(g_sigio_during == (probes ? SIG_IGN : SIG_DFL));    /* during */
+    ASSERT_EQ_INT(0, sigaction(SIGIO, NULL, &cur));
+    ASSERT_TRUE(cur.sa_handler == SIG_DFL);                         /* after: restored */
+
+    ASSERT_EQ_INT(0, sigaction(SIGIO, &mine, NULL));
+    g_sigio_during = NULL;
+    arm(NONE, NULL, NULL);
+    ASSERT_EQ_INT(0, check_store(&st));
+    ASSERT_TRUE(g_sigio_during == host_sigio);                      /* never touched */
+    ASSERT_EQ_INT(0, sigaction(SIGIO, NULL, &cur));
+    ASSERT_TRUE(cur.sa_handler == host_sigio);
+    sigaction(SIGIO, &dfl, NULL);
+    char cmd[400];
+    snprintf(cmd, sizeof cmd, "rm -rf '%s'", g_store);
+    if (system(cmd) != 0) { /* best effort */ }
 }
 
 /* R2-5: I/O errors on one entry are recorded on it, not fatal. */
@@ -1173,6 +1227,7 @@ int main(void) {
     RUN(r3_clock_behind_the_files_flags_nothing);
     RUN(walk_consistency_reads_no_clock);
     RUN(listing_older_than_its_directory_is_flagged);
+    RUN(sigio_is_ignored_only_while_a_capture_probes);
     RUN(store_keeps_no_copy_when_a_writer_opens_during_the_read);
     RUN(store_keeps_no_copy_when_a_writer_leaves_during_the_read);
     RUN(r4_validator_never_enters_a_mount_that_appeared);

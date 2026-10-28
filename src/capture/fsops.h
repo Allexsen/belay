@@ -69,6 +69,11 @@ struct fsops {
      * facility on this platform or filesystem, or not permitted). Must not
      * leave anything held on the file. Gates the content store (capture.c). */
     int (*writer_present)(void *ctx, int fd);
+    /* Bracket every writer_present call of one capture: begin prepares what
+     * the probe needs, end puts it back (Linux: SIGIO, see fsops_linux.c).
+     * Captures may overlap in one process; the platform counts them. */
+    void (*probe_begin)(void *ctx);
+    void (*probe_end)(void *ctx);
 
     /* Wall-clock time, for the header's created_ns only: walk consistency
      * reads no clock (consistency.c). */

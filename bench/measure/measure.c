@@ -294,9 +294,13 @@ int main(int argc, char **argv) {
     const double off0 = now_s(CLOCK_REALTIME) - now_s(CLOCK_MONOTONIC);
     double mt_read = 0;
     if (mounts >= 0) { const double a = now_s(CLOCK_MONOTONIC); read_mountinfo(); mt_read += now_s(CLOCK_MONOTONIC) - a; }
+    /* This driver probes every hashed file, store or not: bracket it as a
+     * capture with a store is (SIGIO; see fsops_linux.c). */
+    real->probe_begin(real->ctx);
     const double t0 = now_s(CLOCK_MONOTONIC);
     const int rc = capture_write(&ops, out, real_scope, &o, &st);
     const double t1 = now_s(CLOCK_MONOTONIC);
+    real->probe_end(real->ctx);
     const double off1 = now_s(CLOCK_REALTIME) - now_s(CLOCK_MONOTONIC);
 
     printf("{\"tag\":");

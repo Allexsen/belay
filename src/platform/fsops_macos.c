@@ -83,6 +83,8 @@ static int macos_writer_present(void *ctx, int fd) {
     return -1;
 }
 
+static void macos_probe_noop(void *ctx) { (void)ctx; }
+
 static int macos_clock(void *ctx, struct timespec *ts) {
     (void)ctx;
     return clock_gettime(CLOCK_REALTIME, ts);
@@ -111,6 +113,8 @@ static const struct fsops macos_ops = {
     .inode_flags = macos_inode_flags,
     .is_overlay = macos_is_overlay,
     .writer_present = macos_writer_present,
+    .probe_begin = macos_probe_noop,
+    .probe_end = macos_probe_noop,
     .clock = macos_clock,
     .tmpfile_in = macos_tmpfile_in,
 };

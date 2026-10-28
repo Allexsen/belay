@@ -95,6 +95,7 @@ int capture_write(const struct fsops *ops, const char *out_path, const char *sco
     char *rel = malloc(PATH_CAP);
     char outtmp[PATH_MAX + 32];
     bool outtmp_live = false;   /* a temp output exists on disk and must go */
+    bool probing = false;       /* ops->probe_begin ran: end it */
     FILE *out = NULL;
     snprintf(outtmp, sizeof outtmp, "%s.tmp.XXXXXX", out_path);
 
@@ -139,6 +140,10 @@ int capture_write(const struct fsops *ops, const char *out_path, const char *sco
         }
         memcpy(wc->abs, real, wc->scope_len);
         if (belay_store_open(opts->store_dir, &wc->store) == -1) goto cleanup;
+        /* Copies are gated by the writer probe (capture.c), which needs
+         * the platform prepared for it until the capture is over. */
+        ops->probe_begin(ops->ctx);
+        probing = true;
     }
 
     /* The scope root itself is an entry, path ".". Without it a chmod or
@@ -268,6 +273,7 @@ int capture_write(const struct fsops *ops, const char *out_path, const char *sco
     rc = 0;
 
 cleanup:
+    if (probing) ops->probe_end(ops->ctx);
     if (out != NULL) fclose(out);
     if (outtmp_live) unlink(outtmp);
     if (verdicts != NULL) fclose(verdicts);
