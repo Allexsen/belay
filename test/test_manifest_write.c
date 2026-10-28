@@ -29,6 +29,7 @@
 #ifdef __linux__
 #include <linux/fs.h>
 #include <sys/ioctl.h>
+#include <sys/vfs.h>
 #endif
 #include <time.h>
 #include <unistd.h>
@@ -1119,12 +1120,17 @@ TEST(store_discards_copies_of_unstable_files) {
  * it, and a torn copy would restore as a file that never existed. The hash
  * is still recorded. Linux decides with a lease probe; macOS has no lease
  * API and stores unguarded, as the spec says -- asserted here too, so the
- * documented behaviour is the tested one. */
+ * documented behaviour is the tested one. On overlayfs (Docker's /tmp) a
+ * mapping whose fd was closed holds the upper file, not the overlay one, so
+ * the probe cannot see it (measured 2026-10-28; the spec lists it). */
 TEST(store_keeps_no_copy_of_a_file_a_writer_holds_open) {
 #ifdef __linux__
     const bool guarded = true;
+    struct statfs sfs;
+    const bool overlay = statfs(g_root, &sfs) == 0 && sfs.f_type == 0x794c7630; /* OVERLAYFS_SUPER_MAGIC */
 #else
     const bool guarded = false;
+    const bool overlay = false;
 #endif
     fx_mkdir("wo");
     fx_write("wo/idle.txt", "nobody writes this\n", 19);
@@ -1147,7 +1153,7 @@ TEST(store_keeps_no_copy_of_a_file_a_writer_holds_open) {
     ASSERT_TRUE(mapped && mapped->sha256[0] != '\0');
     ASSERT_TRUE(stored("idle.txt"));
     ASSERT_EQ_INT(!guarded, stored("held.txt"));
-    ASSERT_EQ_INT(!guarded, stored("mapped.txt"));
+    ASSERT_EQ_INT(!guarded || overlay, stored("mapped.txt"));
     ASSERT_EQ_INT(0, store_tmp_count());                /* refused copies leave nothing */
 
     /* The writer gone, the next check keeps the copy. */

@@ -304,6 +304,10 @@ What the store rule does not cover:
 - Where the probe cannot tell, the copy is kept unguarded: on macOS, which has no lease API; on
   filesystems without lease support; and for files belay's user does not own, unless it runs
   with `CAP_LEASE` (root does).
+- On overlayfs (a container's root, Docker's `/tmp`), a shared writable mapping whose file
+  descriptor was closed holds the upper layer's file, not the overlay's, so the probe does not
+  see it (measured). A writer holding the file open is seen. Reading the upper layer directly,
+  as host-reader mode does, sees both.
 - On Linux, if SIGIO still has its default action, belay sets it to ignored: a writer opening
   the file during the probe makes the kernel send SIGIO, whose default action would end the
   process.
