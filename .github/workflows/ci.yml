@@ -56,7 +56,9 @@ jobs:
 
   test-macos:
     name: macos-portable
-    runs-on: macos-14
+    # macos-14 is retired on 2026-11-02 and failed in GitHub's scheduled
+    # brownouts before that (actions/runner-images#13518).
+    runs-on: macos-15
     env:
       BELAY_SKIP_PROFILE: macos-portable
     steps:
