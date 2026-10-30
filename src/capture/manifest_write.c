@@ -285,6 +285,7 @@ int capture_write(const struct fsops *ops, const char *out_path, const char *sco
     if (stats != NULL) {
         *stats = tally;
         stats->vanished = wc->tally.vanished;
+        stats->store_failed = wc->store_failed;
     }
     rc = 0;
 

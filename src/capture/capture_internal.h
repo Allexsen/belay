@@ -67,6 +67,7 @@ struct walk_ctx {
     bool scope_overlay;
 
     struct belay_store *store;  /* NULL when content storage is off */
+    size_t store_failed;        /* copies the store failed to keep (R11) */
     char  *abs;                 /* scope + "/" + rel, for interpreter claims */
     size_t scope_len;
 };

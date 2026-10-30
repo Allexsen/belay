@@ -184,6 +184,9 @@ struct belay_manifest_stats {
     size_t mounts;      /* mount points: recorded, contents not captured */
     size_t raced;     /* entries that changed after being recorded, before
                            the walk ended (the end-of-walk re-check) */
+    size_t store_failed;  /* capture only, 0 from a trailer: copies the content
+                             store failed to keep; those entries are recorded
+                             without `stored` */
 };
 
 /*
