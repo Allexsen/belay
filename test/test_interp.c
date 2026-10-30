@@ -108,6 +108,29 @@ TEST(a_long_finding_is_cut_between_characters) {
     ASSERT_EQ_INT(BELAY_FINDING_BYTES - 2, (int)n);
 }
 
+/* Review F2: an interpreter controls `n`; past the cap the helper must not
+ * write (it compared with ==). A guard after the buffer catches a write. */
+TEST(no_finding_is_added_past_the_cap) {
+    static struct { struct belay_findings f; char guard[2 * BELAY_FINDING_BYTES]; } g;
+    memset(&g, 0, sizeof g);
+    g.f.n = BELAY_FINDINGS_MAX + 1;
+    ASSERT_EQ_INT(-1, belay_findings_add(&g.f, "x"));
+    for (size_t i = 0; i < sizeof g.guard; i++) if (g.guard[i] != 0) { BELAY_FAIL("byte %zu of the guard written", i); break; }
+}
+
+/* Review F9: a cut backs up at most three bytes, the most a UTF-8 sequence
+ * continues; text that is not UTF-8 stays so, for the emitter to replace,
+ * rather than turning into a valid prefix by losing its bad bytes. */
+TEST(a_cut_never_makes_bad_text_look_valid) {
+    char text[400];
+    memcpy(text, "abc", 3);
+    memset(text + 3, 0x80, sizeof text - 4);
+    text[sizeof text - 1] = '\0';
+    struct belay_findings f = { 0 };
+    ASSERT_EQ_INT(0, belay_findings_add(&f, text));
+    ASSERT_FALSE(belay_utf8_valid(f.item[0], strlen(f.item[0])));
+}
+
 int main(void) {
     RUN(dpkg_claims_status_and_baseline_databases);
     RUN(dpkg_near_misses_are_not_claimed);
@@ -117,5 +140,7 @@ int main(void) {
     RUN(unclaimed_and_hostile_inputs_fall_back_to_binary);
     RUN(names_are_stable);
     RUN(a_long_finding_is_cut_between_characters);
+    RUN(no_finding_is_added_past_the_cap);
+    RUN(a_cut_never_makes_bad_text_look_valid);
     return belay_test_report();
 }

@@ -21,11 +21,16 @@ const struct belay_interp *belay_interp_builtin(enum belay_interp_id id) {
 }
 
 int belay_findings_add(struct belay_findings *f, const char *text) {
-    if (f->n == BELAY_FINDINGS_MAX) return -1;
+    if (f->n >= BELAY_FINDINGS_MAX) return -1;       /* an interpreter may have set n past it */
     size_t n = strlen(text);
     if (n > BELAY_FINDING_BYTES - 1) {
+        /* Back to the start of the character the cut falls in: at most three
+         * bytes, the most a UTF-8 sequence continues. Text that is not UTF-8
+         * stays so, for the emitter to replace. */
         n = BELAY_FINDING_BYTES - 1;
-        while (n > 0 && ((unsigned char)text[n] & 0xC0) == 0x80) n--;   /* text[n] continues a character */
+        size_t back = 0;
+        while (back < 3 && ((unsigned char)text[n - back] & 0xC0) == 0x80) back++;
+        if (((unsigned char)text[n - back] & 0xC0) != 0x80) n -= back;
     }
     memcpy(f->item[f->n], text, n);
     f->item[f->n][n] = '\0';
