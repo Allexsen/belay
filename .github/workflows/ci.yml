@@ -23,6 +23,8 @@ jobs:
         run: make platform
       - name: build + test
         run: make check
+      - name: diff oracle (belay_diff against a naive reference)
+        run: make oracle
 
   build-linux-arm64:
     name: linux-arm64

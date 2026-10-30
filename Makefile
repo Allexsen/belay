@@ -58,7 +58,7 @@ SAN_FLAGS	= -fsanitize=address,undefined -fno-omit-frame-pointer -g -O1
 SAN_BUILD	= $(BUILD)/san
 SAN_TEST_BIN	= $(TEST_SRC:test/%.c=$(SAN_BUILD)/test/%)
 
-.PHONY: all clean test check check-san fuzz bench platform fs-scenarios gen gen-check measure
+.PHONY: all clean test check check-san fuzz bench platform fs-scenarios gen gen-check measure oracle
 
 all: $(BIN)
 
@@ -171,6 +171,12 @@ $(MEASURE): bench/measure/measure.c $(CORE_OBJ)
 	@mkdir -p $(dir $@)
 	$(CC) $(CFLAGS) $(WARN) $(INC) -MMD -MP -o $@ $< $(CORE_OBJ)
 measure: $(MEASURE)
+
+# The diff core against a naive reference on a generated corpus of manifest
+# pairs (scripts/oracle/). ORACLE_BASES scales the corpus (~15 pairs each).
+ORACLE_BASES	?= 200
+oracle: all
+	scripts/oracle/run.sh $(ORACLE_BASES)
 
 bench: $(BENCH_BIN)
 	@echo "built: $(BENCH_BIN)"

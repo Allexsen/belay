@@ -53,7 +53,7 @@ static void m_entry(struct me e) {
     const bool reg = strcmp(e.type, "reg") == 0, dir = strcmp(e.type, "dir") == 0;
     const bool lnk = strcmp(e.type, "lnk") == 0;
     const unsigned tbits = reg ? 0100000 : dir ? 0040000 : lnk ? 0120000 : 0010000;
-    if (lnk && e.target != NULL) e.size = strlen(e.target);
+    if (lnk && e.target != NULL && !e.unreadable) e.size = strlen(e.target);
     fprintf(g_f, "{\"path\":\"%s\",\"type\":\"%s\",\"mode\":%u,\"uid\":1,\"gid\":1,\"size\":%llu,"
                  "\"mtime_ns\":%lld,\"ctime_ns\":%lld,\"ino\":%llu,\"dev\":1,\"nlink\":1",
             e.path, e.type, tbits | (e.mode ? e.mode : 0644), e.size, e.mtime ? e.mtime : 1,
@@ -312,6 +312,89 @@ TEST(manifests_of_different_scopes_are_refused_with_no_output) {
     belay_err_clear();
 }
 
+/* An unreadable link's target is unknown (empty), not a target that
+ * changed: compared only when neither side is unreadable. */
+TEST(an_unreadable_links_unknown_target_is_not_a_change) {
+    m_begin("before", "/s", 1000);
+    ROOT(.mode = 0755);
+    E(.path = "l", .type = "lnk", .target = "t5");
+    m_end();
+    m_begin("after", "/s", 1000);
+    ROOT(.mode = 0755);
+    E(.path = "l", .type = "lnk", .target = "", .size = 2, .unreadable = true);
+    m_end();
+    ASSERT_EQ_INT(0, run());
+    ASSERT_TRUE(has("l", "\"outcome\":\"unknown\""));
+    ASSERT_TRUE(has("l", "\"unknown\":[\"unreadable\"]"));
+}
+
+/* xattrs_unknown suspends the caps and xattrs comparisons: a capability
+ * "missing" on the side that could not read attributes is not a change. */
+TEST(capabilities_are_not_compared_when_attributes_are_unknown) {
+    m_begin("before", "/s", 1000);
+    ROOT(.mode = 0755);
+    E(.path = "f", .type = "reg", .size = 3, .sha = HA);
+    m_end();
+    m_begin("after", "/s", 1000);
+    ROOT(.mode = 0755);
+    E(.path = "f", .type = "reg", .size = 3, .sha = HA, .xattrs_unknown = true);
+    m_end();
+    /* before carries a capability: added by hand, after the builder's line */
+    char p[400];
+    snprintf(p, sizeof p, "%s/before", g_dir);
+    FILE *f = fopen(p, "rb");
+    static char buf[4096];
+    const size_t n = fread(buf, 1, sizeof buf - 1, f);
+    buf[n] = '\0';
+    fclose(f);
+    char *at = strstr(buf, "\"nlink\":1,\"sha256\"");
+    ASSERT_TRUE(at != NULL);
+    if (at == NULL) return;
+    f = fopen(p, "wb");
+    fwrite(buf, 1, (size_t)(at - buf) + strlen("\"nlink\":1"), f);
+    fputs(",\"caps\":\"0100000200200000\"", f);
+    fputs(at + strlen("\"nlink\":1"), f);
+    fclose(f);
+    ASSERT_EQ_INT(0, run());
+    ASSERT_TRUE(has("f", "\"outcome\":\"unknown\""));
+    ASSERT_FALSE(has("f", "\"caps\""));
+}
+
+/* The ancestry stack keeps an ancestor while the stream sits in its
+ * "before range": "a!b" sorts after "a" but before "a/x", so "a" must still
+ * be on the stack when "a/x", missing on that side, is asked about. */
+TEST(an_ancestor_survives_siblings_that_sort_between_it_and_its_children) {
+    m_begin("before", "/s", 1000);
+    ROOT(.mode = 0755);
+    E(.path = "a", .type = "dir", .mode = 0755, .unstable = true);
+    E(.path = "a!b", .type = "reg", .size = 1, .sha = HA);
+    m_end();
+    m_begin("after", "/s", 1000);
+    ROOT(.mode = 0755);
+    E(.path = "a", .type = "dir", .mode = 0755, .unstable = true);
+    E(.path = "a!b", .type = "reg", .size = 1, .sha = HA);
+    E(.path = "a/x", .type = "reg", .size = 1, .sha = HA);
+    m_end();
+    ASSERT_EQ_INT(0, run());
+    ASSERT_TRUE(has("a/x", "\"unknown\":[\"listing_incomplete\"]"));
+}
+
+/* Nothing lives below a non-directory: a path missing below a file is
+ * known absent, even when an ancestor further up is unstable. */
+TEST(absence_below_a_file_is_known) {
+    m_begin("before", "/s", 1000);
+    ROOT(.mode = 0755, .unstable = true);
+    E(.path = "f", .type = "reg", .size = 1, .sha = HA);
+    m_end();
+    m_begin("after", "/s", 1000);
+    ROOT(.mode = 0755, .unstable = true);
+    E(.path = "f", .type = "reg", .size = 1, .sha = HA);
+    E(.path = "f/x", .type = "reg", .size = 1, .sha = HA);
+    m_end();
+    ASSERT_EQ_INT(0, run());
+    ASSERT_TRUE(has("f/x", "\"outcome\":\"added\""));
+}
+
 /* The schema's promise, checked exhaustively: no combination of flags on
  * either side -- every flag field of DIFF_FIELDS, read from the schema, not
  * listed here -- classifies as unchanged, for any entry type, even when
@@ -381,6 +464,10 @@ int main(void) {
     RUN(orphan_entries_are_classified_without_their_parent);
     RUN(names_sorting_before_the_root_see_its_flags);
     RUN(manifests_of_different_scopes_are_refused_with_no_output);
+    RUN(an_unreadable_links_unknown_target_is_not_a_change);
+    RUN(capabilities_are_not_compared_when_attributes_are_unknown);
+    RUN(an_ancestor_survives_siblings_that_sort_between_it_and_its_children);
+    RUN(absence_below_a_file_is_known);
     RUN(no_flag_combination_on_either_side_is_unchanged);
     snprintf(cmd, sizeof cmd, "rm -rf '%s'", g_dir);
     if (system(cmd) != 0) { /* best effort */ }

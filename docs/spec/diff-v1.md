@@ -109,8 +109,8 @@ Flags on **either** side make part of the comparison unknown: their reasons are 
 3. **Content**: a content field that differs is proof (`size` for a regular file or symlink, the
    hash when both sides have one, the link target when neither side is `unreadable`, the device
    number). Proof gives `modified`. Without proof, content is unknown if a content-scoped flag
-   (`unverified`, `unstable`, `unreadable`, `mount`) is on either side, or one side has a hash and
-   the other does not: `unknown`.
+   (`unverified`, `unstable`, `unreadable`, `mount`) is on either side -- a regular file without a
+   hash always carries `unverified`: `unknown`.
 4. **Metadata and identity**: content unchanged and a metadata or identity field differs:
    `metadata_only`. Without such a difference, `xattrs_unknown` on either side: `unknown`.
 5. Only `ctime_ns` differs: `metadata_only`, `changed` names `ctime_ns` -- an attribute the
