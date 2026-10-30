@@ -3,6 +3,7 @@
 # of valid manifest pairs. Usage: scripts/oracle/run.sh [n-bases] [seed]
 # Exit 0 only when every pair agrees on every record and every count.
 set -euo pipefail
+export PYTHONDONTWRITEBYTECODE=1
 HERE=$(cd "$(dirname "$0")" && pwd); REPO=$(cd "$HERE/../.." && pwd)
 N=${1:-200}; SEED=${2:-20261030}
 WORK=$(mktemp -d "${TMPDIR:-/tmp}/belay_oracle.XXXXXX"); trap 'rm -rf "$WORK"' EXIT
