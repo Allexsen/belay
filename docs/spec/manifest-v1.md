@@ -135,9 +135,6 @@ In addition to the grammar above:
 - **The scope root `.` is present**, exactly once, is a directory and is never a mount. If it is
   `unreadable`, it is the only entry.
 - **Nothing appears below a directory marked `unreadable` or `mount`.**
-- **`xattrs_sha256` is the sha256 of the bytes `xattrs` would hold between its brackets**, exactly
-  as a writer emits them -- each element in its double quotes, in order, joined by `,` with no
-  space -- so a set recorded inline in one manifest and by digest in another compares equal.
 
 The rest is generated from the schema the writer and reader both execute, so it cannot drift from
 them. An unreadable symlink with an **empty** target means "target unknown": no real symlink has
@@ -260,6 +257,10 @@ Each rule below closes a way for a state the format records to be rendered as "n
   verify, not a pass.
 - **A change in `iflags`, `caps` or the xattr set is a metadata change**, reported as such
   (diff.v1: metadata-only), naming the attributes where `xattrs` is inline.
+- **`xattrs_sha256` is the sha256 of the bytes `xattrs` would hold between its brackets**, exactly
+  as a writer emits them -- the elements sorted by the attributes' own name bytes (before any `x:`
+  spelling), each in its double quotes, joined by `,` with no space, every hex digit lowercase --
+  so a set recorded inline in one manifest and by digest in another compares equal.
 - **A `ctime_ns` change with every recorded field equal means "changed: unrecorded attribute"**,
   never "unchanged", on a regular file or symlink. The extended metadata belay cannot see (see
   below) still changes ctime, which turns its absence into a visible, if unspecific, change. On a
@@ -377,18 +378,22 @@ holds bytes that match no state of the file"; its first correction said that hol
 power loss. **A store commit alone does not make a copy's name durable.** Before the manifest is
 renamed into place, belay syncs every directory holding the name of a copy the manifest names --
 the copy's fan-out directory, the store directory and its parent -- once each, however many copies
-it holds. The manifest itself is synced before its rename, and its directory after. A sync that
-cannot be done (a directory belay cannot open) or that fails is not an error: by then the files
-are complete and in place.
+it holds. The manifest itself is synced before its rename, and its directory after. This holds as
+far as those syncs succeed: a sync that fails, or a directory belay cannot open, is not reported
+and does not stop the capture (decided: as for the diff's output), so where syncs fail, a
+published manifest can name a copy whose name a power loss takes.
 
-A copy's bytes are not synced: that costs 4.5-5.4 s per 2,000 new files, and a lost copy is
-detected. A copy a power loss emptied or cut short no longer hashes to its name, so it fails
-verification on read, and it is never used: content that fails verification is an error, never
-a copy.
+A copy's bytes are not synced: syncing them made a first capture of 2,000 small files take 2.3 s
+instead of 0.055 s (measured on WSL2, Linux 6.18, ext4), and a lost copy is detected. A copy a
+power loss emptied or cut short no longer hashes to its name, so it fails verification on read,
+and it is never used: content that fails verification is an error, never a copy. The next capture
+that stores the same content replaces it: an object whose size differs from the bytes being
+stored under its name is replaced, one of the same size is kept.
 
-On macOS, `fsync(2)` does not make the drive write its cache to the medium, and belay does not
-use `F_FULLFSYNC`: there, these syncs order the writes but do not ensure they reach the disk before
-a power loss. (macOS already keeps copies without the writer probe, above.)
+On macOS, `fsync(2)` neither makes the drive write its cache to the medium nor keeps the order of
+writes, and belay uses neither `F_FULLFSYNC` nor `F_BARRIERFSYNC`: there, a power loss can take a
+published manifest, or keep it and take the names of copies it names, which then fail
+verification as missing. (macOS already keeps copies without the writer probe, above.)
 
 ## Path encoding
 
