@@ -167,9 +167,10 @@ compares by hash.
 `mtime_ns` and `ctime_ns` are not compared: ttys and pipes stamp themselves when used, and a mount
 root's times belong to the mounted filesystem. Their mode, owner, group, inode, device relation
 and device number still compare, so a real `chmod` is still seen. A mount root's own `iflags`,
-`caps` and `xattrs` are never read (manifest-v1, rule 22), so they are not compared on an entry
-that is a mount root on either side: a directory that became a mount root, or stopped being one,
-is `unknown` for the reason `mount`, with no reason that claims something could not be read.
+`caps` and `xattrs` are never read (manifest-v1, rule 22), so on an entry that is a mount root on
+either side they are not compared and add no reason: a directory that became a mount root, or
+stopped being one, is `unknown` with the reason `mount`, plus those of any flags either side
+carries.
 
 **A directory's own timestamps.** A directory's `mtime_ns` and `ctime_ns` are not compared either:
 they move whenever a name is added, removed or renamed in it, and the records of its children
