@@ -1,5 +1,5 @@
 /*
- *  Generates, from the entry schema (src/capture/entry.c), the two artifacts
+ *  Generates, from the entry schema (src/schema/entry.c), the two artifacts
  *  that would otherwise restate it by hand:
  *
  *    gen_schema spec <file>   <file> with each generated block replaced
@@ -12,7 +12,7 @@
  *  Output goes to stdout. `make gen` writes it in place; `make gen-check`
  *  (part of `make check`) fails when a committed artifact is stale.
  */
-#include "capture/entry.h"
+#include "schema/entry.h"
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -224,7 +224,7 @@ static int spec(const char *path) {
         int b;
         if (inside == -1 && (b = marker(line, BEGIN_MARK)) != -1) {
             fputs(line, stdout);
-            printf("<!-- From src/capture/entry.c by tools/gen_schema.c. "
+            printf("<!-- From src/schema/entry.c by tools/gen_schema.c. "
                    "Edit there, then `make gen`. -->\n\n");
             BLOCKS[b].emit();
             seen[b]++;
@@ -259,11 +259,11 @@ static int spec(const char *path) {
 
 static int fuzz(void) {
     char a[512], b[512], ty[128];
-    printf("/* GENERATED from src/capture/entry.c by tools/gen_schema.c. Do not edit:\n"
+    printf("/* GENERATED from src/schema/entry.c by tools/gen_schema.c. Do not edit:\n"
            " * change the schema, then `make gen`. */\n"
            "#ifndef BELAY_FUZZ_INVARIANTS_GEN_H\n"
            "#define BELAY_FUZZ_INVARIANTS_GEN_H\n\n"
-           "#include \"capture/entry.h\"\n\n"
+           "#include \"schema/entry.h\"\n\n"
            "#include <stdlib.h>\n\n"
            "/* Aborts unless `e`, as the reader delivered it under header `h`, obeys\n"
            " * every schema rule. Fields present are recomputed from the decoded entry\n"

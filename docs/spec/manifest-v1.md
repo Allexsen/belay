@@ -54,7 +54,7 @@ are not permitted anywhere.
 ```
 
 <!-- BEGIN GENERATED: header -->
-<!-- From src/capture/entry.c by tools/gen_schema.c. Edit there, then `make gen`. -->
+<!-- From src/schema/entry.c by tools/gen_schema.c. Edit there, then `make gen`. -->
 
 | field | kind | meaning |
 |---|---|---|
@@ -82,7 +82,7 @@ owner is invisible.
 ```
 
 <!-- BEGIN GENERATED: entries -->
-<!-- From src/capture/entry.c by tools/gen_schema.c. Edit there, then `make gen`. -->
+<!-- From src/schema/entry.c by tools/gen_schema.c. Edit there, then `make gen`. -->
 
 | field | kind | carried by | meaning |
 |---|---|---|---|
@@ -141,7 +141,7 @@ them. An unreadable symlink with an **empty** target means "target unknown": no 
 an empty target, so it cannot be confused with one.
 
 <!-- BEGIN GENERATED: schema -->
-<!-- From src/capture/entry.c by tools/gen_schema.c. Edit there, then `make gen`. -->
+<!-- From src/schema/entry.c by tools/gen_schema.c. Edit there, then `make gen`. -->
 
 - **Entry fields appear in one fixed order**, optional ones omitted, never reordered (`a`|`b`: one
   spelling or the other, never both):
@@ -211,7 +211,7 @@ schema (diff.v1), every format change needs an explicit version bump.
 ```
 
 <!-- BEGIN GENERATED: trailer -->
-<!-- From src/capture/entry.c by tools/gen_schema.c. Edit there, then `make gen`. -->
+<!-- From src/schema/entry.c by tools/gen_schema.c. Edit there, then `make gen`. -->
 
 | field | kind | meaning |
 |---|---|---|

@@ -2,7 +2,7 @@
  *  One entry as one canonical NDJSON line (manifest format v1).
  */
 #include "serialize.h"
-#include "entry.h"
+#include "schema/entry.h"
 
 #include "belay/error.h"
 #include "belay/json.h"

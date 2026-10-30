@@ -16,7 +16,7 @@
 #include "belay/manifest.h"
 #include "belay/store.h"
 
-#include "entry.h"
+#include "schema/entry.h"
 #include "fsops.h"
 #include "ident.h"
 #include "outcome.h"
