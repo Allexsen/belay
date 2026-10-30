@@ -1154,6 +1154,8 @@ def type_changes(w, rng):
                             e2.pop('iflags', None)
                         return with_subject(t, e, e2)
                     scen = ['a type change']
+                    if ctx == 'raced':
+                        scen.append('a raced type change, raced on both sides')
                     if one:
                         scen.append('a raced type change, iflags on one side only' if ctx == 'raced'
                                     else 'a type change, iflags on one side only')
