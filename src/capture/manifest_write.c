@@ -231,6 +231,12 @@ int capture_write(const struct fsops *ops, const char *out_path, const char *sco
         }
     }
     if (got == -1) goto cleanup;
+    if (wc->tally.invalid != 0) {
+        belay_err_set(BELAY_ERR_INTERNAL, 0,
+                      "manifest: internal error: %zu outcome(s) the effect table does not define",
+                      wc->tally.invalid);
+        goto cleanup;
+    }
     if (tally.entries != runs_count(wc->runs)) {
         belay_err_set(BELAY_ERR_CORRUPT, 0,
                       "manifest: internal error, %zu entries walked but %zu written",

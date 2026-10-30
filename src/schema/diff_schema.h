@@ -12,19 +12,26 @@
 
 #define DIFF_VERSION 1
 
-/* One outcome per path. Unchanged is counted, never emitted. */
+/* One outcome per path. Unchanged is counted, never emitted. Value 0 is no
+ * outcome at all: a verdict that was never decided fails, it is never
+ * "unchanged" (audit 2026-10, R1). */
 enum diff_outcome {
-    D_UNCHANGED, D_ADDED, D_REMOVED, D_MODIFIED, D_TYPE_CHANGED, D_METADATA_ONLY, D_UNKNOWN,
-    D_OUTCOME_COUNT
+    D_UNDECIDED, D_UNCHANGED, D_ADDED, D_REMOVED, D_MODIFIED, D_TYPE_CHANGED, D_METADATA_ONLY,
+    D_UNKNOWN, D_OUTCOME_COUNT
 };
+#define D_FIRST D_UNCHANGED
 
 /* Why an outcome is unknown: a flag on either side, or what the side that
- * lacks the path says about its ancestor directory. */
+ * lacks the path says about its ancestor directory. DR_UNSET (0) is a missing
+ * cell; DR_NONE is a field that is not a flag. Real reasons start at
+ * DR_FIRST. */
 enum diff_reason {
+    DR_UNSET, DR_NONE,
     DR_RACED, DR_UNSTABLE, DR_UNVERIFIED, DR_UNREADABLE, DR_MOUNT, DR_XATTRS_UNKNOWN,
     DR_LISTING_INCOMPLETE, DR_NOT_CAPTURED,
     DR_COUNT
 };
+#define DR_FIRST DR_RACED
 #define DRBIT(r) (1u << (r))
 
 struct diff_name_def {
@@ -50,10 +57,15 @@ extern const struct diff_name_def DIFF_REASONS[DR_COUNT];
  *  `types` limits the class to those entry types; elsewhere the field is
  *  CC_INFO (a directory's size and mtime follow its listing, which its
  *  children report).
+ *
+ *  Every cell is explicit: 0 in any column (CC_UNSET, US_UNSET, DR_UNSET) is a
+ *  missing cell, refused by gen_schema and by test_schema, and a classify
+ *  that meets one fails the diff. A field that is not a flag says so:
+ *  US_NONE, DR_NONE.
  */
-enum change_class { CC_KEY, CC_TYPE, CC_CONTENT, CC_METADATA, CC_IDENTITY, CC_CTIME, CC_FLAG,
-                    CC_INFO };
-enum unknown_scope { US_NONE, US_CONTENT, US_METADATA, US_ALL };
+enum change_class { CC_UNSET, CC_KEY, CC_TYPE, CC_CONTENT, CC_METADATA, CC_IDENTITY, CC_CTIME,
+                    CC_FLAG, CC_INFO };
+enum unknown_scope { US_UNSET, US_NONE, US_CONTENT, US_METADATA, US_ALL };
 struct field_change {
     enum change_class cls;
     unsigned types;             /* TBIT mask */
@@ -63,7 +75,8 @@ struct field_change {
 };
 extern const struct field_change DIFF_FIELDS[F_COUNT];
 
-/* The class of field `f` for an entry of type `t`. */
+/* The class of field `f` for an entry of type `t`; CC_UNSET when the row's
+ * class is missing (the caller fails). */
 enum change_class diff_field_class(enum entry_field f, enum belay_entry_type t);
 
 /* The diff.v1 stream: a header line, one record per changed path, a trailer

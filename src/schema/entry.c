@@ -269,6 +269,9 @@ static bool violated(const struct entry_rule *r, const struct belay_entry *e, ui
     const bool applies = (r->types & TBIT(e->type)) != 0;
     *msg = r->msg;
     switch (r->kind) {
+    case R_UNSET:
+        *msg = "internal error: a schema rule without a kind";
+        return true;
     case R_FORBID:      return applies && (present & r->a);
     case R_IMPLIES:     return applies && (present & r->a) && !(present & r->b);
     case R_EXCLUSIVE:   return applies && __builtin_popcount(present & r->a) > 1;
@@ -283,7 +286,8 @@ static bool violated(const struct entry_rule *r, const struct belay_entry *e, ui
         if (!applies) *msg = r->msg2;
         return applies != ((present & r->a) != 0);
     }
-    return false;
+    *msg = "internal error: a schema rule of an unknown kind";
+    return true;                         /* fails closed: never "not violated" */
 }
 
 int entry_check(const struct belay_entry *e, uint32_t present) {

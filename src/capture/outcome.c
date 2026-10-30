@@ -15,35 +15,46 @@ enum {
     COUNT_VANISHED  = 1u << 9,
 };
 
-static const unsigned EFFECT[FACET_N][OUT_N] = {
+#define D EFF_DEFINED
+const unsigned OUTCOME_EFFECT[FACET_N][OUT_N] = {
     [FACET_CONTENT] = {
-        [OUT_CHANGED]   = SET_UNVERIFIED | SET_UNSTABLE | DROP_HASH,
-        [OUT_DENIED]    = SET_UNVERIFIED | SET_UNREADABLE | DROP_HASH,
-        [OUT_TOO_LARGE] = SET_UNVERIFIED,
-        [OUT_GONE]      = COUNT_VANISHED,
+        [OUT_OK]        = D,
+        [OUT_CHANGED]   = D | SET_UNVERIFIED | SET_UNSTABLE | DROP_HASH,
+        [OUT_DENIED]    = D | SET_UNVERIFIED | SET_UNREADABLE | DROP_HASH,
+        [OUT_TOO_LARGE] = D | SET_UNVERIFIED,
+        [OUT_GONE]      = D | COUNT_VANISHED,
     },
     [FACET_LISTING] = {
-        [OUT_CHANGED]   = SET_UNSTABLE,
-        [OUT_DENIED]    = SET_UNREADABLE,
-        [OUT_GONE]      = SET_UNREADABLE | COUNT_VANISHED,
+        [OUT_OK]        = D,
+        [OUT_CHANGED]   = D | SET_UNSTABLE,
+        [OUT_DENIED]    = D | SET_UNREADABLE,
+        [OUT_GONE]      = D | SET_UNREADABLE | COUNT_VANISHED,
     },
     [FACET_TARGET] = {
-        [OUT_DENIED]    = SET_UNREADABLE | TARGET_UNKNOWN,
-        [OUT_CHANGED]   = SET_UNREADABLE | TARGET_UNKNOWN_IF_NONE,
-        [OUT_GONE]      = COUNT_VANISHED,
+        [OUT_OK]        = D,
+        [OUT_DENIED]    = D | SET_UNREADABLE | TARGET_UNKNOWN,
+        [OUT_CHANGED]   = D | SET_UNREADABLE | TARGET_UNKNOWN_IF_NONE,
+        [OUT_GONE]      = D | COUNT_VANISHED,
     },
     [FACET_ENTRY] = {
-        [OUT_GONE]      = COUNT_VANISHED,
-        [OUT_BOUNDARY]  = SET_MOUNT,
-        [OUT_CHANGED]   = SET_RACED,
+        [OUT_OK]        = D,
+        [OUT_GONE]      = D | COUNT_VANISHED,
+        [OUT_BOUNDARY]  = D | SET_MOUNT,
+        [OUT_CHANGED]   = D | SET_RACED,
     },
     [FACET_EXTRAS] = {
-        [OUT_DENIED]    = SET_XUNKNOWN,
+        [OUT_OK]        = D,
+        [OUT_DENIED]    = D | SET_XUNKNOWN,
     },
 };
+#undef D
 
 void outcome_apply(struct belay_entry *e, enum facet f, enum outcome o, struct walk_tally *t) {
-    const unsigned x = EFFECT[f][o];
+    const unsigned x = (unsigned)f < FACET_N && (unsigned)o < OUT_N ? OUTCOME_EFFECT[f][o] : 0;
+    if (!(x & EFF_DEFINED)) {             /* an outcome nothing defines: fail, never ignore */
+        if (t != NULL) t->invalid++;
+        return;
+    }
     if ((x & COUNT_VANISHED) && t != NULL) t->vanished++;
     if (e == NULL) return;
     if (x & SET_UNVERIFIED) e->unverified = true;

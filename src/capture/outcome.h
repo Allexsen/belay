@@ -35,8 +35,15 @@ enum outcome {
     OUT_N
 };
 
-/* What the walk saw that no emitted entry carries. */
-struct walk_tally { size_t vanished; };
+/* What the walk saw that no emitted entry carries; `invalid` counts outcomes
+ * the effect table does not define, and fails the write. */
+struct walk_tally { size_t vanished; size_t invalid; };
+
+/* The effect of (facet, outcome): flag bits, and EFF_DEFINED on every cell
+ * the capture may apply. A cell without it is a combination nothing defines:
+ * applying one fails the write instead of recording nothing (audit 2026-10). */
+#define EFF_DEFINED (1u << 15)
+extern const unsigned OUTCOME_EFFECT[FACET_N][OUT_N];
 
 /* Applies what was found to `e`'s flags (e may be NULL for an entry that is
  * not recorded at all, e.g. one gone before it could be stat'ed). */

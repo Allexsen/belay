@@ -65,6 +65,7 @@ const char *belay_interp_name(enum belay_interp_id id) {
     case BELAY_INTERP_PIP:    return "pip";
     case BELAY_INTERP_DPKG:   return "dpkg";
     case BELAY_INTERP_GIT:    return "git";
-    default:                  return "unknown";
+    case BELAY_INTERP_COUNT:  break;
     }
+    return "unknown";
 }
