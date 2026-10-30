@@ -22,7 +22,8 @@ struct belay_diff_stats {
 
 /*
  *  Compares the manifests at `before` and `after` and writes diff.v1 to
- *  `out_path` (through a temporary name, renamed into place on success).
+ *  `out_path` (through a temporary name, renamed into place on success, then
+ *  its directory synced where the directory can be opened).
  *  Manifests of different scopes are refused before any entry is read.
  *  0, or -1 with belay_err set and no output file; `stats` may be NULL.
  */

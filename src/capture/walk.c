@@ -5,6 +5,7 @@
  */
 #define _GNU_SOURCE
 #include "capture_internal.h"
+#include "util/check.h"
 
 #include "belay/error.h"
 
@@ -191,6 +192,7 @@ int cap_walk(int dfd, char *rel, size_t relsz, size_t rel_len,
         if (v == -1) { rc = -1; break; }
         if (v == VISIT_RECORDED) cons_listing_add(seen, dname);   /* what the re-list must match */
         else if (v == VISIT_INCOMPLETE) incomplete = true;
+        else BELAY_CHECK(v == VISIT_GONE, (ops->dir_close(ops->ctx, d), -1));
     }
 
     ops->dir_close(ops->ctx, d);

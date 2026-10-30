@@ -67,21 +67,20 @@ static int refuse_input_as_output(const char *out_path, const char *before, cons
     return 0;
 }
 
-/* The rename into place survives a crash only once its directory is synced. */
-static int sync_dir_of(const char *path) {
+/* The rename into place survives a crash only once its directory is synced.
+ * Done where the directory can be opened (a write-and-search-only drop
+ * directory cannot be); never a failure: the output is already complete and
+ * in place, and the diff has succeeded (review F3). */
+static void sync_dir_of(const char *path) {
     char dir[PATH_MAX];
     const char *slash = strrchr(path, '/');
     if (slash == NULL) snprintf(dir, sizeof dir, ".");
     else if (slash == path) snprintf(dir, sizeof dir, "/");
     else snprintf(dir, sizeof dir, "%.*s", (int)(slash - path), path);
     const int fd = open(dir, O_RDONLY | O_DIRECTORY | O_CLOEXEC);
-    if (fd == -1 || fsync(fd) != 0) {
-        belay_err_set(BELAY_ERR_IO, errno, "diff: cannot sync %s", dir);
-        if (fd != -1) close(fd);
-        return -1;
-    }
+    if (fd == -1) return;
+    if (fsync(fd) != 0) { /* nothing left to undo: see above */ }
     close(fd);
-    return 0;
 }
 
 struct run {
@@ -108,7 +107,7 @@ static void explain(struct run *x, const struct belay_entry *b, const struct bel
                     const struct verdict *v, const char *scope) {
     const struct belay_entry *e = a != NULL ? a : b;
     const size_t sl = strlen(scope), sep = sl > 1 ? 1 : 0;
-    x->findings.n = 0;
+    memset(&x->findings, 0, sizeof x->findings);   /* nothing of the last path survives */
     if (sl + sep + e->path_len >= sizeof x->abs) return;
     memcpy(x->abs, scope, sl);
     if (sep) x->abs[sl] = '/';
@@ -121,7 +120,7 @@ static void explain(struct run *x, const struct belay_entry *b, const struct bel
                                            DIFF_OUTCOMES[v->outcome].name, v->changed, NULL };
     const enum belay_interp_result r = it->explain(x->state[claim.interp], &in, &x->findings);
     if (r == BELAY_INTERP_ERROR) {
-        x->findings.n = 0;
+        memset(&x->findings, 0, sizeof x->findings);
         belay_findings_add(&x->findings, "could not interpret");
     } else if (r != BELAY_INTERP_FINDINGS) {
         x->findings.n = 0;
@@ -135,15 +134,21 @@ static void explain(struct run *x, const struct belay_entry *b, const struct bel
     if (x->findings.n > BELAY_FINDINGS_MAX) x->findings.n = BELAY_FINDINGS_MAX;
 }
 
+/* Manifests of different scopes are never compared: refused on their
+ * headers, before any entry is read. */
+static int same_scope(struct run *x) {
+    const struct belay_manifest_header *hb = belay_manifest_header(x->rb);
+    const struct belay_manifest_header *ha = belay_manifest_header(x->ra);
+    if (strcmp(hb->scope, ha->scope) == 0) return 0;
+    belay_err_set(BELAY_ERR_INVALID, 0,
+                  "diff: the manifests record different scopes (%s, %s); refusing", hb->scope,
+                  ha->scope);
+    return -1;
+}
+
 static int run_pipeline(struct run *x) {
     const struct belay_manifest_header *hb = belay_manifest_header(x->rb);
     const struct belay_manifest_header *ha = belay_manifest_header(x->ra);
-    if (strcmp(hb->scope, ha->scope) != 0) {
-        belay_err_set(BELAY_ERR_INVALID, 0,
-                      "diff: the manifests record different scopes (%s, %s); refusing", hb->scope,
-                      ha->scope);
-        return -1;
-    }
     if (emit_header(&x->em, hb, ha, x->ctx.remounted) == -1) return -1;
     const struct belay_entry *b, *a;
     int got;
@@ -204,7 +209,8 @@ int diff_run(const char *before, const char *after, const char *out_path,
         return -1;
     }
     if (belay_manifest_open(before, &x->rb) == -1 || belay_manifest_open(after, &x->ra) == -1 ||
-        find_root(x->rb, &x->root[0]) == -1 || find_root(x->ra, &x->root[1]) == -1)
+        same_scope(x) == -1 || find_root(x->rb, &x->root[0]) == -1 ||
+        find_root(x->ra, &x->root[1]) == -1)
         goto done;
     ancestry_init(&x->anc[0], ancestry_kind(&x->root[0]));
     ancestry_init(&x->anc[1], ancestry_kind(&x->root[1]));
@@ -246,7 +252,7 @@ int diff_run(const char *before, const char *after, const char *out_path,
         goto done;
     }
     tmp_live = false;
-    if (sync_dir_of(out_path) == -1) goto done;
+    sync_dir_of(out_path);
     if (stats != NULL) {
         const size_t *c = x->em.count;
         *stats = (struct belay_diff_stats){
