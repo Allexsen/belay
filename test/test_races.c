@@ -1453,12 +1453,6 @@ TEST(a_store_that_fails_mid_copy_keeps_the_entry) {
     closedir(sd);
 }
 
-/* Audit 2026-10, the capture's surviving mutants: each case below passed
- * every check with its decision removed (CAP-WALK-08, CONS-08, CAP-X-02,
- * CAP-X-03, CAP-WALK-09). */
-
-/* Gone between its stat and its open: not recorded, counted as vanished;
- * its directory changed while it was walked. */
 /* Decided 2026-10-30: a published manifest that can vanish on power loss can
  * lose a baseline. The manifest is synced before its rename -- it is the file
  * found at the name afterwards -- and its directory after. */
@@ -1532,6 +1526,12 @@ TEST(a_directory_that_cannot_be_synced_fails_nothing) {
     ASSERT_EQ_INT(0, (int)st.store_failed);
 }
 
+/* Audit 2026-10, the capture's surviving mutants: each case below passed
+ * every check with its decision removed (CAP-WALK-08, CONS-08, CAP-X-02,
+ * CAP-X-03, CAP-WALK-09). */
+
+/* Gone between its stat and its open: not recorded, counted as vanished;
+ * its directory changed while it was walked. */
 TEST(a_file_gone_between_its_stat_and_open_is_counted) {
     reset();
     mk("d");

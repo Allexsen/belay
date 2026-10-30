@@ -24,8 +24,7 @@ struct belay_store {
     int dfd;
     unsigned long counter;
     const struct fsops *ops;
-    bool published[256];        /* fan-out directories a commit renamed into, since the sync */
-    bool made;                  /* a commit made a fan-out directory, since the sync */
+    bool named[256];    /* fan-out directories holding a name a commit returned, since the sync */
 };
 
 /* The fan-out directory of a valid hex name, as an index. */
@@ -156,12 +155,10 @@ void belay_store_abort(struct belay_store_tx *tx) {
     tx->live = false;
 }
 
-/* Opens (creating if needed, which *created says) the fan-out directory for
- * `hex`. */
-static int open_prefix(struct belay_store *s, const char *hex, bool *created) {
+/* Opens (creating if needed) the fan-out directory for `hex`. */
+static int open_prefix(struct belay_store *s, const char *hex) {
     const char prefix[3] = { hex[0], hex[1], '\0' };
-    *created = mkdirat(s->dfd, prefix, 0700) == 0;
-    if (!*created && errno != EEXIST) {
+    if (mkdirat(s->dfd, prefix, 0700) == -1 && errno != EEXIST) {
         belay_err_set(BELAY_ERR_IO, errno, "store: cannot create %s/", prefix);
         return -1;
     }
@@ -193,8 +190,7 @@ int belay_store_commit(struct belay_store_tx *tx, const char *hex) {
     }
     tx->fd = -1;
 
-    bool created;
-    const int pfd = open_prefix(tx->s, hex, &created);
+    const int pfd = open_prefix(tx->s, hex);
     if (pfd == -1) {
         unlinkat(tx->s->dfd, tx->tmp, 0);
         tx->live = false;
@@ -206,8 +202,10 @@ int belay_store_commit(struct belay_store_tx *tx, const char *hex) {
     if (fstatat(pfd, hex + 2, &st, AT_SYMLINK_NOFOLLOW) == 0) {
         if (S_ISREG(st.st_mode)) {
             /* Dedup: keep the existing object, never rewrite it. Its content
-             * is not trusted here -- verify-on-read is what checks it. */
+             * is not trusted here -- verify-on-read is what checks it. Its
+             * name may be one an earlier capture renamed and never synced. */
             unlinkat(tx->s->dfd, tx->tmp, 0);
+            tx->s->named[prefix_index(hex)] = true;         /* for belay_store_sync */
         } else {
             /* A symlink or directory at an object's name was put there by
              * something other than belay. Refuse rather than replace: a
@@ -224,8 +222,7 @@ int belay_store_commit(struct belay_store_tx *tx, const char *hex) {
             belay_err_set(BELAY_ERR_IO, e, "store: cannot publish object");
             rc = -1;
         } else {
-            tx->s->published[prefix_index(hex)] = true;     /* for belay_store_sync */
-            tx->s->made |= created;
+            tx->s->named[prefix_index(hex)] = true;
         }
     } else {
         const int e = errno;
@@ -239,18 +236,23 @@ int belay_store_commit(struct belay_store_tx *tx, const char *hex) {
     return rc;
 }
 
-/* The renames since the last sync survive a crash only once the directories
- * they renamed into are synced, and a fan-out directory made for one only
- * once the store's is: each synced once, however many objects it received
- * (one sync per object made a first capture of 2,000 small files 40 times
- * slower; the first sync commits the journal for the rest). Never a failure:
- * the copies are complete and in place (decided 2026-10-30, as the diff's
- * output, review F3). */
+/* A name a commit returned -- renamed in, or found there, perhaps renamed by
+ * an earlier capture that failed before its sync -- survives a crash only
+ * once every directory on its way up is synced: its fan-out directory, the
+ * store directory, whose fan-out names a failed commit may have made, and
+ * the parent, which holds the store directory's own name (review of the
+ * S6 completion, F2-F4). Each is synced once, however many names it holds:
+ * one sync per object made a first capture of 2,000 small files 40 times
+ * slower, and the first sync commits the journal for the rest. Never a
+ * failure: the copies are complete and in place (decided 2026-10-30, as the
+ * diff's output, review F3). */
 void belay_store_sync(struct belay_store *s) {
     if (s == NULL) return;
+    bool any = false;
     for (int i = 0; i < 256; i++) {
-        if (!s->published[i]) continue;
-        s->published[i] = false;
+        if (!s->named[i]) continue;
+        s->named[i] = false;
+        any = true;
         char prefix[3];
         snprintf(prefix, sizeof prefix, "%02x", i);
         const int pfd = openat(s->dfd, prefix, O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC);
@@ -258,8 +260,12 @@ void belay_store_sync(struct belay_store *s) {
         if (s->ops->fsync(s->ops->ctx, pfd) != 0) { /* nothing left to undo */ }
         close(pfd);
     }
-    if (s->made && s->ops->fsync(s->ops->ctx, s->dfd) != 0) { /* likewise */ }
-    s->made = false;
+    if (!any) return;
+    if (s->ops->fsync(s->ops->ctx, s->dfd) != 0) { /* likewise */ }
+    const int up = openat(s->dfd, "..", O_RDONLY | O_DIRECTORY | O_CLOEXEC);
+    if (up == -1) return;
+    if (s->ops->fsync(s->ops->ctx, up) != 0) { /* likewise */ }
+    close(up);
 }
 
 int belay_store_verify(struct belay_store *s, const char *hex) {

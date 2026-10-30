@@ -13,8 +13,8 @@
  *
  *  INTEGRITY IS VERIFIED ON READ, not trusted on write. A commit whose object
  *  already exists keeps the existing file (dedup without rewriting), and
- *  objects are not fsynced individually -- only the directories commits
- *  publish into are, by belay_store_sync -- so an object may be stale,
+ *  objects are not fsynced individually -- only the directories that hold
+ *  their names are, by belay_store_sync -- so an object may be stale,
  *  planted or truncated by a crash. belay_store_verify() hashes an object and checks
  *  it against its own name; every consumer must call it before trusting
  *  content.
@@ -49,15 +49,18 @@ int  belay_store_write(struct belay_store_tx *tx, const void *buf, size_t n);
  *  else is rejected before it can become a path. If the object exists and is
  *  a regular file it is kept and the staged copy discarded. If something
  *  other than a regular file sits at the object's name, that is an error.
- *  The transaction is finished either way. A new object's name survives a
- *  crash only after belay_store_sync.
+ *  The transaction is finished either way. The object's name, renamed in or
+ *  found there, survives a crash once belay_store_sync has run.
  */
 int  belay_store_commit(struct belay_store_tx *tx, const char *hex);
 
 /*
- *  Syncs each directory a commit renamed an object into since the last call,
- *  once, and the store directory when a commit made a fan-out directory. A
- *  sync that fails is not an error: the objects are already in place.
+ *  Makes the names of the objects committed since the last call survive a
+ *  crash: syncs each fan-out directory holding one (renamed in, or found
+ *  there -- an earlier capture may have renamed it and failed before its
+ *  sync), once, then the store directory and its parent, which hold the
+ *  names above. Not the objects' bytes (see above). A sync that fails is not
+ *  an error: the objects are already in place.
  */
 void belay_store_sync(struct belay_store *s);
 
