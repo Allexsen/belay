@@ -12,6 +12,7 @@
 #include "belay/hash.h"
 #include "diff/classify.h"
 #include "diff/diff_run.h"
+#include "schema/entry.h"
 
 #include <stdarg.h>
 #include <stdbool.h>
@@ -47,13 +48,15 @@ static char g_dir[256];
 static char g_out[300];
 static FILE *g_f;
 static size_t g_n, g_unreadable, g_unstable, g_mounts, g_raced, g_vanished;
+static long long g_created = 1;           /* the next manifest's created_ns */
 
 static void m_begin(const char *name, const char *scope, unsigned long long hash_max) {
     char p[400];
     snprintf(p, sizeof p, "%s/%s", g_dir, name);
     g_f = fopen(p, "wb");
-    fprintf(g_f, "{\"belay_manifest\":1,\"created_ns\":1,\"scopes\":[\"%s\"],\"hash\":\"sha256\","
-                 "\"hash_max_bytes\":%llu,\"store_max_bytes\":0}\n", scope, hash_max);
+    fprintf(g_f, "{\"belay_manifest\":1,\"created_ns\":%lld,\"scopes\":[\"%s\"],\"hash\":\"sha256\","
+                 "\"hash_max_bytes\":%llu,\"store_max_bytes\":0}\n", g_created, scope, hash_max);
+    g_created = 1;
     g_n = g_unreadable = g_unstable = g_mounts = g_raced = g_vanished = 0;
 }
 
@@ -372,6 +375,64 @@ TEST(an_interpreter_sees_the_verdict_and_keeps_its_state_over_one_diff) {
     ASSERT_EQ_INT(1, g_begun);
     ASSERT_EQ_INT(1, g_ended);
     ASSERT_EQ_INT(2, g_saw_modified);
+}
+
+/* R6 (audit 2026-10): every fact a manifest's header and trailer carry is
+ * checked by the reader, carried into the diff, or ignored for a stated
+ * reason -- this table, written by hand, against the schema's keys both
+ * ways, then each carried value against a diff of two manifests that differ
+ * in all of them. (Entry fields are conserved by the field pin: test_pins.) */
+static const struct { const char *line, *key, *fate, *why; } FACTS[] = {
+    { "header", "belay_manifest", "checked", "the reader refuses any other version" },
+    { "header", "created_ns", "carried", "before_created_ns, after_created_ns" },
+    { "header", "scopes", "carried", "scopes; manifests of different scopes are refused" },
+    { "header", "hash", "checked", "the reader refuses any algorithm but sha256" },
+    { "header", "hash_max_bytes", "carried", "before_hash_max_bytes, after_hash_max_bytes" },
+    { "header", "store_max_bytes", "ignored", "which copies a capture kept, nothing about the tree" },
+    { "trailer", "belay_manifest_end", "checked", "the reader counts the entries against it" },
+    { "trailer", "vanished", "carried", "before_vanished, after_vanished, provisional" },
+    { "trailer", "unreadable", "ignored", "each such entry carries its flag, which is compared" },
+    { "trailer", "unstable", "carried", "before_unstable, after_unstable, provisional" },
+    { "trailer", "mounts", "ignored", "each mount point carries its flag, which is compared" },
+    { "trailer", "raced", "carried", "before_raced, after_raced, provisional" },
+};
+
+static bool in_facts(const char *line, const char *key) {
+    for (size_t i = 0; i < sizeof FACTS / sizeof FACTS[0]; i++)
+        if (strcmp(FACTS[i].line, line) == 0 && strcmp(FACTS[i].key, key) == 0) return true;
+    return false;
+}
+
+TEST(every_manifest_fact_is_checked_carried_or_ignored_for_a_reason) {
+    for (int i = 0; i < H_COUNT; i++)
+        if (!in_facts("header", HEADER_FIELDS[i].name))
+            BELAY_FAIL("header key %s has no fate", HEADER_FIELDS[i].name);
+    for (int i = 0; i < TR_COUNT; i++)
+        if (!in_facts("trailer", TRAILER_FIELDS[i].name))
+            BELAY_FAIL("trailer key %s has no fate", TRAILER_FIELDS[i].name);
+    for (size_t i = 0; i < sizeof FACTS / sizeof FACTS[0]; i++) {
+        bool known = false;
+        for (int k = 0; k < H_COUNT; k++)
+            known |= strcmp(FACTS[i].line, "header") == 0 && strcmp(HEADER_FIELDS[k].name, FACTS[i].key) == 0;
+        for (int k = 0; k < TR_COUNT; k++)
+            known |= strcmp(FACTS[i].line, "trailer") == 0 && strcmp(TRAILER_FIELDS[k].name, FACTS[i].key) == 0;
+        if (!known) BELAY_FAIL("%s key %s is not in the format", FACTS[i].line, FACTS[i].key);
+    }
+    g_created = 111;
+    m_begin("before", "/s", 1000); ROOT(); E(.path = "r", .type = "reg", .size = 3, .sha = HA, .raced = true);
+    E(.path = "u", .type = "dir", .unstable = true); g_vanished = 3; m_end();
+    g_created = 222;
+    m_begin("after", "/s", 2000); ROOT(); E(.path = "r", .type = "reg", .size = 3, .sha = HA);
+    E(.path = "u", .type = "dir"); g_vanished = 4; m_end();
+    REQUIRE(run() == 0);
+    static const char *const carried[] = {
+        "\"scopes\":[\"/s\"]", "\"before_created_ns\":111", "\"after_created_ns\":222",
+        "\"before_hash_max_bytes\":1000", "\"after_hash_max_bytes\":2000",
+        "\"before_vanished\":3,\"before_unstable\":1,\"before_raced\":1,"
+        "\"after_vanished\":4,\"after_unstable\":0,\"after_raced\":0,\"provisional\":true",
+    };
+    for (size_t i = 0; i < sizeof carried / sizeof carried[0]; i++)
+        if (strstr(g_text, carried[i]) == NULL) BELAY_FAIL("not carried: %s", carried[i]);
 }
 
 TEST(identical_manifests_emit_no_record) {
@@ -727,6 +788,7 @@ int main(void) {
     RUN(an_interpreter_error_is_a_finding_never_a_failed_diff);
     RUN(a_finding_that_is_not_utf8_is_replaced);
     RUN(an_interpreter_sees_the_verdict_and_keeps_its_state_over_one_diff);
+    RUN(every_manifest_fact_is_checked_carried_or_ignored_for_a_reason);
     RUN(names_sorting_before_the_root_see_its_flags);
     RUN(manifests_of_different_scopes_are_refused_with_no_output);
     RUN(an_unreadable_links_unknown_target_is_not_a_change);

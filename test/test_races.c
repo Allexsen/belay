@@ -1608,8 +1608,8 @@ int main(void) {
     RUN(w6_file_capability_is_recorded);
     RUN(w6_unreadable_xattrs_are_unknown_not_none);
 
-    char cmd[600];
-    snprintf(cmd, sizeof cmd, "rm -rf '%s' '%s'", g_root, g_m);
+    char cmd[1000];
+    snprintf(cmd, sizeof cmd, "rm -rf '%s' '%s' '%s'", g_root, g_m, g_store);
     if (system(cmd) != 0) { /* best effort */ }
     return belay_test_report();
 }
