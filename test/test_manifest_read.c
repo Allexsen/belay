@@ -13,6 +13,7 @@
 #include "belay/manifest.h"
 #include "belay/hash.h"
 #include "belay/error.h"
+#include "capture/manifest_decode.h"
 
 #include <stdbool.h>
 #include <stdio.h>
@@ -1077,6 +1078,18 @@ TEST(w6_reader_accepts_exactly_the_canonical_extended_metadata) {
 }
 #undef XH
 
+/* The decoder reads fields in DECODE_ORDER (it fixes which error a line
+ * with several bad fields reports): every schema field must be in it
+ * exactly once, or a field added to entry.c would never be read. */
+TEST(decoder_reads_every_schema_field_once) {
+    int seen[F_COUNT] = { 0 };
+    for (size_t i = 0; i < F_COUNT; i++) {
+        ASSERT_TRUE(DECODE_ORDER[i] < F_COUNT);
+        if (DECODE_ORDER[i] < F_COUNT) seen[DECODE_ORDER[i]]++;
+    }
+    for (size_t f = 0; f < F_COUNT; f++) ASSERT_EQ_INT(1, seen[f]);
+}
+
 int main(void) {
     RUN(reads_a_well_formed_entry);
     RUN(rejects_traversal_and_absolute_entry_paths);
@@ -1130,6 +1143,7 @@ int main(void) {
     RUN(r3_raced_flag_and_mount_and_race_counts);
     RUN(w6_reader_accepts_exactly_the_canonical_extended_metadata);
     RUN(round_trips_the_writers_output);
+    RUN(decoder_reads_every_schema_field_once);
 
     unlink(g_path);
     return belay_test_report();
