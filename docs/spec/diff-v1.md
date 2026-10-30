@@ -50,7 +50,7 @@ not know, and treat a missing trailer as a truncated diff.
 | `path` / `path_b64` | string | As in the manifest: relative to the scope, base64 when not valid UTF-8. |
 | `outcome` | string | One of the outcomes below, never `unchanged`. |
 | `type` | string | The entry's type after (before, for `removed`). |
-| `type_before` | string | For `type_changed` only: the type before. |
+| `type_before` | string | When the path is on both sides and its types differ: the type before. That is every `type_changed`, and an `unknown` whose type also changed (`raced`). |
 | `changed` | array | The compared fields that differ, in the manifest's field order; absent when none. |
 | `unknown` | array | For `unknown` only: the reasons, in the order of the reasons table. |
 | `findings` | array | What an interpreter explained about the change, one string each; absent when none. Annotations only: an interpreter never sets or changes the outcome. |
@@ -180,6 +180,9 @@ report those changes. A directory whose timestamps differ while every compared f
 `unchanged`. What this hides: an attribute the manifest does not record (a `trusted.*` extended
 attribute when belay does not run as root) that changes on a directory is seen only in that
 count.
+
+`type_before`, for a path present on both sides whose types differ: the type before, whatever the
+outcome -- `type_changed`, or `unknown` when `raced` is on either side.
 
 `changed`, for a path present on both sides: when the types differ, `["type"]`; otherwise every
 compared field that differs (by its class for that type), whatever the outcome, and `ctime_ns` only

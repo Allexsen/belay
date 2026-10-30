@@ -144,7 +144,9 @@ const struct line_field_def DIFF_RECORD_FIELDS[DF_COUNT] = {
         "As in the manifest: relative to the scope, base64 when not valid UTF-8." },
     [DF_OUTCOME] = { "outcome", NULL, "string", "One of the outcomes below, never `unchanged`." },
     [DF_TYPE] = { "type", NULL, "string", "The entry's type after (before, for `removed`)." },
-    [DF_TYPE_BEFORE] = { "type_before", NULL, "string", "For `type_changed` only: the type before." },
+    [DF_TYPE_BEFORE] = { "type_before", NULL, "string",
+        "When the path is on both sides and its types differ: the type before. That is every "
+        "`type_changed`, and an `unknown` whose type also changed (`raced`)." },
     [DF_CHANGED] = { "changed", NULL, "array",
         "The compared fields that differ, in the manifest's field order; absent when none." },
     [DF_UNKNOWN] = { "unknown", NULL, "array",
