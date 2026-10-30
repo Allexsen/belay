@@ -20,14 +20,29 @@ cleanup() { chmod -R u+rwx "$WORK" 2>/dev/null || true; rm -rf "$WORK"
             [ -f "$WORK.shm" ] && rm -rf "$(cat "$WORK.shm")" "$WORK.shm" || true; }
 trap cleanup EXIT
 
+# The core of <source tree> as one archive in a fresh directory: through the
+# tree's own `make lib` when it has one, else compiled from its sources (older
+# bases predate the target). Never "every .o found" in a build directory that
+# an earlier build -- or an earlier mutant -- may have left behind.
+corelib() {   # corelib <source tree> <out dir>  ->  <out dir>/libbelay.a
+    local src=$1 dir=$2 f
+    mkdir -p "$dir"
+    if make -s -C "$src" -n BUILD="$dir" lib >/dev/null 2>&1; then
+        make -s -C "$src" BUILD="$dir" lib >/dev/null 2>&1
+    else
+        for f in $(cd "$src" && ls src/util/*.c src/schema/*.c src/capture/*.c src/diff/*.c \
+                       src/interp/*.c src/platform/fsops_posix.c src/platform/fsops_linux.c 2>/dev/null); do
+            cc -O2 -std=c11 -I"$src/include" -I"$src/src" -c "$src/$f" -o "$dir/$(echo "$f" | tr / _).o"
+        done
+        ar rcs "$dir/libbelay.a" "$dir"/*.o
+    fi
+}
+
 build() {   # build <source tree> <out prefix>
     local src=$1 out=$2
-    make -s -C "$src" all >/dev/null 2>&1
-    local objs
-    objs=$( (find "$src/build/util" "$src/build/schema" "$src/build/capture" "$src/build/diff" "$src/build/interp" \
-                  "$src/build/platform" -name '*.o' 2>/dev/null || true) | sort)
-    cc -O2 -std=c11 -I"$src/include" -o "$out.driver" "$HERE/driver.c" $objs
-    cc -O2 -std=c11 -I"$src/include" -o "$out.reader" "$HERE/reader.c" $objs
+    corelib "$src" "$out.lib"
+    cc -O2 -std=c11 -I"$src/include" -o "$out.driver" "$HERE/driver.c" "$out.lib/libbelay.a"
+    cc -O2 -std=c11 -I"$src/include" -o "$out.reader" "$HERE/reader.c" "$out.lib/libbelay.a"
 }
 
 git -C "$REPO" archive "$BASE" | (mkdir -p "$WORK/base" && tar -x -C "$WORK/base")
