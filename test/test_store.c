@@ -8,6 +8,7 @@
 #include "belay/store.h"
 #include "belay/hash.h"
 #include "belay/error.h"
+#include "capture/store_internal.h"
 
 #include <dirent.h>
 #include <fcntl.h>
@@ -241,6 +242,127 @@ TEST(store_directory_writable_by_others_is_refused) {
     rmdir(d);
 }
 
+/* ---- what belay_store_sync syncs: the adapter, with every fsync recorded ---- */
+
+static const struct fsops *g_real;
+static struct fsops g_ops;
+static struct { dev_t dev; ino_t ino; } g_synced[64];
+static size_t g_nsynced;
+
+static int rec_fsync(void *ctx, int fd) {
+    (void)ctx;
+    struct stat st;
+    if (fstat(fd, &st) == 0 && g_nsynced < sizeof g_synced / sizeof g_synced[0]) {
+        g_synced[g_nsynced].dev = st.st_dev;
+        g_synced[g_nsynced].ino = st.st_ino;
+        g_nsynced++;
+    }
+    return g_real->fsync(g_real->ctx, fd);
+}
+
+/* How many recorded syncs were of the directory at `path`. */
+static int synced(const char *path) {
+    struct stat d;
+    if (stat(path, &d) != 0) return -1;
+    int n = 0;
+    for (size_t i = 0; i < g_nsynced; i++)
+        n += g_synced[i].dev == d.st_dev && g_synced[i].ino == d.st_ino;
+    return n;
+}
+
+/* A fresh store at g_dir, its syncs recorded. */
+static struct belay_store *open_recorded(bool fresh) {
+    if (fresh) {
+        char cmd[600];
+        snprintf(cmd, sizeof cmd, "rm -rf '%s'", g_dir);
+        if (system(cmd) != 0) return NULL;
+    }
+    g_real = fsops_default();
+    g_ops = *g_real;
+    g_ops.fsync = rec_fsync;
+    g_nsynced = 0;
+    struct belay_store *s = NULL;
+    return store_open(&g_ops, g_dir, &s) == 0 ? s : NULL;
+}
+
+/* Review F2: a capture relies on every copy its manifest names, including one
+ * its commit found already there -- which an earlier capture may have renamed
+ * and never synced, failing first. The sync covers that name's directory and
+ * the levels above it, up to the store directory's parent. */
+TEST(a_sync_covers_a_copy_found_already_stored) {
+    char hex[65], prefix[600];
+    sha_hex("found\n", 6, hex);
+    snprintf(prefix, sizeof prefix, "%s/%.2s", g_dir, hex);
+    struct belay_store *a = open_recorded(true);           /* commits, never syncs */
+    REQUIRE(a != NULL);
+    ASSERT_EQ_INT(0, put(a, "found\n", hex));
+    belay_store_close(a);
+    struct belay_store *b = open_recorded(false);
+    REQUIRE(b != NULL);
+    ASSERT_EQ_INT(0, put(b, "found\n", hex));              /* found: kept as it is */
+    belay_store_sync(b);
+    ASSERT_EQ_INT(1, synced(prefix));
+    ASSERT_EQ_INT(1, synced(g_dir));
+    ASSERT_EQ_INT(1, synced("/tmp"));
+    belay_store_close(b);
+}
+
+/* Review F3: a fan-out directory is made by the first commit that needs it,
+ * and stays when that commit fails. The commit that later lands in it relies
+ * on its name in the store directory, so the sync covers that too. */
+TEST(a_sync_covers_a_fan_out_directory_a_failed_commit_made) {
+    char hex[65], prefix[600], tmp[700];
+    sha_hex("made\n", 5, hex);
+    snprintf(prefix, sizeof prefix, "%s/%.2s", g_dir, hex);
+    struct belay_store *s = open_recorded(true);
+    REQUIRE(s != NULL);
+    struct belay_store_tx tx;
+    REQUIRE(belay_store_begin(s, &tx) == 0);
+    REQUIRE(belay_store_write(&tx, "made\n", 5) == 0);
+    snprintf(tmp, sizeof tmp, "%s/%s", g_dir, tx.tmp);
+    REQUIRE(unlink(tmp) == 0);                    /* the rename will fail: ENOENT */
+    ASSERT_EQ_INT(-1, belay_store_commit(&tx, hex));
+    belay_err_clear();
+    struct stat st;
+    ASSERT_EQ_INT(0, stat(prefix, &st));          /* made by the failed commit */
+    ASSERT_EQ_INT(0, put(s, "made\n", hex));
+    g_nsynced = 0;
+    belay_store_sync(s);
+    ASSERT_EQ_INT(1, synced(prefix));
+    ASSERT_EQ_INT(1, synced(g_dir));
+    belay_store_close(s);
+}
+
+/* Review F4: the first capture makes the store directory, whose name is in
+ * its parent: the sync covers the parent. */
+TEST(a_sync_covers_the_store_directory_in_its_parent) {
+    char hex[65];
+    sha_hex("first\n", 6, hex);
+    struct belay_store *s = open_recorded(true);
+    REQUIRE(s != NULL);
+    ASSERT_EQ_INT(0, put(s, "first\n", hex));
+    belay_store_sync(s);
+    ASSERT_EQ_INT(1, synced(g_dir));
+    ASSERT_EQ_INT(1, synced("/tmp"));
+    belay_store_close(s);
+}
+
+/* The sync covers what was committed since the last one: twice in a row, the
+ * second syncs nothing. */
+TEST(a_second_sync_with_nothing_new_syncs_nothing) {
+    char hex[65];
+    sha_hex("once\n", 5, hex);
+    struct belay_store *s = open_recorded(true);
+    REQUIRE(s != NULL);
+    ASSERT_EQ_INT(0, put(s, "once\n", hex));
+    belay_store_sync(s);
+    ASSERT_TRUE(g_nsynced > 0);
+    g_nsynced = 0;
+    belay_store_sync(s);
+    ASSERT_EQ_INT(0, (int)g_nsynced);
+    belay_store_close(s);
+}
+
 int main(void) {
     snprintf(g_dir, sizeof g_dir, "/tmp/belay_store_%d", (int)getpid());
 
@@ -254,6 +376,10 @@ int main(void) {
     RUN(verify_reports_missing_object);
     RUN(store_directory_that_is_a_symlink_is_refused);
     RUN(store_directory_writable_by_others_is_refused);
+    RUN(a_sync_covers_a_copy_found_already_stored);
+    RUN(a_sync_covers_a_fan_out_directory_a_failed_commit_made);
+    RUN(a_sync_covers_the_store_directory_in_its_parent);
+    RUN(a_second_sync_with_nothing_new_syncs_nothing);
 
     char cmd[600];
     snprintf(cmd, sizeof cmd, "rm -rf '%s'", g_dir);
