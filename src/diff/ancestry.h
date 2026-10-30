@@ -2,7 +2,9 @@
  *  For a path one manifest lacks: what that manifest's nearest recorded
  *  ancestor says about it -- sealed (an unreadable or mount directory:
  *  nothing below was captured), incomplete (an unstable directory: its
- *  listing may miss names), or nothing (the absence is known).
+ *  listing may miss names), raced (a non-directory that changed after it was
+ *  recorded: it may have become a directory holding the path), or nothing
+ *  (the absence is known).
  *
  *  Fed every entry of one side in path order. It keeps the recorded entries
  *  that are byte-prefixes of where the stream is -- each a prefix of the
@@ -20,7 +22,7 @@
 #include <stddef.h>
 
 /* ANC_UNSET (0) is no answer at all; classify fails on it (audit 2026-10, R1). */
-enum anc { ANC_UNSET, ANC_NONE, ANC_INCOMPLETE, ANC_SEALED };
+enum anc { ANC_UNSET, ANC_NONE, ANC_INCOMPLETE, ANC_SEALED, ANC_RACED };
 
 #define ANC_PATH_MAX 4096
 
