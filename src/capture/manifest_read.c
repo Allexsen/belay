@@ -149,7 +149,7 @@ int belay_manifest_next(struct belay_manifest_reader *r, struct belay_entry *e) 
     if (r->len == 0) { lex_corrupt("blank line"); return fail(r); }
     if (lex_object(r->line, r->len, &o) == -1) return fail(r);
 
-    if (lex_get(&o, "belay_manifest_end") != NULL) {
+    if (lex_get(&o, TRAILER_FIELDS[TR_ENTRIES].name) != NULL) {
         if (parse_trailer(r, &o) == -1) return fail(r);
         const int more = lex_line(r->f, r->line, &r->len, &r->lineno);
         if (more != 0) {
