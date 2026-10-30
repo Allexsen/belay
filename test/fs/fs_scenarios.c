@@ -12,8 +12,10 @@
  *
  *  --coarse: the filesystem's timestamps are coarser than the time between a
  *            fixture's creation and the change (FAT: 2 s). The "fresh"
- *            variants then hit known issue R4-F1 (equality cannot see a
- *            change in the same timestamp slot) and are expected to escape.
+ *            variants of a same-size rewrite then hit known issue R4-F1
+ *            (equality cannot see a change in the same timestamp slot) and
+ *            are expected to escape. A move into a listed directory is caught
+ *            whatever the timestamps: the end-of-walk re-list compares names.
  *            That is XFAIL only when the capture itself worked -- written,
  *            read back, the change made -- and nothing was flagged; a failed
  *            capture is FAIL, and so is XPASS (the escape did not happen, so
@@ -191,9 +193,9 @@ static void s_move(bool aged, bool coarse) {
     if (aged) sleep(3);
     g_arm = MOVE_INTO_LISTED; g_fired = false; g_walked[0] = '\0';
     const bool ran = check() && g_fired;
+    (void)coarse;      /* caught on any filesystem: the re-list needs no timestamp */
     verdict(aged ? "move into a listed directory (aged fixture)"
-                 : "move into a listed directory (fresh fixture)", ran, ran && flagged(),
-            coarse && !aged);
+                 : "move into a listed directory (fresh fixture)", ran, ran && flagged(), false);
 }
 
 static void s_change(bool append, bool aged, bool coarse) {
