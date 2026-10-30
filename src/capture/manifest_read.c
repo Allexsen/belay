@@ -1,29 +1,8 @@
 /*
  *  Manifest reader.
  *
- *  A STRICT PARSER for exactly the language the writer emits -- not a JSON
- *  reader, and not a key-searcher. Every line is consumed byte by byte against
- *  the grammar below, and anything else is rejected:
- *
- *    line    := object                     (then end of line)
- *    object  := '{' pair (',' pair)* '}'
- *    pair    := key ':' value              (no whitespace anywhere)
- *    key     := '"' [a-z0-9_]+ '"'
- *    value   := string | integer | 'true' | '[' string (',' string)* ']'
- *    string  := '"' (byte >= 0x20 except '"' '\' | escape)* '"'
- *    escape  := '\"' | '\\' | '\b' | '\f' | '\n' | '\r' | '\t'
- *             | '\u00' hex hex   -- lowercase, only for control bytes that
- *                                   have no short form
- *    integer := '0' | '-'? [1-9][0-9]*     (canonical: no '+', no leading 0)
- *
- *  Why a parser: an earlier version searched each line for the keys it wanted.
- *  Everything it did not look at -- whitespace, junk between fields, junk after
- *  the closing brace, bytes after an embedded NUL -- was silently accepted, so
- *  a flag could be hidden where the search never reached. Independent review
- *  and the defect-class sweep found nineteen such instances between them. A
- *  grammar closes the class instead of the instances: the reader's accepted
- *  language is now exactly the writer's output language, plus unknown keys
- *  (whose values must still be well formed) so the format can grow.
+ *  A strict parser for exactly the language the writer emits; the grammar,
+ *  and why it is a grammar rather than a key search, are in manifest_lex.h.
  *
  *  Treat input as hostile: a manifest can be hand-edited, truncated by a full
  *  disk, or crafted. Strictness is the point -- a reader that repairs what it
@@ -33,6 +12,7 @@
 
 #include "belay/manifest.h"
 #include "capture/entry.h"
+#include "capture/manifest_lex.h"
 #include "belay/path.h"
 #include "belay/error.h"
 #include "belay/hash.h"
@@ -45,212 +25,6 @@
 #include <stdlib.h>
 #include <string.h>
 
-/* The writer's longest possible line is under 50 KB (two 4095-byte fields at
- * six bytes per escaped byte, plus fixed fields). Anything longer is not a
- * manifest line, and refusing it bounds the reader's memory. */
-#define LINE_MAX_BYTES (64u * 1024u)
-#define MAX_PAIRS      32
-
-/* ------------------------------------------------------------------------ */
-/* Lexical layer                                                             */
-/* ------------------------------------------------------------------------ */
-
-enum vkind { V_STR, V_INT, V_TRUE, V_ARR };
-
-struct pair {
-    const char *key;  size_t klen;
-    enum vkind kind;
-    const char *val;  size_t vlen;     /* raw span: string body, digits, or array body */
-    size_t nelem;                      /* V_ARR: number of strings */
-};
-
-struct obj {
-    struct pair p[MAX_PAIRS];
-    size_t n;
-};
-
-static int corrupt(const char *msg) {
-    belay_err_set(BELAY_ERR_CORRUPT, 0, "manifest: %s", msg);
-    return -1;
-}
-
-static bool is_lhex(char c) { return (c >= '0' && c <= '9') || (c >= 'a' && c <= 'f'); }
-static int  hexv(char c)    { return c <= '9' ? c - '0' : c - 'a' + 10; }
-
-/*
- *  Scans a string body starting just after the opening quote. On success
- *  *end points at the closing quote. Only the escapes the writer produces are
- *  accepted, in the form it produces them, so each byte string has exactly one
- *  encoding.
- */
-static int scan_string(const char *s, const char *lim, const char **end) {
-    while (s < lim && *s != '"') {
-        const unsigned char c = (unsigned char)*s;
-        if (c < 0x20) return corrupt("raw control byte in a string");
-        if (c != '\\') { s++; continue; }
-        if (s + 1 >= lim) return corrupt("unterminated escape");
-        switch (s[1]) {
-        case '"': case '\\': case 'b': case 'f': case 'n': case 'r': case 't':
-            s += 2;
-            break;
-        case 'u': {
-            if (lim - s < 6 || s[2] != '0' || s[3] != '0' || !is_lhex(s[4]) || !is_lhex(s[5]))
-                return corrupt("non-canonical \\u escape");
-            const int v = hexv(s[4]) * 16 + hexv(s[5]);
-            /* \u00XX only for control bytes with no short form. */
-            if (v >= 0x20 || v == '\b' || v == '\t' || v == '\n' || v == '\f' || v == '\r')
-                return corrupt("non-canonical \\u escape");
-            s += 6;
-            break;
-        }
-        default:
-            return corrupt("unknown escape in a string");
-        }
-    }
-    if (s >= lim) return corrupt("unterminated string");
-    *end = s;
-    return 0;
-}
-
-/* Decodes a scanned string body into `out` (no NUL appended). */
-static int decode_string(const char *s, size_t n, char *out, size_t cap, size_t *outlen) {
-    size_t w = 0;
-    for (size_t i = 0; i < n; ) {
-        if (w >= cap) return corrupt("string value too long");
-        if (s[i] != '\\') { out[w++] = s[i++]; continue; }
-        switch (s[i + 1]) {
-        case '"':  out[w++] = '"';  i += 2; break;
-        case '\\': out[w++] = '\\'; i += 2; break;
-        case 'b':  out[w++] = '\b'; i += 2; break;
-        case 'f':  out[w++] = '\f'; i += 2; break;
-        case 'n':  out[w++] = '\n'; i += 2; break;
-        case 'r':  out[w++] = '\r'; i += 2; break;
-        case 't':  out[w++] = '\t'; i += 2; break;
-        default:   out[w++] = (char)(hexv(s[i + 4]) * 16 + hexv(s[i + 5])); i += 6; break;
-        }
-    }
-    *outlen = w;
-    return 0;
-}
-
-/* Canonical integer: '0' | '-'?[1-9][0-9]*. */
-static int scan_int(const char *s, const char *lim, const char **end) {
-    const char *p = s;
-    if (p < lim && *p == '-') p++;
-    if (p >= lim || *p < '0' || *p > '9') return corrupt("malformed number");
-    if (*p == '0') {
-        p++;
-        if (p - s == 2) return corrupt("malformed number");          /* "-0" */
-        if (p < lim && *p >= '0' && *p <= '9') return corrupt("number has a leading zero");
-    } else {
-        while (p < lim && *p >= '0' && *p <= '9') p++;
-    }
-    *end = p;
-    return 0;
-}
-
-/* Parses one whole line into `o`. Duplicate keys are rejected. */
-static int parse_object(const char *s, size_t len, struct obj *o) {
-    const char *p = s, *lim = s + len;
-    o->n = 0;
-    if (p >= lim || *p != '{') return corrupt("line is not an object");
-    p++;
-
-    for (;;) {
-        if (o->n == MAX_PAIRS) return corrupt("too many fields");
-        struct pair *pr = &o->p[o->n];
-
-        if (p >= lim || *p != '"') return corrupt("expected a key");
-        const char *k = ++p;
-        while (p < lim && ((*p >= 'a' && *p <= 'z') || (*p >= '0' && *p <= '9') || *p == '_')) p++;
-        if (p == k || p >= lim || *p != '"') return corrupt("malformed key");
-        pr->key = k;
-        pr->klen = (size_t)(p - k);
-        p++;
-        if (p >= lim || *p != ':') return corrupt("expected ':' after a key");
-        p++;
-
-        if (p < lim && *p == '"') {
-            const char *e = p + 1;
-            if (scan_string(p + 1, lim, &e) == -1) return -1;
-            pr->kind = V_STR;
-            pr->val = p + 1;
-            pr->vlen = (size_t)(e - (p + 1));
-            p = e + 1;
-        } else if (p < lim && (*p == '-' || (*p >= '0' && *p <= '9'))) {
-            const char *e = p;
-            if (scan_int(p, lim, &e) == -1) return -1;
-            pr->kind = V_INT;
-            pr->val = p;
-            pr->vlen = (size_t)(e - p);
-            p = e;
-        } else if (lim - p >= 4 && memcmp(p, "true", 4) == 0) {
-            pr->kind = V_TRUE;
-            pr->val = p;
-            pr->vlen = 4;
-            p += 4;
-        } else if (p < lim && *p == '[') {
-            pr->kind = V_ARR;
-            pr->val = p + 1;
-            pr->nelem = 0;
-            p++;
-            for (;;) {
-                if (p >= lim || *p != '"') return corrupt("array element is not a string");
-                const char *e;
-                if (scan_string(p + 1, lim, &e) == -1) return -1;
-                pr->nelem++;
-                p = e + 1;
-                if (p < lim && *p == ',') { p++; continue; }
-                if (p < lim && *p == ']') { p++; break; }
-                return corrupt("malformed array");
-            }
-            pr->vlen = (size_t)(p - 1 - pr->val);
-        } else {
-            return corrupt("malformed value");
-        }
-
-        for (size_t i = 0; i < o->n; i++) {
-            if (o->p[i].klen == pr->klen && memcmp(o->p[i].key, pr->key, pr->klen) == 0) {
-                belay_err_set(BELAY_ERR_CORRUPT, 0, "manifest: duplicate key \"%.*s\"",
-                              (int)pr->klen, pr->key);
-                return -1;
-            }
-        }
-        o->n++;
-
-        if (p < lim && *p == ',') { p++; continue; }
-        if (p < lim && *p == '}') { p++; break; }
-        return corrupt("expected ',' or '}'");
-    }
-    if (p != lim) return corrupt("data after the closing brace");
-    return 0;
-}
-
-/*
- *  Field order is part of the canonical form: the writer always emits known
- *  keys in the order of `order`, and the reader rejects any other order --
- *  otherwise one entry would have many spellings. Unknown keys (informational
- *  fields a newer writer may add) may only follow every known key.
- */
-static int check_order(const struct obj *o, const char *const *order, size_t n) {
-    size_t next = 0;               /* index into `order` the next known key must be at or after */
-    bool seen_unknown = false;
-    for (size_t i = 0; i < o->n; i++) {
-        size_t k = n;
-        for (size_t j = 0; j < n; j++) {
-            if (strlen(order[j]) == o->p[i].klen && memcmp(order[j], o->p[i].key, o->p[i].klen) == 0) {
-                k = j;
-                break;
-            }
-        }
-        if (k == n) { seen_unknown = true; continue; }
-        if (seen_unknown) return corrupt("a known field follows an unknown one");
-        if (k < next) return corrupt("fields out of canonical order");
-        next = k + 1;
-    }
-    return 0;
-}
-
 /* Entry keys in canonical order: the schema's fields, each followed by its
  * base64 spelling where it has one. */
 static size_t entry_keys(const char *keys[2 * F_COUNT]) {
@@ -262,14 +36,12 @@ static size_t entry_keys(const char *keys[2 * F_COUNT]) {
     return n;
 }
 
-static const struct pair *get(const struct obj *o, const char *key);
-
 /* Which schema fields the line carries, by key. */
 static uint32_t present_fields(const struct obj *o) {
     uint32_t p = 0;
     for (size_t f = 0; f < F_COUNT; f++)
-        if (get(o, ENTRY_FIELDS[f].name) != NULL ||
-            (ENTRY_FIELDS[f].alt != NULL && get(o, ENTRY_FIELDS[f].alt) != NULL))
+        if (lex_get(o, ENTRY_FIELDS[f].name) != NULL ||
+            (ENTRY_FIELDS[f].alt != NULL && lex_get(o, ENTRY_FIELDS[f].alt) != NULL))
             p |= FBIT(f);
     return p;
 }
@@ -281,13 +53,6 @@ static const char *const TRAILER_ORDER[] = {
     "belay_manifest_end", "vanished", "unreadable", "unstable", "mounts", "raced"
 };
 
-static const struct pair *get(const struct obj *o, const char *key) {
-    const size_t kl = strlen(key);
-    for (size_t i = 0; i < o->n; i++)
-        if (o->p[i].klen == kl && memcmp(o->p[i].key, key, kl) == 0) return &o->p[i];
-    return NULL;
-}
-
 static int bad_kind(const char *key, const char *want) {
     belay_err_set(BELAY_ERR_CORRUPT, 0, "manifest: \"%s\" must be %s", key, want);
     return -1;
@@ -295,7 +60,7 @@ static int bad_kind(const char *key, const char *want) {
 
 /* Field accessors. `required` decides whether absence is an error. */
 static int get_u64(const struct obj *o, const char *key, bool required, uint64_t *out, bool *present) {
-    const struct pair *p = get(o, key);
+    const struct pair *p = lex_get(o, key);
     if (present) *present = (p != NULL);
     if (p == NULL) {
         if (!required) return 0;
@@ -317,7 +82,7 @@ static int get_u64(const struct obj *o, const char *key, bool required, uint64_t
 }
 
 static int get_i64(const struct obj *o, const char *key, int64_t *out) {
-    const struct pair *p = get(o, key);
+    const struct pair *p = lex_get(o, key);
     if (p == NULL) {
         belay_err_set(BELAY_ERR_CORRUPT, 0, "manifest: missing %s", key);
         return -1;
@@ -355,7 +120,7 @@ static int get_u32(const struct obj *o, const char *key, uint32_t *out) {
 /* A flag is either absent or exactly `true`; the parser already rejects
  * `false`, `null`, quoted forms and anything else. */
 static int get_flag(const struct obj *o, const char *key, bool *out) {
-    const struct pair *p = get(o, key);
+    const struct pair *p = lex_get(o, key);
     *out = false;
     if (p == NULL) return 0;
     if (p->kind != V_TRUE) return bad_kind(key, "exactly true");
@@ -370,8 +135,8 @@ static int get_flag(const struct obj *o, const char *key, bool *out) {
  * cannot see past one (§5.1.1). */
 static int get_bytes(const struct obj *o, const char *key, const char *key_b64,
                      char *out, size_t cap, size_t *outlen, bool *present) {
-    const struct pair *pj = get(o, key);
-    const struct pair *pb = get(o, key_b64);
+    const struct pair *pj = lex_get(o, key);
+    const struct pair *pb = lex_get(o, key_b64);
     *present = false;
     if (pj != NULL && pb != NULL) {
         belay_err_set(BELAY_ERR_CORRUPT, 0, "manifest: both %s and %s", key, key_b64);
@@ -379,7 +144,7 @@ static int get_bytes(const struct obj *o, const char *key, const char *key_b64,
     }
     if (pj != NULL) {
         if (pj->kind != V_STR) return bad_kind(key, "a string");
-        if (decode_string(pj->val, pj->vlen, out, cap - 1, outlen) == -1) return -1;
+        if (lex_decode_string(pj->val, pj->vlen, out, cap - 1, outlen) == -1) return -1;
         if (memchr(out, '\0', *outlen) != NULL) {
             belay_err_set(BELAY_ERR_CORRUPT, 0, "manifest: %s contains a NUL byte", key);
             return -1;
@@ -391,7 +156,7 @@ static int get_bytes(const struct obj *o, const char *key, const char *key_b64,
     } else if (pb != NULL) {
         if (pb->kind != V_STR) return bad_kind(key_b64, "a string");
         char b64[8192];
-        if (pb->vlen >= sizeof b64) return corrupt("base64 value too long");
+        if (pb->vlen >= sizeof b64) return lex_corrupt("base64 value too long");
         memcpy(b64, pb->val, pb->vlen);   /* base64 alphabet needs no unescaping */
         b64[pb->vlen] = '\0';
         if (belay_base64_decode(out, cap - 1, outlen, b64) == -1) return -1;
@@ -412,12 +177,12 @@ static int get_bytes(const struct obj *o, const char *key, const char *key_b64,
 }
 
 static int get_hex64(const struct obj *o, const char *key, char out[65], bool *present) {
-    const struct pair *p = get(o, key);
+    const struct pair *p = lex_get(o, key);
     *present = (p != NULL);
     if (p == NULL) return 0;
     if (p->kind != V_STR || p->vlen != BELAY_SHA256_HEX_LEN) return bad_kind(key, "64 lowercase hex");
     for (size_t i = 0; i < p->vlen; i++)
-        if (!is_lhex(p->val[i])) return bad_kind(key, "64 lowercase hex");
+        if (!lex_is_lhex(p->val[i])) return bad_kind(key, "64 lowercase hex");
     memcpy(out, p->val, 64);
     out[64] = '\0';
     return 0;
@@ -443,49 +208,49 @@ static bool plain_xname(const char *n, size_t l) {
 
 static int parse_xattrs(const struct pair *p, struct belay_entry *e) {
     if (p->kind != V_ARR || p->nelem == 0) return bad_kind("xattrs", "a non-empty array");
-    if (p->vlen > BELAY_XATTRS_INLINE_MAX) return corrupt("xattrs longer than the inline limit");
+    if (p->vlen > BELAY_XATTRS_INLINE_MAX) return lex_corrupt("xattrs longer than the inline limit");
     char prev[256], cur[256];
     size_t prev_len = 0;
     bool have_prev = false;
     const char *q = p->val, *end = p->val + p->vlen;
     while (q < end) {
         if (*q == ',') q++;
-        if (q >= end || *q != '"') return corrupt("malformed xattrs element");
+        if (q >= end || *q != '"') return lex_corrupt("malformed xattrs element");
         const char *b = ++q;
         while (q < end && *q != '"') {
-            if (*q == '\\') return corrupt("escape in an xattrs element");
+            if (*q == '\\') return lex_corrupt("escape in an xattrs element");
             q++;
         }
-        if (q >= end) return corrupt("malformed xattrs element");
+        if (q >= end) return lex_corrupt("malformed xattrs element");
         const char *el_end = q++;                     /* past the closing quote */
         const char *eq = el_end - 1 - BELAY_SHA256_HEX_LEN;
-        if (eq < b + 1 || *eq != '=') return corrupt("xattrs element is not name=sha256");
+        if (eq < b + 1 || *eq != '=') return lex_corrupt("xattrs element is not name=sha256");
         for (const char *h = eq + 1; h < el_end; h++)
-            if (hexval(*h) < 0) return corrupt("xattrs element is not name=sha256");
+            if (hexval(*h) < 0) return lex_corrupt("xattrs element is not name=sha256");
         const size_t raw = (size_t)(eq - b);
         size_t cl;
         if (raw >= 2 && b[0] == 'x' && b[1] == ':') {
             const size_t hx = raw - 2;
-            if (hx == 0 || hx % 2 || hx / 2 > 255) return corrupt("bad hex xattr name");
+            if (hx == 0 || hx % 2 || hx / 2 > 255) return lex_corrupt("bad hex xattr name");
             cl = hx / 2;
             for (size_t i = 0; i < cl; i++) {
                 const int hi = hexval(b[2 + 2 * i]), lo = hexval(b[3 + 2 * i]);
-                if (hi < 0 || lo < 0) return corrupt("bad hex xattr name");
+                if (hi < 0 || lo < 0) return lex_corrupt("bad hex xattr name");
                 cur[i] = (char)(hi * 16 + lo);
-                if (cur[i] == '\0') return corrupt("NUL in an xattr name");
+                if (cur[i] == '\0') return lex_corrupt("NUL in an xattr name");
             }
-            if (plain_xname(cur, cl)) return corrupt("xattr name hex-encoded but printable");
+            if (plain_xname(cur, cl)) return lex_corrupt("xattr name hex-encoded but printable");
         } else {
-            if (raw > 255 || !plain_xname(b, raw)) return corrupt("bad xattr name");
+            if (raw > 255 || !plain_xname(b, raw)) return lex_corrupt("bad xattr name");
             cl = raw;
             memcpy(cur, b, cl);
         }
         if (cl == 19 && memcmp(cur, "security.capability", 19) == 0)
-            return corrupt("security.capability belongs in caps, not xattrs");
+            return lex_corrupt("security.capability belongs in caps, not xattrs");
         if (have_prev) {
             const size_t m = prev_len < cl ? prev_len : cl;
             const int c = memcmp(prev, cur, m);
-            if (c > 0 || (c == 0 && prev_len >= cl)) return corrupt("xattrs not strictly sorted");
+            if (c > 0 || (c == 0 && prev_len >= cl)) return lex_corrupt("xattrs not strictly sorted");
         }
         memcpy(prev, cur, cl);
         prev_len = cl;
@@ -509,7 +274,7 @@ static int parse_xattrs(const struct pair *p, struct belay_entry *e) {
 
 static int parse_extras(const struct obj *o, struct belay_entry *e) {
     if (get_u64(o, "iflags", false, &e->iflags, &e->has_iflags) == -1) return -1;
-    const struct pair *c = get(o, "caps");
+    const struct pair *c = lex_get(o, "caps");
     if (c != NULL) {
         if (c->kind != V_STR || c->vlen == 0 || c->vlen % 2 || c->vlen >= sizeof e->caps_hex)
             return bad_kind("caps", "lowercase hex");
@@ -519,7 +284,7 @@ static int parse_extras(const struct obj *o, struct belay_entry *e) {
         e->caps_hex[c->vlen] = '\0';
         e->has_caps = true;
     }
-    const struct pair *x = get(o, "xattrs");
+    const struct pair *x = lex_get(o, "xattrs");
     bool have_digest;
     if (x != NULL && parse_xattrs(x, e) == -1) return -1;
     char digest[65];
@@ -543,16 +308,16 @@ static int parse_extras(const struct obj *o, struct belay_entry *e) {
  */
 static int check_canonical(const char *path, size_t len) {
     if (len == 1 && path[0] == '.') return 0;
-    if (path[0] == '/') return corrupt("entry path is absolute");
+    if (path[0] == '/') return lex_corrupt("entry path is absolute");
     size_t i = 0;
     while (i <= len) {
         size_t j = i;
         while (j < len && path[j] != '/') j++;
         const size_t n = j - i;
-        if (n == 0) return corrupt("entry path has an empty component");
-        if (n == 1 && path[i] == '.') return corrupt("entry path has a \".\" component");
+        if (n == 0) return lex_corrupt("entry path has an empty component");
+        if (n == 1 && path[i] == '.') return lex_corrupt("entry path has a \".\" component");
         if (n == 2 && path[i] == '.' && path[i + 1] == '.')
-            return corrupt("entry path contains a \"..\" component");
+            return lex_corrupt("entry path contains a \"..\" component");
         i = j + 1;
     }
     return 0;
@@ -574,17 +339,17 @@ static int type_from(const struct pair *p, enum belay_entry_type *t) {
 static int parse_entry(const struct obj *o, struct belay_entry *e) {
     memset(e, 0, sizeof *e);
     const char *keys[2 * F_COUNT];
-    if (check_order(o, keys, entry_keys(keys)) == -1) return -1;
+    if (lex_order(o, keys, entry_keys(keys)) == -1) return -1;
 
     bool have_path;
     if (get_bytes(o, "path", "path_b64", e->path, sizeof e->path, &e->path_len, &have_path) == -1)
         return -1;
-    if (!have_path) return corrupt("entry has no path");
-    if (e->path_len == 0) return corrupt("empty path");
+    if (!have_path) return lex_corrupt("entry has no path");
+    if (e->path_len == 0) return lex_corrupt("empty path");
     if (check_canonical(e->path, e->path_len) == -1) return -1;
 
-    const struct pair *tp = get(o, "type");
-    if (tp == NULL) return corrupt("entry has no type");
+    const struct pair *tp = lex_get(o, "type");
+    if (tp == NULL) return lex_corrupt("entry has no type");
     if (type_from(tp, &e->type) == -1) return -1;
 
     if (get_u32(o, "mode", &e->mode) == -1 || get_u32(o, "uid", &e->uid) == -1 ||
@@ -632,7 +397,7 @@ static int parse_header(const struct obj *o, struct belay_manifest_header *h) {
     uint64_t ver;
     bool present;
     if (get_u64(o, "belay_manifest", false, &ver, &present) == -1) return -1;
-    if (!present) return corrupt("missing header");
+    if (!present) return lex_corrupt("missing header");
     if (ver != BELAY_MANIFEST_VERSION) {
         /* Refused rather than read: a newer writer may use fields whose
          * absence an older reader would read as "unchanged". */
@@ -641,22 +406,22 @@ static int parse_header(const struct obj *o, struct belay_manifest_header *h) {
         return -1;
     }
     h->version = ver;
-    if (check_order(o, HEADER_ORDER, sizeof HEADER_ORDER / sizeof HEADER_ORDER[0]) == -1) return -1;
+    if (lex_order(o, HEADER_ORDER, sizeof HEADER_ORDER / sizeof HEADER_ORDER[0]) == -1) return -1;
 
     if (get_i64(o, "created_ns", &h->created_ns) == -1 ||
         get_u64(o, "hash_max_bytes", true, &h->hash_max_bytes, NULL) == -1 ||
         get_u64(o, "store_max_bytes", true, &h->store_max_bytes, NULL) == -1)
         return -1;
 
-    const struct pair *hp = get(o, "hash");
+    const struct pair *hp = lex_get(o, "hash");
     if (hp == NULL || hp->kind != V_STR || hp->vlen != 6 || memcmp(hp->val, "sha256", 6) != 0)
-        return corrupt("header hash is not sha256");
+        return lex_corrupt("header hash is not sha256");
 
     /* The scope is what makes two manifests comparable at all. Exactly one in
      * this version, as JSON or (not UTF-8) base64. */
-    const struct pair *sj = get(o, "scopes");
-    const struct pair *sb = get(o, "scopes_b64");
-    if ((sj == NULL) == (sb == NULL)) return corrupt("header needs exactly one of scopes, scopes_b64");
+    const struct pair *sj = lex_get(o, "scopes");
+    const struct pair *sb = lex_get(o, "scopes_b64");
+    if ((sj == NULL) == (sb == NULL)) return lex_corrupt("header needs exactly one of scopes, scopes_b64");
     const struct pair *sp = sj ? sj : sb;
     if (sp->kind != V_ARR) return bad_kind(sj ? "scopes" : "scopes_b64", "an array");
     if (sp->nelem != 1) {
@@ -672,14 +437,14 @@ static int parse_header(const struct obj *o, struct belay_manifest_header *h) {
     bool have;
     if (get_bytes(&one, "scope", "scope_b64", h->scope, sizeof h->scope, &slen, &have) == -1)
         return -1;
-    if (slen == 0 || h->scope[0] != '/') return corrupt("scope is not an absolute path");
+    if (slen == 0 || h->scope[0] != '/') return lex_corrupt("scope is not an absolute path");
     /* The writer records realpath()'s output: absolute and canonical. "/" is
      * the only scope ending in a slash. */
     if (slen > 1 && check_canonical(h->scope + 1, slen - 1) == -1) {
         belay_err_clear();
-        return corrupt("scope is not a canonical absolute path");
+        return lex_corrupt("scope is not a canonical absolute path");
     }
-    if (slen > 1 && h->scope[1] == '.' && slen == 2) return corrupt("scope is not canonical");
+    if (slen > 1 && h->scope[1] == '.' && slen == 2) return lex_corrupt("scope is not canonical");
     return 0;
 }
 
@@ -736,49 +501,6 @@ belay_manifest_trailer(const struct belay_manifest_reader *r) {
     return (r != NULL && r->have_trailer) ? &r->trailer : NULL;
 }
 
-/*
- *  Reads one line into r->line. 1 = line (newline stripped), 0 = EOF, -1 =
- *  error. Bounded, and NUL-intolerant: a NUL inside a line would end the
- *  parse early in any C-string consumer and hide what follows it -- verified
- *  with a flag placed after a NUL, which the old reader silently dropped.
- */
-static int next_line(struct belay_manifest_reader *r) {
-    size_t n = 0;
-    int c;
-    while ((c = getc(r->f)) != EOF) {
-        if (c == '\n') {
-            r->line[n] = '\0';
-            r->len = n;
-            r->lineno++;
-            return 1;
-        }
-        if (c == '\0') {
-            r->lineno++;
-            belay_err_set(BELAY_ERR_CORRUPT, 0, "manifest: NUL byte in line %zu", r->lineno);
-            return -1;
-        }
-        if (n == LINE_MAX_BYTES) {
-            r->lineno++;
-            belay_err_set(BELAY_ERR_CORRUPT, 0, "manifest: line %zu exceeds %u bytes",
-                          r->lineno, LINE_MAX_BYTES);
-            return -1;
-        }
-        r->line[n++] = (char)c;
-    }
-    if (ferror(r->f)) {
-        belay_err_set(BELAY_ERR_IO, errno, "manifest: read error");
-        return -1;
-    }
-    if (n > 0) {
-        r->lineno++;
-        /* A line without its newline is a truncated write. */
-        belay_err_set(BELAY_ERR_CORRUPT, 0,
-                      "manifest: line %zu is truncated (no newline)", r->lineno);
-        return -1;
-    }
-    return 0;
-}
-
 static void err_at_line(size_t lineno) {
     char msg[600];
     snprintf(msg, sizeof msg, "%s (line %zu)", belay_err_msg(), lineno);
@@ -812,7 +534,7 @@ int belay_manifest_open(const char *path, struct belay_manifest_reader **out) {
         return -1;
     }
 
-    const int got = next_line(r);
+    const int got = lex_line(r->f, r->line, &r->len, &r->lineno);
     if (got == -1) { belay_manifest_close(r); return -1; }
     if (got == 0) {
         belay_err_set(BELAY_ERR_CORRUPT, 0, "manifest: file is empty");
@@ -820,7 +542,7 @@ int belay_manifest_open(const char *path, struct belay_manifest_reader **out) {
         return -1;
     }
     struct obj o;
-    if (parse_object(r->line, r->len, &o) == -1 || parse_header(&o, &r->header) == -1) {
+    if (lex_object(r->line, r->len, &o) == -1 || parse_header(&o, &r->header) == -1) {
         err_at_line(r->lineno);
         belay_manifest_close(r);
         return -1;
@@ -836,7 +558,7 @@ static int fail(struct belay_manifest_reader *r) {
 }
 
 static int parse_trailer(struct belay_manifest_reader *r, const struct obj *o) {
-    if (check_order(o, TRAILER_ORDER, sizeof TRAILER_ORDER / sizeof TRAILER_ORDER[0]) == -1) return -1;
+    if (lex_order(o, TRAILER_ORDER, sizeof TRAILER_ORDER / sizeof TRAILER_ORDER[0]) == -1) return -1;
     enum { N = sizeof TRAILER_ORDER / sizeof TRAILER_ORDER[0] };
     uint64_t v[N];
     for (size_t i = 0; i < N; i++)
@@ -852,12 +574,12 @@ static int parse_trailer(struct belay_manifest_reader *r, const struct obj *o) {
                       r->n_unstable, r->n_mounts, r->n_raced);
         return -1;
     }
-    if (!r->have_root) return corrupt("no entry for the scope root \".\"");
+    if (!r->have_root) return lex_corrupt("no entry for the scope root \".\"");
     /* An unreadable root was not walked, so it is the only entry. Checked here
      * rather than per entry because names sorting before "." (such as "!x")
      * are read before the root itself. */
     if (r->root_unreadable && r->n_entries != 1)
-        return corrupt("entries recorded under an unreadable scope root");
+        return lex_corrupt("entries recorded under an unreadable scope root");
     r->trailer.entries    = (size_t)v[0];
     r->trailer.vanished   = (size_t)v[1];
     r->trailer.unreadable = (size_t)v[2];
@@ -874,7 +596,7 @@ int belay_manifest_next(struct belay_manifest_reader *r, struct belay_entry *e) 
     }
     if (r->state != 0) return r->state == 1 ? 0 : -1;
 
-    const int got = next_line(r);
+    const int got = lex_line(r->f, r->line, &r->len, &r->lineno);
     if (got == -1) { r->state = -1; return -1; }
     if (got == 0) {
         belay_err_set(BELAY_ERR_CORRUPT, 0,
@@ -884,14 +606,14 @@ int belay_manifest_next(struct belay_manifest_reader *r, struct belay_entry *e) 
     }
 
     struct obj o;
-    if (r->len == 0) { corrupt("blank line"); return fail(r); }
-    if (parse_object(r->line, r->len, &o) == -1) return fail(r);
+    if (r->len == 0) { lex_corrupt("blank line"); return fail(r); }
+    if (lex_object(r->line, r->len, &o) == -1) return fail(r);
 
-    if (get(&o, "belay_manifest_end") != NULL) {
+    if (lex_get(&o, "belay_manifest_end") != NULL) {
         if (parse_trailer(r, &o) == -1) return fail(r);
-        const int more = next_line(r);
+        const int more = lex_line(r->f, r->line, &r->len, &r->lineno);
         if (more != 0) {
-            if (more == 1) corrupt("data after the end marker");
+            if (more == 1) lex_corrupt("data after the end marker");
             r->state = -1;
             return -1;
         }
@@ -913,7 +635,7 @@ int belay_manifest_next(struct belay_manifest_reader *r, struct belay_entry *e) 
             ? (unsigned char)r->prev[common] < (unsigned char)e->path[common]
             : r->prev_len < e->path_len;
         if (!greater) {
-            corrupt(common == n && r->prev_len == e->path_len ? "duplicate path"
+            lex_corrupt(common == n && r->prev_len == e->path_len ? "duplicate path"
                                                                : "entries out of order");
             return fail(r);
         }
@@ -933,7 +655,7 @@ int belay_manifest_next(struct belay_manifest_reader *r, struct belay_entry *e) 
     if (r->n_sealed > 0 && r->sealed[r->n_sealed - 1] == common) {
         const unsigned char next = (unsigned char)e->path[common];
         if (next == '/') {
-            corrupt("entry below an unreadable or mounted directory");
+            lex_corrupt("entry below an unreadable or mounted directory");
             return fail(r);
         }
         if (next > '/') r->n_sealed--;
@@ -943,15 +665,15 @@ int belay_manifest_next(struct belay_manifest_reader *r, struct belay_entry *e) 
     if (e->type == BELAY_T_DIR && (e->unreadable || e->is_mount) &&
         !(e->path_len == 1 && e->path[0] == '.')) {
         if (r->n_sealed == SEALED_MAX) {        /* unreachable: see SEALED_MAX */
-            corrupt("too many nested sealed directories");
+            lex_corrupt("too many nested sealed directories");
             return fail(r);
         }
         r->sealed[r->n_sealed++] = e->path_len;
     }
 
     if (e->path_len == 1 && e->path[0] == '.') {
-        if (e->type != BELAY_T_DIR) { corrupt("scope root is not a directory"); return fail(r); }
-        if (e->is_mount) { corrupt("scope root flagged as a mount"); return fail(r); }
+        if (e->type != BELAY_T_DIR) { lex_corrupt("scope root is not a directory"); return fail(r); }
+        if (e->is_mount) { lex_corrupt("scope root flagged as a mount"); return fail(r); }
         r->have_root = true;
         r->root_unreadable = e->unreadable;
     }
