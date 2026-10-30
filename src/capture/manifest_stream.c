@@ -39,13 +39,32 @@ int stream_entry(struct stream *s, const struct belay_entry *e) {
         if (next == '/') return lex_corrupt("entry below an unreadable or mounted directory");
         if (next > '/') s->n_sealed--;
     }
+    /* The parent: popped as the sealed stack is, then it must be the recorded
+     * directory of exactly the parent's length. Names with no '/' have the
+     * root as parent, which the trailer checks (it may sort after them). */
+    while (s->n_dirs > 0 && s->dirs[s->n_dirs - 1] > common) s->n_dirs--;
+    if (s->n_dirs > 0 && s->dirs[s->n_dirs - 1] == common && (unsigned char)e->path[common] > '/')
+        s->n_dirs--;
+    size_t plen = e->path_len;
+    while (plen > 0 && e->path[plen - 1] != '/') plen--;
+    if (plen > 0) {
+        size_t i = s->n_dirs;
+        while (i > 0 && s->dirs[i - 1] > plen - 1) i--;
+        if (i == 0 || s->dirs[i - 1] != plen - 1)
+            return lex_corrupt("orphan: the parent directory is not recorded");
+    }
+
     /* "." is not a prefix of the paths below it; an unreadable root is
      * checked at the trailer instead (it must be the only entry). */
-    if (e->type == BELAY_T_DIR && (e->unreadable || e->is_mount) &&
-        !(e->path_len == 1 && e->path[0] == '.')) {
-        if (s->n_sealed == SEALED_MAX)          /* unreachable: see SEALED_MAX */
-            return lex_corrupt("too many nested sealed directories");
-        s->sealed[s->n_sealed++] = e->path_len;
+    if (e->type == BELAY_T_DIR && !(e->path_len == 1 && e->path[0] == '.')) {
+        if (s->n_dirs == SEALED_MAX)            /* unreachable: see SEALED_MAX */
+            return lex_corrupt("too many nested directories");
+        s->dirs[s->n_dirs++] = e->path_len;
+        if (e->unreadable || e->is_mount) {
+            if (s->n_sealed == SEALED_MAX)      /* unreachable: see SEALED_MAX */
+                return lex_corrupt("too many nested sealed directories");
+            s->sealed[s->n_sealed++] = e->path_len;
+        }
     }
 
     if (e->path_len == 1 && e->path[0] == '.') {

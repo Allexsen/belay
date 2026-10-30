@@ -10,10 +10,10 @@
  *
  *  The invariant checks matter as much as the crash check: a reader that
  *  silently produced a path containing a NUL would pass a memory-safety-only
- *  oracle while breaking the §5.1.1 rule. The schema's rules (which fields
- *  and flags go together) are generated from src/schema/entry.c into
- *  fuzz_invariants.gen.h; what is checked by hand here is decoding: lengths,
- *  NULs, hex shape and canonical paths, which the schema does not describe.
+ *  oracle while breaking the §5.1.1 rule. Every check below is written by
+ *  hand from test/expect/manifest-v1.md: the schema's rules (which fields and
+ *  flags go together), no orphan, and decoding -- lengths, NULs, hex shape
+ *  and canonical paths.
  */
 #include "belay/manifest.h"
 #include "belay/error.h"
@@ -121,8 +121,42 @@ static void schema_invariants(const struct belay_manifest_header *h, const struc
     if (lnk && P_OUTSIDE != (!P_UNREAD && target_leaves_scope(h->scope, e))) abort();
 }
 
+/* No orphan (the pin: "an entry whose parent directory is not recorded is
+ * rejected"): the parent was accepted before the entry, as a directory.
+ * Entries arrive in path order, so the directories do too and stay sorted. */
+static char **g_dirs;
+static size_t g_ndirs, g_capdirs;
+
+static int cmp_path(const void *a, const void *b) {
+    return strcmp(*(char *const *)a, *(char *const *)b);
+}
+
+static void check_parent(const struct belay_entry *e) {
+    size_t plen = e->path_len;
+    while (plen > 0 && e->path[plen - 1] != '/') plen--;
+    if (plen > 0) {
+        static char parent[sizeof e->path];
+        memcpy(parent, e->path, plen - 1);
+        parent[plen - 1] = '\0';
+        const char *key = parent;
+        if (bsearch(&key, g_dirs, g_ndirs, sizeof *g_dirs, cmp_path) == NULL) abort();
+    }
+    if (e->type == BELAY_T_DIR && !(e->path_len == 1 && e->path[0] == '.')) {
+        if (g_ndirs == g_capdirs) {
+            g_capdirs = g_capdirs ? 2 * g_capdirs : 64;
+            g_dirs = realloc(g_dirs, g_capdirs * sizeof *g_dirs);
+            if (g_dirs == NULL) abort();
+        }
+        char *copy = malloc(e->path_len + 1);
+        if (copy == NULL) abort();
+        memcpy(copy, e->path, e->path_len + 1);
+        g_dirs[g_ndirs++] = copy;
+    }
+}
+
 static void check_entry(const struct belay_manifest_header *h, const struct belay_entry *e) {
     schema_invariants(h, e);
+    check_parent(e);
 
     /* §5.1.1: a path reaching the callback must never contain a NUL. */
     if (memchr(e->path, '\0', e->path_len) != NULL) abort();
@@ -191,6 +225,8 @@ int LLVMFuzzerTestOneInput(const uint8_t *data, size_t size) {
         belay_manifest_close(r);
     }
     belay_err_clear();
+    for (size_t i = 0; i < g_ndirs; i++) free(g_dirs[i]);
+    g_ndirs = 0;
 
     return 0;
 }

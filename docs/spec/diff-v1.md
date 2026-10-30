@@ -99,8 +99,8 @@ deepest entry whose path, followed by `/`, begins this path; the scope root `.` 
 - Otherwise the absence is known. If the side that has the path carries `raced` on it, `unknown`
   (reason `raced`): it may not have existed at the end of that walk. Else `added` or `removed`.
 
-An entry whose parent is missing from its own manifest (an orphan) is handled the same way; nothing
-looks a parent up.
+An entry whose parent directory is missing from its own manifest (an orphan) never reaches the
+diff: the reader rejects that manifest, and the diff writes nothing.
 
 **Present on both sides.** Each field takes part in the comparison by its class, for the entry
 types, and on the entries (mount roots or not) that `test/expect/diff-fields.md` pins and the
