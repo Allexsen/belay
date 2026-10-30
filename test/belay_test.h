@@ -161,6 +161,10 @@ static int belay_h_lines(const char *path, char **out, int cap) {
     return n;
 }
 
+static void belay_h_free(char **set, int n) {
+    for (int i = 0; i < n; i++) free(set[i]);
+}
+
 static int belay_h_has(char **set, int n, const char *s) {
     for (int i = 0; i < n; i++) if (strcmp(set[i], s) == 0) return 1;
     return 0;
@@ -200,6 +204,7 @@ static inline int belay_h_accounting(void) {
         const int nd = belay_h_lines(path, decl, BELAY_TEST_MAX);
         if (nd < 0) {
             printf("accounting: no skip list %s for profile %s\n", path, profile);
+            belay_h_free(want, nw);
             return 1;
         }
         const int sk = belay_tests_skipped < BELAY_TEST_MAX ? belay_tests_skipped : BELAY_TEST_MAX;
@@ -220,9 +225,11 @@ static inline int belay_h_accounting(void) {
                 bad = 1;
             }
         }
+        belay_h_free(decl, nd);
     } else if (belay_tests_skipped > 0) {
         printf("accounting: %d skip(s) not judged (no BELAY_SKIP_PROFILE)\n", belay_tests_skipped);
     }
+    belay_h_free(want, nw);
     return bad;
 #else
     return 0;
