@@ -111,6 +111,13 @@ $(SAN_BUILD)/test/%: test/%.c $(SAN_CORE_OBJ)
 
 $(BUILD)/test/test_stress $(SAN_BUILD)/test/test_stress: TEST_LDFLAGS = -pthread
 
+# mkdir_p lives beside the CLI (src/utils.c), outside the core archive: its
+# test links it on its own.
+$(BUILD)/test/test_utils: $(BUILD)/utils.o
+$(BUILD)/test/test_utils: TEST_LDFLAGS = $(BUILD)/utils.o
+$(SAN_BUILD)/test/test_utils: $(SAN_BUILD)/utils.o
+$(SAN_BUILD)/test/test_utils: TEST_LDFLAGS = $(SAN_BUILD)/utils.o
+
 # The self-test runs first: if the harness or the runner could not report a
 # failure, no test result would mean anything. Accounting (test/accounting/):
 # the tests each binary ran, and -- when CI sets BELAY_SKIP_PROFILE -- the
