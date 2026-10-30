@@ -200,10 +200,27 @@ int belay_store_commit(struct belay_store_tx *tx, const char *hex) {
     int rc = 0;
     struct stat st;
     if (fstatat(pfd, hex + 2, &st, AT_SYMLINK_NOFOLLOW) == 0) {
-        if (S_ISREG(st.st_mode)) {
+        struct stat staged;
+        if (S_ISREG(st.st_mode) &&
+            fstatat(tx->s->dfd, tx->tmp, &staged, AT_SYMLINK_NOFOLLOW) == 0 &&
+            staged.st_size != st.st_size) {
+            /* An object of another size than these bytes, which hash to its
+             * name: a copy a power loss emptied or cut short (its name was
+             * synced, its bytes never are). Replaced, or it would stay lost
+             * for every later capture (review r3, F3). */
+            if (renameat(tx->s->dfd, tx->tmp, pfd, hex + 2) == -1) {
+                const int e = errno;
+                unlinkat(tx->s->dfd, tx->tmp, 0);
+                belay_err_set(BELAY_ERR_IO, e, "store: cannot replace object");
+                rc = -1;
+            } else {
+                tx->s->named[prefix_index(hex)] = true;
+            }
+        } else if (S_ISREG(st.st_mode)) {
             /* Dedup: keep the existing object, never rewrite it. Its content
-             * is not trusted here -- verify-on-read is what checks it. Its
-             * name may be one an earlier capture renamed and never synced. */
+             * is not trusted here -- verify-on-read is what checks it (a
+             * same-size forgery included). Its name may be one an earlier
+             * capture renamed and never synced. */
             unlinkat(tx->s->dfd, tx->tmp, 0);
             tx->s->named[prefix_index(hex)] = true;         /* for belay_store_sync */
         } else {

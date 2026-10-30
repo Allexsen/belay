@@ -174,7 +174,7 @@ TEST(planted_wrong_content_is_caught_by_verify) {
     mkdir(prefix, 0700);
     obj_path(hex, p, sizeof p);
     FILE *f = fopen(p, "wb");
-    if (f) { fputs("forged content", f); fclose(f); }
+    if (f) { fputs("forged content!!", f); fclose(f); }   /* the real content's size */
 
     ASSERT_EQ_INT(0, put(s, data, hex));        /* kept, not rewritten */
     ASSERT_EQ_INT(0, belay_store_verify(s, hex));
@@ -206,6 +206,31 @@ TEST(a_copy_a_crash_emptied_or_cut_short_fails_verification) {
         ASSERT_TRUE(strstr(belay_err_msg(), "has content hashing to") != NULL);
         belay_err_clear();
     }
+    unlink(p);
+    belay_store_close(s);
+}
+
+/* Review r3, F3: dedup kept any regular file at an object's name, so a copy a
+ * power loss emptied (its name synced, its bytes not) stayed lost for every
+ * later capture. A commit of the same content replaces an object whose size
+ * is not the staged size; one of the right size is kept, as before. */
+TEST(a_later_commit_restores_a_copy_a_crash_emptied) {
+    struct belay_store *s = NULL;
+    ASSERT_EQ_INT(0, belay_store_open(g_dir, &s));
+    const char *data = "content a power loss emptied";
+    char hex[65], p[1024];
+    sha_hex(data, strlen(data), hex);
+    ASSERT_EQ_INT(0, put(s, data, hex));
+    obj_path(hex, p, sizeof p);
+    REQUIRE(truncate(p, 0) == 0);
+    ASSERT_EQ_INT(0, belay_store_verify(s, hex));
+    belay_err_clear();
+    ASSERT_EQ_INT(0, put(s, data, hex));             /* the next capture stores it again */
+    ASSERT_EQ_INT(1, belay_store_verify(s, hex));
+    ASSERT_EQ_INT(0, count_tmp());
+    struct stat st;
+    ASSERT_EQ_INT(0, stat(p, &st));
+    ASSERT_EQ_INT(0600, (int)(st.st_mode & 07777));
     unlink(p);
     belay_store_close(s);
 }
@@ -398,6 +423,7 @@ int main(void) {
     RUN(planted_symlink_at_object_name_is_refused_not_followed);
     RUN(planted_wrong_content_is_caught_by_verify);
     RUN(a_copy_a_crash_emptied_or_cut_short_fails_verification);
+    RUN(a_later_commit_restores_a_copy_a_crash_emptied);
     RUN(abort_leaves_nothing);
     RUN(verify_reports_missing_object);
     RUN(store_directory_that_is_a_symlink_is_refused);
