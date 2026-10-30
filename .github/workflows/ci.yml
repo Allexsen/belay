@@ -8,19 +8,32 @@ on:
 permissions:
   contents: read
 
-# BELAY_DESIGN.md §9.1 test matrix. All jobs gate every PR and every push to
-# main, and every platform runs the full `make check`. The Linux-only session
-# tree is excluded off Linux by uname -s in the Makefile; main.c's session
-# calls are behind #ifdef __linux__.
+# BELAY_DESIGN.md §9.1 test matrix. Every job here is a required check of
+# main's branch protection (test/accounting/required-checks.txt), every platform
+# runs the full `make check`, and scripts/check-ci.py fails the build if a job
+# or step could go red without failing (continue-on-error, if:, || true).
+#
+# BELAY_SKIP_PROFILE names the job's declared skips, test/accounting/skips/
+# <job>.txt: a test that skips without being declared there, or is declared
+# and runs, fails the job (test/belay_test.h). The Ubuntu jobs enable
+# unprivileged user namespaces (Ubuntu 24.04 restricts them through AppArmor),
+# so the mount, overlay and file-capability tests run instead of skipping.
+#
+# The Linux-only session tree is excluded off Linux by uname -s in the
+# Makefile; main.c's session calls are behind #ifdef __linux__.
 jobs:
   build-linux-x86_64:
     name: linux-x86_64
     runs-on: ubuntu-24.04
+    env:
+      BELAY_SKIP_PROFILE: linux-x86_64
     steps:
       - uses: actions/checkout@v5
       - run: uname -m
       - name: platform summary
         run: make platform
+      - name: enable unprivileged user namespaces
+        run: sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
       - name: build + test
         run: make check
       - name: diff oracle (belay_diff against a naive reference)
@@ -29,17 +42,23 @@ jobs:
   build-linux-arm64:
     name: linux-arm64
     runs-on: ubuntu-24.04-arm
+    env:
+      BELAY_SKIP_PROFILE: linux-arm64
     steps:
       - uses: actions/checkout@v5
       - run: uname -m
       - name: platform summary
         run: make platform
+      - name: enable unprivileged user namespaces
+        run: sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
       - name: build + test
         run: make check
 
   test-macos:
     name: macos-portable
     runs-on: macos-14
+    env:
+      BELAY_SKIP_PROFILE: macos-portable
     steps:
       - uses: actions/checkout@v5
       - run: uname -m
@@ -55,23 +74,24 @@ jobs:
   sanitizers:
     name: asan-ubsan
     runs-on: ubuntu-24.04
-    # §0.4c: ASan + UBSan gate every PR. Fuzz targets for the path utilities
-    # and the manifest reader are added by the phases that create them
-    # (M1 phase 0.3 and phase 2.3); test/fuzz/ exists for them to land in.
+    env:
+      BELAY_SKIP_PROFILE: asan-ubsan
+    # §0.4c: ASan + UBSan gate every PR.
     steps:
       - uses: actions/checkout@v5
       - run: uname -m
       - name: platform summary
         run: make platform
+      - name: enable unprivileged user namespaces
+        run: sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
       - name: asan + ubsan
         run: make check-san
 
   fuzz:
     name: fuzz
     runs-on: ubuntu-24.04
-    # §0.4c: fuzz targets for the path utilities and (from phase 2.3) the
-    # manifest reader -- the two places untrusted input meets parsing.
-    # Short runs gate PRs; they are regression checks, not a fuzzing campaign.
+    # §0.4c: fuzz targets for the path utilities and the manifest reader --
+    # the two places untrusted input meets parsing. Short runs gate PRs.
     steps:
       - uses: actions/checkout@v5
       - name: fuzz (clang/libFuzzer)
@@ -82,16 +102,17 @@ jobs:
     runs-on: ubuntu-24.04
     # §4.5: Apache-2.0 + DCO sign-off, enforced from 2026-10-20 forward.
     # Comparing base..head means pre-cutoff commits are never examined, so the
-    # no-backfill decision is structural rather than a hardcoded date.
-    if: github.event_name == 'pull_request'
+    # no-backfill decision is structural rather than a hardcoded date. On a
+    # pull request the range is the PR's commits; on a push to main, the
+    # pushed commits. Merge commits are not checked (scripts/check-dco.sh).
     steps:
       - uses: actions/checkout@v5
         with:
           fetch-depth: 0
       - name: check Signed-off-by on new commits
         env:
-          BASE: ${{ github.event.pull_request.base.sha }}
-          HEAD: ${{ github.event.pull_request.head.sha }}
+          BASE: ${{ github.event.pull_request.base.sha || github.event.before }}
+          HEAD: ${{ github.event.pull_request.head.sha || github.sha }}
         run: ./scripts/check-dco.sh "$BASE" "$HEAD"
 
   docker:
@@ -101,18 +122,18 @@ jobs:
     # /usr-in-Docker timing. The image's /usr sits on overlayfs, so this also
     # exercises the overlay mount rules. Tests run as a non-root user: as root,
     # permission tests (unreadable directories) cannot fail the way they must.
-    # The CLI does not wire check/diff/mark yet; the test suite and the bench
-    # driver stand in for `check` until it does.
+    # The container's seccomp profile denies user namespaces, so its declared
+    # skips are the namespace tests (test/accounting/skips/docker.txt).
     steps:
       - uses: actions/checkout@v5
       - name: build + test + /usr timing inside ubuntu:24.04
         run: |
           docker run --rm -v "$PWD:/src:ro" ubuntu:24.04 bash -euo pipefail -c '
             apt-get update -qq
-            apt-get install -y -qq --no-install-recommends build-essential >/dev/null
+            apt-get install -y -qq --no-install-recommends build-essential python3 >/dev/null
             useradd -m tester
             cp -r /src /home/tester/w && chown -R tester /home/tester/w
-            su tester -c "cd /home/tester/w && make check && make bench"
+            su tester -c "cd /home/tester/w && BELAY_SKIP_PROFILE=docker make check && make bench"
             cd /home/tester/w
             for run in first warm warm; do
               su tester -c "./build/bench/bench_check /usr usr-in-docker-$run" | tail -1
@@ -125,7 +146,12 @@ jobs:
     # filesystems other than local ext4 -- NFS, coarse timestamps, btrfs
     # subvolumes. Loopback btrfs and FAT images and a loopback NFS export,
     # with test/fs/fs_scenarios.c on each, and the stress test on btrfs and
-    # NFS. On FAT the "fresh fixture" cases are known issue R4-F1 (XFAIL).
+    # NFS (under the harness's accounting). On FAT the "fresh fixture" cases
+    # are known issue R4-F1: XFAIL only when the capture itself worked and the
+    # change escaped; anything else, an unexpected catch included, fails.
+    env:
+      BELAY_ACCOUNTING: test/accounting
+      BELAY_SKIP_PROFILE: filesystems
     steps:
       - uses: actions/checkout@v5
       - name: install filesystem tools

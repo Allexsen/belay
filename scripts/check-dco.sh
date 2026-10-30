@@ -19,7 +19,7 @@ count=0
 
 # %H alone per line; everything else is looked up per commit so that
 # multi-line trailers are handled.
-for sha in $(git rev-list "$BASE".."$HEAD"); do
+for sha in $(git rev-list --no-merges "$BASE".."$HEAD"); do
 	count=$((count + 1))
 	author="$(git show -s --format='%an <%ae>' "$sha")"
 	subject="$(git show -s --format='%s' "$sha")"
