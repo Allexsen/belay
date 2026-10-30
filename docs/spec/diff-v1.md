@@ -106,6 +106,8 @@ deepest entry whose path, followed by `/`, begins this path; the scope root `.` 
 
 - That ancestor is a directory carrying `unreadable` or `mount`: `unknown`, reason `not_captured`.
 - It is a directory carrying `unstable`: `unknown`, reason `listing_incomplete`.
+- It is not a directory and carries `raced`: `unknown`, reason `raced`. It changed after it was
+  recorded, and may have become a directory holding this path before that walk ended.
 - Otherwise the absence is known. If the side that has the path carries `raced` on it, `unknown`
   (reason `raced`): it may not have existed at the end of that walk. Else `added` or `removed`.
 
@@ -181,7 +183,7 @@ one side only.
 
 | name | meaning |
 |---|---|
-| `raced` | An entry changed after it was recorded: its recorded fields may not be the state at the end of its walk, so not even a difference proves a change. |
+| `raced` | An entry changed after it was recorded: its recorded fields may not be the state at the end of its walk, so not even a difference proves a change. For a path on one side only, that entry is the path's own, or its nearest recorded ancestor on the side that lacks it, a non-directory that may have become a directory holding it. |
 | `unstable` | A file changed while read (no hash), or a directory's listing is incomplete. |
 | `unverified` | No hash on one side (larger than its `hash_max_bytes`, or not readable). |
 | `unreadable` | The entry's contents could not be captured. |

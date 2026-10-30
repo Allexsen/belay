@@ -809,6 +809,36 @@ TEST(absence_below_a_file_is_known) {
     ASSERT_TRUE(has("f/x", "\"outcome\":\"added\""));
 }
 
+/* Review F5 (decided 2026-10-30): a non-directory that changed after it was
+ * recorded may have become a directory holding the path, so a path missing
+ * below it is unknown (raced), never a definite added or removed -- either
+ * way round, and however deep. Below a file that did not race, the absence
+ * is still known. */
+static void raced_file_side(const char *name) {
+    m_begin(name, "/s", 1000); ROOT();
+    E(.path = "d", .type = "reg", .size = 3, .sha = HA, .raced = true);
+    E(.path = "f", .type = "reg", .size = 3, .sha = HA); m_end();
+}
+
+static void tree_side(const char *name) {
+    m_begin(name, "/s", 1000); ROOT();
+    E(.path = "d", .type = "dir"); E(.path = "d/e", .type = "dir");
+    E(.path = "d/e/x", .type = "reg", .size = 1, .sha = HA);
+    E(.path = "f", .type = "dir"); E(.path = "f/x", .type = "reg", .size = 1, .sha = HA); m_end();
+}
+
+TEST(absence_below_a_raced_non_directory_is_unknown) {
+    for (int way = 0; way < 2; way++) {
+        raced_file_side(way ? "after" : "before");
+        tree_side(way ? "before" : "after");
+        REQUIRE(run() == 0);
+        ASSERT_TRUE(has("d", "\"outcome\":\"unknown\""));
+        ASSERT_TRUE(has("d/e", "\"outcome\":\"unknown\",\"type\":\"dir\",\"unknown\":[\"raced\"]}"));
+        ASSERT_TRUE(has("d/e/x", "\"outcome\":\"unknown\",\"type\":\"reg\",\"unknown\":[\"raced\"]}"));
+        ASSERT_TRUE(has("f/x", way ? "\"outcome\":\"removed\"" : "\"outcome\":\"added\""));
+    }
+}
+
 /* The schema's promise, checked exhaustively: no combination of flags on
  * either side classifies as unchanged, for any entry type, even when every
  * compared field is equal. The six flags are listed here by hand, from the
@@ -901,6 +931,7 @@ int main(void) {
     RUN(capabilities_are_not_compared_when_attributes_are_unknown);
     RUN(an_ancestor_survives_siblings_that_sort_between_it_and_its_children);
     RUN(absence_below_a_file_is_known);
+    RUN(absence_below_a_raced_non_directory_is_unknown);
     RUN(no_flag_combination_on_either_side_is_unchanged);
     snprintf(cmd, sizeof cmd, "rm -rf '%s'", g_dir);
     if (system(cmd) != 0) { /* best effort */ }

@@ -3,7 +3,10 @@
 #include <string.h>
 
 enum anc ancestry_kind(const struct belay_entry *e) {
-    if (e->type != BELAY_T_DIR) return ANC_NONE;    /* nothing lives below a non-directory */
+    /* Nothing lives below a non-directory -- unless it changed after it was
+     * recorded, into a directory perhaps (review F5). A raced directory is
+     * also unreadable or a mount (manifest rule 10): sealed. */
+    if (e->type != BELAY_T_DIR) return e->raced ? ANC_RACED : ANC_NONE;
     if (e->unreadable || e->is_mount) return ANC_SEALED;
     if (e->unstable) return ANC_INCOMPLETE;
     return ANC_NONE;

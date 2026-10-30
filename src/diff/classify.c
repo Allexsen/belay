@@ -137,10 +137,11 @@ int classify_both(const struct diff_ctx *ctx, const struct belay_entry *b,
 int classify_one(const struct belay_entry *present, bool is_after, enum anc absent,
                  struct verdict *v) {
     memset(v, 0, sizeof *v);                                /* D_UNDECIDED */
-    BELAY_CHECK(absent == ANC_NONE || absent == ANC_INCOMPLETE || absent == ANC_SEALED, -1);
+    BELAY_CHECK(absent == ANC_NONE || absent == ANC_INCOMPLETE || absent == ANC_SEALED ||
+                absent == ANC_RACED, -1);
     if (absent == ANC_SEALED) v->reasons = DRBIT(DR_NOT_CAPTURED);
     else if (absent == ANC_INCOMPLETE) v->reasons = DRBIT(DR_LISTING_INCOMPLETE);
-    else if (present->raced) v->reasons = DRBIT(DR_RACED);
+    else if (absent == ANC_RACED || present->raced) v->reasons = DRBIT(DR_RACED);
     v->outcome = v->reasons ? D_UNKNOWN : is_after ? D_ADDED : D_REMOVED;
     return 0;
 }

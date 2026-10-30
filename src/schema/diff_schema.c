@@ -22,7 +22,9 @@ const struct diff_name_def DIFF_OUTCOMES[D_OUTCOME_COUNT] = {
 const struct diff_name_def DIFF_REASONS[DR_COUNT] = {
     [DR_RACED]       = { "raced",
         "An entry changed after it was recorded: its recorded fields may not be the state at "
-        "the end of its walk, so not even a difference proves a change." },
+        "the end of its walk, so not even a difference proves a change. For a path on one side "
+        "only, that entry is the path's own, or its nearest recorded ancestor on the side that "
+        "lacks it, a non-directory that may have become a directory holding it." },
     [DR_UNSTABLE]    = { "unstable",
         "A file changed while read (no hash), or a directory's listing is incomplete." },
     [DR_UNVERIFIED]  = { "unverified",
