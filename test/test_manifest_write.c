@@ -23,7 +23,9 @@
 #include <stdlib.h>
 #include <string.h>
 #include <sys/mman.h>
+#include <sys/socket.h>
 #include <sys/stat.h>
+#include <sys/un.h>
 #include <sys/wait.h>
 #include <sys/xattr.h>
 #ifdef __linux__
@@ -101,6 +103,7 @@ struct found {
     bool   seen;
     uint64_t nlink;
     uint32_t mode;
+    uint32_t uid, gid;
     uint64_t size;
 };
 
@@ -178,6 +181,8 @@ static int load(const char *mpath) {
         e->unreadable = jbool(line, "unreadable");
         e->nlink      = jnum(line, "nlink");
         e->mode       = (uint32_t)jnum(line, "mode");
+        e->uid        = (uint32_t)jnum(line, "uid");
+        e->gid        = (uint32_t)jnum(line, "gid");
         e->size       = jnum(line, "size");
         e->seen       = true;
         g_nfound++;
@@ -1563,6 +1568,79 @@ TEST(w6_large_xattr_set_is_recorded_by_digest) {
 #endif
 }
 
+/* Audit 2026-10, the capture's surviving mutants (CAP-FILE-03, CAP-STAT-01,
+ * CAP-TYPE-01, PUB-02): each passed every check with its line removed. */
+
+/* The hash limit is inclusive: a file of exactly hash_max_bytes is hashed,
+ * one byte more is unverified. */
+TEST(a_file_at_the_hash_limit_is_hashed_one_byte_over_is_not) {
+    fx_write("at", "0123456789", 10);
+    fx_write("over", "0123456789A", 11);
+    char mpath[8192];
+    snprintf(mpath, sizeof mpath, "/tmp/belay_m3_%d.ndjson", (int)getpid());
+    struct belay_manifest_opts o = { .hash_max_bytes = 10, .store_max_bytes = BELAY_STORE_MAX_BYTES_DEFAULT };
+    struct belay_manifest_stats ost;
+    ASSERT_EQ_INT(0, belay_manifest_write(mpath, g_root, &o, &ost));
+    ASSERT_EQ_INT(0, load(mpath));
+    struct found *at = get("at"), *over = get("over");
+    ASSERT_TRUE(at != NULL && !at->unverified && strlen(at->sha256) == 64);
+    ASSERT_TRUE(over != NULL && over->unverified && over->sha256[0] == '\0');
+    unlink(mpath);
+    fx_rm("at");
+    fx_rm("over");
+}
+
+/* Owner and group are the entry's own. Run as root, the file first gets an
+ * owner other than root, or a writer recording 0 would pass. */
+TEST(owner_and_group_are_recorded) {
+    fx_write("owned", "x", 1);
+    char p[8192];
+    snprintf(p, sizeof p, "%s/owned", g_root);
+    if (geteuid() == 0) REQUIRE(chown(p, 4242, 4343) == 0);
+    struct stat st;
+    REQUIRE(lstat(p, &st) == 0 && st.st_uid != 0);
+    ASSERT_EQ_INT(0, run_check(NULL, NULL));
+    struct found *f = get("owned");
+    ASSERT_TRUE(f != NULL);
+    if (f != NULL) {
+        ASSERT_EQ_INT((long long)st.st_uid, (long long)f->uid);
+        ASSERT_EQ_INT((long long)st.st_gid, (long long)f->gid);
+    }
+    fx_rm("owned");
+}
+
+/* A socket is recorded as sock: not as a FIFO, not skipped. */
+TEST(socket_is_recorded_as_sock) {
+    char p[8192];
+    snprintf(p, sizeof p, "%s/sk", g_root);
+    struct sockaddr_un a;
+    memset(&a, 0, sizeof a);
+    a.sun_family = AF_UNIX;
+    REQUIRE(strlen(p) < sizeof a.sun_path);
+    memcpy(a.sun_path, p, strlen(p) + 1);
+    const int sk = socket(AF_UNIX, SOCK_STREAM, 0);
+    REQUIRE(sk != -1);
+    const int b = bind(sk, (const struct sockaddr *)&a, sizeof a);
+    close(sk);
+    REQUIRE(b == 0);
+    ASSERT_EQ_INT(0, run_check(NULL, NULL));
+    struct found *f = get("sk");
+    ASSERT_TRUE(f != NULL && strcmp(f->type, "sock") == 0);
+    fx_rm("sk");
+}
+
+/* The header's created_ns is when the capture ran. */
+TEST(header_records_when_the_capture_ran) {
+    struct timespec t0, t1;
+    clock_gettime(CLOCK_REALTIME, &t0);
+    ASSERT_EQ_INT(0, run_check(NULL, NULL));
+    clock_gettime(CLOCK_REALTIME, &t1);
+    const long long lo = (long long)t0.tv_sec * 1000000000LL + t0.tv_nsec;
+    const long long hi = (long long)t1.tv_sec * 1000000000LL + t1.tv_nsec;
+    const long long c = (long long)jnum(g_header, "created_ns");
+    ASSERT_TRUE(c >= lo && c <= hi);
+}
+
 int main(void) {
     fx_init();
 
@@ -1578,6 +1656,10 @@ int main(void) {
     RUN(mode_bits_are_recorded);
     RUN(empty_directory_is_recorded);
     RUN(oversized_file_is_unverified_not_skipped);
+    RUN(a_file_at_the_hash_limit_is_hashed_one_byte_over_is_not);
+    RUN(owner_and_group_are_recorded);
+    RUN(socket_is_recorded_as_sock);
+    RUN(header_records_when_the_capture_ran);
     RUN(non_utf8_path_uses_base64);
     RUN(path_with_newline_and_quote_is_escaped);
     RUN(rejects_dotdot_scope_before_touching_fs);

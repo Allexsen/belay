@@ -59,7 +59,12 @@ enum arm { NONE, SWAP_ON_DIR_OPEN, SWAP_ON_READLINK, REPLACE_LINK_WITH_FILE,
            MOUNT_AFTER_WALK,         /* tmpfs over g_x once the walk is done */
            STALE_LISTING,            /* the walk's listing of g_x omits g_y, once */
            VANISH_ON_STAT,           /* g_x's stat fails ENOENT once; the file stays */
-           STORE_GONE_ON_OPEN };     /* the store directory is removed as g_x is opened */
+           STORE_GONE_ON_OPEN,       /* the store directory is removed as g_x is opened */
+           VANISH_ON_OPEN,           /* g_x is unlinked between its stat and its open */
+           SHORT_READ,               /* reading g_x yields one byte, then end of file */
+           XATTR_GET_EIO,            /* the first fd listing names one attribute; its get fails */
+           XSRC_FAIL,                /* g_x cannot be reached for its attributes (EXDEV) */
+           ROOT_READDIR_EIO };       /* the root's listing fails with EIO after one name */
 static int g_flip;
 
 static char g_root[256], g_m[300];
@@ -145,8 +150,12 @@ static int t_openat(void *ctx, int fd, const char *name, int flags) {
     if (g_arm == STORE_GONE_ON_OPEN && !g_fired && !(flags & O_DIRECTORY) && g_x != NULL &&
         strcmp(name, g_x) == 0 && rmdir(g_store) == 0)
         g_fired = 1;                     /* the store, still empty, is gone */
+    if (g_arm == VANISH_ON_OPEN && !g_fired && !(flags & O_DIRECTORY) && g_x != NULL &&
+        strcmp(name, g_x) == 0 && unlinkat(fd, name, 0) == 0)
+        g_fired = 1;
     const int r = g_real->openat(g_real->ctx, fd, name, flags);
-    if ((g_arm == WRITER_DURING_READ || g_arm == WRITER_LEAVES_DURING_READ) && r >= 0 &&
+    if ((g_arm == WRITER_DURING_READ || g_arm == WRITER_LEAVES_DURING_READ ||
+         g_arm == SHORT_READ) && r >= 0 &&
         !(flags & O_DIRECTORY) && g_x != NULL &&
         strcmp(name, g_x) == 0)
         g_target_fd = r;
@@ -295,7 +304,37 @@ static ssize_t t_xattr_list(void *ctx, const struct xsrc *x, char *buf, size_t n
         errno = EIO;
         return -1;
     }
+    if (g_arm == XATTR_GET_EIO && !g_fired && x->path == NULL && n >= 7) {
+        g_fired = 1;                     /* one name, whatever the filesystem holds */
+        memcpy(buf, "user.t", 7);
+        return 7;
+    }
     return g_real->xattr_list(g_real->ctx, x, buf, n);
+}
+
+/* XATTR_GET_EIO: the get of the name the listing above invented fails. */
+static ssize_t t_xattr_get(void *ctx, const struct xsrc *x, const char *name, void *buf,
+                           size_t n) {
+    (void)ctx;
+    if (g_arm == XATTR_GET_EIO && strcmp(name, "user.t") == 0) {
+        errno = EIO;
+        return -1;
+    }
+    return g_real->xattr_get(g_real->ctx, x, name, buf, n);
+}
+
+/* XSRC_FAIL: g_x, which has no open fd, cannot be reached for its attributes. */
+static int t_xattr_source_open(void *ctx, int pfd, const char *name, const struct stat *st,
+                               struct xsrc *x) {
+    (void)ctx;
+    if (g_arm == XSRC_FAIL && g_x != NULL && strcmp(name, g_x) == 0) {
+        g_fired = 1;
+        x->fd = -1;
+        x->own = -1;
+        errno = EXDEV;
+        return -1;
+    }
+    return g_real->xattr_source_open(g_real->ctx, pfd, name, st, x);
 }
 
 static void *g_rootdir;
@@ -310,6 +349,11 @@ static const char *t_dir_next(void *ctx, void *d) {
         return g_saved;                   /* the same name, a second time */
     }
     if (g_arm == SUBDIR_READDIR_EIO && !g_fired && g_rootdir != NULL && d != g_rootdir) {
+        g_fired = 1;
+        errno = EIO;
+        return NULL;
+    }
+    if (g_arm == ROOT_READDIR_EIO && !g_fired && g_rootdir != NULL && d == g_rootdir) {
         g_fired = 1;
         errno = EIO;
         return NULL;
@@ -374,6 +418,14 @@ static ssize_t t_read(void *ctx, int fd, void *buf, size_t n) {
         g_writer = -1;
         g_fired = 1;
     }
+    if (g_arm == SHORT_READ && fd == g_target_fd) {
+        if (g_fired) {                           /* end of file, early -- once: the fd */
+            g_target_fd = -1;                    /* number is reused after its close */
+            return 0;
+        }
+        g_fired = 1;
+        return g_real->read(g_real->ctx, fd, buf, 1);
+    }
     return g_real->read(g_real->ctx, fd, buf, n);
 }
 
@@ -403,6 +455,8 @@ static void decorate(void) {
     g_ops.stat_mount = t_stat_mount;
     g_ops.fstatat = t_fstatat;
     g_ops.xattr_list = t_xattr_list;
+    g_ops.xattr_get = t_xattr_get;
+    g_ops.xattr_source_open = t_xattr_source_open;
     g_ops.dir_next = t_dir_next;
     g_ops.read = t_read;
     g_ops.dir_open = t_dir_open;
@@ -1343,6 +1397,162 @@ TEST(a_store_that_fails_mid_copy_keeps_the_entry) {
     closedir(sd);
 }
 
+/* Audit 2026-10, the capture's surviving mutants: each case below passed
+ * every check with its decision removed (CAP-WALK-08, CONS-08, CAP-X-02,
+ * CAP-X-03, CAP-WALK-09). */
+
+/* Gone between its stat and its open: not recorded, counted as vanished;
+ * its directory changed while it was walked. */
+TEST(a_file_gone_between_its_stat_and_open_is_counted) {
+    reset();
+    mk("d");
+    touch("d/x", "x");
+    touch("d/y", "y");
+    usleep(20000);
+    arm(VANISH_ON_OPEN, "x", NULL);
+    struct belay_manifest_stats st;
+    ASSERT_EQ_INT(0, check(&st));
+    ASSERT_TRUE(g_fired);
+    ASSERT_TRUE(find("d/x") == NULL);
+    ASSERT_EQ_INT(1, (int)st.vanished);
+    const struct belay_entry *d = find("d"), *y = find("d/y");
+    ASSERT_TRUE(d != NULL && d->unstable);
+    ASSERT_TRUE(y != NULL && y->has_hash && !y->unstable);
+}
+
+/* A read that ends before the file's size: the bytes hashed are not the
+ * file, so there is no hash, never a wrong one. */
+TEST(a_short_read_is_unstable_never_a_wrong_hash) {
+    reset();
+    touch("f", "hello");
+    usleep(20000);
+    arm(SHORT_READ, "f", NULL);
+    struct belay_manifest_stats st;
+    ASSERT_EQ_INT(0, check(&st));
+    ASSERT_TRUE(g_fired);
+    const struct belay_entry *f = find("f");
+    ASSERT_TRUE(f != NULL && f->unstable && f->unverified && !f->has_hash);
+    ASSERT_EQ_INT(1, (int)st.unstable);
+}
+
+/* An attribute listed but not readable: the set is unknown, not the set
+ * without it. */
+TEST(an_attribute_that_cannot_be_read_makes_them_unknown) {
+    reset();
+    touch("f", "x");
+    arm(XATTR_GET_EIO, NULL, NULL);
+    ASSERT_EQ_INT(0, check(NULL));
+    ASSERT_TRUE(g_fired);
+    size_t unknown = 0;
+    for (size_t i = 0; i < g_n; i++) if (g_e[i].xattrs_unknown) unknown++;
+    ASSERT_EQ_INT(1, (int)unknown);
+}
+
+/* An entry without an open fd that cannot be reached for its attributes. */
+TEST(an_entry_unreachable_for_its_attributes_has_them_unknown) {
+    reset();
+    lnk("target", "L");
+    touch("f", "x");
+    arm(XSRC_FAIL, "L", NULL);
+    ASSERT_EQ_INT(0, check(NULL));
+    ASSERT_TRUE(g_fired);
+    const struct belay_entry *l = find("L"), *f = find("f");
+    ASSERT_TRUE(l != NULL && l->xattrs_unknown);
+    ASSERT_TRUE(f != NULL && !f->xattrs_unknown);
+}
+
+/* The scope root's own listing cut short by EIO. */
+TEST(a_root_listing_cut_short_flags_the_root) {
+    reset();
+    touch("a", "a");
+    touch("b", "b");
+    touch("c", "c");
+    usleep(20000);
+    arm(ROOT_READDIR_EIO, NULL, NULL);
+    ASSERT_EQ_INT(0, check(NULL));
+    ASSERT_TRUE(g_fired);
+    const struct belay_entry *r = find(".");
+    ASSERT_TRUE(r != NULL && r->unstable);
+}
+
+/* R7 and M6 (audit 2026-10): each per-entry decision, made on one entry of
+ * the same tree, flags exactly what this table says -- the entry, or its
+ * directory when the entry itself cannot be recorded -- and nothing else.
+ * The expectations are written by hand from the spec, never from a run. */
+enum { X_UNV = 1, X_UNS = 2, X_UNR = 4, X_RAC = 8, X_XU = 16, X_MNT = 32 };
+static unsigned flags_of(const struct belay_entry *e) {
+    return (e->unverified ? X_UNV : 0) | (e->unstable ? X_UNS : 0) | (e->unreadable ? X_UNR : 0) |
+           (e->raced ? X_RAC : 0) | (e->xattrs_unknown ? X_XU : 0) | (e->is_mount ? X_MNT : 0);
+}
+
+TEST(each_per_entry_decision_flags_only_what_it_should) {
+    static const struct {
+        const char *name;
+        enum arm arm;
+        const char *x, *y;
+        bool linux_only;
+        const char *flagged;
+        unsigned flags;
+        const char *absent;
+        int vanished;
+    } rows[] = {
+        { "nothing happens",         NONE, NULL, NULL, false, NULL, 0, NULL, 0 },
+        /* rewritten after its stat: the bytes read are not the recorded
+         * file's, and the recorded fields are not its state at the end */
+        { "rewritten before its open", REWRITE_ON_FILE_OPEN, "x", NULL, false, "d/x",
+          X_UNV | X_UNS | X_RAC, NULL, 0 },
+        { "read short",              SHORT_READ, "x", NULL, false, "d/x", X_UNV | X_UNS, NULL, 0 },
+        { "link unreadable",         LINK_EIO, "L", NULL, false, "d/L", X_UNR, NULL, 0 },
+        { "attributes unreachable",  XSRC_FAIL, "L", NULL, false, "d/L", X_XU, NULL, 0 },
+        /* the entry cannot be recorded: its directory's listing is what is
+         * incomplete (or, for a file that is really gone, changed) */
+        { "gone before its stat",    VANISH_ON_STAT, "x", NULL, false, "d", X_UNS, "d/x", 1 },
+        { "gone before its open",    VANISH_ON_OPEN, "x", NULL, false, "d", X_UNS, "d/x", 1 },
+        { "stat denied",             STATX_EPERM_ONCE, "x", NULL, true, "d", X_UNS, "d/x", 0 },
+        { "listing stale",           STALE_LISTING, "d", "x", false, "d", X_UNS, "d/x", 0 },
+    };
+    static const char *const all[] = { ".", "a.txt", "d", "d/L", "d/x", "d/y", "e", "e/z" };
+    for (size_t i = 0; i < sizeof rows / sizeof rows[0]; i++) {
+#ifndef __linux__
+        if (rows[i].linux_only) continue;          /* statx only */
+#endif
+        reset();
+        touch("a.txt", "alpha");
+        mk("d");
+        touch("d/x", "x-content");
+        touch("d/y", "yy");
+        lnk("x", "d/L");
+        mk("e");
+        touch("e/z", "zz");
+        usleep(20000);
+        arm(rows[i].arm, rows[i].x, rows[i].y);
+        struct belay_manifest_stats st;
+        if (check(&st) != 0) {
+            BELAY_FAIL("%s: capture failed: %s", rows[i].name, belay_err_msg());
+            belay_err_clear();
+            continue;
+        }
+        if (rows[i].arm != NONE && !g_fired) BELAY_FAIL("%s: the fault never fired", rows[i].name);
+        for (size_t k = 0; k < sizeof all / sizeof all[0]; k++) {
+            const struct belay_entry *e = find(all[k]);
+            if (rows[i].absent != NULL && strcmp(all[k], rows[i].absent) == 0) {
+                if (e != NULL) BELAY_FAIL("%s: %s recorded", rows[i].name, all[k]);
+                continue;
+            }
+            if (e == NULL) {
+                BELAY_FAIL("%s: %s not recorded", rows[i].name, all[k]);
+                continue;
+            }
+            const unsigned want = rows[i].flagged != NULL && strcmp(rows[i].flagged, all[k]) == 0
+                                ? rows[i].flags : 0;
+            if (flags_of(e) != want)
+                BELAY_FAIL("%s: %s has flags %u, want %u", rows[i].name, all[k], flags_of(e), want);
+        }
+        if ((int)st.vanished != rows[i].vanished)
+            BELAY_FAIL("%s: %zu vanished, want %d", rows[i].name, st.vanished, rows[i].vanished);
+    }
+}
+
 int main(void) {
     decorate();
     snprintf(g_root, sizeof g_root, "/tmp/belay_races_%d", (int)getpid());
@@ -1380,6 +1590,12 @@ int main(void) {
     RUN(a_store_that_cannot_begin_a_copy_keeps_the_entry);
     RUN(a_store_that_cannot_publish_a_copy_keeps_the_entry);
     RUN(a_store_that_fails_mid_copy_keeps_the_entry);
+    RUN(a_file_gone_between_its_stat_and_open_is_counted);
+    RUN(a_short_read_is_unstable_never_a_wrong_hash);
+    RUN(an_attribute_that_cannot_be_read_makes_them_unknown);
+    RUN(an_entry_unreachable_for_its_attributes_has_them_unknown);
+    RUN(a_root_listing_cut_short_flags_the_root);
+    RUN(each_per_entry_decision_flags_only_what_it_should);
     RUN(w6_file_capability_is_recorded);
     RUN(w6_unreadable_xattrs_are_unknown_not_none);
 
