@@ -3,8 +3,8 @@
 const struct diff_name_def DIFF_OUTCOMES[D_OUTCOME_COUNT] = {
     [D_UNCHANGED]     = { "unchanged",
         "Every compared field equal and nothing unknown. Counted in the trailer, never emitted. "
-        "A directory whose own timestamps alone differ is `unchanged` (its timestamps are not "
-        "compared), and counted again in `dir_timestamps_only`." },
+        "A directory whose timestamps differ while every compared field is equal is `unchanged` "
+        "(its timestamps are not compared), and counted again in `dir_timestamps_only`." },
     [D_ADDED]         = { "added", "Present after, absent before, and the absence is known." },
     [D_REMOVED]       = { "removed", "Present before, absent after, and the absence is known." },
     [D_MODIFIED]      = { "modified",
