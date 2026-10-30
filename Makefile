@@ -14,7 +14,10 @@
 
 CC	?= cc
 CFLAGS	?= -O2
-WARN	= -Wall -Wextra -std=c11
+# -Werror for the switch family: a missing case over a schema enum is a build
+# failure, not a warning nobody reads (audit 2026-10, R1). Every rule uses
+# WARN -- release, sanitizer, fuzz and tool builds alike.
+WARN	= -Wall -Wextra -std=c11 -Werror=switch -Werror=switch-enum -Werror=implicit-fallthrough
 INC	= -Iinclude -Isrc
 BUILD	?= build
 BIN	= bin/belay
@@ -166,7 +169,7 @@ FUZZ_SECS	?= 30
 
 $(BUILD)/fuzz/%: test/fuzz/%.c $(CORE_SRC) $(GEN_FUZZ)
 	@mkdir -p $(dir $@)
-	$(CC) -fsanitize=fuzzer,address,undefined -g -O1 $(INC) -o $@ $< $(CORE_SRC)
+	$(CC) -fsanitize=fuzzer,address,undefined -g -O1 $(WARN) $(INC) -o $@ $< $(CORE_SRC)
 
 # Baseline timing (§10: measured, never a target). Not part of `check`.
 BENCH_SRC	= $(wildcard bench/*.c)
