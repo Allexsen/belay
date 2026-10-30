@@ -28,17 +28,30 @@ The corpus has three parts:
     both ways round -- compared cells and the cells the pin excludes (a
     FIFO's mtime, a directory's nlink); every two compared fields of a type
     differing together, and a few changes as tools make them (rewrite,
-    chmod+chown, setcap, ...); every type change; every optional
-    field present on one side only; and the scenarios: dev relation, scope
+    chmod+chown, setcap, ...); every type change; every optional field
+    present on one side only; and the scenarios: dev relation, scope
     remounts, timestamps on fifo/sock/blk/chr and mount roots, iflags on one
     side, caps/xattrs under xattrs_unknown, O1 with and without a size
-    change, hash limits, sealing and unsealing directories, unstable listings,
-    one-sided raced entries, the root itself, names sorting before ".",
-    non-UTF-8 and escaped names;
+    change, hash limits, sealing and unsealing directories, unstable
+    listings, one-sided raced entries, the root itself, names sorting before
+    ".", non-UTF-8 and escaped names;
   - random pairs: n-bases random trees, each with four mutated variants
     (several changes at once), compared in both directions and with
     themselves;
   - refusal pairs: different scopes.
+
+The targeted pairs are DETERMINISTIC in what they hold. Each is built once,
+with no retries: its builder cannot fail (a tree's hash limit is chosen for
+the change it must hold, an entry is placed in the root, which is always
+open, a new value is made to differ by construction), and the combinations
+the frozen format cannot hold are left out by stated rules (*_feasible),
+never by trying. Each targeted pair is written both ways round and checked,
+with compare.py's own coverage code, to show what it was built for (its cell,
+field pair, optional field or scenarios); then the targeted pairs ALONE must
+pass compare.py's whole coverage gate. Anything else stops the generator
+with an error naming the pair or what is missing. So no required case
+depends on the seed or on the random pairs, which add variety only. The
+same seed gives the same corpus, byte for byte.
 Nothing here comes from the generated spec tables or from the C code.
 """
 import base64, copy, json, os, random, sys
@@ -47,6 +60,12 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 REPO = os.path.normpath(os.path.join(HERE, '..', '..'))
 MANIFEST_PIN = os.path.join(REPO, 'test', 'expect', 'manifest-v1.md')
 FIELDS_PIN = os.path.join(REPO, 'test', 'expect', 'diff-fields.md')
+sys.path.insert(0, HERE)
+import compare      # the coverage gate: what a pair shows, and what is required
+
+
+def die(msg):
+    raise SystemExit('gen_corpus: ' + msg)
 
 # ---------------------------------------------------------------------------
 # The pins (plumbing: markdown tables).
@@ -167,6 +186,7 @@ RDEVS = [0, 259, 1025, 34816, 2049, (1 << 32) + 7]
 ROOT_DEVS = [2049, 2050, 64768, 66306, 1 << 40]
 OTHER_DEVS = [0, 37, 2051, 64769, 66307, (1 << 40) + 9, (1 << 32) + 5]
 LIMITS = [0, 100, 1000, 4096, 10 ** 9]
+POSITIVE_LIMITS = [l for l in LIMITS if l > 0]   # a hashed file can take another size within these
 SCOPES = [b'/scope', b'/home/u/proj', b'/srv/caf\xc3\xa9 x']
 XNAMES = ['security.selinux', 'system.posix_acl_access', 'system.posix_acl_default', 'user.a',
           'user.b', 'user.mime_type']
@@ -357,18 +377,25 @@ def parent_of(p):
 
 
 def fresh_path(t, rng, parent=None):
-    dirs = t.open_dirs()
+    """A path no entry of t has, below `parent` or below a random open
+    directory. None only when there is no open directory (a random tree whose
+    root is sealed); otherwise it cannot fail: a few random names first, for
+    variety, then the first free one of n0, n1, ..."""
+    dirs = [parent] if parent is not None else [d for d in t.open_dirs() if len(d) < 150]
     if not dirs:
         return None
-    for _ in range(200):
-        par = parent if parent is not None else rng.choice(dirs)
+    par = rng.choice(dirs)
+    join = lambda n: n if par == b'.' else par + b'/' + n
+    for _ in range(8):
         name = rng.choice(NAMES)
         if rng.random() < 0.3:
             name += b'%d' % rng.randrange(10)
-        p = name if par == b'.' else par + b'/' + name
-        if p not in t.e and len(p) < 200:
-            return p
-    return None
+        if join(name) not in t.e:
+            return join(name)
+    i = 0
+    while join(b'n%d' % i) in t.e:
+        i += 1
+    return join(b'n%d' % i)
 
 
 def random_type(rng):
@@ -619,23 +646,53 @@ def write_manifest(t, path):
 class Writer:
     def __init__(self, out):
         self.out, self.k, self.s = out, 0, 0
+        self.targeted_stems = []        # which alone must pass the coverage gate
 
     def pair(self, b, a, label):
         assert b.scope == a.scope
         for t in (b, a):
             v = violations(t)
             if v:
-                raise SystemExit('generator bug (%s): %s' % (label, v[:5]))
+                die('generator bug (%s): %s' % (label, v[:5]))
         stem = os.path.join(self.out, 'pair-%05d' % self.k)
         write_manifest(b, stem + '.before')
         write_manifest(a, stem + '.after')
         with open(stem + '.label', 'w', encoding='utf-8') as f:
             f.write(label + '\n')
         self.k += 1
+        return stem
 
     def both_ways(self, b, a, label):
-        self.pair(b, a, label)
-        self.pair(a, b, label + ' (reversed)')
+        return [self.pair(b, a, label), self.pair(a, b, label + ' (reversed)')]
+
+    def targeted(self, rng, label, build, cells=(), pairs=(), optional=(), scenarios=()):
+        """One targeted pair: built ONCE -- no retries; build(rng) is written
+        so that it cannot fail -- written both ways round, and checked to show
+        what it was built for, as compare.py's coverage gate sees it: its
+        (field, type) cells, (type, field, field) pairs, optional fields
+        present on one side only, and named scenarios. Anything else stops
+        the generator, naming the pair."""
+        unknown = [s for s in scenarios if s not in compare.SCENARIOS]
+        if unknown:
+            die('%r names scenarios the gate does not have: %s' % (label, unknown))
+        r = build(rng)
+        if r is None:
+            die('could not build the targeted pair %r' % label)
+        stems = self.both_ways(r[0], r[1], label)
+        self.targeted_stems += stems
+        cov = compare.coverage(stems)
+        want = ([('cell', c) for c in cells] + [('field pair', p) for p in pairs]
+                + [('optional', f) for f in optional] + [('scenario', s) for s in scenarios])
+        lacking = [x for x in want if not cov[x[0]][x[1]]]
+        if lacking:
+            die('the pair built for %r (%s) does not show %s' % (label, stems[0], lacking))
+
+    def check_gate(self):
+        """compare.py's whole coverage gate, over the targeted pairs alone."""
+        missing, impossible = compare.gate(compare.coverage(self.targeted_stems))
+        if missing or impossible:
+            die('the targeted pairs alone do not pass the coverage gate: missing %s; cells '
+                'the format cannot hold: %s' % (missing, impossible))
 
     def refusal(self, b, a, label):
         assert b.scope != a.scope
@@ -651,26 +708,99 @@ class Writer:
         self.s += 1
 
 # ---------------------------------------------------------------------------
-# Targeted pairs: one field of one entry differs.
+# Targeted pairs. Each is built once, by Writer.targeted, which checks what it
+# shows; every builder below cannot fail on a combination its *_feasible rule
+# admits, and those rules exclude only what the frozen format cannot hold.
 
 CONTEXTS = ['plain', 'offdev', 'mount', 'xattrs_unknown', 'unverified', 'unstable',
             'unreadable', 'raced']
+# The entry types each context can hold: a bare `unverified` only on reg
+# (manifest-v1 rule 5, header 1), `unstable` only on reg and dir (rules 12,
+# 13), `unreadable` only on reg, dir and lnk (rule 13).
+CONTEXT_TYPES = {'plain': TYPE_NAMES, 'offdev': TYPE_NAMES, 'mount': TYPE_NAMES,
+                 'xattrs_unknown': TYPE_NAMES, 'unverified': ['reg'],
+                 'unstable': ['reg', 'dir'], 'unreadable': ['reg', 'dir', 'lnk'],
+                 'raced': TYPE_NAMES}
+ATTRS = ('iflags', 'caps', 'xattrs', 'xattrs_sha256', 'xattrs_unknown')
+TS = ('mtime_ns', 'ctime_ns')
 
 
 def other_dev(t, rng, avoid=()):
     return rng.choice([d for d in OTHER_DEVS if d != t.root_dev() and d not in avoid])
 
 
+def letters(rng, n):
+    return bytes(rng.choice(b'abcdefgh') for _ in range(n))
+
+
+def unlike(new, old):
+    """new, its last character changed if it happens to equal old."""
+    if new != old:
+        return new
+    if isinstance(new, str):
+        return new[:-1] + ('0' if new[-1:] != '0' else '1')
+    return new[:-1] + (b'a' if new[-1:] != b'a' else b'b')
+
+
+def base_tree(rng, n=None, **kw):
+    """A tree for a targeted pair. Its root is open (grow() flags only the
+    entries it adds), so an entry can always be placed in it."""
+    t = Tree(rng, **kw)
+    grow(t, rng, rng.randrange(0, 7) if n is None else n)
+    return t
+
+
+def place(rng, t, typ, extras=True, parent=None):
+    p = fresh_path(t, rng, parent)
+    return None if p is None else new_entry(rng, t, p, typ, extras)
+
+
+def subject(rng, t, typ, extras=True, parent=None):
+    """A new entry for a targeted pair, at a path no entry of t has (not yet
+    in t: the caller puts it there)."""
+    e = place(rng, t, typ, extras, parent)
+    if e is None:
+        die('a targeted tree with no open directory')
+    return e
+
+
+def with_subject(t, e, e2):
+    """The pair: t holding e, and a later copy of t holding e2 at e's path."""
+    if e is None or e2 is None:
+        return None
+    a = t.copy()
+    t.e[e['path']], a.e[e['path']] = e, e2
+    return t, a
+
+
+def size_limit(rng):
+    """A hash limit within which a hashed file can take another size (0
+    cannot): a tree's limit, chosen for a change of size."""
+    return rng.choice(POSITIVE_LIMITS)
+
+
+def hashed(e, t, rng, least=0):
+    """The regular file e, hashed: within the limit (and at least `least`
+    bytes), no flag that rules a hash out, nothing stored."""
+    e['size'] = max(least, min(e['size'], t.limit))
+    if e['size'] > t.limit:
+        die('a limit of %d holds no hashed file of %d bytes' % (t.limit, least))
+    for k in ('unstable', 'unreadable', 'mount', 'stored'):
+        e.pop(k, None)
+    settle_hash(e, t, rng)
+    return e
+
+
 def in_context(ctx, e, t, rng):
-    """The entry as it is in one context (the same on both sides), or None."""
+    """The entry as it is in one context, the same on both sides; None for a
+    type the context cannot hold (CONTEXT_TYPES)."""
     e, typ = copy.deepcopy(e), e['type']
-    if ctx == 'plain':
-        pass
-    elif ctx == 'offdev':
+    if typ not in CONTEXT_TYPES[ctx]:
+        return None
+    if ctx == 'offdev':
         e['dev'] = other_dev(t, rng)
     elif ctx == 'mount':
-        for k in ('iflags', 'caps', 'xattrs', 'xattrs_sha256', 'xattrs_unknown', 'sha256',
-                  'stored', 'unstable', 'unreadable'):
+        for k in ATTRS + ('sha256', 'stored', 'unstable', 'unreadable'):
             e.pop(k, None)
         e['mount'] = True
         e['dev'] = other_dev(t, rng)
@@ -681,8 +811,6 @@ def in_context(ctx, e, t, rng):
             e.pop(k, None)
         e['xattrs_unknown'] = True
     elif ctx == 'unverified':                  # bare: too large for this manifest
-        if typ != 'reg':
-            return None
         e['size'] = t.limit + 1 + rng.randrange(1000)
         for k in ('sha256', 'stored'):
             e.pop(k, None)
@@ -692,29 +820,105 @@ def in_context(ctx, e, t, rng):
             for k in ('sha256', 'stored'):
                 e.pop(k, None)
             e['unverified'] = True
-        elif typ == 'lnk' and ctx == 'unreadable':
+        elif typ == 'lnk':                     # unreadable
             e.pop('target_outside_scope', None)
             if rng.random() < 0.4:
                 e['link_target'] = b''          # "target unknown"; size stays as stat'ed
-        elif typ != 'dir':
-            return None
         e[ctx] = True
     elif ctx == 'raced':
         e['raced'] = True
-        if typ == 'dir':
+        if typ == 'dir':                        # rule 10
             e['unreadable'] = True
     return e
 
 
+VARIANTS = {'dev': ['flip', 'renumber'], 'caps': ['change', 'add', 'drop'],
+            'xattrs': ['change', 'add', 'drop'], 'link_target': [None, 'non-utf8']}
+
+
+def cell_feasible(f, typ, ctx, var):
+    """Whether the frozen format holds a pair where only f differs, on a typ
+    in context ctx: what it cannot hold is excluded here, by rule, never by
+    trying."""
+    if typ not in CONTEXT_TYPES[ctx]:
+        return False
+    if f == 'size' and typ == 'lnk':
+        return ctx == 'unreadable'             # rule 19: else the size is the target's length
+    if f == 'dev' and var == 'renumber':
+        return ctx in ('offdev', 'mount')      # renumbered while off the root's device
+    if f in ('iflags', 'caps', 'xattrs') and ctx == 'mount':
+        return False                           # rule 22
+    if f in ('caps', 'xattrs') and ctx == 'xattrs_unknown':
+        return False                           # rule 3
+    if f == 'caps':
+        return typ == 'reg'                    # rule 4
+    if f == 'sha256':                          # a hash: rules 5, 6, 21
+        return typ == 'reg' and ctx in ('plain', 'offdev', 'xattrs_unknown', 'raced')
+    if f == 'rdev':
+        return typ in ('blk', 'chr')           # rule 15
+    if f == 'link_target':
+        return typ == 'lnk'                    # rule 16
+    return True
+
+
+def prepare(f, var, e, t, rng):
+    """What the base entry must hold for field f to be changed alone."""
+    e = copy.deepcopy(e)
+    if f == 'iflags':
+        e['iflags'] = rng.choice(IFLAGS)
+    elif f == 'caps':
+        if e['type'] != 'reg':                  # manifest-v1 rule 4
+            return e
+        e.pop('xattrs_unknown', None)
+        if var in ('change', 'drop'):
+            e['caps'] = caps_hex(rng)
+        else:
+            e.pop('caps', None)
+    elif f == 'xattrs':
+        for k in ('xattrs_sha256', 'xattrs_unknown', 'xattrs'):
+            e.pop(k, None)
+        if var in ('change', 'drop'):
+            e['xattrs'] = xattr_set(rng)
+    elif f == 'sha256' and e['type'] == 'reg':
+        hashed(e, t, rng)
+    return e
+
+
+def new_target(rng, e, var):
+    """Another target for the symlink e: the same length (rule 19 ties the
+    size to it unless the link is unreadable) on the same side of the scope
+    (header 2 ties target_outside_scope to it). `non-utf8`: its last byte is
+    0xff, which ends no UTF-8 string."""
+    tg = e['link_target']
+    if e.get('unreadable'):                     # target unknown or stale: any other one
+        new = letters(rng, max(len(tg), 1))
+    elif e.get('target_outside_scope'):
+        if tg.startswith(b'/'):                 # absolute: no scope starts with these letters
+            new = b'/' + letters(rng, len(tg) - 1)
+        else:                                   # the same leading `..`s, other names after them
+            comps, ups = tg.split(b'/'), 0
+            while comps[ups] == b'..':
+                ups += 1
+            rest = b'/'.join(comps[ups:])
+            new = b'../' * ups + bytes(c if c == 0x2f else rng.choice(b'abcdefgh') for c in rest)
+    else:                                       # inside: a plain name
+        new = letters(rng, len(tg))
+    if var == 'non-utf8':
+        new = new[:-1] + b'\xff'
+    return unlike(new, tg)
+
+
 def mutate(f, var, e, t, rng):
-    """e with only field f changed, validity kept; None when impossible here."""
+    """e with only field f changed, validity kept; a new value differs by
+    construction. None only where the format cannot hold the change at all,
+    which cell_feasible() excludes before."""
     e2, typ = copy.deepcopy(e), e['type']
     if f == 'mode':
         e2['mode'] = (e['mode'] & S_IFMT) | other(rng, PERMS, e['mode'] & 0o7777)
     elif f in ('uid', 'gid'):
         e2[f] = other(rng, IDS, e[f])
     elif f == 'size':
-        if typ == 'reg' and 'sha256' in e:
+        if typ == 'reg' and 'sha256' in e:      # within the limit: size_limit() leaves room
             c = [s for s in {0, 1, t.limit // 2, t.limit} if s != e['size'] and s <= t.limit]
         elif typ == 'reg' and not any(e.get(k) for k in ('unstable', 'unreadable', 'mount')):
             c = [t.limit + 1 + i for i in (0, 5, 999) if t.limit + 1 + i != e['size']]
@@ -724,8 +928,8 @@ def mutate(f, var, e, t, rng):
             c = [s for s in (0, 1, 4096, 123456) if s != e['size']]
         if not c:
             return None
-        e2['size'] = rng.choice(c)
-    elif f in ('mtime_ns', 'ctime_ns'):
+        e2['size'] = rng.choice(sorted(c))
+    elif f in TS:
         e2[f] = e[f] + rng.randrange(1, 10 ** 12)
     elif f == 'ino':
         e2[f] = other(rng, [e[f] + 1, e[f] + 77777, 2], e[f])
@@ -746,7 +950,7 @@ def mutate(f, var, e, t, rng):
         if typ != 'reg' or e.get('xattrs_unknown') or e.get('mount'):
             return None
         if var == 'change' and 'caps' in e:
-            e2['caps'] = caps_hex(rng)
+            e2['caps'] = unlike(caps_hex(rng), e['caps'])
         elif var == 'add' and 'caps' not in e:
             e2['caps'] = caps_hex(rng)
         elif var == 'drop' and 'caps' in e:
@@ -758,8 +962,9 @@ def mutate(f, var, e, t, rng):
             return None
         if var == 'change' and 'xattrs' in e:
             new = xattr_set(rng)
-            if new == e['xattrs']:
-                return None
+            if new == e['xattrs']:              # one value made to differ
+                n, v = new[-1].split('=', 1)
+                new[-1] = '%s=%s' % (n, unlike(v, v))
             e2['xattrs'] = new
         elif var == 'add' and 'xattrs' not in e:
             e2['xattrs'] = xattr_set(rng)
@@ -770,111 +975,46 @@ def mutate(f, var, e, t, rng):
     elif f == 'sha256':
         if 'sha256' not in e or 'stored' in e:
             return None
-        e2['sha256'] = hexs(rng)
+        e2['sha256'] = unlike(hexs(rng), e['sha256'])
     elif f == 'rdev':
         if 'rdev' not in e:
             return None
         e2['rdev'] = other(rng, RDEVS, e['rdev'])
     elif f == 'link_target':
-        # Same length (rule 19 ties the size to it) and the same side of the
-        # scope (header 2 ties target_outside_scope to it).
-        tg = e.get('link_target', b'')
-        if tg == b'':
+        if typ != 'lnk':
             return None
-        if e.get('target_outside_scope'):
-            if not tg.startswith(b'/') or len(tg) < 2:
-                return None
-            new = b'/' + bytes(rng.choice(b'abcdefgh') for _ in range(len(tg) - 1))
-        else:                                   # a plain name: inside
-            new = bytes(rng.choice(b'abcdefgh\xff') for _ in range(len(tg)))
-        if new == tg:
-            return None
-        e2['link_target'] = new
+        e2['link_target'] = new_target(rng, e, var)
     else:
-        raise SystemExit('gen_corpus: no mutation for field %r (the pin grew a row?)' % f)
+        die('no mutation for field %r (the pin grew a row?)' % f)
     return e2
 
 
-def prepare(f, var, e, rng):
-    """What the base entry must hold for field f to be changed alone."""
-    e = copy.deepcopy(e)
-    if f == 'iflags':
-        e['iflags'] = rng.choice(IFLAGS)
-    elif f == 'caps':
-        if e['type'] != 'reg':                  # manifest-v1 rule 4
-            return e
-        e.pop('xattrs_unknown', None)
-        if var in ('change', 'drop'):
-            e['caps'] = caps_hex(rng)
-        else:
-            e.pop('caps', None)
-    elif f == 'xattrs':
-        for k in ('xattrs_sha256', 'xattrs_unknown', 'xattrs'):
-            e.pop(k, None)
-        if var in ('change', 'drop'):
-            e['xattrs'] = xattr_set(rng)
-    elif f == 'sha256':
-        e.pop('stored', None)
-    return e
-
-
-VARIANTS = {'dev': ['flip', 'renumber'], 'caps': ['change', 'add', 'drop'],
-            'xattrs': ['change', 'add', 'drop']}
-
-
-def base_tree(rng, n=None, **kw):
-    t = Tree(rng, **kw)
-    grow(t, rng, rng.randrange(0, 7) if n is None else n)
-    return t
-
-
-def place(rng, t, typ, extras=True):
-    p = fresh_path(t, rng)
-    return None if p is None else new_entry(rng, t, p, typ, extras)
-
-
-def try_pair(w, rng, label, build, attempts=64):
-    """build(rng) -> (before tree, after tree) or None; writes both ways. Many
-    attempts: a build fails when its random tree cannot hold the change (a size
-    past the tree's hash limit), and the coverage gate must not depend on a
-    random seed's luck -- with 4, about one seed in a dozen missed a pair."""
-    for _ in range(attempts):
-        r = build(rng)
-        if r is None:
-            continue
-        b, a = r
-        if violations(b) or violations(a):
-            continue
-        w.both_ways(b, a, label)
-        return True
-    return False
-
-
 def cells(w, rng):
-    """Every field (required ones, and every compared optional one) x every
-    type x every context: only that field of one entry differs."""
+    """Every field (the required ones, and every compared optional one) x every
+    type x every context the format can hold it in: only that field of one
+    entry differs. Each pair must show its (field, type) cell."""
     fields = REQUIRED_FIELDS + [f for f in CELL_FIELDS
                                 if f not in REQUIRED_FIELDS and f != 'type']
     for f in fields:
         for typ in TYPE_NAMES:
             for ctx in CONTEXTS:
                 for var in VARIANTS.get(f, [None]):
+                    if not cell_feasible(f, typ, ctx, var):
+                        continue
                     def build(rng, f=f, typ=typ, ctx=ctx, var=var):
-                        t = base_tree(rng)
-                        e = place(rng, t, typ)
-                        if e is None:
-                            return None
-                        e = in_context(ctx, prepare(f, var, e, rng), t, rng)
-                        if e is None:
-                            return None
-                        e2 = mutate(f, var, e, t, rng)
-                        if e2 is None:
-                            return None
-                        a = t.copy()
-                        t.e[e['path']], a.e[e['path']] = e, e2
-                        return t, a
-                    try_pair(w, rng, 'only %s differs on a %s (%s%s)' %
-                             (f, typ, ctx, ', ' + var if var else ''), build)
+                        t = base_tree(rng, limit=size_limit(rng) if f == 'size' else None)
+                        e = in_context(ctx, prepare(f, var, subject(rng, t, typ), t, rng), t, rng)
+                        return with_subject(t, e, e and mutate(f, var, e, t, rng))
+                    scen = []
+                    if f in TS and ctx == 'mount':
+                        scen.append('only %s differs on a mount root' % f)
+                    if f in TS and ctx == 'plain' and typ in SPECIAL:
+                        scen.append('only %s differs on a %s' % (f, typ))
+                    if var == 'non-utf8':
+                        scen.append('a non-UTF-8 link target that differs')
+                    w.targeted(rng, 'only %s differs on a %s (%s%s)' %
+                               (f, typ, ctx, ', ' + var if var else ''), build,
+                               cells=[(f, typ)], scenarios=scen)
 
 
 PAIR_VARIANT = {'dev': 'flip', 'caps': 'change', 'xattrs': 'change'}
@@ -883,39 +1023,33 @@ PAIR_VARIANT = {'dev': 'flip', 'caps': 'change', 'xattrs': 'change'}
 def field_pairs(w, rng):
     """Every two compared fields of one entry differing together, on every
     type: the order of `changed` for every pair of fields. A symlink's size
-    and target change together through a target of another length."""
+    moves alone only when the link is unreadable (rule 19), and with its
+    target through a target of another length."""
     for typ in TYPE_NAMES:
         fs = [f for f in CELL_FIELDS if f not in ('type', 'ctime_ns') and typ in CELL_FIELDS[f]
               and not (f == 'caps' and typ != 'reg')]          # manifest-v1 rule 4
         for i, f1 in enumerate(fs):
             for f2 in fs[i + 1:]:
-                def build(rng, typ=typ, f1=f1, f2=f2):
+                both = {f1, f2}
+                ctx = 'unreadable' if typ == 'lnk' and 'size' in both and \
+                    'link_target' not in both else 'plain'
+                def build(rng, typ=typ, f1=f1, f2=f2, ctx=ctx):
                     v1, v2 = PAIR_VARIANT.get(f1), PAIR_VARIANT.get(f2)
-                    for ctx in ('plain', 'unreadable'):
-                        t = base_tree(rng)
-                        e = place(rng, t, typ)
-                        if e is None:
-                            return None
-                        e = in_context(ctx, prepare(f2, v2, prepare(f1, v1, e, rng), rng), t, rng)
-                        if e is None:
-                            continue
-                        if typ == 'lnk' and {f1, f2} == {'size', 'link_target'}:
-                            if e.get('unreadable') or not e['link_target']:
-                                continue
-                            e2 = dict(e, link_target=e['link_target'] + b'x')
-                            e2['size'] = len(e2['link_target'])
-                        else:
-                            e2 = mutate(f1, v1, e, t, rng)
-                            e2 = e2 and mutate(f2, v2, e2, t, rng)
-                        if not e2:
-                            continue
-                        a = t.copy()
-                        t.e[e['path']], a.e[e['path']] = e, e2
-                        return t, a
-                    return None
-                try_pair(w, rng, 'only %s and %s differ on a %s' % (f1, f2, typ), build)
+                    t = base_tree(rng, limit=size_limit(rng) if 'size' in (f1, f2) else None)
+                    e = prepare(f2, v2, prepare(f1, v1, subject(rng, t, typ), t, rng), t, rng)
+                    e = in_context(ctx, e, t, rng)
+                    if {f1, f2} == {'size', 'link_target'}:
+                        e2 = dict(e, link_target=e['link_target'] + b'x',
+                                  size=len(e['link_target']) + 1)
+                    else:
+                        e2 = mutate(f1, v1, e, t, rng)
+                        e2 = e2 and mutate(f2, v2, e2, t, rng)
+                    return with_subject(t, e, e2)
+                w.targeted(rng, 'only %s and %s differ on a %s (%s)' % (f1, f2, typ, ctx), build,
+                           pairs=[(typ, f1, f2)])
 
-    # And a few changes as tools make them.
+    # And a few changes as tools make them (variety; a field the entry cannot
+    # change is left alone).
     tools = {'rewrite': ('size', 'mtime_ns', 'ctime_ns', 'sha256'),
              'replace': ('ino', 'size', 'mtime_ns', 'ctime_ns', 'sha256', 'mode'),
              'chmod+chown': ('mode', 'uid', 'gid', 'ctime_ns'),
@@ -928,21 +1062,17 @@ def field_pairs(w, rng):
         for typ in ('reg', 'dir', 'lnk', 'fifo', 'chr'):
             def build(rng, typ=typ, fields=fields):
                 t = base_tree(rng)
-                e = place(rng, t, typ)
-                if e is None:
-                    return None
+                e = subject(rng, t, typ)
                 for f in fields:
-                    e = prepare(f, PAIR_VARIANT.get(f), e, rng)
+                    e = prepare(f, PAIR_VARIANT.get(f), e, t, rng)
                 e2 = e
                 for f in fields:
-                    e3 = mutate(f, PAIR_VARIANT.get(f), e2, t, rng)
-                    e2 = e3 or e2                    # a field this type cannot change: skip it
-                if e2 == e:
-                    return None
-                a = t.copy()
-                t.e[e['path']], a.e[e['path']] = e, e2
-                return t, a
-            try_pair(w, rng, '%s on a %s' % (name, typ), build)
+                    e2 = mutate(f, PAIR_VARIANT.get(f), e2, t, rng) or e2
+                return with_subject(t, e, e2)
+            three = name == 'chmod+chown' and typ == 'reg'      # mode, uid and gid always move
+            w.targeted(rng, '%s on a %s' % (name, typ), build,
+                       scenarios=['three or more compared fields differ on one entry'] if three
+                       else [])
 
 
 def change_type(e, t2, t, rng):
@@ -969,33 +1099,82 @@ def change_type(e, t2, t, rng):
     return e2
 
 
+def type_change_feasible(t1, t2, ctx):
+    """Whether a t1 in context ctx can become a t2 keeping its flags."""
+    if t1 not in CONTEXT_TYPES[ctx]:
+        return False
+    if ctx == 'unreadable':
+        return t2 in CONTEXT_TYPES['unreadable']     # rule 13
+    if ctx == 'raced' and t2 == 'dir' and t1 != 'dir':
+        return False        # rule 10: a raced directory is unreadable or a mount; this one is neither
+    if ctx == 'raced' and t1 == 'dir' and t2 in SPECIAL:
+        return False        # the raced directory is unreadable, which these cannot be (rule 13)
+    return True
+
+
 def type_changes(w, rng):
+    """Every type change in every context the format can hold it in, the
+    flags the same on both sides; in two of them also with iflags read on one
+    side only (across a type change no field is compared, so it adds no
+    reason, raced or not)."""
     for t1 in TYPE_NAMES:
         for t2 in TYPE_NAMES:
             if t1 == t2:
                 continue
             for ctx in ('plain', 'offdev', 'xattrs_unknown', 'raced', 'mount', 'unreadable'):
-                # iflags read on one side only: across a type change no field
-                # is compared, so it adds no reason, raced or not
+                if not type_change_feasible(t1, t2, ctx):
+                    continue
                 for one in ((False, True) if ctx in ('plain', 'raced') else (False,)):
                     def build(rng, t1=t1, t2=t2, ctx=ctx, one=one):
                         t = base_tree(rng)
-                        e = place(rng, t, t1)
-                        e = e and in_context(ctx, e, t, rng)
-                        e2 = e and change_type(e, t2, t, rng)
-                        if not e2:
-                            return None
-                        if one:
+                        e = in_context(ctx, subject(rng, t, t1), t, rng)
+                        e2 = change_type(e, t2, t, rng)
+                        if one and e2 is not None:
                             e = dict(e, iflags=e.get('iflags', 16))
                             e2.pop('iflags', None)
-                        a = t.copy()
-                        t.e[e['path']], a.e[e['path']] = e, e2
-                        return t, a
-                    try_pair(w, rng, 'type %s -> %s (%s%s)' % (t1, t2, ctx,
-                             ', iflags on one side' if one else ''), build)
+                        return with_subject(t, e, e2)
+                    scen = ['a type change']
+                    if one:
+                        scen.append('a raced type change, iflags on one side only' if ctx == 'raced'
+                                    else 'a type change, iflags on one side only')
+                    opt = [f for f, ts in (('rdev', ('blk', 'chr')), ('link_target', ('lnk',)))
+                           if (t1 in ts) != (t2 in ts)]
+                    w.targeted(rng, 'type %s -> %s (%s%s)' % (t1, t2, ctx,
+                               ', iflags on one side' if one else ''), build,
+                               cells=[('type', t1)], optional=opt, scenarios=scen)
 
 
-ATTRS = ('iflags', 'caps', 'xattrs', 'xattrs_sha256', 'xattrs_unknown')
+def one_sided_feasible(f, var, typ, ctx):
+    """Whether the format holds f on one side only, on a typ in context ctx,
+    built as one_sided_build() builds it."""
+    if typ not in CONTEXT_TYPES[ctx] or ctx == f or (ctx == 'xattrs_unknown' and f in ATTRS):
+        return False
+    if ctx == 'mount' and f in ATTRS:
+        return False                                    # rule 22
+    if f == 'caps':
+        return typ == 'reg'                             # rule 4
+    if f in ('sha256', 'stored'):                       # a hashed file: rules 5, 6, 21
+        return typ == 'reg' and ctx in ('plain', 'offdev', 'raced', 'xattrs_unknown') and \
+            not (var == 'mount' and ctx == 'xattrs_unknown')       # rule 22 on the mount side
+    if f == 'unstable':
+        if typ == 'dir':
+            return ctx in ('plain', 'offdev', 'xattrs_unknown')    # rule 11 (raced: unreadable)
+        return typ == 'reg' and ctx not in ('unreadable', 'mount')  # rules 7, 8, 12, 13
+    if f == 'unreadable':
+        if typ == 'dir':
+            return ctx in ('plain', 'offdev', 'xattrs_unknown')    # rule 11
+        return typ == 'lnk' or (typ == 'reg' and ctx != 'mount')   # rules 8, 13
+    if f == 'mount':
+        if ctx == 'xattrs_unknown':
+            return False                                # rule 22
+        if typ in ('reg', 'dir') and ctx == 'unreadable':
+            return False                                # rules 8, 11
+        return not (typ == 'dir' and ctx == 'raced')    # rule 11: the raced dir is unreadable
+    if f == 'raced':
+        return typ != 'dir' or ctx in ('unreadable', 'mount')       # rule 10
+    if f == 'target_outside_scope':
+        return typ == 'lnk' and ctx != 'unreadable'                # header 2
+    return True
 
 
 def one_sided_build(f, var, typ, ctx):
@@ -1003,10 +1182,8 @@ def one_sided_build(f, var, typ, ctx):
     entry `e` lacks f (and whatever f excludes); `w_` is e plus f, plus only
     what the rules force to change with it."""
     def build(rng):
-        t = base_tree(rng)
-        e = place(rng, t, typ)
-        if e is None:
-            return None
+        t = base_tree(rng, limit=size_limit(rng) if f in ('sha256', 'stored') else None)
+        e = subject(rng, t, typ)
         strip = set()
         if f in ('iflags', 'caps', 'xattrs', 'xattrs_sha256', 'xattrs_unknown', 'stored',
                  'unstable', 'unreadable', 'mount', 'raced', 'target_outside_scope'):
@@ -1015,8 +1192,10 @@ def one_sided_build(f, var, typ, ctx):
             strip |= {'caps', 'xattrs', 'xattrs_sha256', 'xattrs_unknown'}
         if f == 'mount' or var == 'mount':      # rule 22, and 14/21 through sha256
             strip |= set(ATTRS) | {'stored'}
-        for k in strip:
+        for k in sorted(strip):
             e.pop(k, None)
+        if f in ('sha256', 'stored'):           # hashed, at least 1 byte (`limit` goes below it)
+            hashed(e, t, rng, least=1)
         e = in_context(ctx, e, t, rng)
         if e is None or (f in e and f != 'sha256'):
             return None
@@ -1056,7 +1235,7 @@ def one_sided_build(f, var, typ, ctx):
             if typ != 'lnk' or e.get('unreadable'):
                 return None
             out = rng.choice(OUTSIDE_ABS)
-            e['link_target'] = bytes(rng.choice(b'abcdefgh') for _ in range(len(out)))
+            e['link_target'] = letters(rng, len(out))
             e['size'] = len(out)
             w_['link_target'], w_['size'], w_['target_outside_scope'] = out, len(out), True
         elif f == 'sha256':                     # the other side unverified (rule O1)
@@ -1066,8 +1245,6 @@ def one_sided_build(f, var, typ, ctx):
                 w_.pop(k, None)
             w_['unverified'] = True
             if var in ('limit', 'limit+size'):  # the other manifest's limit is lower
-                if e['size'] == 0:
-                    return None
                 a.limit = e['size'] - 1
                 for x in a.e.values():
                     settle_hash(x, a, rng)
@@ -1082,43 +1259,53 @@ def one_sided_build(f, var, typ, ctx):
     return build
 
 
+ONE_SIDED_PLAN = {'iflags': [None], 'caps': [None], 'xattrs': [None, 'vs-digest'],
+                  'xattrs_sha256': [None, 'vs-inline'], 'xattrs_unknown': ['bare', 'attrs'],
+                  'sha256': ['limit', 'limit+size', 'unstable', 'unreadable', 'mount'],
+                  'stored': [None], 'unstable': [None], 'unreadable': [None], 'mount': [None],
+                  'raced': [None], 'target_outside_scope': [None]}
+
+
 def optional_one_sided(w, rng):
-    plan = {'iflags': [None], 'caps': [None], 'xattrs': [None, 'vs-digest'],
-            'xattrs_sha256': [None, 'vs-inline'], 'xattrs_unknown': ['bare', 'attrs'],
-            'sha256': ['limit', 'limit+size', 'unstable', 'unreadable', 'mount'],
-            'stored': [None], 'unstable': [None], 'unreadable': [None], 'mount': [None],
-            'raced': [None], 'target_outside_scope': [None]}
     # `unverified` is sha256's other side (rule 5); `rdev` and `link_target`
     # are present on one side only exactly when the type changes.
     for f in OPTIONAL_FIELDS:
         if f in ('unverified', 'rdev', 'link_target'):
             continue
-        if f not in plan:
-            raise SystemExit('gen_corpus: no one-sided plan for optional field %r' % f)
-        for var in plan[f]:
+        if f not in ONE_SIDED_PLAN:
+            die('no one-sided plan for optional field %r' % f)
+        for var in ONE_SIDED_PLAN[f]:
             for typ in TYPE_NAMES:
                 for ctx in ('plain', 'offdev', 'unverified', 'raced', 'xattrs_unknown',
                             'unreadable', 'mount'):
-                    if ctx == f or (ctx == 'xattrs_unknown' and f in ATTRS):
+                    if not one_sided_feasible(f, var, typ, ctx):
                         continue
-                    try_pair(w, rng, '%s on one side only, %s (%s%s)' %
-                             (f, typ, ctx, ', ' + var if var else ''),
-                             one_sided_build(f, var, typ, ctx))
+                    scen = []
+                    if f == 'sha256':
+                        scen.append('O1: hash on one side, unverified on the other, ' +
+                                    ('size differs' if var == 'limit+size' else 'same size'))
+                        if var.startswith('limit'):
+                            scen.append('hash limits differ')
+                    w.targeted(rng, '%s on one side only, %s (%s%s)' %
+                               (f, typ, ctx, ', ' + var if var else ''),
+                               one_sided_build(f, var, typ, ctx),
+                               optional=[f], scenarios=scen)
 
 # ---------------------------------------------------------------------------
 # Scenarios.
 
 
 def remount(t, rng, renumber_ino):
-    """The scope remounted: every device number changes, relations kept."""
+    """The scope remounted: every device number changes, none keeps its own,
+    and the relations are kept (one number, one new number)."""
     old = t.root_dev()
     new = rng.choice([d for d in ROOT_DEVS + OTHER_DEVS if d != old])
     mapping, used = {old: new}, {old, new}
     for e in t.e.values():
         d = e['dev']
         if d not in mapping:
-            mapping[d] = rng.choice([x for x in OTHER_DEVS + [d + 1000, d + 7]
-                                     if x not in used])
+            free = [x for x in OTHER_DEVS + [d + 1000, d + 7] if x not in used and x != d]
+            mapping[d] = rng.choice(free) if free else max(used | {d}) + 1
             used.add(mapping[d])
         e['dev'] = mapping[d]
         if renumber_ino:
@@ -1137,81 +1324,72 @@ def with_mounts(rng, t, n):
 
 
 def scenarios(w, rng):
-    # The scope remounted.
-    for variant in ('dev', 'dev+ino', 'flip-off', 'flip-on', 'content', 'root-only',
-                    'mode'):
+    # The scope remounted. Each tree holds a hashed regular file on the root's
+    # device, nothing stored, and (with_mounts) at least one entry off it:
+    # what a variant changes is always there.
+    remounts = {'dev': ['scope remount: every entry renumbered'],
+                'dev+ino': ['scope remount: every entry renumbered'],
+                'flip-off': ['scope remount: an entry changes device relation'],
+                'flip-on': ['scope remount: an entry changes device relation'],
+                'content': ['scope remount: content differs by hash',
+                            'scope remount: every entry renumbered'],
+                'root-only': [],
+                'mode': ['scope remount: every entry renumbered']}
+    for variant, tags in remounts.items():
         def build(rng, variant=variant):
             t = base_tree(rng, rng.randrange(4, 14))
             with_mounts(rng, t, rng.randrange(1, 3))
+            s = hashed(subject(rng, t, 'reg', parent=b'.'), t, rng)
+            t.e[s['path']] = s
+            off = [p for p, e in t.e.items() if e['dev'] != t.root_dev()]
             a = t.copy()
             old, new = remount(a, rng, renumber_ino=variant != 'dev')
-            on = [p for p, e in a.e.items() if p != b'.' and e['dev'] == new]
-            off = [p for p, e in a.e.items() if e['dev'] != new]
-            if variant == 'flip-off':           # one entry stays behind: now off the root's device
-                if not on:
-                    return None
-                a.e[rng.choice(on)]['dev'] = old
-            elif variant == 'flip-on':
-                if not off:
-                    return None
+            if variant == 'flip-off':           # stays behind: now off the root's device
+                a.e[s['path']]['dev'] = old
+            elif variant == 'flip-on':          # joins the root's new device
                 a.e[rng.choice(off)]['dev'] = new
             elif variant == 'content':
-                regs = [p for p, e in a.e.items() if 'sha256' in e and 'stored' not in e]
-                if not regs:
-                    return None
-                a.e[rng.choice(regs)]['sha256'] = hexs(rng)
+                a.e[s['path']]['sha256'] = unlike(hexs(rng), s['sha256'])
             elif variant == 'root-only':        # only the root's number moved
                 for p, e in a.e.items():
                     if p != b'.':
-                        e['dev'] = t.e[p]['dev']
-                        e['ino'] = t.e[p]['ino']
+                        e['dev'], e['ino'] = t.e[p]['dev'], t.e[p]['ino']
             elif variant == 'mode':
-                p = rng.choice(list(a.e))
+                p = rng.choice(sorted(a.e))
                 a.e[p]['mode'] = (a.e[p]['mode'] & S_IFMT) | \
                     other(rng, PERMS, a.e[p]['mode'] & 0o7777)
             return t, a
         for _ in range(3):
-            try_pair(w, rng, 'scope remount: ' + variant, build)
+            w.targeted(rng, 'scope remount: ' + variant, build, scenarios=['scope remount'] + tags)
 
     # A device number changing while the relation stays (both off the root's
     # device), with the inode number changing too: neither is compared.
     for typ in TYPE_NAMES:
         def build(rng, typ=typ):
             t = base_tree(rng)
-            e = place(rng, t, typ)
-            if e is None:
-                return None
+            e = subject(rng, t, typ)
             e['dev'] = other_dev(t, rng)
-            a = t.copy()
-            e2 = dict(e, dev=other_dev(t, rng, avoid=(e['dev'],)), ino=e['ino'] + 5)
-            t.e[e['path']], a.e[e['path']] = e, e2
-            return t, a
-        try_pair(w, rng, 'dev renumbered off-device, with a new ino, on a %s' % typ, build)
+            return with_subject(t, e, dict(e, dev=other_dev(t, rng, avoid=(e['dev'],)),
+                                           ino=e['ino'] + 5))
+        w.targeted(rng, 'dev renumbered off-device, with a new ino, on a %s' % typ, build,
+                   scenarios=['dev number changes, off the root device on both sides'])
         def build2(rng, typ=typ):                # relation flips and ino changes
             t = base_tree(rng)
-            e = place(rng, t, typ)
-            if e is None:
-                return None
-            a = t.copy()
-            e2 = dict(e, dev=other_dev(t, rng), ino=e['ino'] + 5)
-            t.e[e['path']], a.e[e['path']] = e, e2
-            return t, a
-        try_pair(w, rng, 'dev leaves the root device, with a new ino, on a %s' % typ, build2)
+            e = subject(rng, t, typ)            # on the root's device
+            return with_subject(t, e, dict(e, dev=other_dev(t, rng), ino=e['ino'] + 5))
+        w.targeted(rng, 'dev leaves the root device, with a new ino, on a %s' % typ, build2,
+                   scenarios=['dev relation: an entry leaves the root device',
+                              'dev relation: an entry joins the root device'])
 
     # Both timestamps at once, on every type and context.
     for typ in TYPE_NAMES:
         for ctx in ('plain', 'mount', 'raced', 'offdev', 'xattrs_unknown'):
             def build(rng, typ=typ, ctx=ctx):
                 t = base_tree(rng)
-                e = place(rng, t, typ)
-                e = e and in_context(ctx, e, t, rng)
-                if not e:
-                    return None
-                a = t.copy()
-                e2 = dict(e, mtime_ns=e['mtime_ns'] + 1, ctime_ns=e['ctime_ns'] + 1)
-                t.e[e['path']], a.e[e['path']] = e, e2
-                return t, a
-            try_pair(w, rng, 'mtime and ctime on a %s (%s)' % (typ, ctx), build)
+                e = in_context(ctx, subject(rng, t, typ), t, rng)
+                return with_subject(t, e, dict(e, mtime_ns=e['mtime_ns'] + 1,
+                                               ctime_ns=e['ctime_ns'] + 1))
+            w.targeted(rng, 'mtime and ctime on a %s (%s)' % (typ, ctx), build)
 
     # An entry that becomes a mount root, its timestamps now the mounted
     # filesystem's: a mount root on one side only (ambiguity A2).
@@ -1219,33 +1397,32 @@ def scenarios(w, rng):
         for same_dev in (False, True):
             def build(rng, typ=typ, same_dev=same_dev):
                 t = base_tree(rng)
-                e = place(rng, t, typ)
-                e2 = e and in_context('mount', e, t, rng)
-                if not e2:
-                    return None
+                e = subject(rng, t, typ)
+                e2 = in_context('mount', e, t, rng)
                 e2['mtime_ns'] += 7
                 e2['ctime_ns'] += 9
                 if same_dev:
                     e2['dev'] = e['dev']
-                a = t.copy()
-                t.e[e['path']], a.e[e['path']] = e, e2
-                return t, a
-            try_pair(w, rng, 'becomes a mount root with new timestamps: %s%s' %
-                     (typ, ', same dev' if same_dev else ''), build)
+                return with_subject(t, e, e2)
+            w.targeted(rng, 'becomes a mount root with new timestamps: %s%s' %
+                       (typ, ', same dev' if same_dev else ''), build,
+                       scenarios=['a mount root on one side only, its timestamps differ'])
 
     # caps / xattrs against xattrs_unknown, alone and with another change.
     for typ in TYPE_NAMES:
         for extra in (None, 'mode', 'ctime', 'ino', 'content', 'iflags-one-sided'):
+            if extra == 'content' and typ != 'reg':
+                continue                            # a hash: only on a regular file
             def build(rng, typ=typ, extra=extra):
                 t = base_tree(rng)
-                e = place(rng, t, typ)
-                if e is None:
-                    return None
+                e = subject(rng, t, typ)
                 e.pop('xattrs_unknown', None)
                 e.pop('xattrs_sha256', None)
                 e['xattrs'] = xattr_set(rng)
                 if typ == 'reg':
                     e['caps'] = caps_hex(rng)
+                if extra == 'content':
+                    hashed(e, t, rng)
                 e2 = {k: v for k, v in e.items() if k not in ('caps', 'xattrs')}
                 e2['xattrs_unknown'] = True
                 if extra == 'mode':
@@ -1255,79 +1432,84 @@ def scenarios(w, rng):
                 elif extra == 'ino':
                     e2['ino'] += 1
                 elif extra == 'content':
-                    if 'sha256' not in e or 'stored' in e:
-                        return None
-                    e2['sha256'] = hexs(rng)
+                    e2['sha256'] = unlike(hexs(rng), e['sha256'])
                 elif extra == 'iflags-one-sided':
                     e['iflags'] = 0
                     e2.pop('iflags', None)
-                a = t.copy()
-                t.e[e['path']], a.e[e['path']] = e, e2
-                return t, a
-            try_pair(w, rng, 'caps/xattrs vs xattrs_unknown on a %s%s' %
-                     (typ, ', with ' + extra if extra else ''), build)
+                return with_subject(t, e, e2)
+            w.targeted(rng, 'caps/xattrs vs xattrs_unknown on a %s%s' %
+                       (typ, ', with ' + extra if extra else ''), build,
+                       scenarios=['xattrs against xattrs_unknown'] +
+                       (['caps against xattrs_unknown'] if typ == 'reg' else []))
 
     # iflags on one side only, with and without another change.
     for typ in TYPE_NAMES:
         for extra in (None, 'mode', 'ctime', 'content', 'unverified'):
+            if extra == 'content' and typ not in ('reg', 'blk', 'chr'):
+                continue                            # no content field to change alone
+            if extra == 'unverified' and typ != 'reg':
+                continue
             def build(rng, typ=typ, extra=extra):
                 t = base_tree(rng)
-                e = place(rng, t, typ)
-                if e is None:
-                    return None
+                e = subject(rng, t, typ)
                 e['iflags'] = rng.choice(IFLAGS)
+                if extra == 'content' and typ == 'reg':
+                    hashed(e, t, rng)
                 e2 = {k: v for k, v in e.items() if k != 'iflags'}
                 if extra == 'mode':
                     e2['mode'] = (e['mode'] & S_IFMT) | other(rng, PERMS, e['mode'] & 0o7777)
                 elif extra == 'ctime':
                     e2['ctime_ns'] += 1
+                elif extra == 'content' and typ == 'reg':
+                    e2['sha256'] = unlike(hexs(rng), e['sha256'])
                 elif extra == 'content':
-                    if typ not in ('reg', 'blk', 'chr'):
-                        return None
-                    if typ == 'reg':
-                        if 'sha256' not in e or 'stored' in e:
-                            return None
-                        e2['sha256'] = hexs(rng)
-                    else:
-                        e2['rdev'] = other(rng, RDEVS, e['rdev'])
+                    e2['rdev'] = other(rng, RDEVS, e['rdev'])
                 elif extra == 'unverified':
-                    if typ != 'reg':
-                        return None
                     for k in ('sha256', 'stored'):
                         e2.pop(k, None)
                     e2['unverified'], e2['unstable'] = True, True
-                a = t.copy()
-                t.e[e['path']], a.e[e['path']] = e, e2
-                return t, a
-            try_pair(w, rng, 'iflags on one side only, %s%s' %
-                     (typ, ', with ' + extra if extra else ''), build)
+                return with_subject(t, e, e2)
+            w.targeted(rng, 'iflags on one side only, %s%s' %
+                       (typ, ', with ' + extra if extra else ''), build,
+                       scenarios=['iflags on one side only on a ' + typ])
 
-    # Hash limits that differ without changing what was hashed.
+    # Hash limits that differ without changing what was hashed: no file is
+    # bare unverified, and the other limit is still above every hashed one.
     def build(rng):
         t = base_tree(rng, rng.randrange(3, 12), limit=10 ** 9)
+        for e in t.e.values():
+            if e['type'] == 'reg' and e.get('unverified') and \
+                    not any(e.get(k) for k in ('unstable', 'unreadable', 'mount')):
+                hashed(e, t, rng)
         a = t.copy()
-        a.limit = max(e['size'] for e in t.e.values()) + rng.randrange(0, 2)
+        a.limit = max([e['size'] for e in t.e.values() if 'sha256' in e] + [0]) + \
+            rng.randrange(0, 2)
+        if a.limit == t.limit:
+            a.limit += 1
         return t, a
     for _ in range(3):
-        try_pair(w, rng, 'hash limits differ, every file within both', build)
+        w.targeted(rng, 'hash limits differ, every file within both', build,
+                   scenarios=['hash limits differ'])
 
-    # Sealing, unsealing and unstable listings.
-    for how in ('unreadable', 'mount', 'mount-offdev', 'unstable-missing', 'unstable-extra',
-                'unstable-same', 'root-unstable', 'root-unreadable'):
+    # Sealing, unsealing and unstable listings; the directory always has a
+    # child (the first one is placed in it).
+    sealed = 'a directory sealed on one side, with entries below it on the other'
+    seals = {'unreadable': [sealed], 'mount': [sealed], 'mount-offdev': [sealed],
+             'unstable-missing': ['a child on one side only below an unstable directory'],
+             'unstable-extra': [], 'unstable-same': [], 'root-unstable': [],
+             'root-unreadable': [sealed]}
+    for how, tags in seals.items():
         def build(rng, how=how):
             t = base_tree(rng, rng.randrange(0, 5))
             if how.startswith('root'):
                 d = b'.'
             else:
-                e = place(rng, t, 'dir', extras=False)
-                if e is None:
-                    return None
+                e = subject(rng, t, 'dir', extras=False)
                 t.e[e['path']] = e
                 d = e['path']
-            for _ in range(rng.randrange(1, 5)):
-                p = fresh_path(t, rng, parent=d if rng.random() < 0.7 else None)
-                if p:
-                    t.e[p] = new_entry(rng, t, p, random_type(rng))
+            for i in range(rng.randrange(1, 5)):
+                p = fresh_path(t, rng, parent=d if i == 0 or rng.random() < 0.7 else None)
+                t.e[p] = new_entry(rng, t, p, random_type(rng))
             fix(t, rng)
             a = t.copy()
             de = a.e[d]
@@ -1335,42 +1517,40 @@ def scenarios(w, rng):
                 de.pop('unstable', None)
                 de['unreadable'] = True
             elif how.startswith('mount'):
-                for k in ('iflags', 'caps', 'xattrs', 'xattrs_sha256', 'xattrs_unknown'):
+                for k in ATTRS:
                     de.pop(k, None)
                 de['mount'] = True
                 if how == 'mount-offdev':
                     de['dev'] = other_dev(a, rng)
             else:
                 de['unstable'] = True
-                kids = [q for q in a.e if parent_of(q) == d and q != b'.']
-                if how == 'unstable-missing' and kids:
+                kids = sorted(q for q in a.e if parent_of(q) == d and q != b'.')
+                if how == 'unstable-missing':
                     victim = rng.choice(kids)
                     del a.e[victim]
                     a.drop_below(victim)
                 elif how == 'unstable-extra':
                     p = fresh_path(a, rng, parent=d)
-                    if p:
-                        a.e[p] = new_entry(rng, a, p, random_type(rng))
+                    a.e[p] = new_entry(rng, a, p, random_type(rng))
             fix(a, rng)
             return t, a
         for _ in range(3):
-            try_pair(w, rng, 'directory: ' + how, build)
+            w.targeted(rng, 'directory: ' + how, build, scenarios=tags)
 
     # Entries present on one side only that carry raced.
     for typ in TYPE_NAMES:
         def build(rng, typ=typ):
             t = base_tree(rng)
             a = t.copy()
-            e = place(rng, a, typ)
-            if e is None:
-                return None
+            e = subject(rng, a, typ)
             e['raced'] = True
             if typ == 'dir':
                 e['unreadable'] = True
             fix_entry(e, a, rng)
             a.e[e['path']] = e
             return t, a
-        try_pair(w, rng, 'raced %s on one side only' % typ, build)
+        w.targeted(rng, 'raced %s on one side only' % typ, build,
+                   scenarios=['a raced entry on one side only'])
 
     # The root itself.
     for change in ('mode', 'uid', 'ctime', 'mtime', 'ino', 'nlink', 'xattrs', 'iflags-one-sided',
@@ -1390,9 +1570,11 @@ def scenarios(w, rng):
             elif change == 'xattrs':
                 r.pop('xattrs_unknown', None)
                 r.pop('xattrs_sha256', None)
-                r['xattrs'] = xattr_set(rng)
-                if t.e[b'.'].get('xattrs') == r['xattrs']:
-                    return None
+                new = xattr_set(rng)
+                if new == t.e[b'.'].get('xattrs'):
+                    n, v = new[-1].split('=', 1)
+                    new[-1] = '%s=%s' % (n, unlike(v, v))
+                r['xattrs'] = new
             elif change == 'iflags-one-sided':
                 if 'iflags' in r:
                     del r['iflags']
@@ -1403,29 +1585,33 @@ def scenarios(w, rng):
                     r.pop(k, None)
                 r['xattrs_unknown'] = True
             return t, a
-        try_pair(w, rng, 'the root: ' + change, build)
+        w.targeted(rng, 'the root: ' + change, build)
 
     # Entries that sort before "." come before the root in the stream, but
     # their device relation, the header and their one-sided outcome all
-    # depend on the root.
+    # depend on the root. Four of them are the root's own children.
     early = [n for n in NAMES if n < b'.']
-    for how in ('root-unreadable', 'root-unstable', 'flip', 'remount', 'remount-flip'):
+    one_early = 'a path sorting before "." on one side only, the other root sealed or unstable'
+    befores = {'root-unreadable': [one_early], 'root-unstable': [one_early],
+               'flip': ['a path sorting before "." changes device relation'],
+               'remount': ['a path sorting before "." in a remounted pair'],
+               'remount-flip': ['a path sorting before "." in a remounted pair']}
+    for how, tags in befores.items():
         def build(rng, how=how):
             t = Tree(rng)
             for n in rng.sample(early, 4):
                 t.e[n] = new_entry(rng, t, n, rng.choice(['reg', 'dir', 'lnk', 'fifo']))
             grow(t, rng, rng.randrange(0, 5))
             a = t.copy()
-            first = [p for p in a.e if p < b'.']
+            first = sorted(p for p in a.e if p < b'.' and b'/' not in p)
             if how == 'root-unreadable':
                 a.e[b'.'].pop('unstable', None)
                 a.e[b'.']['unreadable'] = True
             elif how == 'root-unstable':
                 a.e[b'.']['unstable'] = True
                 for p in rng.sample(first, 2):
-                    if p in a.e:
-                        del a.e[p]
-                        a.drop_below(p)
+                    del a.e[p]
+                    a.drop_below(p)
             elif how == 'flip':
                 p = rng.choice(first)
                 a.e[p]['dev'] = other_dev(a, rng) if a.e[p]['dev'] == a.root_dev() else \
@@ -1438,7 +1624,8 @@ def scenarios(w, rng):
             fix(a, rng)
             return t, a
         for _ in range(2):
-            try_pair(w, rng, 'names before ".": ' + how, build)
+            w.targeted(rng, 'names before ".": ' + how, build,
+                       scenarios=['a path sorting before "."'] + tags)
 
     # The nearest recorded ancestor on the lacking side is not a directory
     # (even a mount root: only a *directory* carrying mount seals), or is a
@@ -1446,9 +1633,7 @@ def scenarios(w, rng):
     for how in ('reg', 'fifo', 'reg-mount', 'lnk', 'below-unstable'):
         def build(rng, how=how):
             t = base_tree(rng, rng.randrange(0, 4))
-            d = place(rng, t, 'dir', extras=False)
-            if d is None:
-                return None
+            d = subject(rng, t, 'dir', extras=False)
             t.e[d['path']] = d
             if how == 'below-unstable':
                 d['unstable'] = True
@@ -1462,21 +1647,25 @@ def scenarios(w, rng):
                 return t, a
             for _ in range(rng.randrange(1, 4)):
                 p = fresh_path(t, rng, parent=d['path'])
-                if p:
-                    t.e[p] = new_entry(rng, t, p, rng.choice(['reg', 'dir', 'fifo']))
+                t.e[p] = new_entry(rng, t, p, rng.choice(['reg', 'dir', 'fifo']))
             fix(t, rng)
             a = t.copy()
             a.drop_below(d['path'])
             e2 = change_type(a.e[d['path']], how.split('-')[0], a, rng)
+            if e2 is not None and how == 'reg-mount':
+                e2 = in_context('mount', e2, a, rng)
             if e2 is None:
                 return None
-            if how == 'reg-mount':
-                e2 = in_context('mount', e2, a, rng)
             a.e[d['path']] = e2
             fix(a, rng)
             return t, a
+        if how == 'below-unstable':
+            tags = ['a one-sided path below a plain directory below an unstable one']
+        else:
+            tags = ['a one-sided path whose nearest ancestor on the other side is not a '
+                    'directory']
         for _ in range(2):
-            try_pair(w, rng, 'one-sided below: ' + how, build)
+            w.targeted(rng, 'one-sided below: ' + how, build, scenarios=tags)
 
     # Every name: before ".", between "a" and "a/", escaped, not UTF-8.
     for _ in range(3):
@@ -1495,7 +1684,17 @@ def scenarios(w, rng):
             a = t.copy()
             mutate_random(a, rng, rng.randrange(2, 8))
             return t, a
-        try_pair(w, rng, 'every name', build)
+        w.targeted(rng, 'every name', build,
+                   scenarios=['a path sorting before "."', 'a non-UTF-8 path'])
+
+
+def targeted(w, rng):
+    cells(w, rng)
+    field_pairs(w, rng)
+    type_changes(w, rng)
+    optional_one_sided(w, rng)
+    scenarios(w, rng)
+
 
 # ---------------------------------------------------------------------------
 # Random pairs.
@@ -1639,11 +1838,8 @@ def main():
     os.makedirs(out, exist_ok=True)
     rng = random.Random(seed)
     w = Writer(out)
-    cells(w, rng)
-    field_pairs(w, rng)
-    type_changes(w, rng)
-    optional_one_sided(w, rng)
-    scenarios(w, rng)
+    targeted(w, rng)
+    w.check_gate()          # the targeted pairs alone: the random ones add variety only
     randomized(w, rng, n)
     refusals(w, rng)
     print(w.k)

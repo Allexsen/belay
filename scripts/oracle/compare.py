@@ -2,10 +2,12 @@
 """Runs the driver and the reference on every pair and compares everything.
 
     compare.py <driver> <corpus-dir>
+    compare.py --gate <corpus-dir>     the coverage gate alone, no driver
 
 pair-NNNNN.before/.after (same scope): the driver's diff and reference.diff()
 must agree on
-  - the header: every key, its value and their order (the prose example's);
+  - the header: every key, its value and their order (the "Shape" example's,
+    which the reference checks at start-up);
   - every record: path and its spelling (path / path_b64), outcome, type,
     type_before, `changed` exactly (order included), `unknown` as a set, the
     records' order;
@@ -29,7 +31,7 @@ scope-NNNNN.before/.after (different scopes): the driver must fail and leave
 no output file.
 
 Then the COVERAGE GATE, computed from the manifests of the pairs, never from
-the generator's labels:
+the generator's labels (coverage(), required(), gate()):
   - every (compared field x entry type) cell of test/expect/diff-fields.md has
     a pair where only that field of one entry differs (for `type`: only the
     type and what the format forces with it); cells the frozen format cannot
@@ -37,9 +39,14 @@ the generator's labels:
   - every two compared fields of one type differ together in some pair (the
     order of `changed`);
   - every optional field is present on one side only in some pair;
-  - the named scenarios (dev relation, remounts, timestamps on fifo/sock/
-    blk/chr and mount roots, iflags on one side, caps/xattrs under
-    xattrs_unknown, O1 with and without a size change, ...) occur.
+  - every named scenario (SCENARIOS) occurs: the device relation and
+    remounts, timestamps on fifo/sock/blk/chr and on mount roots, iflags on
+    one side, caps/xattrs under xattrs_unknown, O1 with and without a size
+    change, one-sided paths below sealed, unstable and non-directory
+    ancestors, type changes, ...
+gen_corpus.py builds every required item deterministically and checks each
+targeted pair, and then the targeted pairs alone, with these same functions;
+here the gate runs again over the whole corpus.
 Exit 0 only when every pair agrees, every refusal holds, the reasons have one
 order, and the gate passes.
 """
@@ -514,27 +521,85 @@ def pair_coverage(stem, cells, optional, scen, fpairs):
         if len(n) >= 3:
             scen['three or more compared fields differ on one entry'] += 1
 
+
+KINDS = ('cell', 'field pair', 'optional', 'scenario')
+
+
+def coverage(stems):
+    """What the pairs at these stems show, from their manifests alone:
+    {kind: Counter of items}. gen_corpus.py checks every targeted pair with
+    this, and the targeted pairs together with gate()."""
+    cov = {k: collections.Counter() for k in KINDS}
+    for stem in stems:
+        pair_coverage(stem, cov['cell'], cov['optional'], cov['scenario'], cov['field pair'])
+    return cov
+
+
+def required():
+    """What the gate requires, [(kind, item)], and the (field, type) cells the
+    frozen format cannot hold."""
+    infeasible = infeasible_cells()
+    need = ([('cell', c) for c in required_cells() if c not in infeasible]
+            + [('field pair', fp) for fp in required_field_pairs(infeasible)]
+            + [('optional', f) for f in OPTIONAL]
+            + [('scenario', s) for s in SCENARIOS])
+    return need, infeasible
+
+
+def gate(cov):
+    """(the required items cov lacks, the cells cov shows that the format
+    cannot hold); the gate passes when both are empty."""
+    need, infeasible = required()
+    return ([n for n in need if not cov[n[0]][n[1]]],
+            [c for c in infeasible if cov['cell'][c]])
+
+
+def print_gate(cov):
+    missing, impossible_seen = gate(cov)
+    need, infeasible = required()
+    print('== coverage gate: %s' % ('FAIL' if missing or impossible_seen else 'PASS'))
+    for kind, title in (('cell', 'cells (field x type, only that field differs)'),
+                        ('field pair', 'two compared fields of one entry differing together '
+                                       '(the order of `changed`)'),
+                        ('optional', 'optional fields on one side only'),
+                        ('scenario', 'scenarios')):
+        items = [i for k, i in need if k == kind]
+        lack = [i for k, i in missing if k == kind]
+        print('   %s: %d/%d, fewest pairs %d' % (title, len(items) - len(lack), len(items),
+                                                min(cov[kind][i] for i in items)))
+        if lack:
+            print('   MISSING %s: %s' % (kind, lack))
+    print('   not required, the format cannot hold them: %s'
+          % sorted('%s on %s (%s)' % (f, t, why.split(':')[0]) for (f, t), why in infeasible.items()
+                   if (f, t) in required_cells()))
+    if impossible_seen:
+        print('   cells the format cannot hold were seen: %s' % impossible_seen)
+    return not (missing or impossible_seen)
+
+
+def stems_of(corpus, kind='pair'):
+    return sorted(p[:-len('.before')] for p in glob.glob(os.path.join(corpus, kind + '-*.before')))
+
 # ---------------------------------------------------------------------------
 
 
 def main():
+    if sys.argv[1] == '--gate':                 # the coverage gate alone, no driver
+        sys.exit(0 if print_gate(coverage(stems_of(sys.argv[2]))) else 1)
     driver, corpus = sys.argv[1], sys.argv[2]
-    stems = sorted(p[:-len('.before')] for p in glob.glob(os.path.join(corpus, 'pair-*.before')))
-    refusals = sorted(p[:-len('.before')] for p in
-                      glob.glob(os.path.join(corpus, 'scope-*.before')))
+    stems = stems_of(corpus)
+    refusals = stems_of(corpus, 'scope')
     label = lambda s: open(s + '.label', encoding='utf-8').read().strip() \
         if os.path.exists(s + '.label') else '?'
     orders, by_group, header_issues = [], collections.defaultdict(list), collections.Counter()
     header_examples = {}
     full = header_only = differ = rejected = 0
     rejected_examples, trailer_only = [], []
-    cells, optional, scen = collections.Counter(), collections.Counter(), collections.Counter()
-    fpairs, outcomes = collections.Counter(), collections.Counter()
+    outcomes = collections.Counter()
     with concurrent.futures.ThreadPoolExecutor(max_workers=os.cpu_count() or 4) as pool:
         ran = list(pool.map(lambda s: run_driver(driver, s), stems))
     for stem, r in zip(stems, ran):
         res = run_pair(r, stem, orders)
-        pair_coverage(stem, cells, optional, scen, fpairs)
         name = os.path.basename(stem)
         for k, v in res.get('expected_trailer', [])[1:]:
             if k in ref.OUTCOMES or k == ref.DIR_TIMESTAMPS_ONLY:
@@ -617,39 +682,11 @@ def main():
     for b in bad_refusals:
         print('   NOT REFUSED: %s [%s] exit %d, output file left: %s, reference refuses: %s' % b)
 
-    # The coverage gate.
-    infeasible = infeasible_cells()
-    need = [c for c in required_cells() if c not in infeasible]
-    missing_cells = [c for c in need if not cells[c]]
-    impossible_seen = [c for c in infeasible if cells[c]]
-    missing_opt = [f for f in OPTIONAL if not optional[f]]
-    missing_scen = [s for s in SCENARIOS if not scen[s]]
-    need_pairs = required_field_pairs(infeasible)
-    missing_pairs = [fp for fp in need_pairs if not fpairs[fp]]
-    gate = not (missing_cells or missing_opt or missing_scen or impossible_seen or missing_pairs)
-    print('== coverage gate: %s' % ('PASS' if gate else 'FAIL'))
-    print('   cells (field x type, only that field differs): %d/%d covered, fewest pairs %d'
-          % (len(need) - len(missing_cells), len(need), min(cells[c] for c in need)))
-    print('   not required, the format cannot hold them: %s'
-          % sorted('%s on %s (%s)' % (f, t, why.split(':')[0]) for (f, t), why in infeasible.items()
-                   if (f, t) in required_cells()))
-    if missing_cells:
-        print('   MISSING cells: %s' % missing_cells)
-    if impossible_seen:
-        print('   cells the format cannot hold were seen: %s' % impossible_seen)
-    print('   two compared fields of one entry differing together (the order of `changed`): '
-          '%d/%d' % (len(need_pairs) - len(missing_pairs), len(need_pairs)))
-    if missing_pairs:
-        print('   MISSING field pairs: %s' % missing_pairs)
-    print('   optional fields on one side only: %d/%d' % (len(OPTIONAL) - len(missing_opt),
-                                                         len(OPTIONAL)))
-    if missing_opt:
-        print('   MISSING optional fields: %s' % missing_opt)
-    print('   scenarios: %d/%d' % (len(SCENARIOS) - len(missing_scen), len(SCENARIOS)))
-    if missing_scen:
-        print('   MISSING scenarios: %s' % missing_scen)
+    # The coverage gate, over every pair (gen_corpus.py has already checked it
+    # over its targeted pairs alone).
+    gate_ok = print_gate(coverage(stems))
 
-    ok = gate and not (differ or rejected or header_only or bad_refusals or clash)
+    ok = gate_ok and not (differ or rejected or header_only or bad_refusals or clash)
     sys.exit(0 if ok else 1)
 
 
