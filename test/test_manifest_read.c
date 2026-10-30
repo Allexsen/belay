@@ -32,6 +32,9 @@
     "\"ino\":10,\"dev\":20,\"nlink\":1,\"sha256\":\"" EMPTY_SHA "\"}\n"
 #define ROOT_E "{\"path\":\".\",\"type\":\"dir\",\"mode\":16877,\"uid\":1,\"gid\":1," \
     "\"size\":1,\"mtime_ns\":1,\"ctime_ns\":1,\"ino\":1,\"dev\":1,\"nlink\":2}\n"
+/* A directory entry, so that the paths below it are not orphans. */
+#define ENTRY_DIR(p) "{\"path\":\"" p "\",\"type\":\"dir\",\"mode\":16877,\"uid\":1,\"gid\":1," \
+    "\"size\":1,\"mtime_ns\":1,\"ctime_ns\":1,\"ino\":2,\"dev\":20,\"nlink\":2}\n"
 
 static char g_path[4096];
 
@@ -223,17 +226,17 @@ TEST(iflags_and_the_trailers_vanished_count_are_decoded) {
 
 
 TEST(reads_a_well_formed_entry) {
-    ASSERT_EQ_INT(0, read_it(HDR ENTRY_REG("src/main.c")));
-    ASSERT_EQ_INT(1, (int)g_n);
-    ASSERT_EQ_STR("src/main.c", g_e[0].path);
-    ASSERT_EQ_INT(10, (int)g_e[0].path_len);
-    ASSERT_EQ_INT(BELAY_T_REG, g_e[0].type);
-    ASSERT_EQ_INT(33188, (int)g_e[0].mode);
-    ASSERT_EQ_INT(1000, (int)g_e[0].uid);
-    ASSERT_EQ_INT(5, (int)g_e[0].size);
-    ASSERT_EQ_INT(10, (int)g_e[0].ino);
-    ASSERT_EQ_INT(1, (int)g_e[0].nlink);
-    ASSERT_TRUE(g_e[0].has_hash);
+    ASSERT_EQ_INT(0, read_it(HDR ENTRY_DIR("src") ENTRY_REG("src/main.c")));
+    ASSERT_EQ_INT(2, (int)g_n);
+    ASSERT_EQ_STR("src/main.c", g_e[1].path);
+    ASSERT_EQ_INT(10, (int)g_e[1].path_len);
+    ASSERT_EQ_INT(BELAY_T_REG, g_e[1].type);
+    ASSERT_EQ_INT(33188, (int)g_e[1].mode);
+    ASSERT_EQ_INT(1000, (int)g_e[1].uid);
+    ASSERT_EQ_INT(5, (int)g_e[1].size);
+    ASSERT_EQ_INT(10, (int)g_e[1].ino);
+    ASSERT_EQ_INT(1, (int)g_e[1].nlink);
+    ASSERT_TRUE(g_e[1].has_hash);
 }
 
 TEST(rejects_unknown_format_version) {
@@ -670,11 +673,11 @@ TEST(rejects_traversal_and_absolute_entry_paths) {
 /* "..." and "..a" are ordinary filenames, not traversal. Over-rejecting them
  * would make legitimate paths unreadable. */
 TEST(allows_dotdot_lookalike_components) {
-    ASSERT_EQ_INT(0, read_it(HDR "{\"path\":\"a/...b/..c\",\"type\":\"reg\","
+    ASSERT_EQ_INT(0, read_it(HDR ENTRY_DIR("a") ENTRY_DIR("a/...b") "{\"path\":\"a/...b/..c\",\"type\":\"reg\","
                                  "\"mode\":33188,\"uid\":1,\"gid\":1,\"size\":1,"
                                  "\"mtime_ns\":1,\"ctime_ns\":1,\"ino\":1,"
                                  "\"dev\":1,\"nlink\":1,\"sha256\":\"" EMPTY_SHA "\"}\n"));
-    ASSERT_EQ_INT(1, (int)g_n);
+    ASSERT_EQ_INT(3, (int)g_n);
 }
 
 TEST(reads_unreadable_flag) {
@@ -1070,6 +1073,33 @@ TEST(r3_sealed_directories_hold_across_interleaved_siblings) {
     }
 }
 
+/* Decided 2026-10-30: an entry whose parent directory is not recorded is
+ * rejected; the writer never emits one. The parent sorts before the entry,
+ * and siblings such as "d!x" sort between a directory and its children. */
+TEST(an_orphan_is_rejected) {
+    static const struct { const char *name; const char *m; int want; } cases[] = {
+        { "no parent",                     HDR REG_LINE("a/b", SHA_F), -1 },
+        { "parent is a file",              HDR REG_LINE("f", SHA_F) REG_LINE("f/x", SHA_F), -1 },
+        { "grandparent only",              HDR DIR_E("a", "") REG_LINE("a/b/c", SHA_F), -1 },
+        { "a sibling between, its own child without it",
+          HDR DIR_E("d", "") REG_LINE("d!x/y", SHA_F), -1 },
+        { "siblings between a directory and its children",
+          HDR DIR_E("d", "") DIR_E("d!x", "") REG_LINE("d!x/y", SHA_F) REG_LINE("d.z", SHA_F)
+          REG_LINE("d/a", SHA_F) DIR_E("d/b", "") REG_LINE("d/b/c", SHA_F), 0 },
+        { "below a name sorting before the root",
+          HDR DIR_E("!x", "") REG_LINE("!x/y", SHA_F) ROOT_E, 0 },     /* "!" sorts before "." */
+    };
+    for (size_t i = 0; i < sizeof cases / sizeof cases[0]; i++) {
+        const int rc = read_it(cases[i].m);
+        if (cases[i].want == -1) {
+            EXPECT_REJECT(cases[i].name, rc, "orphan");
+            continue;
+        }
+        if (rc != 0) BELAY_FAIL("%s: rejected: %s", cases[i].name, belay_err_msg());
+        belay_err_clear();
+    }
+}
+
 /* Many sealed siblings, then an entry below the last one: still caught, and
  * the same manifest without it is accepted. */
 TEST(r3_many_sealed_directories) {
@@ -1325,6 +1355,7 @@ int main(void) {
     RUN(r2_reader_accepts_the_writers_unreadable_symlinks);
     RUN(r3_sealed_directories_hold_across_interleaved_siblings);
     RUN(r3_many_sealed_directories);
+    RUN(an_orphan_is_rejected);
     RUN(r3_reader_checks_annotation_and_hash_limit_against_the_header);
     RUN(r3_raced_flag_and_mount_and_race_counts);
     RUN(w6_reader_accepts_exactly_the_canonical_extended_metadata);

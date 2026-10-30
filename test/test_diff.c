@@ -375,20 +375,21 @@ TEST(absence_below_an_incomplete_or_sealed_directory_is_unknown) {
     ASSERT_TRUE(has("shaky", "\"outcome\":\"unknown\""));         /* its own unstable flag */
 }
 
-/* Orphans (an entry whose parent is missing from its own manifest, which
- * the reader accepts by decision): classified like any entry, no crash. */
-TEST(orphan_entries_are_classified_without_their_parent) {
+/* An orphan (an entry whose parent directory is not recorded) is refused by
+ * the reader (decided 2026-10-30), so the diff never classifies one. */
+TEST(a_manifest_with_an_orphan_is_refused_with_no_output) {
     m_begin("before", "/s", 1000);
     ROOT(.mode = 0755);
-    E(.path = "o1/x", .type = "reg", .size = 1, .sha = HA);
     m_end();
     m_begin("after", "/s", 1000);
     ROOT(.mode = 0755);
-    E(.path = "o2/y/z", .type = "reg", .size = 1, .sha = HA);
+    E(.path = "o/y", .type = "reg", .size = 1, .sha = HA);
     m_end();
-    ASSERT_EQ_INT(0, run());
-    ASSERT_TRUE(has("o1/x", "\"outcome\":\"removed\""));
-    ASSERT_TRUE(has("o2/y/z", "\"outcome\":\"added\""));
+    unlink(g_out);
+    ASSERT_EQ_INT(-1, run());
+    ASSERT_TRUE(strstr(belay_err_msg(), "orphan") != NULL);
+    ASSERT_TRUE(access(g_out, F_OK) != 0);
+    belay_err_clear();
 }
 
 /* "." sorts after "!x": the root's kind must be known before its own line. */
@@ -491,9 +492,9 @@ TEST(absence_below_a_file_is_known) {
     ROOT(.mode = 0755, .unstable = true);
     E(.path = "f", .type = "reg", .size = 1, .sha = HA);
     m_end();
-    m_begin("after", "/s", 1000);
+    m_begin("after", "/s", 1000);                    /* f became a directory */
     ROOT(.mode = 0755, .unstable = true);
-    E(.path = "f", .type = "reg", .size = 1, .sha = HA);
+    E(.path = "f", .type = "dir");
     E(.path = "f/x", .type = "reg", .size = 1, .sha = HA);
     m_end();
     ASSERT_EQ_INT(0, run());
@@ -574,7 +575,7 @@ int main(void) {
     RUN(raced_is_unknown_even_when_a_field_differs);
     RUN(unknown_attributes_never_read_as_unchanged);
     RUN(absence_below_an_incomplete_or_sealed_directory_is_unknown);
-    RUN(orphan_entries_are_classified_without_their_parent);
+    RUN(a_manifest_with_an_orphan_is_refused_with_no_output);
     RUN(names_sorting_before_the_root_see_its_flags);
     RUN(manifests_of_different_scopes_are_refused_with_no_output);
     RUN(an_unreadable_links_unknown_target_is_not_a_change);

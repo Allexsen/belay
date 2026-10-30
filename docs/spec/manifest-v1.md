@@ -250,10 +250,9 @@ Each rule below closes a way for a state the format records to be rendered as "n
 - **`unstable`, `raced` and `unverified` map to the outcome `unknown`, never to "unchanged".** In the
   diff schema (diff.v1), `unknown` is a first-class outcome beside added, removed, modified,
   type-changed and metadata-only.
-- **Do not assume an entry's parent is present.** The reader does not reject an orphan (`a/b`
-  without `a`): that would cost memory in proportion to the number of directories, and flat memory
-  at a million entries is worth more. A comparator must handle an orphan without crashing or
-  misreporting it.
+- **Every entry's parent directory is recorded.** The reader rejects an orphan (`a/b` without a
+  directory `a`): the writer never emits one, and the check costs memory in proportion to a
+  path's depth, not to the number of directories.
 - **`unverified` (including `unstable`) never reports "unchanged" on content alone.** With identical
   metadata the honest label is "unchanged (unverified)"; on a protected path it is a failure to
   verify, not a pass.

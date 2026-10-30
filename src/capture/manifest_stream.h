@@ -30,6 +30,15 @@
  */
 #define SEALED_MAX 4096     /* > the longest path, so the stack cannot fill */
 
+/*
+ *  Every entry below the root has its parent directory recorded (decided
+ *  2026-10-30: the writer never emits an orphan, so the reader rejects one).
+ *  The parent sorts before the entry, and every path between them starts with
+ *  the parent's, so the recorded directories still open are prefixes of the
+ *  previous path, kept like the sealed ones: memory in the depth of a path,
+ *  never in the number of directories.
+ */
+
 struct stream {
     size_t n_entries, n_unreadable, n_unstable, n_mounts, n_raced;
     bool   have_root;
@@ -41,6 +50,8 @@ struct stream {
 
     size_t sealed[SEALED_MAX];  /* lengths of sealed prefixes of prev */
     size_t n_sealed;
+    size_t dirs[SEALED_MAX];    /* lengths of recorded directories, prefixes of prev */
+    size_t n_dirs;
 };
 
 /* One entry, in file order. 0, or -1 with the error set. */

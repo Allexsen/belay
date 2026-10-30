@@ -58,3 +58,4 @@ a_json_string_must_be_valid_utf8
 nothing_may_follow_the_trailer
 a_number_beyond_64_bits_is_rejected
 iflags_and_the_trailers_vanished_count_are_decoded
+an_orphan_is_rejected
