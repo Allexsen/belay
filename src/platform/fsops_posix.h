@@ -9,6 +9,7 @@ int         posix_fstat(void *ctx, int fd, struct stat *st);
 int         posix_openat(void *ctx, int dfd, const char *name, int flags);
 ssize_t     posix_readlinkat(void *ctx, int dfd, const char *name, char *buf, size_t n);
 ssize_t     posix_read(void *ctx, int fd, void *buf, size_t n);
+int         posix_fsync(void *ctx, int fd);
 void       *posix_dir_open(void *ctx, int dfd);
 const char *posix_dir_next(void *ctx, void *dir);
 void        posix_dir_close(void *ctx, void *dir);

@@ -193,8 +193,10 @@ struct belay_manifest_stats {
  *  Walks `scope` and writes a manifest to `out_path`.
  *
  *  Entries are emitted sorted by raw path bytes. Returns 0 on success, -1 with
- *  belay_err_* set. The output is written to a temporary name and renamed
- *  into place, so on failure nothing is left at `out_path`.
+ *  belay_err_* set. The output is written to a temporary name, synced, and
+ *  renamed into place, so on failure nothing is left at `out_path`; then its
+ *  directory is synced where it can be opened (a sync that fails is not an
+ *  error: the manifest is already in place).
  *
  *  `*stats`, if non-NULL, receives what the walk observed.
  */

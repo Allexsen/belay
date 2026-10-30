@@ -36,6 +36,11 @@ ssize_t posix_read(void *ctx, int fd, void *buf, size_t n) {
     return read(fd, buf, n);
 }
 
+int posix_fsync(void *ctx, int fd) {
+    (void)ctx;
+    return fsync(fd);
+}
+
 /* closedir closes the fd it was given; dup so the caller's stays valid. */
 void *posix_dir_open(void *ctx, int dfd) {
     (void)ctx;
