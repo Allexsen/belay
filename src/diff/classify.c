@@ -69,7 +69,8 @@ void classify_both(const struct belay_entry *b, const struct belay_entry *a, str
         if (cls == CC_CONTENT) content_diff = true;
         else meta_diff = true;
     }
-    if (b->type == BELAY_T_REG && b->has_hash != a->has_hash) content_unknown = true;
+    /* A regular file without a hash carries unverified (entry.c, rule 5), so
+     * a hash on one side only is content_unknown already. */
 
     if (raced) v->outcome = D_UNKNOWN;                              /* rule 1 */
     else if (content_diff) v->outcome = D_MODIFIED;                 /* rule 3: proof */
