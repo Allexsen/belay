@@ -33,6 +33,7 @@
 #include "capture.h"
 #include "capture_internal.h"
 #include "serialize.h"
+#include "store_internal.h"
 
 #include <errno.h>
 #include <fcntl.h>
@@ -44,6 +45,22 @@
 #include <sys/stat.h>
 #include <time.h>
 #include <unistd.h>
+
+/* The rename into place survives a crash only once its directory is synced.
+ * Done where the directory can be opened; never a failure: the manifest is
+ * already complete and in place (decided 2026-10-30, as the diff's output,
+ * review F3). */
+static void sync_dir_of(const struct fsops *ops, const char *path) {
+    char dir[PATH_MAX];
+    const char *slash = strrchr(path, '/');
+    if (slash == NULL) snprintf(dir, sizeof dir, ".");
+    else if (slash == path) snprintf(dir, sizeof dir, "/");
+    else snprintf(dir, sizeof dir, "%.*s", (int)(slash - path), path);
+    const int fd = ops->openat(ops->ctx, AT_FDCWD, dir, O_RDONLY | O_DIRECTORY | O_CLOEXEC);
+    if (fd == -1) return;
+    if (ops->fsync(ops->ctx, fd) != 0) { /* nothing left to undo: see above */ }
+    close(fd);
+}
 
 int capture_write(const struct fsops *ops, const char *out_path, const char *scope,
                   const struct belay_manifest_opts *opts, struct belay_manifest_stats *stats) {
@@ -139,7 +156,7 @@ int capture_write(const struct fsops *ops, const char *out_path, const char *sco
             goto cleanup;
         }
         memcpy(wc->abs, real, wc->scope_len);
-        if (belay_store_open(opts->store_dir, &wc->store) == -1) goto cleanup;
+        if (store_open(ops, opts->store_dir, &wc->store) == -1) goto cleanup;
         /* Copies are gated by the writer probe (capture.c), which needs
          * the platform prepared for it until the capture is over. */
         ops->probe_begin(ops->ctx);
@@ -266,7 +283,7 @@ int capture_write(const struct fsops *ops, const char *out_path, const char *sco
         goto cleanup;
     }
 
-    if (fflush(out) != 0 || fsync(fileno(out)) != 0) {
+    if (fflush(out) != 0 || ops->fsync(ops->ctx, fileno(out)) != 0) {
         belay_err_set(BELAY_ERR_IO, errno, "manifest: flush failed");
         goto cleanup;
     }
@@ -276,11 +293,14 @@ int capture_write(const struct fsops *ops, const char *out_path, const char *sco
         belay_err_set(BELAY_ERR_IO, errno, "manifest: close failed");
         goto cleanup;
     }
+    /* The copies it names are durable before the manifest is. */
+    belay_store_sync(wc->store);
     if (rename(outtmp, out_path) != 0) {
         belay_err_set(BELAY_ERR_IO, errno, "manifest: cannot rename into %s", out_path);
         goto cleanup;
     }
     outtmp_live = false;
+    sync_dir_of(ops, out_path);
 
     if (stats != NULL) {
         *stats = tally;

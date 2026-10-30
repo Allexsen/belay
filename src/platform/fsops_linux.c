@@ -220,6 +220,7 @@ static const struct fsops linux_ops = {
     .probe_end = linux_probe_end,
     .clock = linux_clock,
     .tmpfile_in = linux_tmpfile_in,
+    .fsync = posix_fsync,
 };
 
 const struct fsops *fsops_default(void) { return &linux_ops; }

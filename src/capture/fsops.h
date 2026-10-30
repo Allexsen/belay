@@ -83,6 +83,10 @@ struct fsops {
      * platform allows (so the directory does not change), else created from
      * `tmpl` and unlinked at once. A stdio stream, or NULL with errno. */
     FILE *(*tmpfile_in)(void *ctx, const char *dir, const char *tmpl);
+
+    /* fsync(2). Publishing calls it on a manifest before its rename, and on
+     * the directories a rename publishes into, after it. */
+    int (*fsync)(void *ctx, int fd);
 };
 
 /* The table for this platform. */

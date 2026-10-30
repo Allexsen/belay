@@ -64,7 +64,8 @@ enum arm { NONE, SWAP_ON_DIR_OPEN, SWAP_ON_READLINK, REPLACE_LINK_WITH_FILE,
            SHORT_READ,               /* reading g_x yields one byte, then end of file */
            XATTR_GET_EIO,            /* the first fd listing names one attribute; its get fails */
            XSRC_FAIL,                /* g_x cannot be reached for its attributes (EXDEV) */
-           ROOT_READDIR_EIO };       /* the root's listing fails with EIO after one name */
+           ROOT_READDIR_EIO,         /* the root's listing fails with EIO after one name */
+           SYNC_DIR_EIO };           /* every fsync of a directory fails with EIO */
 static int g_flip;
 
 static char g_root[256], g_m[300];
@@ -446,6 +447,56 @@ static void *t_dir_open(void *ctx, int dfd) {
     return d;
 }
 
+/* Every fsync the writer asks for: what the fd was, and whether the name
+ * being published (g_sync_watch) and the manifest existed at that moment. */
+struct synced { dev_t dev; ino_t ino; bool dir, watched, manifest; };
+static struct synced g_sync[64];
+static size_t g_nsync;
+static const char *g_sync_watch;
+
+static int t_fsync(void *ctx, int fd) {
+    (void)ctx;
+    struct stat st, w;
+    if (fstat(fd, &st) == 0) {
+        if (g_nsync < sizeof g_sync / sizeof g_sync[0])
+            g_sync[g_nsync++] = (struct synced){
+                st.st_dev, st.st_ino, S_ISDIR(st.st_mode),
+                g_sync_watch != NULL && lstat(g_sync_watch, &w) == 0, lstat(g_m, &w) == 0 };
+        if (g_arm == SYNC_DIR_EIO && S_ISDIR(st.st_mode)) {
+            g_fired = 1;
+            errno = EIO;
+            return -1;
+        }
+    }
+    return g_real->fsync(g_real->ctx, fd);
+}
+
+/* Whether directory `dir` was synced once the watched name existed. */
+static bool synced_after(const char *dir) {
+    struct stat d;
+    if (stat(dir, &d) != 0) return false;
+    for (size_t i = 0; i < g_nsync; i++)
+        if (g_sync[i].dir && g_sync[i].watched && g_sync[i].dev == d.st_dev &&
+            g_sync[i].ino == d.st_ino)
+            return true;
+    return false;
+}
+
+/* How many times directory `dir` was synced; *between, how many of those
+ * came once the watched name existed and before the manifest did. */
+static int syncs_of(const char *dir, int *between) {
+    struct stat d;
+    *between = 0;
+    if (stat(dir, &d) != 0) return -1;
+    int n = 0;
+    for (size_t i = 0; i < g_nsync; i++) {
+        if (!g_sync[i].dir || g_sync[i].dev != d.st_dev || g_sync[i].ino != d.st_ino) continue;
+        n++;
+        *between += g_sync[i].watched && !g_sync[i].manifest;
+    }
+    return n;
+}
+
 static void decorate(void) {
     g_real = fsops_default();
     g_ops = *g_real;
@@ -461,13 +512,14 @@ static void decorate(void) {
     g_ops.read = t_read;
     g_ops.dir_open = t_dir_open;
     g_ops.writer_present = t_writer_present;
+    g_ops.fsync = t_fsync;
 }
 
 static void arm(enum arm a, const char *x, const char *y) {
     g_arm = a; g_x = x; g_y = y; g_fired = 0; g_replay = 0; g_dir = NULL; g_first = NULL;
     g_rootdir = NULL; g_walked = NULL; g_flip = 0; g_stepped = 0; g_step_s = 0; g_skew_s = 0; g_clock_reads = 0;
     g_statx_calls = 0; g_statx_after = 0; g_target_fd = -1; g_watch_dev = 0; g_entered = 0;
-    g_stale_dir = NULL; g_last_open_was_x = 0;
+    g_stale_dir = NULL; g_last_open_was_x = 0; g_nsync = 0; g_sync_watch = NULL;
 }
 
 static void path(char *out, size_t n, const char *rel) { snprintf(out, n, "%s/%s", g_root, rel); }
@@ -1407,6 +1459,79 @@ TEST(a_store_that_fails_mid_copy_keeps_the_entry) {
 
 /* Gone between its stat and its open: not recorded, counted as vanished;
  * its directory changed while it was walked. */
+/* Decided 2026-10-30: a published manifest that can vanish on power loss can
+ * lose a baseline. The manifest is synced before its rename -- it is the file
+ * found at the name afterwards -- and its directory after. */
+TEST(a_published_manifest_and_its_directory_are_synced) {
+    reset();
+    touch("f.txt", "content\n");
+    arm(NONE, NULL, NULL);
+    g_sync_watch = g_m;
+    struct belay_manifest_stats st;
+    ASSERT_EQ_INT(0, check(&st));
+    struct stat m;
+    REQUIRE(stat(g_m, &m) == 0);
+    bool file_before = false;
+    for (size_t i = 0; i < g_nsync; i++)
+        file_before |= !g_sync[i].dir && !g_sync[i].watched && g_sync[i].dev == m.st_dev &&
+                       g_sync[i].ino == m.st_ino;
+    ASSERT_TRUE(file_before);
+    char dir[300];
+    snprintf(dir, sizeof dir, "%s", g_m);
+    *strrchr(dir, '/') = '\0';
+    ASSERT_TRUE(synced_after(dir));
+}
+
+/* The same for stored copies: before the manifest is published, each
+ * directory a copy was renamed into is synced once, however many copies it
+ * received ("copy 8" and "copy 9" share fan-out directory 13), and the store
+ * directory, which that one was made in. (A copy's bytes are not synced:
+ * store.h, integrity verified on read.) */
+TEST(stored_copies_are_synced_once_per_directory_before_the_manifest) {
+    reset();
+    touch("a.txt", "copy 8\n");
+    touch("b.txt", "copy 9\n");
+    usleep(20000);
+    fresh_store();
+    struct belay_sha256 h;
+    uint8_t d[BELAY_SHA256_DIGEST_LEN];
+    char hex[65], prefix[400], obj[480];
+    belay_sha256_init(&h);
+    belay_sha256_update(&h, "copy 8\n", 7);
+    belay_sha256_final(&h, d);
+    belay_hex_encode(hex, d, sizeof d);
+    snprintf(prefix, sizeof prefix, "%s/%.2s", g_store, hex);
+    snprintf(obj, sizeof obj, "%s/%s", prefix, hex + 2);
+    arm(NONE, NULL, NULL);
+    g_sync_watch = obj;
+    struct belay_manifest_stats st;
+    ASSERT_EQ_INT(0, check_store(&st));
+    const struct belay_entry *a = find("a.txt"), *b = find("b.txt");
+    ASSERT_TRUE(a != NULL && a->has_stored && b != NULL && b->has_stored);
+    ASSERT_TRUE(strncmp(a->sha256_hex, b->sha256_hex, 2) == 0);
+    int between;
+    ASSERT_EQ_INT(1, syncs_of(prefix, &between));
+    ASSERT_EQ_INT(1, between);
+    ASSERT_EQ_INT(1, syncs_of(g_store, &between));
+    ASSERT_EQ_INT(1, between);
+}
+
+/* A directory that cannot be synced fails nothing: the manifest and the copy
+ * are complete and in place by then (as the diff's output, review F3). */
+TEST(a_directory_that_cannot_be_synced_fails_nothing) {
+    reset();
+    touch("f.txt", "content\n");
+    usleep(20000);
+    fresh_store();
+    arm(SYNC_DIR_EIO, NULL, NULL);
+    struct belay_manifest_stats st;
+    ASSERT_EQ_INT(0, check_store(&st));
+    ASSERT_TRUE(g_fired);
+    const struct belay_entry *f = find("f.txt");
+    ASSERT_TRUE(f != NULL && f->has_stored);
+    ASSERT_EQ_INT(0, (int)st.store_failed);
+}
+
 TEST(a_file_gone_between_its_stat_and_open_is_counted) {
     reset();
     mk("d");
@@ -1603,6 +1728,9 @@ int main(void) {
     RUN(a_store_that_cannot_begin_a_copy_keeps_the_entry);
     RUN(a_store_that_cannot_publish_a_copy_keeps_the_entry);
     RUN(a_store_that_fails_mid_copy_keeps_the_entry);
+    RUN(a_published_manifest_and_its_directory_are_synced);
+    RUN(stored_copies_are_synced_once_per_directory_before_the_manifest);
+    RUN(a_directory_that_cannot_be_synced_fails_nothing);
     RUN(a_file_gone_between_its_stat_and_open_is_counted);
     RUN(a_short_read_is_unstable_never_a_wrong_hash);
     RUN(an_attribute_that_cannot_be_read_makes_them_unknown);

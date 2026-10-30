@@ -9,6 +9,7 @@
 #include "belay/store.h"
 #include "belay/error.h"
 #include "belay/hash.h"
+#include "store_internal.h"
 
 #include <errno.h>
 #include <fcntl.h>
@@ -22,7 +23,16 @@
 struct belay_store {
     int dfd;
     unsigned long counter;
+    const struct fsops *ops;
+    bool published[256];        /* fan-out directories a commit renamed into, since the sync */
+    bool made;                  /* a commit made a fan-out directory, since the sync */
 };
+
+/* The fan-out directory of a valid hex name, as an index. */
+static int prefix_index(const char *hex) {
+    const char *digits = "0123456789abcdef";
+    return (int)((strchr(digits, hex[0]) - digits) * 16 + (strchr(digits, hex[1]) - digits));
+}
 
 /* Exactly 64 lowercase hex characters. Checked before `hex` is ever used to
  * build a name, so it cannot carry "/", "..", or a NUL. */
@@ -36,7 +46,11 @@ static bool valid_hex(const char *hex) {
 }
 
 int belay_store_open(const char *dir, struct belay_store **out) {
-    if (dir == NULL || out == NULL) {
+    return store_open(fsops_default(), dir, out);
+}
+
+int store_open(const struct fsops *ops, const char *dir, struct belay_store **out) {
+    if (ops == NULL || dir == NULL || out == NULL) {
         belay_err_set(BELAY_ERR_INVALID, 0, "store_open: null argument");
         return -1;
     }
@@ -79,6 +93,7 @@ int belay_store_open(const char *dir, struct belay_store **out) {
         return -1;
     }
     s->dfd = dfd;
+    s->ops = ops;
     *out = s;
     return 0;
 }
@@ -141,10 +156,12 @@ void belay_store_abort(struct belay_store_tx *tx) {
     tx->live = false;
 }
 
-/* Opens (creating if needed) the fan-out directory for `hex`. */
-static int open_prefix(struct belay_store *s, const char *hex) {
+/* Opens (creating if needed, which *created says) the fan-out directory for
+ * `hex`. */
+static int open_prefix(struct belay_store *s, const char *hex, bool *created) {
     const char prefix[3] = { hex[0], hex[1], '\0' };
-    if (mkdirat(s->dfd, prefix, 0700) == -1 && errno != EEXIST) {
+    *created = mkdirat(s->dfd, prefix, 0700) == 0;
+    if (!*created && errno != EEXIST) {
         belay_err_set(BELAY_ERR_IO, errno, "store: cannot create %s/", prefix);
         return -1;
     }
@@ -176,7 +193,8 @@ int belay_store_commit(struct belay_store_tx *tx, const char *hex) {
     }
     tx->fd = -1;
 
-    const int pfd = open_prefix(tx->s, hex);
+    bool created;
+    const int pfd = open_prefix(tx->s, hex, &created);
     if (pfd == -1) {
         unlinkat(tx->s->dfd, tx->tmp, 0);
         tx->live = false;
@@ -205,6 +223,9 @@ int belay_store_commit(struct belay_store_tx *tx, const char *hex) {
             unlinkat(tx->s->dfd, tx->tmp, 0);
             belay_err_set(BELAY_ERR_IO, e, "store: cannot publish object");
             rc = -1;
+        } else {
+            tx->s->published[prefix_index(hex)] = true;     /* for belay_store_sync */
+            tx->s->made |= created;
         }
     } else {
         const int e = errno;
@@ -216,6 +237,29 @@ int belay_store_commit(struct belay_store_tx *tx, const char *hex) {
     close(pfd);
     tx->live = false;
     return rc;
+}
+
+/* The renames since the last sync survive a crash only once the directories
+ * they renamed into are synced, and a fan-out directory made for one only
+ * once the store's is: each synced once, however many objects it received
+ * (one sync per object made a first capture of 2,000 small files 40 times
+ * slower; the first sync commits the journal for the rest). Never a failure:
+ * the copies are complete and in place (decided 2026-10-30, as the diff's
+ * output, review F3). */
+void belay_store_sync(struct belay_store *s) {
+    if (s == NULL) return;
+    for (int i = 0; i < 256; i++) {
+        if (!s->published[i]) continue;
+        s->published[i] = false;
+        char prefix[3];
+        snprintf(prefix, sizeof prefix, "%02x", i);
+        const int pfd = openat(s->dfd, prefix, O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC);
+        if (pfd == -1) continue;
+        if (s->ops->fsync(s->ops->ctx, pfd) != 0) { /* nothing left to undo */ }
+        close(pfd);
+    }
+    if (s->made && s->ops->fsync(s->ops->ctx, s->dfd) != 0) { /* likewise */ }
+    s->made = false;
 }
 
 int belay_store_verify(struct belay_store *s, const char *hex) {
