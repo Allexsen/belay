@@ -12,7 +12,9 @@
  *  into place.
  *
  *  INTEGRITY IS VERIFIED ON READ, not trusted on write. A commit whose object
- *  already exists keeps the existing file (dedup without rewriting), and
+ *  already exists keeps the existing file (dedup without rewriting) unless its
+ *  size is not the staged size -- a copy a crash emptied or cut short, which
+ *  is replaced -- and
  *  objects are not fsynced individually -- only the directories that hold
  *  their names are, by belay_store_sync -- so an object may be stale,
  *  planted or truncated by a crash (manifest-v1, "What survives a power
@@ -48,10 +50,12 @@ int  belay_store_write(struct belay_store_tx *tx, const void *buf, size_t n);
  *  Publishes the staged bytes as object `hex`, which the CALLER computed over
  *  exactly those bytes. `hex` must be 64 lowercase hex characters; anything
  *  else is rejected before it can become a path. If the object exists and is
- *  a regular file it is kept and the staged copy discarded. If something
+ *  a regular file of the staged size it is kept and the staged copy
+ *  discarded; one of another size is replaced by the staged copy. If something
  *  other than a regular file sits at the object's name, that is an error.
  *  The transaction is finished either way. The object's name, renamed in or
- *  found there, survives a crash once belay_store_sync has run.
+ *  found there, survives a crash once belay_store_sync has run, as far as its
+ *  syncs succeed.
  */
 int  belay_store_commit(struct belay_store_tx *tx, const char *hex);
 
