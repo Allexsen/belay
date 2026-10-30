@@ -22,44 +22,69 @@
 #include "belay/manifest.h"
 
 #include <errno.h>
+#include <fcntl.h>
 #include <limits.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/stat.h>
 #include <unistd.h>
 
-/* The scope root's kind, which ancestry needs before the root's own line
- * ("." sorts after names such as "!x"), and its device, which every entry's
- * device relation needs. Reads this manifest up to ".", which holds only the
- * few entries sorting before it. */
-static int root_kind(const char *path, enum anc *out, uint64_t *dev) {
-    struct belay_manifest_reader *r;
-    if (belay_manifest_open(path, &r) == -1) return -1;
-    struct belay_entry *e = malloc(sizeof *e);
+/* The scope root, which ancestry needs before the root's own line ("." sorts
+ * after names such as "!x") and whose device every entry's device relation
+ * needs. Reads the open manifest up to "." -- the few entries sorting before
+ * it -- and rewinds it: one file, read twice, never a path opened twice
+ * (decided F8). The pipeline checks the root it meets is this one. */
+static int find_root(struct belay_manifest_reader *r, struct belay_entry *root) {
     int rc = -1, got;
-    if (e == NULL) {
-        belay_err_set(BELAY_ERR_NOMEM, 0, "diff: out of memory");
-        belay_manifest_close(r);
-        return -1;
-    }
-    while ((got = belay_manifest_next(r, e)) == 1) {
-        if (e->path_len == 1 && e->path[0] == '.') {
-            *out = ancestry_kind(e);
-            *dev = e->dev;
+    while ((got = belay_manifest_next(r, root)) == 1) {
+        if (root->path_len == 1 && root->path[0] == '.') {
             rc = 0;
             break;
         }
-        if ((unsigned char)e->path[0] >= '.') break;        /* sorts after ".": no root */
+        if ((unsigned char)root->path[0] >= '.') break;     /* sorts after ".": no root */
     }
     if (got != -1 && rc == -1)
         belay_err_set(BELAY_ERR_CORRUPT, 0, "manifest: no entry for the scope root \".\"");
-    free(e);
-    belay_manifest_close(r);
+    if (rc == 0 && belay_manifest_rewind(r) == -1) return -1;
     return rc;
+}
+
+/* The output must not be an input, however it is spelled ("./a", a link):
+ * compared by device and inode, not by name (decided F9). */
+static int refuse_input_as_output(const char *out_path, const char *before, const char *after) {
+    struct stat o, i;
+    if (stat(out_path, &o) == -1) return 0;                 /* nothing there yet */
+    const char *in[2] = { before, after };
+    for (int k = 0; k < 2; k++)
+        if (stat(in[k], &i) == 0 && i.st_dev == o.st_dev && i.st_ino == o.st_ino) {
+            belay_err_set(BELAY_ERR_INVALID, 0, "diff: the output %s is the input %s; refusing",
+                          out_path, in[k]);
+            return -1;
+        }
+    return 0;
+}
+
+/* The rename into place survives a crash only once its directory is synced. */
+static int sync_dir_of(const char *path) {
+    char dir[PATH_MAX];
+    const char *slash = strrchr(path, '/');
+    if (slash == NULL) snprintf(dir, sizeof dir, ".");
+    else if (slash == path) snprintf(dir, sizeof dir, "/");
+    else snprintf(dir, sizeof dir, "%.*s", (int)(slash - path), path);
+    const int fd = open(dir, O_RDONLY | O_DIRECTORY | O_CLOEXEC);
+    if (fd == -1 || fsync(fd) != 0) {
+        belay_err_set(BELAY_ERR_IO, errno, "diff: cannot sync %s", dir);
+        if (fd != -1) close(fd);
+        return -1;
+    }
+    close(fd);
+    return 0;
 }
 
 struct run {
     struct belay_manifest_reader *rb, *ra;
+    struct belay_entry root[2];     /* [0] before, [1] after: as find_root read them */
     struct diff_ctx ctx;
     struct pair_state *pair;
     struct ancestry *anc;       /* [0] before, [1] after */
@@ -100,6 +125,14 @@ static int run_pipeline(struct run *x) {
     const struct belay_entry *b, *a;
     int got;
     while ((got = pair_next(x->pair, &b, &a)) == 1) {
+        const struct belay_entry *side[2] = { b, a };
+        for (int k = 0; k < 2; k++)
+            if (side[k] != NULL && side[k]->path_len == 1 && side[k]->path[0] == '.' &&
+                memcmp(side[k], &x->root[k], sizeof x->root[k]) != 0) {
+                belay_err_set(BELAY_ERR_CORRUPT, 0, "diff: the %s manifest changed while it was read",
+                              k ? "after" : "before");
+                return -1;
+            }
         struct verdict v;
         if (b != NULL && a != NULL) {
             if (classify_both(&x->ctx, b, a, &v) == -1) return -1;
@@ -115,7 +148,11 @@ static int run_pipeline(struct run *x) {
             return -1;
     }
     if (got == -1) return -1;
-    return emit_trailer(&x->em);
+    char sb[65], sa[65];
+    if (belay_manifest_digest(x->rb, sb) == -1 || belay_manifest_digest(x->ra, sa) == -1) return -1;
+    const struct diff_inputs in = { belay_manifest_trailer(x->rb), belay_manifest_trailer(x->ra),
+                                    sb, sa };
+    return emit_trailer(&x->em, &in);
 }
 
 int belay_diff(const char *before, const char *after, const char *out_path,
@@ -124,10 +161,7 @@ int belay_diff(const char *before, const char *after, const char *out_path,
         belay_err_set(BELAY_ERR_INVALID, 0, "diff: null argument");
         return -1;
     }
-    enum anc root_b, root_a;
-    uint64_t dev_b = 0, dev_a = 0;
-    if (root_kind(before, &root_b, &dev_b) == -1 || root_kind(after, &root_a, &dev_a) == -1)
-        return -1;
+    if (refuse_input_as_output(out_path, before, after) == -1) return -1;
 
     struct run *x = calloc(1, sizeof *x);
     int rc = -1;
@@ -137,12 +171,14 @@ int belay_diff(const char *before, const char *after, const char *out_path,
         free(x);
         return -1;
     }
-    ancestry_init(&x->anc[0], root_b);
-    ancestry_init(&x->anc[1], root_a);
+    if (belay_manifest_open(before, &x->rb) == -1 || belay_manifest_open(after, &x->ra) == -1 ||
+        find_root(x->rb, &x->root[0]) == -1 || find_root(x->ra, &x->root[1]) == -1)
+        goto done;
+    ancestry_init(&x->anc[0], ancestry_kind(&x->root[0]));
+    ancestry_init(&x->anc[1], ancestry_kind(&x->root[1]));
+    const uint64_t dev_b = x->root[0].dev, dev_a = x->root[1].dev;
     x->ctx = (struct diff_ctx){ .root_dev_before = dev_b, .root_dev_after = dev_a,
                                 .remounted = dev_b != dev_a };
-    if (belay_manifest_open(before, &x->rb) == -1 || belay_manifest_open(after, &x->ra) == -1)
-        goto done;
     if ((x->pair = pair_new(x->rb, x->ra)) == NULL) {
         belay_err_set(BELAY_ERR_NOMEM, 0, "diff: out of memory");
         goto done;
@@ -174,12 +210,14 @@ int belay_diff(const char *before, const char *after, const char *out_path,
         goto done;
     }
     tmp_live = false;
+    if (sync_dir_of(out_path) == -1) goto done;
     if (stats != NULL) {
         const size_t *c = x->em.count;
         *stats = (struct belay_diff_stats){
             .records = x->em.records, .unchanged = c[D_UNCHANGED], .added = c[D_ADDED],
             .removed = c[D_REMOVED], .modified = c[D_MODIFIED], .type_changed = c[D_TYPE_CHANGED],
             .metadata_only = c[D_METADATA_ONLY], .unknown = c[D_UNKNOWN],
+            .provisional = x->em.provisional,
         };
     }
     rc = 0;

@@ -36,7 +36,13 @@ HEADER_KEYS = ['belay_diff', 'scopes', 'before_created_ns', 'after_created_ns',
                'identity_compared']
 OUTCOMES = ['unchanged', 'added', 'removed', 'modified', 'type_changed', 'metadata_only',
             'unknown']
-TRAILER_KEYS = ['belay_diff_end'] + OUTCOMES
+# After the outcome counts, from "Shape" and the trailer's prose: each
+# manifest's own trailer counts, whether any is non-zero, and the sha256 of
+# each input file (the bytes a diff reads are the whole file).
+INPUT_COUNTS = ['vanished', 'unstable', 'raced']
+TRAILER_KEYS = (['belay_diff_end'] + OUTCOMES + ['before_' + c for c in INPUT_COUNTS]
+                + ['after_' + c for c in INPUT_COUNTS] + ['provisional', 'before_sha256',
+                                                          'after_sha256'])
 # One-sided reasons, from "Present on one side only".
 NOT_CAPTURED, LISTING_INCOMPLETE, RACED = 'not_captured', 'listing_incomplete', 'raced'
 
@@ -171,6 +177,13 @@ for _f, _s in FIELDS.items():
 
 def b64(s):
     return base64.b64decode(s.encode('ascii'), validate=True)
+
+
+def trailer_of(path):
+    """The manifest's own trailer, and the sha256 of the file."""
+    with open(path, 'rb') as f:
+        raw = f.read()
+    return json.loads(raw.rstrip(b'\n').split(b'\n')[-1].decode('utf-8')), hashlib.sha256(raw).hexdigest()
 
 
 def load(path):
@@ -438,6 +451,10 @@ def diff(before, after):
             rec['unknown'] = why
         records.append(rec)
     trailer = [('belay_diff_end', len(records))] + [(o, counts[o]) for o in OUTCOMES]
+    (tb, shab), (ta, shaa) = trailer_of(before), trailer_of(after)
+    inputs = [('before_' + c, tb[c]) for c in INPUT_COUNTS] + [('after_' + c, ta[c]) for c in INPUT_COUNTS]
+    trailer += inputs + [('provisional', any(v != 0 for _, v in inputs)),
+                         ('before_sha256', shab), ('after_sha256', shaa)]
     return header, records, trailer, traces
 
 

@@ -18,7 +18,7 @@ not know, and treat a missing trailer as a truncated diff.
 {"belay_diff":1,"scopes":["/home/u/proj"],"before_created_ns":1761000000000000000,"after_created_ns":1761000600000000000,"before_hash_max_bytes":67108864,"after_hash_max_bytes":67108864,"scope_remounted":false,"identity_compared":true}
 {"path":"src/main.c","outcome":"modified","type":"reg","changed":["size","mtime_ns","sha256"]}
 {"path":"build","outcome":"unknown","type":"dir","unknown":["unstable"]}
-{"belay_diff_end":2,"unchanged":1840,"added":0,"removed":0,"modified":1,"type_changed":0,"metadata_only":0,"unknown":1}
+{"belay_diff_end":2,"unchanged":1840,"added":0,"removed":0,"modified":1,"type_changed":0,"metadata_only":0,"unknown":1,"before_vanished":0,"before_unstable":0,"before_raced":0,"after_vanished":0,"after_unstable":1,"after_raced":0,"provisional":true,"before_sha256":"9f2c...","after_sha256":"41ab..."}
 ```
 
 ### Header
@@ -69,6 +69,15 @@ not know, and treat a missing trailer as a truncated diff.
 | `type_changed` | int | Paths whose outcome is `type_changed`. |
 | `metadata_only` | int | Paths whose outcome is `metadata_only`. |
 | `unknown` | int | Paths whose outcome is `unknown`. |
+| `before_vanished` | int | The earlier manifest's `vanished`: entries gone while its tree was walked. |
+| `before_unstable` | int | The earlier manifest's `unstable`. |
+| `before_raced` | int | The earlier manifest's `raced`. |
+| `after_vanished` | int | The later manifest's `vanished`. |
+| `after_unstable` | int | The later manifest's `unstable`. |
+| `after_raced` | int | The later manifest's `raced`. |
+| `provisional` | bool | Any of the six counts above is not 0: a tree changed while it was walked, so the result is provisional (manifest-v1, obligations on a consumer). The records name each flagged path; `vanished` paths have none. |
+| `before_sha256` | string | The sha256 of the earlier manifest's bytes as this diff read them. |
+| `after_sha256` | string | The sha256 of the later manifest's bytes as this diff read them. |
 <!-- END GENERATED: diff-trailer -->
 
 ## Outcomes

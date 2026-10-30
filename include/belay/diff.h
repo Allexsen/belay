@@ -10,12 +10,14 @@
 #ifndef BELAY_DIFF_H
 #define BELAY_DIFF_H
 
+#include <stdbool.h>
 #include <stddef.h>
 
 /* What one diff decided, path by path. */
 struct belay_diff_stats {
     size_t records;             /* lines emitted between header and trailer */
     size_t unchanged, added, removed, modified, type_changed, metadata_only, unknown;
+    bool provisional;           /* either tree changed while it was walked (trailer) */
 };
 
 /*
