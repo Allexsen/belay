@@ -40,7 +40,7 @@ no prose behind it: the author approved it with this table (2026-10-30).
 | gid | metadata | all | compared | required | proposed; decision (c) |
 | size | content | reg, lnk | compared | required | diff-v1, rule 3: "`size` for a regular file or symlink" |
 | mtime_ns | metadata | reg, lnk | not compared | required | decision (c): fifo, sock, blk, chr and mount roots update timestamps on use; a directory's follows its listing |
-| ctime_ns | ctime | reg, lnk, dir | not compared | required | diff-v1, rule 5; decision (c) |
+| ctime_ns | ctime | reg, lnk | not compared | required | diff-v1, rule 5; decision (c); decision F5: a directory's own timestamps are not compared (O5) |
 | ino | identity: within one device | all | compared | required | decision Q3 (same content, new inode is `metadata_only` naming `ino`); decision (b): rule O3 |
 | dev | identity: device relation | all | compared | required | decision (b): the raw number is not compared (overlay, tmpfs and btrfs renumber devices at mount); a change in the relation is a real mount change |
 | nlink | identity | reg, lnk, fifo, sock, blk, chr | compared | required | proposed: a directory's link count counts its subdirectories |
@@ -67,4 +67,5 @@ no prose behind it: the author approved it with this table (2026-10-30).
 | O1 | A hash on one side and `unverified` on the other: `unknown` (reason `unverified`), unless `size` differs, which gives `modified`, or the type differs, which gives `type_changed` (rule 2). | decision 2026-10-30 (d) |
 | O2 | `none if read`: an absent `caps` or `xattrs` means none only where the attributes were read. With `xattrs_unknown` on either side, or on a mount root (never read), they are not compared and the metadata is `unknown` unless another metadata field proves a change. | decision 2026-10-30 (a) |
 | O3 | `ino` is compared only when the entry's `dev` is the same on both sides: inode numbers are meaningful within one device. When the scope root's `dev` differs between the two manifests (a remount), the diff header reports it once and states that identity was not compared; `ino` is then compared for no entry, and content still compares by hash. | decision 2026-10-30 (b) |
-| O4 | An absent record means `unchanged`. That holds only because every path that is not provably unchanged is emitted -- `unknown` always included. | decision 2026-10-30 (f) |
+| O4 | An absent record means `unchanged`, or a directory whose only difference is its own timestamps, which the trailer counts (O5). That holds only because every other path that is not provably unchanged is emitted -- `unknown` always included. | decision 2026-10-30 (f); decision F5 |
+| O5 | A directory whose `ctime_ns` or `mtime_ns` differs while every compared field is equal and no flag makes anything unknown is not emitted: its listing is recorded through its children, and its timestamps move with every change below it. The diff trailer counts such directories. | decision F5 (review m1-phase3 round 1, F5: every parent of every added or removed file got a ctime-only record) |
