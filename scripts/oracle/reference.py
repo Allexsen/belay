@@ -10,6 +10,8 @@ Its only sources:
     identity", "Timestamps that move on use", "A directory's own timestamps",
     the `type_before` sentence, the `changed` / `unknown` paragraph and "An
     absent record means `unchanged`";
+  - docs/spec/manifest-v1.md, PROSE ONLY: "Encoding" (the canonical string)
+    and, under "Field rules a reader MUST enforce", what `xattrs_sha256` is;
   - test/expect/diff-fields.md, READ AT RUN TIME: for each field its
     `compared as`, `for types`, `on mount roots` and `absent means`, and the
     outcome rules O1-O5;
@@ -29,8 +31,6 @@ What the prose leaves to generated tables:
     outcomes table") is the one the "Shape" example shows;
   - the order of a record's keys after `path`, `outcome` and `type` (the
     record table is generated): compare.py does not check it.
-One thing no allowed source gives at all: how `xattrs_sha256` is computed
-from a set (see values_differ).
 """
 import base64, collections, hashlib, json, os, re, sys
 
@@ -224,6 +224,8 @@ SPELLINGS = collections.defaultdict(list)   # field -> its other spellings
 for _f, _s in FIELDS.items():
     if _s.spelling_of:
         SPELLINGS[_s.spelling_of].append(_f)
+if dict(SPELLINGS) != {'xattrs': ['xattrs_sha256']}:     # the one digest formula: as_digest
+    raise SystemExit('pin: a spelling reference.py has no formula for: %r' % dict(SPELLINGS))
 
 # ---------------------------------------------------------------------------
 # Manifests.
@@ -313,17 +315,46 @@ def value(e, f):
     return e.get(f)
 
 
+def canonical_string(s):
+    """The bytes a writer emits for the JSON string s, quotes included:
+    manifest-v1.md "Encoding" -- `string := '"' ( byte >= 0x20 other than '"'
+    and '\\' | escape )* '"'`, `escape := \\" | \\\\ | \\b | \\f | \\n | \\r |
+    \\t | \\u00XX` (\\u00XX only for a control byte with no short form,
+    lowercase hex). The encoding is canonical, so these are the bytes."""
+    short = {'"': b'\\"', '\\': b'\\\\', '\b': b'\\b', '\f': b'\\f', '\n': b'\\n',
+             '\r': b'\\r', '\t': b'\\t'}
+    out = []
+    for c in s:
+        if c in short:
+            out.append(short[c])
+        elif ord(c) < 0x20:
+            out.append(b'\\u%04x' % ord(c))
+        else:
+            out.append(c.encode('utf-8'))
+    return b'"' + b''.join(out) + b'"'
+
+
+def xattrs_digest(items):
+    """manifest-v1.md, "Field rules a reader MUST enforce": "`xattrs_sha256`
+    is the sha256 of the bytes `xattrs` would hold between its brackets,
+    exactly as a writer emits them -- each element in its double quotes, in
+    order, joined by `,` with no space". Spelled as the format spells every
+    sha256, lowercase hex (ambiguity: the sentence does not say)."""
+    return hashlib.sha256(b','.join(canonical_string(x) for x in items)).hexdigest()
+
+
+def as_digest(v):
+    """A set's digest from its (spelling, value): computed when inline."""
+    return xattrs_digest(v[1]) if v[0] == 'xattrs' else v[1]
+
+
 def values_differ(f, vb, va):
     """A set spelled inline on one side and by its digest on the other
-    (xattrs / xattrs_sha256, "compared as `xattrs`" in the pin) counts as
-    DIFFERENT. No prose or pin gives the digest's formula: the only statement
-    of it is in a generated block of manifest-v1.md, which this file may not
-    use. So this is an assumption about the inputs, not a rule: it holds for
-    every generated pair, because gen_corpus.py never computes a digest from a
-    set (a random 64-hex digest matches a given set's digest with probability
-    2**-256), and it is wrong for a hand-made pair whose digest matches."""
+    (xattrs / xattrs_sha256, "compared as `xattrs`" in the pin) compares by
+    the digest: "so a set recorded inline in one manifest and by digest in
+    another compares equal" (manifest-v1.md, the rule xattrs_digest quotes)."""
     if f in SPELLINGS and vb is not None and va is not None and vb[0] != va[0]:
-        return True
+        return as_digest(vb) != as_digest(va)
     return vb != va
 
 
@@ -423,7 +454,7 @@ def both_sides(b, a, ctx):
         else:
             d = values_differ(f, vb, va)
             if f in SPELLINGS and vb is not None and va is not None and vb[0] != va[0]:
-                trace.append('inline-vs-digest:' + f)            # an assumption: values_differ
+                trace.append('inline-vs-digest:' + f)            # by the formula: values_differ
         if d:
             changed.append(f)
             if s.cls == CONTENT:
