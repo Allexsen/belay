@@ -13,8 +13,12 @@
  *  --coarse: the filesystem's timestamps are coarser than the time between a
  *            fixture's creation and the change (FAT: 2 s). The "fresh"
  *            variants then hit known issue R4-F1 (equality cannot see a
- *            change in the same timestamp slot) and are expected to escape:
- *            XFAIL, not FAIL. An XFAIL that passes prints XPASS.
+ *            change in the same timestamp slot) and are expected to escape.
+ *            That is XFAIL only when the capture itself worked -- written,
+ *            read back, the change made -- and nothing was flagged; a failed
+ *            capture is FAIL, and so is XPASS (the escape did not happen, so
+ *            the expectation is stale). Each fresh fixture starts at the
+ *            beginning of a 2 s slot, so the escape happens every run.
  *  --subvol: NAME is a btrfs subvolume created inside <dir> by the caller; it
  *            must be walked into, not recorded as a mount (review round 3, F4).
  *
@@ -132,12 +136,39 @@ static bool flagged(void) {
     return g_st.vanished || g_st.unreadable || g_st.unstable || g_st.raced;
 }
 
-/* PASS/FAIL/XFAIL/XPASS reporting. */
-static void verdict(const char *name, bool ok, bool expect_escape) {
-    const char *v = ok ? (expect_escape ? "XPASS" : "PASS ") : (expect_escape ? "XFAIL" : "FAIL ");
+/* PASS / FAIL, and XFAIL / XPASS for an expected escape. `ran`: the capture
+ * was written and read back and the hook fired; `caught`: the change was
+ * flagged. Only "ran, not caught" is an XFAIL (audit 2026-10, adversarial L3:
+ * a write failure or a reader rejection used to print XFAIL and pass). */
+static void verdict(const char *name, bool ran, bool caught, bool expect_escape) {
+    const char *v;
+    bool failed;
+    if (!ran) {
+        v = "FAIL ";
+        failed = true;
+    } else if (expect_escape) {
+        v = caught ? "XPASS" : "XFAIL";
+        failed = caught;
+    } else {
+        v = caught ? "PASS " : "FAIL ";
+        failed = !caught;
+    }
     printf("  %s %s  (unstable %zu, raced %zu, vanished %zu)%s\n", v, name, g_st.unstable,
-           g_st.raced, g_st.vanished, !ok && expect_escape ? "  known issue R4-F1" : "");
-    if (!ok && !expect_escape) g_fail++;
+           g_st.raced, g_st.vanished,
+           ran && expect_escape && !caught ? "  known issue R4-F1"
+           : ran && expect_escape ? "  expected escape did not happen: update R4-F1" : "");
+    if (failed) g_fail++;
+}
+
+/* Waits until just past the start of a 2-second slot (FAT keeps mtime to 2 s),
+ * so a fresh fixture and the change made during its walk share one slot. */
+static void align_to_slot(void) {
+    struct timespec now;
+    clock_gettime(CLOCK_REALTIME, &now);
+    const long long into = (long long)(now.tv_sec % 2) * 1000000000LL + now.tv_nsec;
+    const long long wait = 2000000000LL - into + 20000000LL;
+    const struct timespec w = { (time_t)(wait / 1000000000LL), (long)(wait % 1000000000LL) };
+    nanosleep(&w, NULL);
 }
 
 /* ---- scenarios ---- */
@@ -149,33 +180,36 @@ static void s_clean(void) {
     sleep(3);                       /* older than any coarse timestamp slot */
     const bool a = check() && !flagged();
     const bool b = check() && !flagged();
-    verdict("clean tree, checked twice: no flags", a && b, false);
+    verdict("clean tree, checked twice: no flags", true, a && b, false);
 }
 
 static void s_move(bool aged, bool coarse) {
     fresh_scope(aged ? "move_aged" : "move_fresh");
+    if (coarse && !aged) align_to_slot();
     sub("A"); sub("B");
     put("A/m_A", ""); put("B/m_B", "");
     if (aged) sleep(3);
     g_arm = MOVE_INTO_LISTED; g_fired = false; g_walked[0] = '\0';
-    const bool ok = check() && g_fired && flagged();
+    const bool ran = check() && g_fired;
     verdict(aged ? "move into a listed directory (aged fixture)"
-                 : "move into a listed directory (fresh fixture)", ok, coarse && !aged);
+                 : "move into a listed directory (fresh fixture)", ran, ran && flagged(),
+            coarse && !aged);
 }
 
 static void s_change(bool append, bool aged, bool coarse) {
     fresh_scope(append ? (aged ? "append_aged" : "append_fresh")
                        : (aged ? "rewrite_aged" : "rewrite_fresh"));
+    if (coarse && !aged) align_to_slot();
     put("f1", "one"); put("f2", "two");
     if (aged) sleep(3);
     g_arm = CHANGE_AFTER_READ; g_append = append; g_fired = false; g_first[0] = '\0';
-    const bool ok = check() && g_fired && g_st.raced >= 1;
+    const bool ran = check() && g_fired;
     char name[128];
     snprintf(name, sizeof name, "file %s after it was read (%s fixture)",
              append ? "appended to" : "rewritten, same size", aged ? "aged" : "fresh");
     /* A size change is seen at any granularity; a same-size rewrite in the
      * same timestamp slot is not. */
-    verdict(name, ok, coarse && !aged && !append);
+    verdict(name, ran, ran && g_st.raced >= 1, coarse && !aged && !append);
 }
 
 static int g_sub_found, g_sub_child, g_sub_mount;
@@ -195,8 +229,8 @@ static void s_subvol(const char *name) {
     if (f) { fputs("in a subvolume", f); fclose(f); }
     g_sub_found = g_sub_child = g_sub_mount = 0;
     bool ok = check() && belay_manifest_read(g_m, find_sub, (void *)name) == 0;
-    ok = ok && g_sub_found && g_sub_child && !g_sub_mount;
-    verdict("btrfs subvolume is walked, not a mount", ok, false);
+    verdict("btrfs subvolume is walked, not a mount", true,
+            ok && g_sub_found && g_sub_child && !g_sub_mount, false);
 }
 
 int main(int argc, char **argv) {
