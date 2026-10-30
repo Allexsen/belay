@@ -249,6 +249,17 @@ belay_manifest_header(const struct belay_manifest_reader *r);
 const struct belay_manifest_stats *
 belay_manifest_trailer(const struct belay_manifest_reader *r);
 
+/* The sha256 of the bytes read, header to trailer -- the manifest's identity,
+ * which a consumer can record (the diff's trailer does). 0 with `hex` set
+ * once belay_manifest_next has returned 0; -1 before. */
+int belay_manifest_digest(const struct belay_manifest_reader *r, char hex[65]);
+
+/* Back to the first entry, through the same open file: the header is read
+ * again and must be the one read at open, and the digest restarts. A
+ * consumer that reads a manifest twice (the diff finds the scope root first)
+ * reads one file, never a path opened twice. 0, or -1. */
+int belay_manifest_rewind(struct belay_manifest_reader *r);
+
 int  belay_manifest_open(const char *path, struct belay_manifest_reader **out);
 int  belay_manifest_next(struct belay_manifest_reader *r, struct belay_entry *e);
 void belay_manifest_close(struct belay_manifest_reader *r);

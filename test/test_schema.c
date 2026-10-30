@@ -63,6 +63,8 @@ TEST(every_header_and_trailer_row_is_complete) {
     for (int i = 0; i < TR_COUNT; i++) ASSERT_TRUE(TRAILER_FIELDS[i].name != NULL && TRAILER_FIELDS[i].kind != NULL);
     for (int i = 0; i < DH_COUNT; i++) ASSERT_TRUE(DIFF_HEADER_FIELDS[i].name != NULL);
     for (int i = 0; i < DF_COUNT; i++) ASSERT_TRUE(DIFF_RECORD_FIELDS[i].name != NULL);
+    for (int i = 0; i < DT_COUNT; i++)
+        ASSERT_TRUE(DIFF_TRAILER_FIELDS[i].name != NULL && DIFF_TRAILER_FIELDS[i].description != NULL);
     ASSERT_TRUE(DIFF_TRAILER_END.name != NULL);
 }
 

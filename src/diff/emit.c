@@ -150,11 +150,24 @@ int emit_path(struct emitter *em, const struct belay_entry *before,
     return put_line(em, &b);
 }
 
-int emit_trailer(struct emitter *em) {
+int emit_trailer(struct emitter *em, const struct diff_inputs *in) {
     struct buf b = { em->line, 0 };
     if (ap(&b, "{\"%s\":%zu", DIFF_TRAILER_END.name, em->records) == -1) return -1;
     for (int o = D_FIRST; o < D_OUTCOME_COUNT; o++)
         if (ap(&b, ",\"%s\":%zu", DIFF_OUTCOMES[o].name, em->count[o]) == -1) return -1;
-    if (ap(&b, "}") == -1) return -1;
+    const struct { enum diff_trailer_field f; size_t v; } counts[] = {
+        { DT_BEFORE_VANISHED, in->before->vanished }, { DT_BEFORE_UNSTABLE, in->before->unstable },
+        { DT_BEFORE_RACED, in->before->raced },       { DT_AFTER_VANISHED, in->after->vanished },
+        { DT_AFTER_UNSTABLE, in->after->unstable },   { DT_AFTER_RACED, in->after->raced },
+    };
+    em->provisional = false;
+    for (size_t i = 0; i < sizeof counts / sizeof counts[0]; i++) {
+        if (ap(&b, ",\"%s\":%zu", DIFF_TRAILER_FIELDS[counts[i].f].name, counts[i].v) == -1) return -1;
+        em->provisional |= counts[i].v != 0;
+    }
+    if (ap(&b, ",\"%s\":%s,\"%s\":\"%s\",\"%s\":\"%s\"}", DIFF_TRAILER_FIELDS[DT_PROVISIONAL].name,
+           em->provisional ? "true" : "false", DIFF_TRAILER_FIELDS[DT_BEFORE_SHA256].name,
+           in->before_sha256, DIFF_TRAILER_FIELDS[DT_AFTER_SHA256].name, in->after_sha256) == -1)
+        return -1;
     return put_line(em, &b);
 }

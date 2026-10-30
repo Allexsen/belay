@@ -509,7 +509,8 @@ def main():
         pair_coverage(stem, cells, optional, scen, fpairs)
         name = os.path.basename(stem)
         for k, v in res.get('expected_trailer', [])[1:]:
-            outcomes[k] += v
+            if k in ref.OUTCOMES:
+                outcomes[k] += v
         if res['status'] != 'ok':
             rejected += 1
             if len(rejected_examples) < 5:

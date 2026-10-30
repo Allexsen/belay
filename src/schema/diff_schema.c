@@ -151,3 +151,21 @@ const struct line_field_def DIFF_RECORD_FIELDS[DF_COUNT] = {
 const struct line_field_def DIFF_TRAILER_END = { "belay_diff_end", NULL, "int",
     "Number of records emitted. Then one count per outcome, named as the outcome, unchanged "
     "included." };
+
+const struct line_field_def DIFF_TRAILER_FIELDS[DT_COUNT] = {
+    [DT_BEFORE_VANISHED] = { "before_vanished", NULL, "int",
+        "The earlier manifest's `vanished`: entries gone while its tree was walked." },
+    [DT_BEFORE_UNSTABLE] = { "before_unstable", NULL, "int", "The earlier manifest's `unstable`." },
+    [DT_BEFORE_RACED]    = { "before_raced", NULL, "int", "The earlier manifest's `raced`." },
+    [DT_AFTER_VANISHED]  = { "after_vanished", NULL, "int", "The later manifest's `vanished`." },
+    [DT_AFTER_UNSTABLE]  = { "after_unstable", NULL, "int", "The later manifest's `unstable`." },
+    [DT_AFTER_RACED]     = { "after_raced", NULL, "int", "The later manifest's `raced`." },
+    [DT_PROVISIONAL]     = { "provisional", NULL, "bool",
+        "Any of the six counts above is not 0: a tree changed while it was walked, so the result "
+        "is provisional (manifest-v1, obligations on a consumer). The records name each flagged "
+        "path; `vanished` paths have none." },
+    [DT_BEFORE_SHA256]   = { "before_sha256", NULL, "string",
+        "The sha256 of the earlier manifest's bytes as this diff read them." },
+    [DT_AFTER_SHA256]    = { "after_sha256", NULL, "string",
+        "The sha256 of the later manifest's bytes as this diff read them." },
+};

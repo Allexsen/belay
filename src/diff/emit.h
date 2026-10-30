@@ -19,6 +19,7 @@ struct emitter {
     char *line;                 /* EMIT_LINE_CAP */
     size_t count[D_OUTCOME_COUNT];
     size_t records;
+    bool provisional;           /* set by emit_trailer */
 };
 
 int  emit_open(struct emitter *em, FILE *f);
@@ -33,6 +34,14 @@ int emit_path(struct emitter *em, const struct belay_entry *before,
               const struct belay_entry *after, const struct verdict *v,
               const struct belay_findings *findings);
 
-int emit_trailer(struct emitter *em);
+/* What the two manifests said, read to their ends: their trailers and their
+ * digests. */
+struct diff_inputs {
+    const struct belay_manifest_stats *before, *after;
+    const char *before_sha256, *after_sha256;
+};
+
+/* The trailer: the counts, then the inputs. Sets em->provisional. */
+int emit_trailer(struct emitter *em, const struct diff_inputs *in);
 
 #endif

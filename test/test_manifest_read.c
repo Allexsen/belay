@@ -1294,6 +1294,49 @@ TEST(every_flag_is_decoded) {
     ASSERT_TRUE(g_n == 2 && g_e[0].unreadable && g_e[1].is_mount);
 }
 
+/* The digest is of the bytes read, header to trailer, and exists only once
+ * the trailer is read; a rewind reads the same open file again and refuses a
+ * header that changed meanwhile (decided F8, audit L4). */
+TEST(the_digest_is_of_the_bytes_read_and_a_rewind_rereads_them) {
+    write_manifest(HDR ENTRY_REG("a"));
+    FILE *f = fopen(g_path, "rb");
+    REQUIRE(f != NULL);
+    struct belay_sha256 h;
+    belay_sha256_init(&h);
+    unsigned char buf[4096];
+    for (size_t n; (n = fread(buf, 1, sizeof buf, f)) > 0; ) belay_sha256_update(&h, buf, n);
+    fclose(f);
+    uint8_t d[BELAY_SHA256_DIGEST_LEN];
+    char want[65], got[65];
+    belay_sha256_final(&h, d);
+    belay_hex_encode(want, d, sizeof d);
+
+    struct belay_manifest_reader *r;
+    REQUIRE(belay_manifest_open(g_path, &r) == 0);
+    static struct belay_entry e;
+    ASSERT_EQ_INT(-1, belay_manifest_digest(r, got));            /* not read to the end */
+    belay_err_clear();
+    while (belay_manifest_next(r, &e) == 1) {}
+    ASSERT_EQ_INT(0, belay_manifest_digest(r, got));
+    ASSERT_EQ_STR(want, got);
+    ASSERT_EQ_INT(0, belay_manifest_rewind(r));
+    int n = 0;
+    while (belay_manifest_next(r, &e) == 1) n++;
+    ASSERT_EQ_INT(2, n);                                           /* "." and "a" again */
+    ASSERT_EQ_INT(0, belay_manifest_digest(r, got));
+    ASSERT_EQ_STR(want, got);
+
+    f = fopen(g_path, "r+b");                                      /* in place: same inode */
+    REQUIRE(f != NULL);
+    REQUIRE(fseek(f, (long)strlen("{\"belay_manifest\":1,\"created_ns\":"), SEEK_SET) == 0);
+    fputc('7', f);
+    fclose(f);
+    ASSERT_EQ_INT(-1, belay_manifest_rewind(r));
+    ASSERT_TRUE(strstr(belay_err_msg(), "header changed") != NULL);
+    belay_err_clear();
+    belay_manifest_close(r);
+}
+
 /* The decoder reads fields in DECODE_ORDER (it fixes which error a line
  * with several bad fields reports): every schema field must be in it
  * exactly once, or a field added to entry.c would never be read. */
@@ -1367,6 +1410,7 @@ int main(void) {
     RUN(w6_reader_accepts_exactly_the_canonical_extended_metadata);
     RUN(round_trips_the_writers_output);
     RUN(every_flag_is_decoded);
+    RUN(the_digest_is_of_the_bytes_read_and_a_rewind_rereads_them);
     RUN(decoder_reads_every_schema_field_once);
 
     unlink(g_path);

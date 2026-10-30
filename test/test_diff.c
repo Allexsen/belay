@@ -9,6 +9,7 @@
 #include "belay_test.h"
 #include "belay/diff.h"
 #include "belay/error.h"
+#include "belay/hash.h"
 #include "diff/classify.h"
 
 #include <stdarg.h>
@@ -16,6 +17,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/stat.h>
 #include <unistd.h>
 
 #define H64(c) c c c c c c c c c c c c c c c c c c c c c c c c c c c c c c c c \
@@ -43,7 +45,7 @@ struct me {
 static char g_dir[256];
 static char g_out[300];
 static FILE *g_f;
-static size_t g_n, g_unreadable, g_unstable, g_mounts, g_raced;
+static size_t g_n, g_unreadable, g_unstable, g_mounts, g_raced, g_vanished;
 
 static void m_begin(const char *name, const char *scope, unsigned long long hash_max) {
     char p[400];
@@ -51,7 +53,7 @@ static void m_begin(const char *name, const char *scope, unsigned long long hash
     g_f = fopen(p, "wb");
     fprintf(g_f, "{\"belay_manifest\":1,\"created_ns\":1,\"scopes\":[\"%s\"],\"hash\":\"sha256\","
                  "\"hash_max_bytes\":%llu,\"store_max_bytes\":0}\n", scope, hash_max);
-    g_n = g_unreadable = g_unstable = g_mounts = g_raced = 0;
+    g_n = g_unreadable = g_unstable = g_mounts = g_raced = g_vanished = 0;
 }
 
 static void m_entry(struct me e) {
@@ -86,9 +88,9 @@ static void m_entry(struct me e) {
 }
 
 static void m_end(void) {
-    fprintf(g_f, "{\"belay_manifest_end\":%zu,\"vanished\":0,\"unreadable\":%zu,\"unstable\":%zu,"
-                 "\"mounts\":%zu,\"raced\":%zu}\n", g_n, g_unreadable, g_unstable, g_mounts,
-            g_raced);
+    fprintf(g_f, "{\"belay_manifest_end\":%zu,\"vanished\":%zu,\"unreadable\":%zu,\"unstable\":%zu,"
+                 "\"mounts\":%zu,\"raced\":%zu}\n", g_n, g_vanished, g_unreadable, g_unstable,
+            g_mounts, g_raced);
     fclose(g_f);
 }
 
@@ -227,6 +229,76 @@ TEST(node_and_mount_root_timestamps_are_not_compared) {
     m_begin("after", "/s", 1000); ROOT(); E(.path = "b", .type = "reg", .size = 4, .mount = true, .mtime = 9, .ctime = 9); m_end();
     REQUIRE(run() == 0);
     ASSERT_TRUE(has("b", "\"outcome\":\"modified\"") && has("b", "\"changed\":[\"size\"]"));
+}
+
+/* Decided F2: a tree that changed while it was walked makes the whole result
+ * provisional (manifest-v1, obligations on a consumer), and only the trailers
+ * say so for `vanished`, which leaves no record. */
+TEST(a_tree_that_changed_while_walked_makes_the_diff_provisional) {
+    m_begin("before", "/s", 1000); ROOT(); E(.path = "f", .type = "reg", .size = 3, .sha = HA); m_end();
+    m_begin("after", "/s", 1000); ROOT(); E(.path = "f", .type = "reg", .size = 3, .sha = HA); m_end();
+    REQUIRE(run() == 0);
+    ASSERT_TRUE(strstr(g_text, "\"after_raced\":0,\"provisional\":false,") != NULL);
+    ASSERT_FALSE(g_st.provisional);
+    m_begin("after", "/s", 1000); ROOT(); E(.path = "f", .type = "reg", .size = 3, .sha = HA);
+    g_vanished = 1;                                   /* one entry gone mid-walk: no record */
+    m_end();
+    REQUIRE(run() == 0);
+    ASSERT_TRUE(record("f") == NULL);
+    ASSERT_TRUE(strstr(g_text, "\"after_vanished\":1,") != NULL);
+    ASSERT_TRUE(strstr(g_text, "\"provisional\":true,") != NULL);
+    ASSERT_TRUE(g_st.provisional);
+}
+
+/* Decided F9: the output is never one of the inputs, however it is spelled;
+ * compared by device and inode. The input is left as it was. */
+TEST(the_output_is_never_an_input_however_spelled) {
+    m_begin("before", "/s", 1000); ROOT(); m_end();
+    m_begin("after", "/s", 1000); ROOT(); E(.path = "f", .type = "reg", .size = 3, .sha = HA); m_end();
+    char dotted[400], viaink[400], b[400];
+    snprintf(b, sizeof b, "%s/before", g_dir);
+    snprintf(dotted, sizeof dotted, "%s/./before", g_dir);
+    snprintf(viaink, sizeof viaink, "%s/to_before", g_dir);
+    unlink(viaink);
+    REQUIRE(symlink(b, viaink) == 0);
+    struct stat st0, st1;
+    REQUIRE(stat(b, &st0) == 0);
+    const char *outs[] = { b, dotted, viaink };
+    for (size_t i = 0; i < 3; i++) {
+        char a[400];
+        snprintf(a, sizeof a, "%s/after", g_dir);
+        ASSERT_EQ_INT(-1, belay_diff(b, a, outs[i], NULL));
+        ASSERT_EQ_INT(BELAY_ERR_INVALID, belay_err_code());
+        belay_err_clear();
+    }
+    REQUIRE(stat(b, &st1) == 0);
+    ASSERT_TRUE(st1.st_size == st0.st_size && st1.st_mtime == st0.st_mtime);
+    unlink(viaink);
+}
+
+/* Audit L4: the trailer names what was compared -- each input's sha256, of
+ * the bytes read (the header goes out before anything else is read). */
+TEST(the_trailer_names_both_inputs_by_their_digest) {
+    m_begin("before", "/s", 1000); ROOT(); m_end();
+    m_begin("after", "/s", 1000); ROOT(); E(.path = "f", .type = "reg", .size = 3, .sha = HA); m_end();
+    REQUIRE(run() == 0);
+    const char *side[2] = { "before", "after" };
+    for (int k = 0; k < 2; k++) {
+        char p[400], want[128], hex[65];
+        snprintf(p, sizeof p, "%s/%s", g_dir, side[k]);
+        FILE *f = fopen(p, "rb");
+        REQUIRE(f != NULL);
+        struct belay_sha256 h;
+        belay_sha256_init(&h);
+        unsigned char buf[4096];
+        for (size_t n; (n = fread(buf, 1, sizeof buf, f)) > 0; ) belay_sha256_update(&h, buf, n);
+        fclose(f);
+        uint8_t d[BELAY_SHA256_DIGEST_LEN];
+        belay_sha256_final(&h, d);
+        belay_hex_encode(hex, d, sizeof d);
+        snprintf(want, sizeof want, "\"%s_sha256\":\"%s\"", side[k], hex);
+        ASSERT_TRUE(strstr(g_text, want) != NULL);
+    }
 }
 
 TEST(identical_manifests_emit_no_record) {
@@ -576,6 +648,9 @@ int main(void) {
     RUN(unknown_attributes_never_read_as_unchanged);
     RUN(absence_below_an_incomplete_or_sealed_directory_is_unknown);
     RUN(a_manifest_with_an_orphan_is_refused_with_no_output);
+    RUN(a_tree_that_changed_while_walked_makes_the_diff_provisional);
+    RUN(the_output_is_never_an_input_however_spelled);
+    RUN(the_trailer_names_both_inputs_by_their_digest);
     RUN(names_sorting_before_the_root_see_its_flags);
     RUN(manifests_of_different_scopes_are_refused_with_no_output);
     RUN(an_unreadable_links_unknown_target_is_not_a_change);

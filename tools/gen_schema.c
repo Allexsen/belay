@@ -195,7 +195,7 @@ static void diff_reasons_block(void) { names_table(DIFF_REASONS, DR_FIRST, DR_CO
 static void diff_header_block(void) { line_table(DIFF_HEADER_FIELDS, DH_COUNT); }
 static void diff_record_block(void) { line_table(DIFF_RECORD_FIELDS, DF_COUNT); }
 static void diff_trailer_block(void) {
-    struct line_field_def t[1 + D_OUTCOME_COUNT];
+    struct line_field_def t[1 + D_OUTCOME_COUNT + DT_COUNT];
     char doc[D_OUTCOME_COUNT][96];
     size_t n = 0;
     t[n++] = DIFF_TRAILER_END;
@@ -203,6 +203,7 @@ static void diff_trailer_block(void) {
         snprintf(doc[i], sizeof doc[i], "Paths whose outcome is `%s`.", DIFF_OUTCOMES[i].name);
         t[n++] = (struct line_field_def){ DIFF_OUTCOMES[i].name, NULL, "int", doc[i] };
     }
+    for (size_t i = 0; i < DT_COUNT; i++) t[n++] = DIFF_TRAILER_FIELDS[i];
     line_table(t, n);
 }
 
