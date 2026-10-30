@@ -346,6 +346,77 @@ static int run_with(const struct belay_interp *t) {
     return 0;
 }
 
+/* Review F8: `out` is cleared before each path, so an interpreter that sets a
+ * count without writing cannot pass one path's findings to the next. */
+static int g_calls;
+static enum belay_interp_result t_stale(void *state, const struct belay_interp_input *in,
+                                        struct belay_findings *out) {
+    (void)state; (void)in;
+    if (g_calls++ == 0) {
+        belay_findings_add(out, "only for f");
+        return BELAY_INTERP_FINDINGS;
+    }
+    out->n = 1;                                   /* claims one, writes nothing */
+    return BELAY_INTERP_FINDINGS;
+}
+
+TEST(one_paths_findings_never_reach_the_next) {
+    m_begin("before", "/s", 1000); ROOT(); E(.path = "f", .type = "reg", .size = 3, .sha = HA);
+    E(.path = "g", .type = "reg", .size = 3, .sha = HA); m_end();
+    m_begin("after", "/s", 1000); ROOT(); E(.path = "f", .type = "reg", .size = 3, .sha = HB);
+    E(.path = "g", .type = "reg", .size = 3, .sha = HB); m_end();
+    g_calls = 0;
+    const struct belay_interp t = { BELAY_INTERP_BINARY, NULL, t_stale, NULL };
+    REQUIRE(run_with(&t) == 0);
+    ASSERT_TRUE(has("f", "\"findings\":[\"only for f\"]"));
+    ASSERT_FALSE(has("g", "only for f"));
+}
+
+/* Review F4: different scopes are refused before any entry is read -- not
+ * reported as whatever is wrong with an entry sorting before the root. */
+TEST(different_scopes_are_refused_before_any_entry_is_read) {
+    char b[400], a[400];
+    snprintf(b, sizeof b, "%s/before", g_dir);
+    snprintf(a, sizeof a, "%s/after", g_dir);
+    FILE *f = fopen(b, "wb");
+    REQUIRE(f != NULL);
+    fputs("{\"belay_manifest\":1,\"created_ns\":1,\"scopes\":[\"/s\"],\"hash\":\"sha256\","
+          "\"hash_max_bytes\":1000,\"store_max_bytes\":0}\n"
+          "{\"path\":\"!a/b\",\"type\":\"reg\",\"mode\":33188,\"uid\":1,\"gid\":1,\"size\":3,"
+          "\"mtime_ns\":1,\"ctime_ns\":1,\"ino\":7,\"dev\":1,\"nlink\":1,\"sha256\":\"" HA "\"}\n", f);
+    fclose(f);
+    m_begin("after", "/other", 1000); ROOT(); m_end();
+    unlink(g_out);
+    ASSERT_EQ_INT(-1, belay_diff(b, a, g_out, NULL));
+    ASSERT_EQ_INT(BELAY_ERR_INVALID, belay_err_code());
+    ASSERT_TRUE(strstr(belay_err_msg(), "different scopes") != NULL);
+    belay_err_clear();
+}
+
+/* Review F3: once the output is in place, the diff has succeeded. A directory
+ * that cannot be opened to sync it (write and search only) does not turn a
+ * complete output into a reported failure. */
+TEST(a_published_output_is_success_even_where_its_directory_cannot_be_synced) {
+    m_begin("before", "/s", 1000); ROOT(); m_end();
+    m_begin("after", "/s", 1000); ROOT(); E(.path = "f", .type = "reg", .size = 3, .sha = HA); m_end();
+    char d[400], out[480], b[400], a[400];
+    snprintf(d, sizeof d, "%s/drop", g_dir);
+    snprintf(out, sizeof out, "%s/out.diff", d);
+    snprintf(b, sizeof b, "%s/before", g_dir);
+    snprintf(a, sizeof a, "%s/after", g_dir);
+    mkdir(d, 0700);
+    REQUIRE(chmod(d, 0300) == 0);
+    const int rc = belay_diff(b, a, out, NULL);
+    const char *why = rc == 0 ? "" : belay_err_msg();
+    chmod(d, 0700);
+    ASSERT_TRUE(rc == 0);
+    if (rc != 0) BELAY_FAIL("refused: %s", why);
+    belay_err_clear();
+    ASSERT_TRUE(access(out, F_OK) == 0);
+    unlink(out);
+    rmdir(d);
+}
+
 TEST(an_interpreter_error_is_a_finding_never_a_failed_diff) {
     m_begin("before", "/s", 1000); ROOT(); E(.path = "f", .type = "reg", .size = 3, .sha = HA); m_end();
     m_begin("after", "/s", 1000); ROOT(); E(.path = "f", .type = "reg", .size = 3, .sha = HB); m_end();
@@ -789,6 +860,9 @@ int main(void) {
     RUN(a_finding_that_is_not_utf8_is_replaced);
     RUN(an_interpreter_sees_the_verdict_and_keeps_its_state_over_one_diff);
     RUN(every_manifest_fact_is_checked_carried_or_ignored_for_a_reason);
+    RUN(one_paths_findings_never_reach_the_next);
+    RUN(different_scopes_are_refused_before_any_entry_is_read);
+    RUN(a_published_output_is_success_even_where_its_directory_cannot_be_synced);
     RUN(names_sorting_before_the_root_see_its_flags);
     RUN(manifests_of_different_scopes_are_refused_with_no_output);
     RUN(an_unreadable_links_unknown_target_is_not_a_change);
