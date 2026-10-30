@@ -3,24 +3,32 @@
 
 Its only sources:
   - docs/spec/diff-v1.md, PROSE ONLY: the "Shape" example (header, record and
-    trailer keys), "How an outcome is decided" (one-sided paths, rules 1-6),
-    "Devices and identity", "Timestamps that move on use", the `changed` /
-    `unknown` paragraph and "An absent record means `unchanged`";
+    trailer keys, checked at run time against the lists below) and the
+    sentence after it ("`before` is the first manifest given and `after` the
+    second, whatever their `created_ns` say"), the "### Trailer" paragraph,
+    "How an outcome is decided" (one-sided paths, rules 1-6), "Devices and
+    identity", "Timestamps that move on use", "A directory's own timestamps",
+    the `changed` / `unknown` paragraph and "An absent record means
+    `unchanged`";
   - test/expect/diff-fields.md, READ AT RUN TIME: for each field its
     `compared as`, `for types`, `on mount roots` and `absent means`, and the
-    outcome rules O1-O4;
+    outcome rules O1-O5;
   - test/expect/manifest-v1.md, read at run time for the entry types.
-Never the generated blocks of the spec, never src/.
+Never the generated blocks of the spec, never src/ or include/.
 
 Deliberately naive: both manifests in memory as dictionaries, the union of
 their paths sorted, ancestors found by walking a path's prefixes.
 
     reference.py <before> <after>   prints the expected diff, one JSON line each
 
-Two things the prose leaves to generated tables are NOT predicted here and are
-checked differently by compare.py: the order of the reasons in `unknown`
-("in the order of the reasons table", a generated table) is compared as a set
-plus one global order that every record must respect.
+What the prose leaves to generated tables:
+  - the order of the reasons in `unknown` ("in the order of the reasons
+    table") is NOT predicted here: compare.py compares the reasons as a set,
+    plus one global order that every record must respect;
+  - the order of the outcome counts in the trailer ("in the order of the
+    outcomes table") is the one the "Shape" example shows.
+One thing no allowed source gives at all: how `xattrs_sha256` is computed
+from a set (see values_differ).
 """
 import base64, collections, hashlib, json, os, re, sys
 
@@ -28,23 +36,50 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 REPO = os.path.normpath(os.path.join(HERE, '..', '..'))
 FIELDS_PIN = os.path.join(REPO, 'test', 'expect', 'diff-fields.md')
 MANIFEST_PIN = os.path.join(REPO, 'test', 'expect', 'manifest-v1.md')
+SPEC = os.path.join(REPO, 'docs', 'spec', 'diff-v1.md')
 
-# From the prose example under "Shape" (diff-v1.md): the header's and the
-# trailer's keys, in the example's order.
+# The header's and the trailer's keys, in order. The header's from the "Shape"
+# example (its first line); `scopes` is spelled `scopes_b64` when the scope
+# is not UTF-8 (ambiguity A9).
 HEADER_KEYS = ['belay_diff', 'scopes', 'before_created_ns', 'after_created_ns',
                'before_hash_max_bytes', 'after_hash_max_bytes', 'scope_remounted',
                'identity_compared']
+# The trailer's from the "### Trailer" paragraph: "`belay_diff_end` is the
+# number of records written. Then come one count per outcome, named as the
+# outcome, ... `unchanged` included" (in the example's order) ...
 OUTCOMES = ['unchanged', 'added', 'removed', 'modified', 'type_changed', 'metadata_only',
             'unknown']
-# After the outcome counts, from "Shape" and the trailer's prose: each
-# manifest's own trailer counts, whether any is non-zero, and the sha256 of
-# each input file (the bytes a diff reads are the whole file).
+# ... "`dir_timestamps_only` counts the directories among `unchanged` whose own
+# timestamps differ (see "A directory's own timestamps")" ...
+DIR_TIMESTAMPS_ONLY = 'dir_timestamps_only'
+# ... "`before_vanished`, `before_unstable` and `before_raced` are the first
+# manifest's `vanished`, `unstable` and `raced` counts, and `after_vanished`,
+# `after_unstable` and `after_raced` the second's. `provisional` is `true`
+# exactly when any of those six is not 0 ... Last, `before_sha256` and
+# `after_sha256` are the sha256 of each manifest file's bytes, all of them".
 INPUT_COUNTS = ['vanished', 'unstable', 'raced']
-TRAILER_KEYS = (['belay_diff_end'] + OUTCOMES + ['before_' + c for c in INPUT_COUNTS]
-                + ['after_' + c for c in INPUT_COUNTS] + ['provisional', 'before_sha256',
-                                                          'after_sha256'])
+TRAILER_KEYS = (['belay_diff_end'] + OUTCOMES + [DIR_TIMESTAMPS_ONLY]
+                + ['before_' + c for c in INPUT_COUNTS] + ['after_' + c for c in INPUT_COUNTS]
+                + ['provisional', 'before_sha256', 'after_sha256'])
 # One-sided reasons, from "Present on one side only".
 NOT_CAPTURED, LISTING_INCOMPLETE, RACED = 'not_captured', 'listing_incomplete', 'raced'
+
+
+def shape_example_keys():
+    """The keys of the first (header) and last (trailer) line of the example
+    under "## Shape" in docs/spec/diff-v1.md -- prose, not a generated block."""
+    text = open(SPEC, encoding='utf-8').read()
+    m = re.search(r'^## Shape\n.*?^```json\n(.*?)^```', text, re.S | re.M)
+    if not m:
+        raise SystemExit('spec: no example under "## Shape" in %s' % SPEC)
+    lines = m.group(1).splitlines()
+    keys = lambda line: [k for k, _ in json.loads(line, object_pairs_hook=list)]
+    return keys(lines[0]), keys(lines[-1])
+
+
+if shape_example_keys() != (HEADER_KEYS, TRAILER_KEYS):
+    raise SystemExit('spec: the "Shape" example\'s header or trailer keys are not the ones '
+                     'reference.py writes: %r' % (shape_example_keys(),))
 
 # ---------------------------------------------------------------------------
 # The pins, parsed at run time.
@@ -155,13 +190,30 @@ def load_fields():
     for name, ok in need.items():
         if name not in fields or not ok(fields[name]):
             raise SystemExit('pin: row %r no longer says what reference.py assumes' % name)
-    for r in ('O1', 'O2', 'O3', 'O4'):
+    for r in ('O1', 'O2', 'O3', 'O4', 'O5'):
         if r not in rules:
             raise SystemExit('pin: outcome rule %s missing' % r)
+    # O2: "With `xattrs_unknown` on either side, or on a mount root (never
+    # read), they are not compared" -- whatever the `on mount roots` column
+    # says for caps and xattrs (in one version of the pin it said `compared`).
+    if 'on a mount root' not in rules['O2']:
+        raise SystemExit('pin: O2 no longer says what reference.py assumes (mount roots)')
     return fields, rules
 
 
+def o5_timestamps(fields, rules):
+    """The fields O5 names ("A directory whose `ctime_ns` or `mtime_ns`
+    differs ..."): a directory's own timestamps, which the trailer counts.
+    O5 holds only while the table compares none of them on a directory."""
+    st = rules['O5']
+    names = [f for f in fields if '`%s`' % f in st]
+    if 'directory' not in st or not names or any(fields[f].applies('dir') for f in names):
+        raise SystemExit('pin: O5 no longer says what reference.py assumes: %r' % st)
+    return names
+
+
 FIELDS, RULES = load_fields()
+DIR_TIMESTAMPS = o5_timestamps(FIELDS, RULES)
 FIELD_ORDER = list(FIELDS)          # `changed` lists fields in this order (the
                                     # manifest's key order; the prose example's
                                     # ["size","mtime_ns","sha256"] follows it)
@@ -180,7 +232,8 @@ def b64(s):
 
 
 def trailer_of(path):
-    """The manifest's own trailer, and the sha256 of the file."""
+    """The manifest's own trailer, and the sha256 of the file: "of each
+    manifest file's bytes, all of them" ("### Trailer")."""
     with open(path, 'rb') as f:
         raw = f.read()
     return json.loads(raw.rstrip(b'\n').split(b'\n')[-1].decode('utf-8')), hashlib.sha256(raw).hexdigest()
@@ -224,12 +277,18 @@ def nearest_ancestor(entries, p):
 
 
 def one_sided(p, present, lacking_entries, added):
+    """The four bullets of "Present on one side only", in their order."""
     anc = nearest_ancestor(lacking_entries, p)
     trace = ['one-sided']
     if anc['type'] == 'dir' and (anc.get('unreadable') or anc.get('mount')):
         return 'unknown', [NOT_CAPTURED], trace + ['not_captured']
     if anc['type'] == 'dir' and anc.get('unstable'):
         return 'unknown', [LISTING_INCOMPLETE], trace + ['listing_incomplete']
+    # "It is not a directory and carries `raced`: `unknown`, reason `raced`.
+    # It changed after it was recorded, and may have become a directory
+    # holding this path before that walk ended."
+    if anc['type'] != 'dir' and anc.get(RACED):
+        return 'unknown', [RACED], trace + ['raced-ancestor']
     if present.get(RACED):
         return 'unknown', [RACED], trace + ['raced-one-sided']
     return ('added' if added else 'removed'), [], trace + ['known-absence']
@@ -252,19 +311,17 @@ def value(e, f):
     return e.get(f)
 
 
-def xattrs_digest_guess(items):
-    """GUESS, never deciding a generated pair: include/belay/manifest.h says the
-    digest is of "the canonical set", whose inline form is "the body of the
-    manifest's xattrs array". The corpus never pairs an inline set with the
-    digest of the same set, so this only matters for hand-made inputs."""
-    body = ','.join(json.dumps(x, ensure_ascii=False, separators=(',', ':')) for x in items)
-    return hashlib.sha256(body.encode('utf-8')).hexdigest()
-
-
 def values_differ(f, vb, va):
+    """A set spelled inline on one side and by its digest on the other
+    (xattrs / xattrs_sha256, "compared as `xattrs`" in the pin) counts as
+    DIFFERENT. No prose or pin gives the digest's formula: the only statement
+    of it is in a generated block of manifest-v1.md, which this file may not
+    use. So this is an assumption about the inputs, not a rule: it holds for
+    every generated pair, because gen_corpus.py never computes a digest from a
+    set (a random 64-hex digest matches a given set's digest with probability
+    2**-256), and it is wrong for a hand-made pair whose digest matches."""
     if f in SPELLINGS and vb is not None and va is not None and vb[0] != va[0]:
-        inline, digest = (vb, va) if vb[0] == f else (va, vb)
-        return xattrs_digest_guess(inline[1]) != digest[1]
+        return True
     return vb != va
 
 
@@ -273,20 +330,28 @@ def both_sides(b, a, ctx):
     trace = []
     flags = [f for f in FLAGS if b.get(f) or a.get(f)]
     scopes = {FIELDS[f].scope for f in flags}
-    mount_root = bool(b.get('mount') or a.get('mount'))       # either side: see ambiguity A2
+    # Either side ("on an entry that is a mount root on either side",
+    # "Timestamps that move on use"; for timestamps, ambiguity A2).
+    mount_root = bool(b.get('mount') or a.get('mount'))
     if mount_root:
         trace.append('mount-root')
     # caps/xattrs "were read on both sides": no metadata-unknown flag on
-    # either side and neither side a mount root (O2; prose `changed` paragraph).
+    # either side and neither side a mount root (O2, checked in load_fields;
+    # prose `changed` paragraph).
     read_both = not mount_root and 'metadata' not in scopes
 
     # Fields whose absence means "could not be read" (`absent means: unknown`),
-    # present on one side only: unknown under rule 4 (`iflags_unknown`).
+    # present on one side only: unknown under rule 4 (`iflags_unknown`) --
+    # where the field is compared at all: by type, and on a mount root only
+    # when the pin's `on mount roots` column says `compared`.
     def one_sided_unknown(types):
         out = []
         for f, s in FIELDS.items():
             if s.absent == 'unknown' and all(s.applies(t) for t in types) and \
                     (f in b) != (f in a):
+                if mount_root and not s.on_mount_roots:
+                    trace.append('not-on-mount-root:' + f)
+                    continue
                 out.append(f)
         return out
 
@@ -355,6 +420,8 @@ def both_sides(b, a, ctx):
             d = vb != va
         else:
             d = values_differ(f, vb, va)
+            if f in SPELLINGS and vb is not None and va is not None and vb[0] != va[0]:
+                trace.append('inline-vs-digest:' + f)            # an assumption: values_differ
         if d:
             changed.append(f)
             if s.cls == CONTENT:
@@ -409,7 +476,10 @@ def check_o4(out, b, a):
 def diff(before, after):
     """None when the scopes differ (refused). Otherwise (header, records,
     trailer, traces): header and trailer as [(key, value)], records as dicts
-    with `path` as bytes, traces {path: [tags]} for messages."""
+    with `path` as bytes, traces {path: [tags]} for messages.
+
+    `before` is the first manifest given and `after` the second, "whatever
+    their `created_ns` say" (diff-v1.md, after the "Shape" example)."""
     hb, sb, eb = load(before)
     ha, sa, ea = load(after)
     if sb != sa:
@@ -423,8 +493,10 @@ def diff(before, after):
               ('before_hash_max_bytes', hb['hash_max_bytes']),
               ('after_hash_max_bytes', ha['hash_max_bytes']),
               ('scope_remounted', remounted), ('identity_compared', not remounted)]
+    assert [('scopes' if k == 'scopes_b64' else k) for k, _ in header] == HEADER_KEYS
     records, counts, traces = [], collections.Counter(), {}
-    for p in sorted(set(eb) | set(ea)):
+    paths = sorted(set(eb) | set(ea))
+    for p in paths:
         b, a = eb.get(p), ea.get(p)
         if b is not None and a is not None:
             out, changed, why, trace = both_sides(b, a, ctx)
@@ -438,6 +510,15 @@ def diff(before, after):
         if out == 'unknown' and not why:
             raise AssertionError('reference bug: unknown without a reason at %r' % p)
         counts[out] += 1
+        # "A directory whose only difference is its own timestamps is
+        # therefore `unchanged` and gets no record; the trailer counts it in
+        # `dir_timestamps_only`, which is part of `unchanged`" -- and an absent
+        # record means "for a directory, possibly with its own timestamps
+        # changed": every `unchanged` directory whose O5 timestamps differ.
+        if out == 'unchanged' and b['type'] == 'dir' and \
+                any(b[f] != a[f] for f in DIR_TIMESTAMPS):
+            counts[DIR_TIMESTAMPS_ONLY] += 1
+            trace = trace + ['dir-timestamps-counted']
         traces[p] = trace + (['remount'] if remounted else [])
         if out == 'unchanged':
             continue
@@ -450,11 +531,16 @@ def diff(before, after):
         if out == 'unknown':
             rec['unknown'] = why
         records.append(rec)
-    trailer = [('belay_diff_end', len(records))] + [(o, counts[o]) for o in OUTCOMES]
+    # "every path present in either manifest is counted once, so the counts
+    # add up to the number of distinct paths"
+    assert sum(counts[o] for o in OUTCOMES) == len(paths)
+    trailer = ([('belay_diff_end', len(records))] + [(o, counts[o]) for o in OUTCOMES]
+               + [(DIR_TIMESTAMPS_ONLY, counts[DIR_TIMESTAMPS_ONLY])])
     (tb, shab), (ta, shaa) = trailer_of(before), trailer_of(after)
     inputs = [('before_' + c, tb[c]) for c in INPUT_COUNTS] + [('after_' + c, ta[c]) for c in INPUT_COUNTS]
     trailer += inputs + [('provisional', any(v != 0 for _, v in inputs)),
                          ('before_sha256', shab), ('after_sha256', shaa)]
+    assert [k for k, _ in trailer] == TRAILER_KEYS
     return header, records, trailer, traces
 
 
