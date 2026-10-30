@@ -114,7 +114,9 @@ int emit_path(struct emitter *em, const struct belay_entry *before,
     if (ap(&b, ",\"%s\":\"%s\",\"%s\":\"%s\"", R[DF_OUTCOME].name, DIFF_OUTCOMES[v->outcome].name,
            R[DF_TYPE].name, ENTRY_TYPES[e->type].name) == -1)
         return -1;
-    if (v->outcome == D_TYPE_CHANGED &&
+    /* Whenever both types are known and differ: a raced type change, unknown,
+     * keeps the type it had too (decided 2026-10-30). */
+    if (before != NULL && after != NULL && before->type != after->type &&
         ap(&b, ",\"%s\":\"%s\"", R[DF_TYPE_BEFORE].name, ENTRY_TYPES[before->type].name) == -1)
         return -1;
     if (v->changed) {

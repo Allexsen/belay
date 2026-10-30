@@ -641,6 +641,25 @@ TEST(type_change_names_the_type_before) {
                          "\"changed\":[\"type\"]"));
 }
 
+/* Decided 2026-10-30: a raced type change is unknown (rule 1), but both types
+ * are known, so its record keeps the type before, as a type_changed does. */
+TEST(a_raced_type_change_names_the_type_before) {
+    m_begin("before", "/s", 1000); ROOT(); E(.path = "x", .type = "reg", .size = 3, .sha = HA, .has_iflags = true, .iflags = 16); m_end();
+    m_begin("after", "/s", 1000); ROOT(); E(.path = "x", .type = "lnk", .target = "t", .raced = true); m_end();
+    REQUIRE(run() == 0);
+    ASSERT_TRUE(has("x", "\"outcome\":\"unknown\",\"type\":\"lnk\",\"type_before\":\"reg\","
+                         "\"changed\":[\"type\"],\"unknown\":[\"raced\"]}"));
+    /* raced on the other side, the same */
+    m_begin("before", "/s", 1000); ROOT(); E(.path = "x", .type = "reg", .size = 3, .sha = HA, .raced = true); m_end();
+    m_begin("after", "/s", 1000); ROOT(); E(.path = "x", .type = "lnk", .target = "t"); m_end();
+    REQUIRE(run() == 0);
+    ASSERT_TRUE(has("x", "\"type_before\":\"reg\""));
+    /* a raced path whose type did not change has none */
+    m_begin("after", "/s", 1000); ROOT(); E(.path = "x", .type = "reg", .size = 4, .sha = HB); m_end();
+    REQUIRE(run() == 0);
+    ASSERT_TRUE(has("x", "\"outcome\":\"unknown\"") && !has("x", "type_before"));
+}
+
 /* Rule 1: raced on either side is unknown, even with a different hash --
  * its recorded fields may not be the state at the end of its walk. */
 TEST(raced_is_unknown_even_when_a_field_differs) {
@@ -929,6 +948,7 @@ int main(void) {
     RUN(new_inode_permissions_and_ctime_alone_are_metadata_only);
     RUN(a_directorys_own_timestamps_are_counted_never_emitted);
     RUN(type_change_names_the_type_before);
+    RUN(a_raced_type_change_names_the_type_before);
     RUN(raced_is_unknown_even_when_a_field_differs);
     RUN(unknown_attributes_never_read_as_unchanged);
     RUN(absence_below_an_incomplete_or_sealed_directory_is_unknown);
