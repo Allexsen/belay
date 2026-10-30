@@ -118,9 +118,9 @@ owner is invisible.
 
 In addition to the grammar above:
 
-- **Fields appear in one fixed order**, optional ones omitted, never reordered; unknown fields
-  may appear only after every known one. The orders, for entries, header and trailer, are
-  generated below.
+- **Fields appear in one fixed order**, optional ones omitted, never reordered; a key this
+  version does not define is rejected, wherever it appears. The orders, for entries, header and
+  trailer, are generated below.
 - **No key appears twice** in one line. "First wins" would let two different lines mean the same
   thing.
 - **Boolean flags are spelled exactly `"key":true`**, and are absent otherwise. Any other value
@@ -197,12 +197,11 @@ an empty target, so it cannot be confused with one.
 
 ### Growing the format
 
-Unknown fields are ignored by a reader, so the format can grow -- **but only by informational
-fields.** Any new field whose absence an older reader would misread as "nothing changed" (as
-`unreadable`, `unstable` and `rdev` would have been) MUST come with a version bump, which older
-readers refuse. `unreadable`, `unstable`, `rdev`, `raced` and the trailer counts `mounts` and
-`raced` are part of version 1 because version 1 has not shipped. Once Phase 3 publishes the diff
-schema (diff.v1), every format change needs an explicit version bump.
+A reader rejects a key this version does not define, so the format grows **only with a version
+bump**, which older readers refuse: a field an older reader skipped would be read as absent, and
+absence means something for most fields (as it would have for `unreadable`, `unstable` and
+`rdev`). `unreadable`, `unstable`, `rdev`, `raced` and the trailer counts `mounts` and `raced` are
+part of version 1 because version 1 has not shipped.
 
 ## Trailer
 

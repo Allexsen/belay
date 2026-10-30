@@ -168,14 +168,14 @@ int lex_object(const char *s, size_t len, struct obj *o) {
 }
 
 /*
- *  Field order is part of the canonical form: the writer always emits known
- *  keys in the order of `order`, and the reader rejects any other order --
- *  otherwise one entry would have many spellings. Unknown keys (informational
- *  fields a newer writer may add) may only follow every known key.
+ *  Field order is part of the canonical form: the writer always emits keys in
+ *  the order of `order`, and the reader rejects any other order -- otherwise
+ *  one entry would have many spellings. A key not in `order` is rejected
+ *  (decided 2026-10-30): a reader that skipped it would read what it means as
+ *  absent; the format grows only with a version bump.
  */
 int lex_order(const struct obj *o, const char *const *order, size_t n) {
-    size_t next = 0;               /* index into `order` the next known key must be at or after */
-    bool seen_unknown = false;
+    size_t next = 0;               /* index into `order` the next key must be at or after */
     for (size_t i = 0; i < o->n; i++) {
         size_t k = n;
         for (size_t j = 0; j < n; j++) {
@@ -184,8 +184,11 @@ int lex_order(const struct obj *o, const char *const *order, size_t n) {
                 break;
             }
         }
-        if (k == n) { seen_unknown = true; continue; }
-        if (seen_unknown) return lex_corrupt("a known field follows an unknown one");
+        if (k == n) {
+            belay_err_set(BELAY_ERR_CORRUPT, 0, "manifest: unknown key \"%.*s\"",
+                          (int)o->p[i].klen, o->p[i].key);
+            return -1;
+        }
         if (k < next) return lex_corrupt("fields out of canonical order");
         next = k + 1;
     }
