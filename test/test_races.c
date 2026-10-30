@@ -17,6 +17,7 @@
 #include "belay_test.h"
 #include "belay/manifest.h"
 #include "belay/error.h"
+#include "belay/hash.h"
 #include "capture/capture.h"
 
 #include <errno.h>
@@ -31,6 +32,8 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <dirent.h>
+#include <sys/resource.h>
 #include <sys/stat.h>
 #include <sys/xattr.h>
 #include <time.h>
@@ -55,13 +58,15 @@ enum arm { NONE, SWAP_ON_DIR_OPEN, SWAP_ON_READLINK, REPLACE_LINK_WITH_FILE,
            WRITER_LEAVES_DURING_READ,  /* g_x's writer closes while belay reads it */
            MOUNT_AFTER_WALK,         /* tmpfs over g_x once the walk is done */
            STALE_LISTING,            /* the walk's listing of g_x omits g_y, once */
-           VANISH_ON_STAT };         /* g_x's stat fails ENOENT once; the file stays */
+           VANISH_ON_STAT,           /* g_x's stat fails ENOENT once; the file stays */
+           STORE_GONE_ON_OPEN };     /* the store directory is removed as g_x is opened */
 static int g_flip;
 
 static char g_root[256], g_m[300];
 static const char *g_first;      /* MOVE_BETWEEN_DIRS: the directory walked first */
 
 static enum arm g_arm;
+static char g_store[300];        /* check_store's content store */
 static const char *g_x, *g_y;
 static int g_fired;
 
@@ -137,6 +142,9 @@ static int t_openat(void *ctx, int fd, const char *name, int flags) {
             if (w >= 0) { if (write(w, "NEW!", 4) != 4) { /* best effort */ } close(w); }
         }
     }
+    if (g_arm == STORE_GONE_ON_OPEN && !g_fired && !(flags & O_DIRECTORY) && g_x != NULL &&
+        strcmp(name, g_x) == 0 && rmdir(g_store) == 0)
+        g_fired = 1;                     /* the store, still empty, is gone */
     const int r = g_real->openat(g_real->ctx, fd, name, flags);
     if ((g_arm == WRITER_DURING_READ || g_arm == WRITER_LEAVES_DURING_READ) && r >= 0 &&
         !(flags & O_DIRECTORY) && g_x != NULL &&
@@ -460,12 +468,10 @@ static int check(struct belay_manifest_stats *st) {
 }
 
 /* As check(), with the content store on. */
-static char g_store[300];
-static int check_store(struct belay_manifest_stats *st) {
-    snprintf(g_store, sizeof g_store, "/tmp/belay_races_store_%d", (int)getpid());
+static int check_store_max(struct belay_manifest_stats *st, uint64_t store_max) {
     struct belay_manifest_opts o = {
         .hash_max_bytes = BELAY_HASH_MAX_BYTES_DEFAULT,
-        .store_max_bytes = BELAY_STORE_MAX_BYTES_DEFAULT,
+        .store_max_bytes = store_max,
         .store_dir = g_store,
     };
     const int rc = capture_write(&g_ops, g_m, g_root, &o, st);
@@ -473,6 +479,16 @@ static int check_store(struct belay_manifest_stats *st) {
     if (rc != 0) return rc;
     g_n = 0;
     return belay_manifest_read(g_m, collect, NULL);
+}
+static int check_store(struct belay_manifest_stats *st) {
+    return check_store_max(st, BELAY_STORE_MAX_BYTES_DEFAULT);
+}
+
+/* An empty content store for the next check_store (nothing of it exists). */
+static void fresh_store(void) {
+    char cmd[400];
+    snprintf(cmd, sizeof cmd, "rm -rf '%s'", g_store);
+    if (system(cmd) != 0) { /* best effort */ }
 }
 
 /* D1: a directory swapped between its stat and its open. Before, A's mode and
@@ -1237,10 +1253,101 @@ TEST(a_name_that_vanished_and_came_back_flags_its_directory) {
     ASSERT_TRUE(y != NULL && !y->unstable && !y->raced);
 }
 
+/* R11 (audit 2026-10): the content store degrades, it never costs the
+ * capture. A store that cannot begin a copy, fails mid-copy or cannot
+ * publish it keeps no copy: the entry is recorded and hashed, without
+ * `stored`, and the failure is counted. Before, each failed the capture.
+ * The faults are ones root cannot bypass. */
+TEST(a_store_that_cannot_begin_a_copy_keeps_the_entry) {
+    reset();
+    touch("f.txt", "content\n");
+    usleep(20000);
+    fresh_store();
+    arm(STORE_GONE_ON_OPEN, "f.txt", NULL);
+    struct belay_manifest_stats st;
+    ASSERT_EQ_INT(0, check_store(&st));
+    ASSERT_TRUE(g_fired);
+    const struct belay_entry *f = find("f.txt");
+    ASSERT_TRUE(f != NULL && f->has_hash && !f->has_stored);
+    ASSERT_EQ_INT(1, (int)st.store_failed);
+}
+
+TEST(a_store_that_cannot_publish_a_copy_keeps_the_entry) {
+    reset();
+    touch("f.txt", "content\n");
+    usleep(20000);
+    fresh_store();
+    REQUIRE(mkdir(g_store, 0700) == 0);
+    /* The copy's fan-out directory name is taken by a regular file. */
+    struct belay_sha256 h;
+    uint8_t d[BELAY_SHA256_DIGEST_LEN];
+    char hex[65], p[400];
+    belay_sha256_init(&h);
+    belay_sha256_update(&h, "content\n", 8);
+    belay_sha256_final(&h, d);
+    belay_hex_encode(hex, d, sizeof d);
+    snprintf(p, sizeof p, "%s/%.2s", g_store, hex);
+    FILE *blocker = fopen(p, "wb");
+    REQUIRE(blocker != NULL);
+    fclose(blocker);
+    struct belay_manifest_stats st;
+    ASSERT_EQ_INT(0, check_store(&st));
+    const struct belay_entry *f = find("f.txt");
+    ASSERT_TRUE(f != NULL && f->has_hash && !f->has_stored);
+    ASSERT_EQ_INT(1, (int)st.store_failed);
+}
+
+TEST(a_store_that_fails_mid_copy_keeps_the_entry) {
+    reset();
+    /* 256 KiB of text: the copy outgrows a 64 KiB file-size limit, while the
+     * manifest and the walk's temporary files stay far below it. */
+    char p[512];
+    path(p, sizeof p, "big.txt");
+    FILE *f = fopen(p, "wb");
+    REQUIRE(f != NULL);
+    for (int i = 0; i < 16384; i++) fputs("fifteen bytes.\n", f);
+    fclose(f);
+    usleep(20000);
+    fresh_store();
+    int fds[2];
+    REQUIRE(pipe(fds) == 0);
+    const pid_t pid = fork();
+    REQUIRE(pid != -1);
+    if (pid == 0) {
+        close(fds[0]);
+        signal(SIGXFSZ, SIG_IGN);
+        const struct rlimit rl = { 64 * 1024, 64 * 1024 };
+        struct belay_manifest_stats st;
+        memset(&st, 0, sizeof st);
+        const int rc = setrlimit(RLIMIT_FSIZE, &rl) == 0 ? check_store_max(&st, 1024 * 1024) : -2;
+        const size_t out[2] = { (size_t)(rc + 2), st.store_failed };
+        _exit(write(fds[1], out, sizeof out) == (ssize_t)sizeof out ? 0 : 1);
+    }
+    close(fds[1]);
+    size_t got[2] = { 0, 0 };
+    const ssize_t n = read(fds[0], got, sizeof got);
+    close(fds[0]);
+    int status = 0;
+    waitpid(pid, &status, 0);
+    REQUIRE(n == (ssize_t)sizeof got && WIFEXITED(status) && WEXITSTATUS(status) == 0);
+    ASSERT_EQ_INT(2, (int)got[0]);                  /* the capture succeeded */
+    ASSERT_EQ_INT(1, (int)got[1]);                  /* and counted the dropped copy */
+    g_n = 0;
+    ASSERT_EQ_INT(0, belay_manifest_read(g_m, collect, NULL));
+    const struct belay_entry *e = find("big.txt");
+    ASSERT_TRUE(e != NULL && e->has_hash && !e->has_stored);
+    DIR *sd = opendir(g_store);                     /* the staged part is gone */
+    REQUIRE(sd != NULL);
+    for (struct dirent *de; (de = readdir(sd)) != NULL; )
+        ASSERT_FALSE(strncmp(de->d_name, ".tmp-", 5) == 0);
+    closedir(sd);
+}
+
 int main(void) {
     decorate();
     snprintf(g_root, sizeof g_root, "/tmp/belay_races_%d", (int)getpid());
     snprintf(g_m, sizeof g_m, "/tmp/belay_races_%d.ndjson", (int)getpid());
+    snprintf(g_store, sizeof g_store, "/tmp/belay_races_store_%d", (int)getpid());
 
     RUN(directory_swapped_between_stat_and_open_is_flagged);
     RUN(symlink_swapped_mid_read_is_never_recorded_mismatched);
@@ -1270,6 +1377,9 @@ int main(void) {
     RUN(r3_one_statx_eperm_is_recorded_and_does_not_switch_statx_off);
     RUN(r3_empty_link_target_is_recorded_unreadable);
     RUN(a_name_that_vanished_and_came_back_flags_its_directory);
+    RUN(a_store_that_cannot_begin_a_copy_keeps_the_entry);
+    RUN(a_store_that_cannot_publish_a_copy_keeps_the_entry);
+    RUN(a_store_that_fails_mid_copy_keeps_the_entry);
     RUN(w6_file_capability_is_recorded);
     RUN(w6_unreadable_xattrs_are_unknown_not_none);
 

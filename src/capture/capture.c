@@ -28,12 +28,14 @@ static enum belay_entry_type type_of(mode_t m) {
 }
 
 /* Hashes by fd: no path is re-resolved, so there is no window between the
- * open and the read. */
-/* Hashes by fd, and when `tx` is non-NULL stages the same bytes into the
- * store in the same pass: what is stored is exactly what was hashed. `*binary`
- * reports a NUL within the first SNIFF_BYTES. */
+ * open and the read. When `tx` is non-NULL, stages the same bytes into the
+ * store in the same pass: what is stored is exactly what was hashed. A store
+ * write that fails drops the copy (*store_failed) and the hash goes on: the
+ * store degrades, it never costs the entry (R11). `*binary` reports a NUL
+ * within the first SNIFF_BYTES. 0, or -1 when the file could not be read. */
 static int hash_fd(const struct fsops *ops, int fd, unsigned char *buf, char hex_out[65],
-                   uint64_t *nread, struct belay_store_tx *tx, bool *binary) {
+                   uint64_t *nread, struct belay_store_tx *tx, bool *store_failed,
+                   bool *binary) {
     struct belay_sha256 c;
     belay_sha256_init(&c);
     *nread = 0;
@@ -43,8 +45,7 @@ static int hash_fd(const struct fsops *ops, int fd, unsigned char *buf, char hex
         if (n == 0) break;
         if (n < 0) {
             if (errno == EINTR) continue;
-            belay_err_set(BELAY_ERR_IO, errno, "hash: read failed");
-            return -2;                      /* the file's problem, not belay's */
+            return -1;                      /* the file's problem, not belay's */
         }
         if (*nread < SNIFF_BYTES) {
             const size_t span = (size_t)n < SNIFF_BYTES - *nread ? (size_t)n
@@ -52,7 +53,11 @@ static int hash_fd(const struct fsops *ops, int fd, unsigned char *buf, char hex
             if (memchr(buf, '\0', span) != NULL) *binary = true;
         }
         belay_sha256_update(&c, buf, (size_t)n);
-        if (tx != NULL && belay_store_write(tx, buf, (size_t)n) == -1) return -1;
+        if (tx != NULL && belay_store_write(tx, buf, (size_t)n) == -1) {
+            belay_err_clear();
+            *store_failed = true;
+            tx = NULL;
+        }
         *nread += (uint64_t)n;
     }
     uint8_t d[BELAY_SHA256_DIGEST_LEN];
@@ -391,29 +396,34 @@ int cap_read_file(int pfd, const char *name, const struct stat *st, const char *
      */
     if (want && wc->ops->writer_present(wc->ops->ctx, fd) == 1) want = false;
 
+    /* A store that fails -- here, mid-copy or at commit -- keeps no copy;
+     * the entry is recorded as if no copy had been wanted (R11). */
     struct belay_store_tx tx;
     if (want && belay_store_begin(wc->store, &tx) == -1) {
-        close(fd);
-        return -1;
+        belay_err_clear();
+        wc->store_failed++;
+        want = false;
     }
 
     uint64_t nread = 0;
-    bool binary = false;
-    const int h = hash_fd(wc->ops, fd, wc->readbuf, e->sha256_hex, &nread, want ? &tx : NULL, &binary);
+    bool binary = false, store_failed = false;
+    const int h = hash_fd(wc->ops, fd, wc->readbuf, e->sha256_hex, &nread, want ? &tx : NULL,
+                          &store_failed, &binary);
+    if (store_failed) {
+        belay_store_abort(&tx);
+        wc->store_failed++;
+        want = false;
+    }
     if (h == 0 && want && wc->ops->writer_present(wc->ops->ctx, fd) == 1) {
         belay_store_abort(&tx);                 /* a writer opened during the read */
         want = false;
     }
     if (h != 0) {
+        /* The file could not be read (EIO and friends): record it. */
         if (want) belay_store_abort(&tx);
         close(fd);
-        if (h == -2) {
-            /* The file could not be read (EIO and friends): record it. */
-            belay_err_clear();
-            outcome_apply(e, FACET_CONTENT, OUT_DENIED, &wc->tally);
-            return V_OK;
-        }
-        return -1;                                      /* store write failed */
+        outcome_apply(e, FACET_CONTENT, OUT_DENIED, &wc->tally);
+        return V_OK;
     }
     if (wc->ops->fstat(wc->ops->ctx, fd, &after) == -1) {
         if (want) belay_store_abort(&tx);
@@ -435,9 +445,13 @@ int cap_read_file(int pfd, const char *name, const struct stat *st, const char *
     /* Unclaimed binary content is not kept: the text interpreter could not
      * use it. Claimed content is kept whatever it is. */
     if (want && !(claim.keep == BELAY_KEEP_DEFAULT && binary)) {
-        if (belay_store_commit(&tx, e->sha256_hex) == -1) return -1;
-        e->has_stored = true;
-        memcpy(e->stored_hex, e->sha256_hex, sizeof e->stored_hex);
+        if (belay_store_commit(&tx, e->sha256_hex) == -1) {     /* ends the transaction */
+            belay_err_clear();
+            wc->store_failed++;
+        } else {
+            e->has_stored = true;
+            memcpy(e->stored_hex, e->sha256_hex, sizeof e->stored_hex);
+        }
     } else if (want) {
         belay_store_abort(&tx);
     }
