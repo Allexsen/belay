@@ -58,7 +58,7 @@ SAN_FLAGS	= -fsanitize=address,undefined -fno-omit-frame-pointer -g -O1
 SAN_BUILD	= $(BUILD)/san
 SAN_TEST_BIN	= $(TEST_SRC:test/%.c=$(SAN_BUILD)/test/%)
 
-.PHONY: all clean test check check-san fuzz bench platform fs-scenarios gen gen-check measure oracle lib lint
+.PHONY: all clean test check check-san fuzz bench platform fs-scenarios gen gen-check measure oracle lib lint ci-check
 
 all: $(BIN)
 
@@ -127,8 +127,11 @@ check-san: $(SAN_TEST_BIN)
 lint:
 	@python3 scripts/lint-tests.py $(TEST_SRC)
 
+# The CI workflow gates what it claims to (scripts/check-ci.py).
+ci-check:
+	@python3 scripts/check-ci.py
 
-check: all lint gen-check measure test
+check: all lint ci-check gen-check measure test
 
 # Generated from the schemas in src/schema/ (entry.c, diff_schema.c): the
 # specs' tables and rules, and the fuzz target's invariants. `make gen` rewrites them;

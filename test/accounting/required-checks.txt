@@ -1,0 +1,10 @@
+# The CI jobs: exactly the jobs of .github/workflows/ci.yml, and exactly the
+# checks main's branch protection must require (scripts/check-ci.py).
+linux-x86_64
+linux-arm64
+macos-portable
+asan-ubsan
+fuzz
+dco
+docker
+filesystems

@@ -1,0 +1,35 @@
+# Every step of every CI job: "job | step | check" for a step that verifies
+# something, "job | step | setup" for one that only prepares (scripts/check-ci.py).
+# A step is named by its `name:`, else its first `run:` line, else its `uses:`.
+linux-x86_64 | actions/checkout@v5 | setup
+linux-x86_64 | uname -m | setup
+linux-x86_64 | platform summary | setup
+linux-x86_64 | enable unprivileged user namespaces | setup
+linux-x86_64 | build + test | check
+linux-x86_64 | diff oracle (belay_diff against a naive reference) | check
+linux-arm64 | actions/checkout@v5 | setup
+linux-arm64 | uname -m | setup
+linux-arm64 | platform summary | setup
+linux-arm64 | enable unprivileged user namespaces | setup
+linux-arm64 | build + test | check
+macos-portable | actions/checkout@v5 | setup
+macos-portable | uname -m | setup
+macos-portable | platform summary | setup
+macos-portable | build + test | check
+asan-ubsan | actions/checkout@v5 | setup
+asan-ubsan | uname -m | setup
+asan-ubsan | platform summary | setup
+asan-ubsan | enable unprivileged user namespaces | setup
+asan-ubsan | asan + ubsan | check
+fuzz | actions/checkout@v5 | setup
+fuzz | fuzz (clang/libFuzzer) | check
+dco | actions/checkout@v5 | setup
+dco | check Signed-off-by on new commits | check
+docker | actions/checkout@v5 | setup
+docker | build + test + /usr timing inside ubuntu:24.04 | check
+filesystems | actions/checkout@v5 | setup
+filesystems | install filesystem tools | setup
+filesystems | build | check
+filesystems | btrfs (loopback, with a subvolume inside the scope) | check
+filesystems | FAT (loopback, 2 s timestamps) | check
+filesystems | NFS (loopback export) | check
