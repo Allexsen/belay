@@ -25,7 +25,7 @@ int  emit_open(struct emitter *em, FILE *f);
 void emit_close(struct emitter *em);
 
 int emit_header(struct emitter *em, const struct belay_manifest_header *before,
-                const struct belay_manifest_header *after);
+                const struct belay_manifest_header *after, bool scope_remounted);
 
 /* One path's verdict: counted, and written unless unchanged. `findings` may
  * be NULL. */

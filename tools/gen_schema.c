@@ -221,22 +221,36 @@ static void diff_trailer_block(void) {
 static const char *const CLASS_NAMES[] = {
     [CC_UNSET] = NULL,                  /* refused before anything is generated */
     [CC_KEY] = "key", [CC_TYPE] = "type", [CC_CONTENT] = "content", [CC_METADATA] = "metadata",
-    [CC_IDENTITY] = "identity", [CC_CTIME] = "ctime", [CC_FLAG] = "flag", [CC_INFO] = "not compared",
+    [CC_IDENTITY] = "identity", [CC_DEVICE] = "identity: device relation",
+    [CC_INODE] = "identity: within one device", [CC_CTIME] = "ctime", [CC_FLAG] = "flag",
+    [CC_INFO] = "not compared",
+};
+static const char *const MOUNT_NAMES[] = {
+    [MR_UNSET] = NULL, [MR_COMPARED] = "compared", [MR_NOT_COMPARED] = "not compared",
+};
+static const char *const ABSENT_NAMES[] = {
+    [AM_UNSET] = NULL, [AM_REQUIRED] = "required", [AM_FLAG] = "flag", [AM_NONE] = "none",
+    [AM_NONE_IF_READ] = "none if read", [AM_UNKNOWN] = "unknown",
+    [AM_WITH_UNVERIFIED] = "with unverified", [AM_ONLY_ON_TYPES] = "only on its types",
+    [AM_NA] = "n/a",
 };
 static const char *const SCOPE_NAMES[] = {
     [US_UNSET] = NULL, [US_NONE] = "", [US_CONTENT] = "content", [US_METADATA] = "metadata",
     [US_ALL] = "everything",
 };
 static void diff_fields_block(void) {
-    printf("| field | class | for types | makes unknown | why |\n|---|---|---|---|---|\n");
+    printf("| field | class | for types | on mount roots | absent means | makes unknown | why |\n"
+           "|---|---|---|---|---|---|---|\n");
     for (int f = 0; f < F_COUNT; f++) {
         const struct field_change *c = &DIFF_FIELDS[f];
         char ty[128];
         type_names(ty, sizeof ty, c->types, ", ");
         if (strchr(c->why, '|') != NULL) abort();
-        printf("| `%s` | %s | %s | %s | %s |\n", ENTRY_FIELDS[f].name, CLASS_NAMES[c->cls],
+        printf("| `%s` | %s | %s | %s | %s | %s | %s |\n", ENTRY_FIELDS[f].name,
+               CLASS_NAMES[c->cls],
                c->cls == CC_FLAG || c->cls == CC_INFO || c->cls == CC_KEY ? "" : ty,
-               SCOPE_NAMES[c->unknown], c->why);
+               MOUNT_NAMES[c->mount_roots], ABSENT_NAMES[c->absent], SCOPE_NAMES[c->unknown],
+               c->why);
     }
 }
 
@@ -407,6 +421,8 @@ static int tables_complete(void) {
         if (c->unknown == US_UNSET) REFUSE("DIFF_FIELDS[%s]: unknown scope unset", n);
         if (c->reason == DR_UNSET) REFUSE("DIFF_FIELDS[%s]: reason unset", n);
         if (c->why == NULL) REFUSE("DIFF_FIELDS[%s]: no description", n);
+        if (c->mount_roots == MR_UNSET) REFUSE("DIFF_FIELDS[%s]: mount-root cell unset", n);
+        if (c->absent == AM_UNSET) REFUSE("DIFF_FIELDS[%s]: absent-means cell unset", n);
         if (c->cls == CC_FLAG && (c->unknown == US_NONE || c->reason < DR_FIRST))
             REFUSE("DIFF_FIELDS[%s]: a flag needs a scope and a reason", n);
         if (c->cls != CC_FLAG && (c->unknown != US_NONE || c->reason != DR_NONE))

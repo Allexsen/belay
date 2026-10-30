@@ -4,14 +4,21 @@
 
 #include <string.h>
 
-/* differs(): 1 yes, 0 no, -1 not compared (a side does not know it). */
+/* differs(): 1 yes, 0 no, -1 not compared (a side does not know it), -3 not
+ * compared because one side lacks a field whose absence means "could not be
+ * read" (metadata unknown). */
 #define NOT_COMPARED (-1)
 #define NO_ANSWER    (-2)   /* a field with no case: an internal error, never "not compared" */
+#define ONE_SIDE     (-3)
 
 /* Whether field `f` differs between the two sides. Every case of enum
  * entry_field, and nothing after the switch that could pass for an answer. */
-static int differs(enum entry_field f, const struct belay_entry *b, const struct belay_entry *a) {
-    const bool xu = b->xattrs_unknown || a->xattrs_unknown;
+static int differs(const struct diff_ctx *ctx, enum entry_field f, const struct belay_entry *b,
+                   const struct belay_entry *a) {
+    /* Extended attributes were read on both sides: none recorded means none.
+     * Under xattrs_unknown, or on a mount root (never read), they are not
+     * compared, and xattrs_unknown makes the metadata unknown (rule 4). */
+    const bool attrs_read = !b->xattrs_unknown && !a->xattrs_unknown && !b->is_mount && !a->is_mount;
     switch (f) {
     case F_MODE:   return b->mode != a->mode;
     case F_UID:    return b->uid != a->uid;
@@ -19,15 +26,22 @@ static int differs(enum entry_field f, const struct belay_entry *b, const struct
     case F_SIZE:   return b->size != a->size;
     case F_MTIME:  return b->mtime_ns != a->mtime_ns;
     case F_CTIME:  return b->ctime_ns != a->ctime_ns;
-    case F_INO:    return b->ino != a->ino;
-    case F_DEV:    return b->dev != a->dev;
+    case F_INO:
+        /* An inode number means something within one device only. */
+        if (ctx->remounted || b->dev != a->dev) return NOT_COMPARED;
+        return b->ino != a->ino;
+    case F_DEV:
+        /* The relation to the scope root's device, never the raw number. */
+        return (b->dev == ctx->root_dev_before) != (a->dev == ctx->root_dev_after);
     case F_NLINK:  return b->nlink != a->nlink;
-    case F_IFLAGS: return b->has_iflags && a->has_iflags ? b->iflags != a->iflags : -1;
+    case F_IFLAGS:
+        if (b->has_iflags && a->has_iflags) return b->iflags != a->iflags;
+        return b->has_iflags == a->has_iflags ? 0 : ONE_SIDE;
     case F_CAPS:
-        if (xu) return -1;
+        if (!attrs_read) return NOT_COMPARED;
         return b->has_caps != a->has_caps || (b->has_caps && strcmp(b->caps_hex, a->caps_hex) != 0);
     case F_XATTRS:
-        if (xu) return -1;
+        if (!attrs_read) return NOT_COMPARED;
         return b->has_xattrs != a->has_xattrs ||
                (b->has_xattrs && strcmp(b->xattrs_sha256_hex, a->xattrs_sha256_hex) != 0);
     case F_SHA256:
@@ -47,7 +61,8 @@ static int differs(enum entry_field f, const struct belay_entry *b, const struct
     return NO_ANSWER;
 }
 
-int classify_both(const struct belay_entry *b, const struct belay_entry *a, struct verdict *v) {
+int classify_both(const struct diff_ctx *ctx, const struct belay_entry *b,
+                  const struct belay_entry *a, struct verdict *v) {
     memset(v, 0, sizeof *v);                                /* D_UNDECIDED */
     /* Flags on either side: their reasons, and what they make unknown. */
     const uint32_t flags = entry_present(b) | entry_present(a);
@@ -55,7 +70,8 @@ int classify_both(const struct belay_entry *b, const struct belay_entry *a, stru
     bool raced = false, content_unknown = false, meta_unknown = false;
     for (int f = 0; f < F_COUNT; f++) {
         const struct field_change *c = &DIFF_FIELDS[f];
-        BELAY_CHECK(c->cls != CC_UNSET && c->unknown != US_UNSET && c->reason != DR_UNSET, -1);
+        BELAY_CHECK(c->cls != CC_UNSET && c->unknown != US_UNSET && c->reason != DR_UNSET &&
+                    c->mount_roots != MR_UNSET && c->absent != AM_UNSET, -1);
         if (c->cls != CC_FLAG || !(flags & FBIT(f))) continue;
         BELAY_CHECK(c->reason >= DR_FIRST && c->reason < DR_COUNT && c->unknown != US_NONE, -1);
         reasons |= DRBIT(c->reason);
@@ -70,13 +86,24 @@ int classify_both(const struct belay_entry *b, const struct belay_entry *a, stru
         if (raced) v->reasons = reasons;
         return 0;
     }
+    /* A mount root's own timestamps belong to the mounted filesystem. */
+    const bool mount_root = b->is_mount || a->is_mount;
     bool content_diff = false, meta_diff = false;
     for (int f = 0; f < F_COUNT; f++) {
         const enum change_class cls = diff_field_class((enum entry_field)f, a->type);
         BELAY_CHECK(cls != CC_UNSET, -1);
-        if (cls != CC_CONTENT && cls != CC_METADATA && cls != CC_IDENTITY) continue;
-        const int d = differs((enum entry_field)f, b, a);
+        if (cls != CC_CONTENT && cls != CC_METADATA && cls != CC_IDENTITY && cls != CC_DEVICE &&
+            cls != CC_INODE)
+            continue;
+        if (mount_root && DIFF_FIELDS[f].mount_roots == MR_NOT_COMPARED) continue;
+        const int d = differs(ctx, (enum entry_field)f, b, a);
         BELAY_CHECK(d != NO_ANSWER, -1);
+        if (d == ONE_SIDE) {                       /* absent = could not be read: rule 4 */
+            BELAY_CHECK(DIFF_FIELDS[f].absent == AM_UNKNOWN, -1);
+            meta_unknown = true;
+            reasons |= DRBIT(DR_IFLAGS_UNKNOWN);
+            continue;
+        }
         if (d != 1) continue;
         v->changed |= FBIT(f);
         if (cls == CC_CONTENT) content_diff = true;
@@ -90,7 +117,8 @@ int classify_both(const struct belay_entry *b, const struct belay_entry *a, stru
     else if (content_unknown) v->outcome = D_UNKNOWN;
     else if (meta_diff) v->outcome = D_METADATA_ONLY;               /* rule 4 */
     else if (meta_unknown) v->outcome = D_UNKNOWN;
-    else if (differs(F_CTIME, b, a) == 1) {                         /* rule 5 */
+    else if (diff_field_class(F_CTIME, a->type) == CC_CTIME && !mount_root &&   /* rule 5 */
+             differs(ctx, F_CTIME, b, a) == 1) {
         v->outcome = D_METADATA_ONLY;
         v->changed |= FBIT(F_CTIME);
     } else v->outcome = D_UNCHANGED;                                /* rule 6 */
