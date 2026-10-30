@@ -1480,6 +1480,15 @@ TEST(a_root_listing_cut_short_flags_the_root) {
  * directory when the entry itself cannot be recorded -- and nothing else.
  * The expectations are written by hand from the spec, never from a run. */
 enum { X_UNV = 1, X_UNS = 2, X_UNR = 4, X_RAC = 8, X_XU = 16, X_MNT = 32 };
+/* A file whose open was abandoned has its attributes read without an fd
+ * (fsops.h, xattr_source_open): Linux reaches it through O_PATH, checked to be
+ * the recorded inode; macOS has no safe way for a regular file (ENOTSUP), so
+ * they are unknown there. */
+#ifdef __linux__
+#define X_XU_WITHOUT_FD 0
+#else
+#define X_XU_WITHOUT_FD X_XU
+#endif
 static unsigned flags_of(const struct belay_entry *e) {
     return (e->unverified ? X_UNV : 0) | (e->unstable ? X_UNS : 0) | (e->unreadable ? X_UNR : 0) |
            (e->raced ? X_RAC : 0) | (e->xattrs_unknown ? X_XU : 0) | (e->is_mount ? X_MNT : 0);
@@ -1500,7 +1509,7 @@ TEST(each_per_entry_decision_flags_only_what_it_should) {
         /* rewritten after its stat: the bytes read are not the recorded
          * file's, and the recorded fields are not its state at the end */
         { "rewritten before its open", REWRITE_ON_FILE_OPEN, "x", NULL, false, "d/x",
-          X_UNV | X_UNS | X_RAC, NULL, 0 },
+          X_UNV | X_UNS | X_RAC | X_XU_WITHOUT_FD, NULL, 0 },
         { "read short",              SHORT_READ, "x", NULL, false, "d/x", X_UNV | X_UNS, NULL, 0 },
         { "link unreadable",         LINK_EIO, "L", NULL, false, "d/L", X_UNR, NULL, 0 },
         { "attributes unreachable",  XSRC_FAIL, "L", NULL, false, "d/L", X_XU, NULL, 0 },
