@@ -125,12 +125,12 @@ const struct line_field_def DIFF_HEADER_FIELDS[DH_COUNT] = {
     [DH_SCOPES] = { "scopes", "scopes_b64", "array",
         "The scope both manifests record; manifests of different scopes are never compared. "
         "Not valid UTF-8: `scopes_b64`." },
-    [DH_BEFORE_CREATED] = { "before_created_ns", NULL, "int", "The earlier manifest's `created_ns`." },
-    [DH_AFTER_CREATED] = { "after_created_ns", NULL, "int", "The later manifest's `created_ns`." },
+    [DH_BEFORE_CREATED] = { "before_created_ns", NULL, "int", "The first manifest's `created_ns`." },
+    [DH_AFTER_CREATED] = { "after_created_ns", NULL, "int", "The second manifest's `created_ns`." },
     [DH_BEFORE_HASH_MAX] = { "before_hash_max_bytes", NULL, "int",
-        "The earlier manifest's hash limit. When the two differ, a file hashed on one side and "
+        "The first manifest's hash limit. When the two differ, a file hashed on one side and "
         "not the other is `unknown` unless its size proves a change." },
-    [DH_AFTER_HASH_MAX] = { "after_hash_max_bytes", NULL, "int", "The later manifest's hash limit." },
+    [DH_AFTER_HASH_MAX] = { "after_hash_max_bytes", NULL, "int", "The second manifest's hash limit." },
     [DH_SCOPE_REMOUNTED] = { "scope_remounted", NULL, "bool",
         "The scope root's `dev` differs between the manifests: it was remounted, and devices were "
         "numbered anew." },
@@ -164,18 +164,18 @@ const struct line_field_def DIFF_TRAILER_FIELDS[DT_COUNT] = {
         "directory's own timestamps move with every name added, removed or renamed in it, which "
         "the records of its children report." },
     [DT_BEFORE_VANISHED] = { "before_vanished", NULL, "int",
-        "The earlier manifest's `vanished`: entries gone while its tree was walked." },
-    [DT_BEFORE_UNSTABLE] = { "before_unstable", NULL, "int", "The earlier manifest's `unstable`." },
-    [DT_BEFORE_RACED]    = { "before_raced", NULL, "int", "The earlier manifest's `raced`." },
-    [DT_AFTER_VANISHED]  = { "after_vanished", NULL, "int", "The later manifest's `vanished`." },
-    [DT_AFTER_UNSTABLE]  = { "after_unstable", NULL, "int", "The later manifest's `unstable`." },
-    [DT_AFTER_RACED]     = { "after_raced", NULL, "int", "The later manifest's `raced`." },
+        "The first manifest's `vanished`: entries gone while its tree was walked." },
+    [DT_BEFORE_UNSTABLE] = { "before_unstable", NULL, "int", "The first manifest's `unstable`." },
+    [DT_BEFORE_RACED]    = { "before_raced", NULL, "int", "The first manifest's `raced`." },
+    [DT_AFTER_VANISHED]  = { "after_vanished", NULL, "int", "The second manifest's `vanished`." },
+    [DT_AFTER_UNSTABLE]  = { "after_unstable", NULL, "int", "The second manifest's `unstable`." },
+    [DT_AFTER_RACED]     = { "after_raced", NULL, "int", "The second manifest's `raced`." },
     [DT_PROVISIONAL]     = { "provisional", NULL, "bool",
         "Any of the six counts above is not 0: a tree changed while it was walked, so the result "
         "is provisional (manifest-v1, obligations on a consumer). The records name each flagged "
         "path; `vanished` paths have none." },
     [DT_BEFORE_SHA256]   = { "before_sha256", NULL, "string",
-        "The sha256 of the earlier manifest's bytes as this diff read them." },
+        "The sha256 of the first manifest's bytes as this diff read them: the whole file." },
     [DT_AFTER_SHA256]    = { "after_sha256", NULL, "string",
-        "The sha256 of the later manifest's bytes as this diff read them." },
+        "The sha256 of the second manifest's bytes, likewise." },
 };

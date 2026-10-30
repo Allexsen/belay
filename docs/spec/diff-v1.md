@@ -21,6 +21,8 @@ not know, and treat a missing trailer as a truncated diff.
 {"belay_diff_end":2,"unchanged":1840,"added":0,"removed":0,"modified":1,"type_changed":0,"metadata_only":0,"unknown":1,"dir_timestamps_only":0,"before_vanished":0,"before_unstable":0,"before_raced":0,"after_vanished":0,"after_unstable":1,"after_raced":0,"provisional":true,"before_sha256":"9f2c...","after_sha256":"41ab..."}
 ```
 
+`before` is the first manifest given and `after` the second, whatever their `created_ns` say.
+
 ### Header
 
 <!-- BEGIN GENERATED: diff-header -->
@@ -30,10 +32,10 @@ not know, and treat a missing trailer as a truncated diff.
 |---|---|---|
 | `belay_diff` | int | Format version. A reader MUST reject a version it does not know. |
 | `scopes` / `scopes_b64` | array | The scope both manifests record; manifests of different scopes are never compared. Not valid UTF-8: `scopes_b64`. |
-| `before_created_ns` | int | The earlier manifest's `created_ns`. |
-| `after_created_ns` | int | The later manifest's `created_ns`. |
-| `before_hash_max_bytes` | int | The earlier manifest's hash limit. When the two differ, a file hashed on one side and not the other is `unknown` unless its size proves a change. |
-| `after_hash_max_bytes` | int | The later manifest's hash limit. |
+| `before_created_ns` | int | The first manifest's `created_ns`. |
+| `after_created_ns` | int | The second manifest's `created_ns`. |
+| `before_hash_max_bytes` | int | The first manifest's hash limit. When the two differ, a file hashed on one side and not the other is `unknown` unless its size proves a change. |
+| `after_hash_max_bytes` | int | The second manifest's hash limit. |
 | `scope_remounted` | bool | The scope root's `dev` differs between the manifests: it was remounted, and devices were numbered anew. |
 | `identity_compared` | bool | Whether `ino` was compared: never across a remount of the scope root, since an inode number means something only within one device. Content still compares by hash. |
 <!-- END GENERATED: diff-header -->
@@ -56,6 +58,20 @@ not know, and treat a missing trailer as a truncated diff.
 
 ### Trailer
 
+The trailer is written once both manifests have been read to their ends. `belay_diff_end` is the
+number of records written. Then come one count per outcome, named as the outcome, in the order of
+the outcomes table, `unchanged` included: every path present in either manifest is counted once,
+so the counts add up to the number of distinct paths. `dir_timestamps_only` counts the directories
+among `unchanged` whose own timestamps differ (see "A directory's own timestamps"). Then what each
+manifest's own trailer said about its walk: `before_vanished`, `before_unstable` and `before_raced`
+are the first manifest's `vanished`, `unstable` and `raced` counts, and `after_vanished`,
+`after_unstable` and `after_raced` the second's. `provisional` is `true` exactly when any of those
+six is not 0: a tree changed while it was walked, so the whole result is provisional (manifest-v1,
+obligations on a consumer), and a `vanished` path has no record that could say so. Last,
+`before_sha256` and `after_sha256` are the sha256 of each manifest file's bytes, all of them, as
+this diff read them; a reader accepts nothing after a manifest's trailer, so that is the whole
+file.
+
 <!-- BEGIN GENERATED: diff-trailer -->
 <!-- From src/schema/diff_schema.c by tools/gen_schema.c. Edit there, then `make gen`. -->
 
@@ -70,15 +86,15 @@ not know, and treat a missing trailer as a truncated diff.
 | `metadata_only` | int | Paths whose outcome is `metadata_only`. |
 | `unknown` | int | Paths whose outcome is `unknown`. |
 | `dir_timestamps_only` | int | Directories counted in `unchanged` whose `mtime_ns` or `ctime_ns` differs: a directory's own timestamps move with every name added, removed or renamed in it, which the records of its children report. |
-| `before_vanished` | int | The earlier manifest's `vanished`: entries gone while its tree was walked. |
-| `before_unstable` | int | The earlier manifest's `unstable`. |
-| `before_raced` | int | The earlier manifest's `raced`. |
-| `after_vanished` | int | The later manifest's `vanished`. |
-| `after_unstable` | int | The later manifest's `unstable`. |
-| `after_raced` | int | The later manifest's `raced`. |
+| `before_vanished` | int | The first manifest's `vanished`: entries gone while its tree was walked. |
+| `before_unstable` | int | The first manifest's `unstable`. |
+| `before_raced` | int | The first manifest's `raced`. |
+| `after_vanished` | int | The second manifest's `vanished`. |
+| `after_unstable` | int | The second manifest's `unstable`. |
+| `after_raced` | int | The second manifest's `raced`. |
 | `provisional` | bool | Any of the six counts above is not 0: a tree changed while it was walked, so the result is provisional (manifest-v1, obligations on a consumer). The records name each flagged path; `vanished` paths have none. |
-| `before_sha256` | string | The sha256 of the earlier manifest's bytes as this diff read them. |
-| `after_sha256` | string | The sha256 of the later manifest's bytes as this diff read them. |
+| `before_sha256` | string | The sha256 of the first manifest's bytes as this diff read them: the whole file. |
+| `after_sha256` | string | The sha256 of the second manifest's bytes, likewise. |
 <!-- END GENERATED: diff-trailer -->
 
 ## Outcomes
