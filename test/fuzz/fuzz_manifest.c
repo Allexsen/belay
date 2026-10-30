@@ -199,15 +199,19 @@ static void check_entry(const struct belay_manifest_header *h, const struct bela
     }
 }
 
+static char path[256];                  /* the input, as a file: the reader takes a path */
+static void remove_input(void) { if (path[0] != '\0') unlink(path); }
+
 int LLVMFuzzerTestOneInput(const uint8_t *data, size_t size) {
     if (size > 1u << 20) return 0;
 
     /* The reader takes a path, so the input has to reach it as a file. A
      * fixed name per process keeps this cheap; libFuzzer is single-threaded
      * per worker. */
-    static char path[256];
-    if (path[0] == '\0')
+    if (path[0] == '\0') {
         snprintf(path, sizeof path, "/tmp/belay_fuzz_manifest_%d", (int)getpid());
+        atexit(remove_input);
+    }
 
     FILE *f = fopen(path, "wb");
     if (f == NULL) return 0;

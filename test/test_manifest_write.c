@@ -1698,5 +1698,8 @@ int main(void) {
                  (int)getpid(), (int)getpid());
         if (system(cmd) != 0) { /* best effort */ }
     }
+    char left[64];                                  /* run_check's manifest */
+    snprintf(left, sizeof left, "/tmp/belay_m_%d.ndjson", (int)getpid());
+    unlink(left);
     return belay_test_report();
 }
