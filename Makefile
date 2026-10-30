@@ -58,7 +58,7 @@ SAN_FLAGS	= -fsanitize=address,undefined -fno-omit-frame-pointer -g -O1
 SAN_BUILD	= $(BUILD)/san
 SAN_TEST_BIN	= $(TEST_SRC:test/%.c=$(SAN_BUILD)/test/%)
 
-.PHONY: all clean test check check-san fuzz bench platform fs-scenarios gen gen-check measure oracle
+.PHONY: all clean test check check-san fuzz bench platform fs-scenarios gen gen-check measure oracle lint
 
 all: $(BIN)
 
@@ -76,9 +76,20 @@ $(BUILD)/%.o: src/%.c
 	@mkdir -p $(dir $@)
 	$(CC) $(CFLAGS) $(WARN) $(INC) -MMD -MP -c $< -o $@
 
+# Tests: BELAY_TEST_BIN names the binary for the harness's accounting
+# (test/belay_test.h); an unused static function is an error, so a TEST whose
+# RUN() line was deleted fails the build instead of silently not running.
+TEST_FLAGS	= -Itest -Werror=unused-function -DBELAY_TEST_BIN='"$(notdir $@)"'
+
 $(BUILD)/test/%: test/%.c $(CORE_OBJ)
 	@mkdir -p $(dir $@)
-	$(CC) $(CFLAGS) $(WARN) $(INC) -Itest -MMD -MP -o $@ $< $(CORE_OBJ) $(TEST_LDFLAGS)
+	$(CC) $(CFLAGS) $(WARN) $(INC) $(TEST_FLAGS) -MMD -MP -o $@ $< $(CORE_OBJ) $(TEST_LDFLAGS)
+
+# The harness's own failure and accounting paths (scripts/selftest.sh).
+SELFTEST_BIN	= $(BUILD)/selftest/must_fail $(BUILD)/selftest/must_pass
+$(BUILD)/selftest/%: test/selftest/%.c test/belay_test.h
+	@mkdir -p $(dir $@)
+	$(CC) $(CFLAGS) $(WARN) $(INC) $(TEST_FLAGS) -o $@ $<
 
 $(SAN_BUILD)/%.o: src/%.c
 	@mkdir -p $(dir $@)
@@ -86,31 +97,31 @@ $(SAN_BUILD)/%.o: src/%.c
 
 $(SAN_BUILD)/test/%: test/%.c $(SAN_CORE_OBJ)
 	@mkdir -p $(dir $@)
-	$(CC) $(SAN_FLAGS) $(WARN) $(INC) -Itest -MMD -MP -o $@ $< $(SAN_CORE_OBJ) $(TEST_LDFLAGS)
+	$(CC) $(SAN_FLAGS) $(WARN) $(INC) $(TEST_FLAGS) -MMD -MP -o $@ $< $(SAN_CORE_OBJ) $(TEST_LDFLAGS)
 
 $(BUILD)/test/test_stress $(SAN_BUILD)/test/test_stress: TEST_LDFLAGS = -pthread
 
-test: $(TEST_BIN)
-	@fail=0; \
-	for t in $(TEST_BIN); do \
-		echo "== $$t"; \
-		$$t || fail=1; \
-	done; \
-	exit $$fail
+# The self-test runs first: if the harness or the runner could not report a
+# failure, no test result would mean anything. Accounting (test/accounting/):
+# the tests each binary ran, and -- when CI sets BELAY_SKIP_PROFILE -- the
+# tests it skipped, must match the lists exactly.
+test: $(TEST_BIN) $(SELFTEST_BIN)
+	@scripts/selftest.sh $(SELFTEST_BIN)
+	@BELAY_ACCOUNTING=test/accounting scripts/run-tests.sh $(TEST_BIN)
 
 # ASan + UBSan. halt_on_error so a sanitizer report fails the job rather than
 # being buried in passing output.
 check-san: $(SAN_TEST_BIN)
-	@fail=0; \
-	for t in $(SAN_TEST_BIN); do \
-		echo "== $$t (asan+ubsan)"; \
-		ASAN_OPTIONS=detect_leaks=1 \
-		UBSAN_OPTIONS=print_stacktrace=1:halt_on_error=1 \
-		$$t || fail=1; \
-	done; \
-	exit $$fail
+	@ASAN_OPTIONS=detect_leaks=1 UBSAN_OPTIONS=print_stacktrace=1:halt_on_error=1 \
+	BELAY_ACCOUNTING=test/accounting scripts/run-tests.sh $(SAN_TEST_BIN)
 
-check: all gen-check measure test
+# A bare `return` in a TEST body, or a helper printing "skipped", reports a
+# test as passed without checking anything (scripts/lint-tests.py).
+lint:
+	@python3 scripts/lint-tests.py $(TEST_SRC)
+
+
+check: all lint gen-check measure test
 
 # Generated from the schemas in src/schema/ (entry.c, diff_schema.c): the
 # specs' tables and rules, and the fuzz target's invariants. `make gen` rewrites them;

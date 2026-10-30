@@ -392,10 +392,7 @@ TEST(hardlinks_both_recorded_with_nlink) {
 TEST(fifo_recorded_by_type_not_opened) {
     char p[8192];
     snprintf(p, sizeof p, "%s/pipe", g_root);
-    if (mkfifo(p, 0644) != 0) {
-        /* Environment refused mkfifo; nothing to assert. */
-        return;
-    }
+    if (mkfifo(p, 0644) != 0) SKIP("mkfifo refused here");
 
     size_t n = 0;
     ASSERT_EQ_INT(0, run_check(NULL, &n));
@@ -474,7 +471,7 @@ TEST(non_utf8_path_uses_base64) {
     char p[8192];
     snprintf(p, sizeof p, "%s/bad\xff\xfename", g_root);
     int fd = open(p, O_WRONLY | O_CREAT | O_TRUNC, 0644);
-    if (fd == -1) return;   /* filesystem refused the name */
+    if (fd == -1) SKIP("the filesystem refuses non-UTF-8 names");
     close(fd);
 
     size_t n = 0;
@@ -555,7 +552,7 @@ TEST(unreadable_directory_is_flagged_not_silently_omitted) {
 
     char p[8192];
     snprintf(p, sizeof p, "%s/locked", g_root);
-    if (chmod(p, 0000) != 0) return;   /* environment will not allow it */
+    if (chmod(p, 0000) != 0) SKIP("chmod refused");
 
     size_t n = 0;
     const int rc = run_check(NULL, &n);
@@ -588,7 +585,7 @@ TEST(unreadable_and_empty_directories_are_distinguishable) {
 
     char p[8192];
     snprintf(p, sizeof p, "%s/has_content", g_root);
-    if (chmod(p, 0000) != 0) return;
+    if (chmod(p, 0000) != 0) SKIP("chmod refused");
 
     size_t n = 0;
     const int rc = run_check(NULL, &n);
@@ -613,7 +610,7 @@ TEST(unreadable_file_is_flagged) {
     fx_write("noread", "data", 4);
     char p[8192];
     snprintf(p, sizeof p, "%s/noread", g_root);
-    if (chmod(p, 0000) != 0) return;
+    if (chmod(p, 0000) != 0) SKIP("chmod refused");
 
     size_t n = 0;
     const int rc = run_check(NULL, &n);
@@ -833,8 +830,7 @@ TEST(sweep_hash_always_matches_recorded_size_under_concurrent_append) {
     snprintf(fpath, sizeof fpath, "%s/grow/log", g_root);
     {
         FILE *f = fopen(fpath, "wb");
-        ASSERT_TRUE(f != NULL);
-        if (!f) return;
+        REQUIRE(f != NULL);
         static char chunk[65536];
         memset(chunk, 'a', sizeof chunk);
         for (int i = 0; i < 300; i++) fwrite(chunk, 1, sizeof chunk, f);  /* ~19 MB */
@@ -902,6 +898,12 @@ TEST(sweep_hash_always_matches_recorded_size_under_concurrent_append) {
 /* W3. Device nodes carry rdev. Creating one needs privilege, so this reads the
  * real /dev/null, which exists on Linux and macOS alike. */
 TEST(sweep_device_nodes_record_rdev) {
+    /* The precondition is asked of the system, never of the writer: a skip
+     * decided by the writer's own failure passed exactly when the writer broke
+     * on character devices (audit 2026-10, adversarial H3). */
+    struct stat null_st;
+    if (stat("/dev/null", &null_st) != 0 || !S_ISCHR(null_st.st_mode))
+        SKIP("no /dev/null character device here");
     char mpath[512];
     snprintf(mpath, sizeof mpath, "/tmp/belay_dev_%d.ndjson", (int)getpid());
     struct belay_manifest_opts o = {
@@ -909,22 +911,21 @@ TEST(sweep_device_nodes_record_rdev) {
         .store_max_bytes = BELAY_STORE_MAX_BYTES_DEFAULT,
     };
     struct belay_manifest_stats st;
-    if (belay_manifest_write(mpath, "/dev", &o, &st) != 0) {
-        belay_err_clear();
-        return;   /* /dev not walkable here; nothing to assert */
-    }
+    REQUIRE_MSG(belay_manifest_write(mpath, "/dev", &o, &st) == 0, "writing /dev failed: %s",
+                belay_err_msg());
     FILE *f = fopen(mpath, "rb");
-    ASSERT_TRUE(f != NULL);
+    REQUIRE(f != NULL);
     bool found = false;
-    char line[65536];
-    while (f && fgets(line, sizeof line, f) != NULL) {
+    char line[65536], want_rdev[64];
+    snprintf(want_rdev, sizeof want_rdev, "\"rdev\":%llu", (unsigned long long)null_st.st_rdev);
+    while (fgets(line, sizeof line, f) != NULL) {
         if (strstr(line, "\"path\":\"null\",") != NULL) {
             found = true;
             ASSERT_TRUE(strstr(line, "\"type\":\"chr\"") != NULL);
-            ASSERT_TRUE(strstr(line, "\"rdev\":") != NULL);
+            ASSERT_TRUE(strstr(line, want_rdev) != NULL);    /* the value, not just the key */
         }
     }
-    if (f) fclose(f);
+    fclose(f);
     ASSERT_TRUE(found);
     unlink(mpath);
 }
@@ -935,7 +936,7 @@ TEST(sweep_trailer_and_stats_report_unreadable) {
     fx_mkdir("tr/locked");
     char p[8192];
     snprintf(p, sizeof p, "%s/tr/locked", g_root);
-    if (chmod(p, 0000) != 0) return;
+    if (chmod(p, 0000) != 0) SKIP("chmod refused");
 
     char mpath[512], scope[8192];
     snprintf(mpath, sizeof mpath, "/tmp/belay_tr_%d.ndjson", (int)getpid());
@@ -1078,7 +1079,7 @@ TEST(store_discards_copies_of_unstable_files) {
     char fpath[8192];
     snprintf(fpath, sizeof fpath, "%s/race/f", g_root);
     FILE *f = fopen(fpath, "wb");
-    if (!f) return;
+    REQUIRE(f != NULL);
     static char chunk[65536];
     memset(chunk, 'a', sizeof chunk);
     for (int i = 0; i < 200; i++) fwrite(chunk, 1, sizeof chunk, f);  /* ~13 MB */
@@ -1175,7 +1176,7 @@ TEST(review_readable_but_not_searchable_directory_is_flagged) {
     fx_write("rx/d/f", "x", 1);
     char p[8192];
     snprintf(p, sizeof p, "%s/rx/d", g_root);
-    if (chmod(p, 0444) != 0) return;
+    if (chmod(p, 0444) != 0) SKIP("chmod refused");
     size_t n = 0;
     const int rc = run_check("rx", &n);
     chmod(p, 0755);
@@ -1191,7 +1192,7 @@ TEST(review_unsearchable_scope_root_is_flagged) {
     fx_write("rr/f", "x", 1);
     char p[8192];
     snprintf(p, sizeof p, "%s/rr", g_root);
-    if (chmod(p, 0444) != 0) return;
+    if (chmod(p, 0444) != 0) SKIP("chmod refused");
     size_t n = 0;
     const int rc = run_check("rr", &n);
     chmod(p, 0755);
@@ -1230,7 +1231,10 @@ TEST(review_longest_legal_link_target_is_recorded) {
     target[4095] = '\0';
     char p[8192];
     snprintf(p, sizeof p, "%s/lt/l", g_root);
-    if (symlink(target, p) != 0) { fx_rm("lt"); return; }
+    if (symlink(target, p) != 0) {
+        fx_rm("lt");
+        SKIP("a 4095-byte symlink target is refused here");
+    }
     size_t n = 0;
     ASSERT_EQ_INT(0, run_check("lt", &n));
     struct found *l = get("l");
@@ -1244,7 +1248,7 @@ TEST(review_longest_legal_link_target_is_recorded) {
 TEST(review_non_utf8_scope_produces_valid_header) {
     char p[8192];
     snprintf(p, sizeof p, "%s/s\xff", g_root);
-    if (mkdir(p, 0755) != 0) return;
+    if (mkdir(p, 0755) != 0) SKIP("the filesystem refuses non-UTF-8 names");
     size_t n = 0;
     ASSERT_EQ_INT(0, run_check("s\xff", &n));
     ASSERT_TRUE(strstr(g_header, "\"scopes_b64\":[\"") != NULL);
@@ -1261,7 +1265,11 @@ TEST(r2_far_future_timestamp_saturates_instead_of_overflowing) {
     char p[8192];
     snprintf(p, sizeof p, "%s/ts/f", g_root);
     struct timespec t[2] = { { 10413792000LL, 0 }, { 10413792000LL, 0 } };  /* year 2300 */
-    if (utimensat(AT_FDCWD, p, t, 0) != 0) { fx_rm("ts/f"); fx_rm("ts"); return; }
+    if (utimensat(AT_FDCWD, p, t, 0) != 0) {
+        fx_rm("ts/f");
+        fx_rm("ts");
+        SKIP("a year-2300 timestamp is refused here");
+    }
     size_t n = 0;
     ASSERT_EQ_INT(0, run_check("ts", &n));
     char mpath[512], line[65536];
@@ -1308,7 +1316,7 @@ TEST(r3_output_inside_the_scope_is_not_a_change) {
         ASSERT_EQ_INT(0, (int)st.raced);
     }
 #else
-    printf("      (skipped: no O_TMPFILE on this platform)\n");
+    SKIP("no O_TMPFILE on this platform");
 #endif
 }
 
@@ -1452,14 +1460,11 @@ TEST(w6_xattrs_are_recorded_and_a_symlink_never_shows_its_targets) {
     snprintf(f, sizeof f, "%s/xa/f", g_root);
     snprintf(d, sizeof d, "%s/xa/d", g_root);
     snprintf(scope, sizeof scope, "%s/xa", g_root);
-    if (set_x(f, A, "1") != 0 || set_x(f, B, "2") != 0 || set_x(d, A, "dir") != 0) {
-        printf("      (skipped: no user xattrs on this filesystem)\n");
-        return;
-    }
+    if (set_x(f, A, "1") != 0 || set_x(f, B, "2") != 0 || set_x(d, A, "dir") != 0)
+        SKIP("no user xattrs on this filesystem");
     ASSERT_EQ_INT(0, x_check(scope));
     const struct belay_entry *ef = x_find("f"), *ed = x_find("d"), *el = x_find("l");
-    ASSERT_TRUE(ef != NULL && ed != NULL && el != NULL);
-    if (!ef || !ed || !el) return;
+    REQUIRE(ef != NULL && ed != NULL && el != NULL);
     ASSERT_TRUE(ef->has_xattrs && ef->xattrs_inline && !ef->xattrs_unknown);
     ASSERT_TRUE(strstr(ef->xattrs, A) != NULL && strstr(ef->xattrs, B) != NULL);
     ASSERT_TRUE(ed->has_xattrs && strstr(ed->xattrs, A) != NULL);
@@ -1481,12 +1486,26 @@ TEST(w6_inode_flags_are_recorded) {
     char f[8192], scope[8192];
     snprintf(f, sizeof f, "%s/fl/f", g_root);
     snprintf(scope, sizeof scope, "%s/fl", g_root);
+    /* Whether this filesystem has inode flags is asked of the filesystem, not
+     * of the writer: when the writer stops recording iflags this test must
+     * fail, not skip (audit 2026-10, mutant SER-03). */
+#ifdef __APPLE__
+    struct stat pst;
+    REQUIRE(stat(f, &pst) == 0);            /* st_flags: every file has them */
+#else
+    int probe = 0;
+    const int pfd = open(f, O_RDONLY);
+    const int have = pfd >= 0 && ioctl(pfd, FS_IOC_GETFLAGS, &probe) == 0;
+    if (pfd >= 0) close(pfd);
+    if (!have) SKIP("no inode flags on this filesystem");
+#endif
     ASSERT_EQ_INT(0, x_check(scope));
     const struct belay_entry *e = x_find("f");
-    if (e == NULL || !e->has_iflags) {
-        printf("      (skipped: no inode flags on this filesystem)\n");
-        return;
-    }
+    REQUIRE(e != NULL);
+    ASSERT_TRUE(e->has_iflags);
+#ifndef __APPLE__
+    ASSERT_EQ_INT((uint32_t)probe, e->iflags);     /* the value the filesystem reports */
+#endif
     const uint64_t before = e->iflags;
 #ifdef __APPLE__
     const int set = chflags(f, UF_NODUMP);
@@ -1501,10 +1520,7 @@ TEST(w6_inode_flags_are_recorded) {
     if (fd >= 0) close(fd);
     const uint64_t bit = FS_NODUMP_FL;
 #endif
-    if (set != 0) {
-        printf("      (skipped: cannot set nodump here)\n");
-        return;
-    }
+    if (set != 0) SKIP("cannot set nodump here");
     ASSERT_EQ_INT(0, x_check(scope));
     e = x_find("f");
     ASSERT_TRUE(e != NULL && e->has_iflags && (e->iflags & bit) && e->iflags != before);
@@ -1526,24 +1542,24 @@ TEST(w6_large_xattr_set_is_recorded_by_digest) {
         snprintf(name, sizeof name, "user.a-fairly-long-attribute-name-number-%03d", i);
         ok = set_x(f, name, "v") == 0;
     }
-    if (!ok) {
-        printf("      (skipped: tmpfs here does not hold 100 user xattrs)\n");
-    } else {
-        ASSERT_EQ_INT(0, x_check(base));
-        const struct belay_entry *e = x_find("f");
-        ASSERT_TRUE(e != NULL && e->has_xattrs && !e->xattrs_inline);
-        char before[65] = "";
-        if (e) snprintf(before, sizeof before, "%s", e->xattrs_sha256_hex);
-        ASSERT_EQ_INT(0, set_x(f, "user.a-fairly-long-attribute-name-number-050", "w"));
-        ASSERT_EQ_INT(0, x_check(base));
-        e = x_find("f");
-        ASSERT_TRUE(e != NULL && strcmp(e->xattrs_sha256_hex, before) != 0);
-    }
     char cmd[400];
     snprintf(cmd, sizeof cmd, "rm -rf '%s'", base);
+    if (!ok) {
+        if (system(cmd) != 0) { /* best effort */ }
+        SKIP("tmpfs here does not hold 100 user xattrs");
+    }
+    ASSERT_EQ_INT(0, x_check(base));
+    const struct belay_entry *e = x_find("f");
+    ASSERT_TRUE(e != NULL && e->has_xattrs && !e->xattrs_inline);
+    char before[65] = "";
+    if (e) snprintf(before, sizeof before, "%s", e->xattrs_sha256_hex);
+    ASSERT_EQ_INT(0, set_x(f, "user.a-fairly-long-attribute-name-number-050", "w"));
+    ASSERT_EQ_INT(0, x_check(base));
+    e = x_find("f");
+    ASSERT_TRUE(e != NULL && strcmp(e->xattrs_sha256_hex, before) != 0);
     if (system(cmd) != 0) { /* best effort */ }
 #else
-    printf("      (skipped: Linux tmpfs only)\n");
+    SKIP("Linux tmpfs only");
 #endif
 }
 

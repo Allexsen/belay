@@ -1,0 +1,9 @@
+# Tests allowed to skip in the docker CI job, one "<binary> <test>" per line.
+# Any other skip, or a test listed here that runs, fails the job (test/belay_test.h).
+# The container's default seccomp profile denies unshare(CLONE_NEWUSER), so the
+# namespace tests cannot run inside it. They run on every other Linux job.
+test_races r4_validator_never_enters_a_mount_that_appeared
+test_races r4_mount_over_the_scope_root_flags_the_root
+test_races w6_file_capability_is_recorded
+test_races r2_overlay_scope_files_are_hashed_not_flagged_as_mounts
+test_races r3_file_bind_mounted_from_another_fs_is_a_boundary_with_or_without_statx

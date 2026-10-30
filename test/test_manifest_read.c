@@ -806,8 +806,7 @@ TEST(review_nul_byte_in_a_line_is_rejected) {
  * cost memory; the old reader buffered a 300 MB line whole. */
 TEST(review_overlong_line_is_rejected) {
     FILE *f = fopen(g_path, "wb");
-    ASSERT_TRUE(f != NULL);
-    if (!f) return;
+    REQUIRE(f != NULL);
     fputs(HDR, f);
     for (int i = 0; i < 70000; i++) fputc('{', f);
     fputc('\n', f);

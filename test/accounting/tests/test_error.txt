@@ -1,0 +1,5 @@
+clear_resets_everything
+set_records_code_errno_and_message
+null_format_yields_empty_message
+overlong_message_truncates_safely
+errno_is_preserved_verbatim
