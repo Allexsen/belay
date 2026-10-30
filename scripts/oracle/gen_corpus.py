@@ -833,8 +833,11 @@ def place(rng, t, typ, extras=True):
     return None if p is None else new_entry(rng, t, p, typ, extras)
 
 
-def try_pair(w, rng, label, build, attempts=4):
-    """build(rng) -> (before tree, after tree) or None; writes both ways."""
+def try_pair(w, rng, label, build, attempts=64):
+    """build(rng) -> (before tree, after tree) or None; writes both ways. Many
+    attempts: a build fails when its random tree cannot hold the change (a size
+    past the tree's hash limit), and the coverage gate must not depend on a
+    random seed's luck -- with 4, about one seed in a dozen missed a pair."""
     for _ in range(attempts):
         r = build(rng)
         if r is None:
