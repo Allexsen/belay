@@ -316,10 +316,18 @@ What the store rule does not cover:
 - Files belay does not own are stored anyway, by decision. Interpreter-claimed files (dpkg's
   `status`, a wheel's `RECORD`) are root-owned and stored whatever their size; refusing them
   would break those interpreters for every run that is not root. The risk is low for exactly
-  this class: package managers write a new file and rename it over the old one rather than
-  overwriting in place. A rename replaces the inode, so belay either read the old file whole --
-  a real state, and the end-of-walk validator flags the entry `raced` -- or sees the inode
-  change between its stat and its open and records the file `unstable`, with no hash.
+  this class: **no installer measured overwrites existing bytes in place** (traced 2026-10-28,
+  first install and reinstall). dpkg writes `<file>.dpkg-new` and renames it over the old file,
+  status database included. pip moves the old package aside (a directory rename) and writes new
+  files at their final paths; only `RECORD`, `INSTALLER` and compiled `.pyc` files go through a
+  temporary file and a rename. Either way the old file's bytes are never rewritten: belay read
+  the old file whole -- a real state, and the end-of-walk validator flags the entry `raced` --
+  or sees the inode change between its stat and its open and records the file `unstable`.
+- What remains for those files is a **part-written copy**: pip's new file is visible at its
+  final path while it is being written. The stability check usually sees it grow and records it
+  `unstable`. If it does not, and belay cannot check for writers (a file it does not own, without
+  `CAP_LEASE`), the copy kept is of a real but incomplete file -- not torn, but a restore from it
+  writes a truncated file.
 - On overlayfs (a container's root, Docker's `/tmp`), a shared writable mapping whose file
   descriptor was closed holds the upper layer's file, not the overlay's, so the probe does not
   see it (measured). A writer holding the file open is seen. Reading the upper layer directly,

@@ -46,9 +46,16 @@ build/bench/measure --keep keep --tag truth "$tree"     # the quiet final tree
 bench/measure/torn_check.py "$tree" keep/truth.*.ndjson keep/during.*.ndjson
 ```
 
-`torn_check.py` sorts every clean hash that differs from the final file into a real
-intermediate state (a prefix of the final file: written front to back) or torn (bytes the file
-never held), and exits 1 if any is torn.
+`torn_check.py` sorts every clean hash that differs from the final file into:
+
+- `partial_real_state`: a prefix of the final file, written front to back;
+- `complete_earlier_version`: an earlier file at that path, read whole -- later replaced whole
+  (its inode differs from the final file's: pip's `RECORD`, npm's `package.json`), or recorded
+  identically by two or more checks before being rewritten;
+- `torn`: bytes the file never held, as far as the oracle can tell. One sighting of an earlier
+  version rewritten in place on the same inode also lands here; it cannot be told from a tear.
+
+It exits 1 if anything is torn.
 
 ## Reading the numbers
 
