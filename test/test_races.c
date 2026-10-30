@@ -1019,20 +1019,17 @@ static int mount_over_scope_child(void) {
 
 #endif
 
+#ifdef __linux__
 /* The child's exit status: 0 passed, 77 cannot run here (no namespace), else
  * the step that failed. The TEST decides what a 77 means (SKIP). */
 static int run_child(int (*child)(void)) {
-#ifdef __linux__
     const pid_t pid = fork();
     if (pid == 0) _exit(child());
     int status = 0;
     waitpid(pid, &status, 0);
     return WIFEXITED(status) ? WEXITSTATUS(status) : 99;
-#else
-    (void)child;
-    return 77;
-#endif
 }
+#endif
 
 TEST(r4_validator_never_enters_a_mount_that_appeared) {
 #ifndef __linux__
