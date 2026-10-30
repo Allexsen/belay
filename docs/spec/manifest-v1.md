@@ -258,8 +258,12 @@ Each rule below closes a way for a state the format records to be rendered as "n
 - **A change in `iflags`, `caps` or the xattr set is a metadata change**, reported as such
   (diff.v1: metadata-only), naming the attributes where `xattrs` is inline.
 - **A `ctime_ns` change with every recorded field equal means "changed: unrecorded attribute"**,
-  never "unchanged". The extended metadata belay cannot see (see below) still changes ctime. This
-  turns its absence into a visible, if unspecific, change.
+  never "unchanged", on a regular file, symlink or directory. The extended metadata belay cannot see
+  (see below) still changes ctime, which turns its absence into a visible, if unspecific, change.
+  On a FIFO, socket or device node, and on a mount root, ctime is not compared (decided
+  2026-10-30): ttys and pipes stamp themselves when used and a mount root's times belong to the
+  mounted filesystem, so a ctime change there is evidence of nothing -- and an unrecorded attribute
+  changed on such an entry is not seen.
 - **Compare under the same `hash_max_bytes`**, or report entries hashed on one side and unverified
   on the other as unverified rather than changed.
 
@@ -383,8 +387,9 @@ hidden-traversal risk the NUL rule above exists to prevent.
   `trusted.*` attributes, which only root can list; macOS ACLs, which are not extended attributes;
   inode flags of symlinks, FIFOs, sockets and devices on Linux (no safe fd to ask through); and on
   macOS the attributes of FIFOs, sockets and devices, which are recorded as `xattrs_unknown`
-  because opening them has side effects. A change to any of these still moves `ctime_ns`, and the
-  ctime rule above keeps it from rendering as "unchanged".
+  because opening them has side effects. A change to any of these still moves `ctime_ns`, which
+  the ctime rule above reports on a regular file, symlink or directory; on a FIFO, socket or device
+  node ctime is not compared, so such a change is not seen there.
 - **File content**, except copies under `store/` for files within `store_max_bytes` or claimed by an
   interpreter.
 - **Anything below a mount boundary** inside a scope.
