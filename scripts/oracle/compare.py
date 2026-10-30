@@ -426,6 +426,8 @@ SCENARIOS = (['dev relation: an entry leaves the root device',
              + ['a directory %s a mount root, %s on the other side' % (v, x)
                 for v in ('becomes', 'stops being') for x in ('iflags', 'xattrs')]
              + ['a directory is a mount root on one side only, xattrs_unknown on the other',
+                'a directory is a mount root on one side only, unstable or unreadable on the '
+                'other',
                 'a regular file is a mount root on one side only, caps on the other']
              # Rule 1 before rule 2, `raced` on one side only or on both; each
              # record keeps its `type_before` ("whatever the outcome").
@@ -575,6 +577,9 @@ def pair_coverage(stem, cells, optional, scen, fpairs):
                 tags.add('a directory %s a mount root, xattrs on the other side' % verb)
             if t == 'dir' and other.get('xattrs_unknown'):
                 tags.add('a directory is a mount root on one side only, xattrs_unknown on the other')
+            if t == 'dir' and (other.get('unstable') or other.get('unreadable')):
+                tags.add('a directory is a mount root on one side only, unstable or unreadable '
+                         'on the other')
             if t == 'reg' and 'caps' in other:
                 tags.add('a regular file is a mount root on one side only, caps on the other')
         xb, xa = ref.value(b, 'xattrs'), ref.value(a, 'xattrs')

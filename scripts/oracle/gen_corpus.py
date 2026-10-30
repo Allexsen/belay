@@ -1903,10 +1903,13 @@ def mount_root_attributes(w, rng):
     being one) with iflags, caps or xattrs read on the other side, or that
     side's attributes unreadable: a mount root's own are never read
     (manifest-v1 rule 22), so whether they compare there is the pin's `on
-    mount roots` column."""
+    mount roots` column, and they "add no reason" ("Timestamps that move on
+    use"). And a directory unstable or unreadable on the other side: the
+    reason `mount`, "plus those of any flags either side carries"."""
     plan = [('dir', ('iflags',)), ('dir', ('xattrs',)), ('dir', ('xattrs_sha256',)),
             ('dir', ('iflags', 'xattrs')), ('dir', ('xattrs_unknown',)),
-            ('dir', ('iflags', 'xattrs_unknown')), ('reg', ('caps',)),
+            ('dir', ('iflags', 'xattrs_unknown')), ('dir', ('unstable',)),
+            ('dir', ('unreadable', 'iflags')), ('reg', ('caps',)),
             ('reg', ('iflags', 'caps', 'xattrs')), ('lnk', ('iflags', 'xattrs')),
             ('fifo', ('iflags',))]
     for typ, attrs in plan:
@@ -1918,7 +1921,8 @@ def mount_root_attributes(w, rng):
             for k in attrs:
                 e[k] = {'iflags': lambda: rng.choice(IFLAGS), 'caps': lambda: caps_hex(rng),
                         'xattrs': lambda: xattr_set(rng), 'xattrs_sha256': lambda: hexs(rng),
-                        'xattrs_unknown': lambda: True}[k]()
+                        'xattrs_unknown': lambda: True, 'unstable': lambda: True,
+                        'unreadable': lambda: True}[k]()
             return with_subject(t, e, in_context('mount', e, t, rng))
         scen = []
         if typ == 'dir':
@@ -1930,6 +1934,9 @@ def mount_root_attributes(w, rng):
             if 'xattrs_unknown' in attrs:
                 scen.append('a directory is a mount root on one side only, xattrs_unknown on '
                             'the other')
+            if 'unstable' in attrs or 'unreadable' in attrs:
+                scen.append('a directory is a mount root on one side only, unstable or '
+                            'unreadable on the other')
         if typ == 'reg' and 'caps' in attrs:
             scen.append('a regular file is a mount root on one side only, caps on the other')
         w.targeted(rng, 'a %s becomes a mount root, %s read before' % (typ, '+'.join(attrs)),
