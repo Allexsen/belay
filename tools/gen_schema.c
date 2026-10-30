@@ -13,6 +13,7 @@
  *  (part of `make check`) fails when a committed artifact is stale.
  */
 #include "schema/entry.h"
+#include "schema/diff_schema.h"
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -192,11 +193,68 @@ static void schema_block(void) {
     }
 }
 
-static const struct { const char *name; void (*emit)(void); } BLOCKS[] = {
-    { "entries", entries_block },
-    { "header", header_block },
-    { "trailer", trailer_block },
-    { "schema", schema_block },
+/* ---- diff.v1 (src/schema/diff_schema.c) ---- */
+
+static void names_table(const struct diff_name_def *d, size_t n) {
+    printf("| name | meaning |\n|---|---|\n");
+    for (size_t i = 0; i < n; i++) {
+        if (strchr(d[i].description, '|') != NULL) abort();
+        printf("| `%s` | %s |\n", d[i].name, d[i].description);
+    }
+}
+static void diff_outcomes_block(void) { names_table(DIFF_OUTCOMES, D_OUTCOME_COUNT); }
+static void diff_reasons_block(void) { names_table(DIFF_REASONS, DR_COUNT); }
+static void diff_header_block(void) { line_table(DIFF_HEADER_FIELDS, DH_COUNT); }
+static void diff_record_block(void) { line_table(DIFF_RECORD_FIELDS, DF_COUNT); }
+static void diff_trailer_block(void) {
+    struct line_field_def t[1 + D_OUTCOME_COUNT];
+    char doc[D_OUTCOME_COUNT][96];
+    t[0] = DIFF_TRAILER_END;
+    for (size_t i = 0; i < D_OUTCOME_COUNT; i++) {
+        snprintf(doc[i], sizeof doc[i], "Paths whose outcome is `%s`.", DIFF_OUTCOMES[i].name);
+        t[1 + i] = (struct line_field_def){ DIFF_OUTCOMES[i].name, NULL, "int", doc[i] };
+    }
+    line_table(t, 1 + D_OUTCOME_COUNT);
+}
+
+static const char *const CLASS_NAMES[] = {
+    [CC_KEY] = "key", [CC_TYPE] = "type", [CC_CONTENT] = "content", [CC_METADATA] = "metadata",
+    [CC_IDENTITY] = "identity", [CC_CTIME] = "ctime", [CC_FLAG] = "flag", [CC_INFO] = "not compared",
+};
+static const char *const SCOPE_NAMES[] = {
+    [US_NONE] = "", [US_CONTENT] = "content", [US_METADATA] = "metadata", [US_ALL] = "everything",
+};
+static void diff_fields_block(void) {
+    printf("| field | class | for types | makes unknown | why |\n|---|---|---|---|---|\n");
+    for (int f = 0; f < F_COUNT; f++) {
+        const struct field_change *c = &DIFF_FIELDS[f];
+        char ty[128];
+        type_names(ty, sizeof ty, c->types, ", ");
+        if (strchr(c->why, '|') != NULL) abort();
+        printf("| `%s` | %s | %s | %s | %s |\n", ENTRY_FIELDS[f].name, CLASS_NAMES[c->cls],
+               c->cls == CC_FLAG || c->cls == CC_INFO || c->cls == CC_KEY ? "" : ty,
+               SCOPE_NAMES[c->unknown], c->why);
+    }
+}
+
+/* Every generated block, and the spec file it belongs in: each file must
+ * hold each of its blocks exactly once. */
+static const struct {
+    const char *name;
+    const char *file;           /* basename of the spec */
+    const char *source;
+    void (*emit)(void);
+} BLOCKS[] = {
+    { "entries", "manifest-v1.md", "src/schema/entry.c", entries_block },
+    { "header", "manifest-v1.md", "src/schema/entry.c", header_block },
+    { "trailer", "manifest-v1.md", "src/schema/entry.c", trailer_block },
+    { "schema", "manifest-v1.md", "src/schema/entry.c", schema_block },
+    { "diff-header", "diff-v1.md", "src/schema/diff_schema.c", diff_header_block },
+    { "diff-record", "diff-v1.md", "src/schema/diff_schema.c", diff_record_block },
+    { "diff-trailer", "diff-v1.md", "src/schema/diff_schema.c", diff_trailer_block },
+    { "diff-outcomes", "diff-v1.md", "src/schema/diff_schema.c", diff_outcomes_block },
+    { "diff-reasons", "diff-v1.md", "src/schema/diff_schema.c", diff_reasons_block },
+    { "diff-fields", "diff-v1.md", "src/schema/diff_schema.c", diff_fields_block },
 };
 #define NBLOCKS (sizeof BLOCKS / sizeof BLOCKS[0])
 
@@ -224,8 +282,8 @@ static int spec(const char *path) {
         int b;
         if (inside == -1 && (b = marker(line, BEGIN_MARK)) != -1) {
             fputs(line, stdout);
-            printf("<!-- From src/schema/entry.c by tools/gen_schema.c. "
-                   "Edit there, then `make gen`. -->\n\n");
+            printf("<!-- From %s by tools/gen_schema.c. Edit there, then `make gen`. -->\n\n",
+                   BLOCKS[b].source);
             BLOCKS[b].emit();
             seen[b]++;
             inside = b;
@@ -243,10 +301,12 @@ static int spec(const char *path) {
         fprintf(stderr, "%s: block \"%s\" has no end marker\n", path, BLOCKS[inside].name);
         return 1;
     }
+    const char *base = strrchr(path, '/') ? strrchr(path, '/') + 1 : path;
     for (size_t i = 0; i < NBLOCKS; i++) {
-        if (seen[i] != 1) {
-            fprintf(stderr, "%s: block \"%s\" appears %d times, want 1\n", path,
-                    BLOCKS[i].name, seen[i]);
+        const int want = strcmp(BLOCKS[i].file, base) == 0;
+        if (seen[i] != want) {
+            fprintf(stderr, "%s: block \"%s\" appears %d times, want %d\n", path,
+                    BLOCKS[i].name, seen[i], want);
             bad = 1;
         }
     }
