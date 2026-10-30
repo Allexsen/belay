@@ -49,4 +49,40 @@ void belay_interp_classify(const char *abs_path, size_t len, struct belay_claim 
 
 const char *belay_interp_name(enum belay_interp_id id);
 
+/*
+ *  Explaining a change (diff.v1, "Interpreters"). For a path whose outcome
+ *  is not unchanged, the interpreter that claims it receives {path, before,
+ *  after} and returns findings -- short strings, emitted as the record's
+ *  "findings" -- or declines. Findings are annotations only: nothing here
+ *  can set or change the outcome, so an interpreter cannot hide a change.
+ *  Declining is always safe. In this version every interpreter declines;
+ *  Phase 4 adds pip, dpkg, git and text.
+ */
+#define BELAY_FINDINGS_MAX   16
+#define BELAY_FINDING_BYTES  256
+
+struct belay_findings {
+    size_t n;
+    char item[BELAY_FINDINGS_MAX][BELAY_FINDING_BYTES];
+};
+
+/* Appends one finding (truncated to BELAY_FINDING_BYTES - 1). 0, or -1 when
+ * BELAY_FINDINGS_MAX are already recorded. */
+int belay_findings_add(struct belay_findings *f, const char *text);
+
+struct belay_entry;
+struct belay_interp_input {
+    const char *path;                   /* relative to the scope */
+    size_t path_len;
+    const struct belay_entry *before;   /* NULL: added */
+    const struct belay_entry *after;    /* NULL: removed */
+};
+
+enum belay_interp_result { BELAY_INTERP_FINDINGS, BELAY_INTERP_DECLINE, BELAY_INTERP_ERROR };
+
+/* Runs interpreter `id` on one change. `out` is cleared first. */
+enum belay_interp_result belay_interp_explain(enum belay_interp_id id,
+                                              const struct belay_interp_input *in,
+                                              struct belay_findings *out);
+
 #endif /* BELAY_INTERP_H */
