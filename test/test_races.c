@@ -54,7 +54,8 @@ enum arm { NONE, SWAP_ON_DIR_OPEN, SWAP_ON_READLINK, REPLACE_LINK_WITH_FILE,
            WRITER_DURING_READ,       /* a writer opens g_x while belay reads it */
            WRITER_LEAVES_DURING_READ,  /* g_x's writer closes while belay reads it */
            MOUNT_AFTER_WALK,         /* tmpfs over g_x once the walk is done */
-           STALE_LISTING };          /* the walk's listing of g_x omits g_y, once */
+           STALE_LISTING,            /* the walk's listing of g_x omits g_y, once */
+           VANISH_ON_STAT };         /* g_x's stat fails ENOENT once; the file stays */
 static int g_flip;
 
 static char g_root[256], g_m[300];
@@ -251,6 +252,11 @@ static int t_stat_mount(void *ctx, int dfd, const char *name, struct stat *st,
         errno = EPERM;
         return -1;
     }
+    if (g_arm == VANISH_ON_STAT && !g_fired && g_x != NULL && strcmp(name, g_x) == 0) {
+        g_fired = 1;
+        errno = ENOENT;
+        return -1;
+    }
     g_statx_calls++;
     if (g_fired) g_statx_after++;
     const int r = g_real->stat_mount(g_real->ctx, dfd, name, st, mount_root, mount_known);
@@ -263,6 +269,11 @@ static int t_stat_mount(void *ctx, int dfd, const char *name, struct stat *st,
 static int t_fstatat(void *ctx, int dfd, const char *name, struct stat *st, int flags) {
     (void)ctx;
     watch(dfd);
+    if (g_arm == VANISH_ON_STAT && !g_fired && g_x != NULL && strcmp(name, g_x) == 0) {
+        g_fired = 1;
+        errno = ENOENT;
+        return -1;
+    }
     const int r = g_real->fstatat(g_real->ctx, dfd, name, st, flags);
     if (r == 0 && g_arm == LINK_EMPTY && g_x != NULL && strcmp(name, g_x) == 0) st->st_size = 0;
     return r;
@@ -1203,6 +1214,29 @@ TEST(r3_empty_link_target_is_recorded_unreadable) {
     ASSERT_TRUE(l != NULL && l->unreadable && l->link_target_len == 0);
 }
 
+/* F2 (audit 2026-10): a name gone between the listing and its stat, back
+ * before the walk ended. The manifest cannot record it, so its directory's
+ * listing must not pass the end-of-walk re-list. Before, every listed name
+ * went into what the re-list is compared with, recorded or not, and the file
+ * was missing from a directory recorded as complete. */
+TEST(a_name_that_vanished_and_came_back_flags_its_directory) {
+    reset();
+    mk("d");
+    touch("d/x", "x");
+    touch("d/y", "y");
+    usleep(20000);
+    arm(VANISH_ON_STAT, "x", NULL);
+    struct belay_manifest_stats st;
+    ASSERT_EQ_INT(0, check(&st));
+    ASSERT_TRUE(g_fired);
+    ASSERT_TRUE(find("d/x") == NULL);
+    ASSERT_EQ_INT(1, (int)st.vanished);
+    const struct belay_entry *d = find("d"), *r = find("."), *y = find("d/y");
+    ASSERT_TRUE(d != NULL && d->unstable);        /* its listing no longer holds */
+    ASSERT_TRUE(r != NULL && !r->unstable);       /* the root's does */
+    ASSERT_TRUE(y != NULL && !y->unstable && !y->raced);
+}
+
 int main(void) {
     decorate();
     snprintf(g_root, sizeof g_root, "/tmp/belay_races_%d", (int)getpid());
@@ -1235,6 +1269,7 @@ int main(void) {
     RUN(r3_file_changed_after_it_was_read_is_raced);
     RUN(r3_one_statx_eperm_is_recorded_and_does_not_switch_statx_off);
     RUN(r3_empty_link_target_is_recorded_unreadable);
+    RUN(a_name_that_vanished_and_came_back_flags_its_directory);
     RUN(w6_file_capability_is_recorded);
     RUN(w6_unreadable_xattrs_are_unknown_not_none);
 

@@ -31,10 +31,14 @@ static ssize_t rel_join(char *rel, size_t relsz, size_t rel_len, const char *nam
 
 int cap_emit_scratch(struct walk_ctx *wc) { return cap_emit(wc, &wc->e, NULL); }
 
-
+/* What visit() did with one name. Only a RECORDED name goes into its
+ * directory's listing (`seen`), which the end-of-walk re-list must match: a
+ * name that vanished and came back before the walk ended is then a listing
+ * change, never a file missing from a directory recorded as complete. */
+enum visited { VISIT_RECORDED = 1, VISIT_GONE, VISIT_INCOMPLETE };
 
 /* Records one entry and, for directories, recurses. Takes the parent dirfd and
- * the entry name; never a path string. */
+ * the entry name; never a path string. Returns an enum visited, or -1. */
 static int visit(int parent_fd, const char *name, char *rel, size_t relsz,
                  size_t rel_len, int depth, struct walk_ctx *wc) {
     struct belay_entry *e = &wc->e;
@@ -47,7 +51,7 @@ static int visit(int parent_fd, const char *name, char *rel, size_t relsz,
             /* Vanished between readdir and stat: the tree changed under us. */
             if (errno == ENOENT) {
                 outcome_apply(NULL, FACET_ENTRY, OUT_GONE, &wc->tally);
-                return 0;
+                return VISIT_GONE;
             }
             if (cap_fatal_errno(errno)) {
                 belay_err_set(BELAY_ERR_IO, errno, "manifest: stat %s", rel);
@@ -55,7 +59,7 @@ static int visit(int parent_fd, const char *name, char *rel, size_t relsz,
             }
             /* EIO, or EACCES from an LSM: this entry cannot be recorded at all,
              * so the PARENT's listing is incomplete -- reported to cap_walk(). */
-            return W_INCOMPLETE;
+            return VISIT_INCOMPLETE;
         }
 
         memset(e, 0, sizeof *e);
@@ -86,7 +90,7 @@ static int visit(int parent_fd, const char *name, char *rel, size_t relsz,
         if (r == -1) return -1;
         if (r == V_VANISHED) {
             outcome_apply(NULL, FACET_ENTRY, OUT_GONE, &wc->tally);
-            return 0;
+            return VISIT_GONE;
         }
         if (r == V_RACED && attempt + 1 < MAX_RACE_RETRIES) continue;   /* stat again */
         /* A symlink whose target could not be read reliably -- an I/O error, a
@@ -108,7 +112,7 @@ static int visit(int parent_fd, const char *name, char *rel, size_t relsz,
         break;
     }
 
-    if (cfd == -1) return cap_emit_scratch(wc);
+    if (cfd == -1) return cap_emit_scratch(wc) == -1 ? -1 : VISIT_RECORDED;
 
     /*
      *  A walked directory is emitted AFTER its subtree (order is fixed by the
@@ -134,11 +138,12 @@ static int visit(int parent_fd, const char *name, char *rel, size_t relsz,
     close(cfd);
     if (r == 0) r = cap_emit(wc, dir, &seen);
     free(dir);
-    return r;
+    return r == 0 ? VISIT_RECORDED : -1;
 }
 
 /*
- *  Lists one directory and visits each entry, adding every name to `seen`.
+ *  Lists one directory and visits each entry, adding each recorded name to
+ *  `seen`.
  *  Returns 0, -1 (fatal: belay's
  *  own resource exhaustion or an output error), or W_INCOMPLETE when the
  *  listing could not be fully captured -- a readdir error part way through,
@@ -173,7 +178,6 @@ int cap_walk(int dfd, char *rel, size_t relsz, size_t rel_len,
             break;
         }
         if (strcmp(dname, ".") == 0 || strcmp(dname, "..") == 0) continue;
-        cons_listing_add(seen, dname);          /* what the validator re-lists */
 
         const ssize_t nlen = rel_join(rel, relsz, rel_len, dname);
         if (nlen == -1) {
@@ -184,8 +188,9 @@ int cap_walk(int dfd, char *rel, size_t relsz, size_t rel_len,
 
         const int v = visit(dfd, dname, rel, relsz, (size_t)nlen, depth, wc);
         rel[rel_len] = '\0';
-        if (v == W_INCOMPLETE) { incomplete = true; continue; }
-        if (v != 0) { rc = v; break; }
+        if (v == -1) { rc = -1; break; }
+        if (v == VISIT_RECORDED) cons_listing_add(seen, dname);   /* what the re-list must match */
+        else if (v == VISIT_INCOMPLETE) incomplete = true;
     }
 
     ops->dir_close(ops->ctx, d);
