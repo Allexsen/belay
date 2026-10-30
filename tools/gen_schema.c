@@ -128,6 +128,27 @@ static void entries_block(void) {
     }
 }
 
+/* A header or trailer table: field, kind, meaning. */
+static void line_table(const struct line_field_def *d, size_t n) {
+    printf("| field | kind | meaning |\n|---|---|---|\n");
+    for (size_t i = 0; i < n; i++) {
+        if (strchr(d[i].description, '|') != NULL) abort();
+        printf("| `%s`%s%s%s | %s | %s |\n", d[i].name, d[i].alt ? " / `" : "",
+               d[i].alt ? d[i].alt : "", d[i].alt ? "`" : "", d[i].kind, d[i].description);
+    }
+}
+static void header_block(void) { line_table(HEADER_FIELDS, H_COUNT); }
+static void trailer_block(void) { line_table(TRAILER_FIELDS, TR_COUNT); }
+
+/* "`a`, `b`|`b_b64`, ..." for a header or trailer key order. */
+static void line_order(char *buf, size_t cap, const struct line_field_def *d, size_t n) {
+    size_t w = 0;
+    for (size_t i = 0; i < n; i++)
+        w += (size_t)snprintf(buf + w, cap - w, "%s`%s`%s%s%s", i ? ", " : "", d[i].name,
+                              d[i].alt ? "|`" : "", d[i].alt ? d[i].alt : "", d[i].alt ? "`" : "");
+    snprintf(buf + w, cap - w, ".");
+}
+
 static void schema_block(void) {
     char buf[1024];
     size_t n = 0;
@@ -140,6 +161,12 @@ static void schema_block(void) {
     n += (size_t)snprintf(buf + n, sizeof buf - n, ".");
     wrap("- ", "**Entry fields appear in one fixed order**, optional ones omitted, never "
          "reordered (`a`|`b`: one spelling or the other, never both):", 2);
+    wrap("  ", buf, 2);
+    line_order(buf, sizeof buf, HEADER_FIELDS, H_COUNT);
+    wrap("- ", "**Header fields, in order:**", 2);
+    wrap("  ", buf, 2);
+    line_order(buf, sizeof buf, TRAILER_FIELDS, TR_COUNT);
+    wrap("- ", "**Trailer fields, in order:**", 2);
     wrap("  ", buf, 2);
 
     n = 0;
@@ -167,6 +194,8 @@ static void schema_block(void) {
 
 static const struct { const char *name; void (*emit)(void); } BLOCKS[] = {
     { "entries", entries_block },
+    { "header", header_block },
+    { "trailer", trailer_block },
     { "schema", schema_block },
 };
 #define NBLOCKS (sizeof BLOCKS / sizeof BLOCKS[0])

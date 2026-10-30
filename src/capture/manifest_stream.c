@@ -62,15 +62,15 @@ int stream_entry(struct stream *s, const struct belay_entry *e) {
     return 0;
 }
 
-int stream_end(const struct stream *s, const uint64_t v[6]) {
-    if (v[0] != s->n_entries || v[2] != s->n_unreadable || v[3] != s->n_unstable ||
-        v[4] != s->n_mounts || v[5] != s->n_raced) {
+int stream_end(const struct stream *s, const uint64_t v[TR_COUNT]) {
+    if (v[TR_ENTRIES] != s->n_entries || v[TR_UNREADABLE] != s->n_unreadable || v[TR_UNSTABLE] != s->n_unstable ||
+        v[TR_MOUNTS] != s->n_mounts || v[TR_RACED] != s->n_raced) {
         belay_err_set(BELAY_ERR_CORRUPT, 0,
                       "manifest: trailer says %llu entries / %llu unreadable / %llu unstable / "
                       "%llu mounts / %llu raced, read %zu / %zu / %zu / %zu / %zu",
-                      (unsigned long long)v[0], (unsigned long long)v[2],
-                      (unsigned long long)v[3], (unsigned long long)v[4],
-                      (unsigned long long)v[5], s->n_entries, s->n_unreadable,
+                      (unsigned long long)v[TR_ENTRIES], (unsigned long long)v[TR_UNREADABLE],
+                      (unsigned long long)v[TR_UNSTABLE], (unsigned long long)v[TR_MOUNTS],
+                      (unsigned long long)v[TR_RACED], s->n_entries, s->n_unreadable,
                       s->n_unstable, s->n_mounts, s->n_raced);
         return -1;
     }

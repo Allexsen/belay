@@ -28,13 +28,12 @@ int cap_write_header(const struct fsops *ops, FILE *f, const char *scope_real,
     const bool utf8 = belay_utf8_valid(scope_real, sl);
     if ((utf8 ? belay_json_escape(buf, LINE_CAP, scope_real, sl)
               : belay_base64_encode(buf, LINE_CAP, scope_real, sl)) == -1) return -1;
-    if (fprintf(f,
-                "{\"belay_manifest\":%d,\"created_ns\":%lld,\"%s\":[\"%s\"]"
-                ",\"hash\":\"sha256\",\"hash_max_bytes\":%llu"
-                ",\"store_max_bytes\":%llu}\n",
-                BELAY_MANIFEST_VERSION, created, utf8 ? "scopes" : "scopes_b64", buf,
-                (unsigned long long)opts->hash_max_bytes,
-                (unsigned long long)opts->store_max_bytes) < 0) {
+    const struct line_field_def *H = HEADER_FIELDS;   /* the names, from the schema */
+    if (fprintf(f, "{\"%s\":%d,\"%s\":%lld,\"%s\":[\"%s\"],\"%s\":\"sha256\",\"%s\":%llu,\"%s\":%llu}\n",
+                H[H_VERSION].name, BELAY_MANIFEST_VERSION, H[H_CREATED].name, created,
+                utf8 ? H[H_SCOPES].name : H[H_SCOPES].alt, buf, H[H_HASH].name,
+                H[H_HASH_MAX].name, (unsigned long long)opts->hash_max_bytes,
+                H[H_STORE_MAX].name, (unsigned long long)opts->store_max_bytes) < 0) {
         belay_err_set(BELAY_ERR_IO, errno, "manifest: header write failed");
         return -1;
     }

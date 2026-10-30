@@ -26,8 +26,7 @@ int decode_entry(const struct obj *o, struct belay_entry *e);
 /* The header line. */
 int decode_header(const struct obj *o, struct belay_manifest_header *h);
 
-/* The trailer line's six values, in order: entries, vanished, unreadable,
- * unstable, mounts, raced. */
-int decode_trailer(const struct obj *o, uint64_t v[6]);
+/* The trailer line's values, indexed by enum trailer_field. */
+int decode_trailer(const struct obj *o, uint64_t v[TR_COUNT]);
 
 #endif

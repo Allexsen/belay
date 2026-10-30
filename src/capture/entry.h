@@ -77,6 +77,21 @@ struct entry_rule {
 extern const struct entry_rule ENTRY_RULES[];
 extern const size_t ENTRY_RULE_COUNT;
 
+/* The header and trailer lines: their fields in canonical order. The
+ * writer prints these names, the reader decodes by them, and the spec's
+ * tables are generated from them. */
+enum header_field { H_VERSION, H_CREATED, H_SCOPES, H_HASH, H_HASH_MAX, H_STORE_MAX, H_COUNT };
+enum trailer_field { TR_ENTRIES, TR_VANISHED, TR_UNREADABLE, TR_UNSTABLE, TR_MOUNTS, TR_RACED,
+                     TR_COUNT };
+struct line_field_def {
+    const char *name;
+    const char *alt;            /* base64 spelling, or NULL */
+    const char *kind;           /* "string", "int", "array" */
+    const char *description;    /* the spec's table (generated) */
+};
+extern const struct line_field_def HEADER_FIELDS[H_COUNT];
+extern const struct line_field_def TRAILER_FIELDS[TR_COUNT];
+
 /* Which fields `e` carries, as FBIT bits. */
 uint32_t entry_present(const struct belay_entry *e);
 
