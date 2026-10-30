@@ -104,7 +104,7 @@ file.
 
 | name | meaning |
 |---|---|
-| `unchanged` | Every compared field equal and nothing unknown. Counted in the trailer, never emitted. A directory whose own timestamps alone differ is `unchanged` (its timestamps are not compared), and counted again in `dir_timestamps_only`. |
+| `unchanged` | Every compared field equal and nothing unknown. Counted in the trailer, never emitted. A directory whose timestamps differ while every compared field is equal is `unchanged` (its timestamps are not compared), and counted again in `dir_timestamps_only`. |
 | `added` | Present after, absent before, and the absence is known. |
 | `removed` | Present before, absent after, and the absence is known. |
 | `modified` | Content changed: a content field differs (hash, size, link target, device number). |
@@ -169,7 +169,8 @@ and device number still compare, so a real `chmod` is still seen.
 
 **A directory's own timestamps.** A directory's `mtime_ns` and `ctime_ns` are not compared either:
 they move whenever a name is added, removed or renamed in it, and the records of its children
-report those changes. A directory whose only difference is its own timestamps is therefore
+report those changes. A directory whose timestamps differ while every compared field is equal
+(its `size` and `nlink` are not compared either: they follow its listing too) is therefore
 `unchanged` and gets no record; the trailer counts it in `dir_timestamps_only`, which is part of
 `unchanged`. What this hides: an attribute the manifest does not record (a `trusted.*` extended
 attribute when belay does not run as root) that changes on a directory is seen only in that
