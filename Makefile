@@ -16,7 +16,7 @@ CC	?= cc
 CFLAGS	?= -O2
 WARN	= -Wall -Wextra -std=c11
 INC	= -Iinclude -Isrc
-BUILD	= build
+BUILD	?= build
 BIN	= bin/belay
 
 UNAME_S	:= $(shell uname -s)
@@ -58,7 +58,7 @@ SAN_FLAGS	= -fsanitize=address,undefined -fno-omit-frame-pointer -g -O1
 SAN_BUILD	= $(BUILD)/san
 SAN_TEST_BIN	= $(TEST_SRC:test/%.c=$(SAN_BUILD)/test/%)
 
-.PHONY: all clean test check check-san fuzz bench platform fs-scenarios gen gen-check measure oracle lint
+.PHONY: all clean test check check-san fuzz bench platform fs-scenarios gen gen-check measure oracle lib lint
 
 all: $(BIN)
 
@@ -90,6 +90,13 @@ SELFTEST_BIN	= $(BUILD)/selftest/must_fail $(BUILD)/selftest/must_pass
 $(BUILD)/selftest/%: test/selftest/%.c test/belay_test.h
 	@mkdir -p $(dir $@)
 	$(CC) $(CFLAGS) $(WARN) $(INC) $(TEST_FLAGS) -o $@ $<
+
+# Every harness links the core through this one archive, built in whatever
+# BUILD directory it chooses (a fresh one): nothing links "every .o found".
+lib: $(BUILD)/libbelay.a
+$(BUILD)/libbelay.a: $(CORE_OBJ)
+	@rm -f $@
+	ar rcs $@ $(CORE_OBJ)
 
 $(SAN_BUILD)/%.o: src/%.c
 	@mkdir -p $(dir $@)
