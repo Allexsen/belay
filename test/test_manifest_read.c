@@ -1245,6 +1245,19 @@ TEST(w6_reader_accepts_exactly_the_canonical_extended_metadata) {
 }
 #undef XH
 
+/* Each flag the reader accepts is set in the entry it returns. The rule
+ * witnesses cannot see a flag the decoder dropped -- rules are judged on the
+ * keys present -- and a dropped xattrs_unknown passed every reader test
+ * (audit mutants RD-20, RD-22, RD-25). */
+TEST(every_flag_is_decoded) {
+    ASSERT_EQ_INT(0, read_it(HDR REG_LINE("f", ",\"xattrs_unknown\":true" SHA_F ",\"raced\":true")));
+    ASSERT_TRUE(g_n == 1 && g_e[0].xattrs_unknown && g_e[0].has_hash && g_e[0].raced);
+    ASSERT_EQ_INT(0, read_it(HDR REG_LINE("f", ",\"unverified\":true,\"unstable\":true")));
+    ASSERT_TRUE(g_n == 1 && g_e[0].unverified && g_e[0].unstable);
+    ASSERT_EQ_INT(0, read_it(HDR DIR_E("d", ",\"unreadable\":true") DIR_E("m", ",\"mount\":true")));
+    ASSERT_TRUE(g_n == 2 && g_e[0].unreadable && g_e[1].is_mount);
+}
+
 /* The decoder reads fields in DECODE_ORDER (it fixes which error a line
  * with several bad fields reports): every schema field must be in it
  * exactly once, or a field added to entry.c would never be read. */
@@ -1316,6 +1329,7 @@ int main(void) {
     RUN(r3_raced_flag_and_mount_and_race_counts);
     RUN(w6_reader_accepts_exactly_the_canonical_extended_metadata);
     RUN(round_trips_the_writers_output);
+    RUN(every_flag_is_decoded);
     RUN(decoder_reads_every_schema_field_once);
 
     unlink(g_path);

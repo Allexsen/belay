@@ -117,7 +117,8 @@ int classify_both(const struct diff_ctx *ctx, const struct belay_entry *b,
     else if (content_unknown) v->outcome = D_UNKNOWN;
     else if (meta_diff) v->outcome = D_METADATA_ONLY;               /* rule 4 */
     else if (meta_unknown) v->outcome = D_UNKNOWN;
-    else if (diff_field_class(F_CTIME, a->type) == CC_CTIME && !mount_root &&   /* rule 5 */
+    /* A mount root never gets here: its flag made the content unknown. */
+    else if (diff_field_class(F_CTIME, a->type) == CC_CTIME &&                  /* rule 5 */
              differs(ctx, F_CTIME, b, a) == 1) {
         v->outcome = D_METADATA_ONLY;
         v->changed |= FBIT(F_CTIME);

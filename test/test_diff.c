@@ -162,6 +162,11 @@ TEST(caps_and_xattrs_against_unreadable_attributes_are_unknown) {
     m_begin("after", "/s", 1000); ROOT(); E(.path = "f", .type = "reg", .size = 3, .sha = HA, .xattrs = "\"user.a=" HB "\""); m_end();
     REQUIRE(run() == 0);
     ASSERT_TRUE(has("f", "\"outcome\":\"metadata_only\"") && has("f", "\"changed\":[\"caps\"]"));
+    /* a mount root's are never read: against one they are not compared, which
+     * shows where content proves a change and the changed fields are listed */
+    m_begin("after", "/s", 1000); ROOT(); E(.path = "f", .type = "reg", .size = 4, .mount = true); m_end();
+    REQUIRE(run() == 0);
+    ASSERT_TRUE(has("f", "\"outcome\":\"modified\"") && has("f", "\"changed\":[\"size\"]"));
 }
 
 /* Item 1b: dev is compared as the entry's relation to its scope root's
@@ -186,6 +191,12 @@ TEST(a_remounted_scope_reports_once_and_still_compares_content) {
     ASSERT_TRUE(record("f") == NULL);                    /* renumbered, nothing else */
     ASSERT_TRUE(has("g", "\"outcome\":\"modified\"") && has("g", "\"changed\":[\"sha256\"]"));
     ASSERT_TRUE(record(".") == NULL);
+    /* No inode is compared across a remount, even one whose device number
+     * held (a btrfs subvolume keeps its own): rule O3. */
+    m_begin("before", "/s", 1000); ROOT(); E(.path = "v", .type = "reg", .size = 3, .sha = HA, .ino = 7, .dev = 5); m_end();
+    m_begin("after", "/s", 1000); ROOT(.dev = 9); E(.path = "v", .type = "reg", .size = 3, .sha = HA, .ino = 8, .dev = 5); m_end();
+    REQUIRE(run() == 0);
+    ASSERT_TRUE(record("v") == NULL);
 }
 
 /* Item 1b: an inode number means something within one device only. */
@@ -210,6 +221,12 @@ TEST(node_and_mount_root_timestamps_are_not_compared) {
     ASSERT_TRUE(has("c", "\"outcome\":\"metadata_only\"") && has("c", "\"changed\":[\"mode\"]"));
     ASSERT_TRUE(has("m", "\"outcome\":\"unknown\""));
     ASSERT_FALSE(has("m", "mtime_ns") || has("m", "ctime_ns"));
+    /* A file mount root whose content proves a change lists what differs:
+     * its times are not among it. */
+    m_begin("before", "/s", 1000); ROOT(); E(.path = "b", .type = "reg", .size = 3, .mount = true); m_end();
+    m_begin("after", "/s", 1000); ROOT(); E(.path = "b", .type = "reg", .size = 4, .mount = true, .mtime = 9, .ctime = 9); m_end();
+    REQUIRE(run() == 0);
+    ASSERT_TRUE(has("b", "\"outcome\":\"modified\"") && has("b", "\"changed\":[\"size\"]"));
 }
 
 TEST(identical_manifests_emit_no_record) {
