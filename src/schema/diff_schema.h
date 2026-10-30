@@ -28,7 +28,7 @@ enum diff_outcome {
 enum diff_reason {
     DR_UNSET, DR_NONE,
     DR_RACED, DR_UNSTABLE, DR_UNVERIFIED, DR_UNREADABLE, DR_MOUNT, DR_XATTRS_UNKNOWN,
-    DR_LISTING_INCOMPLETE, DR_NOT_CAPTURED,
+    DR_IFLAGS_UNKNOWN, DR_LISTING_INCOMPLETE, DR_NOT_CAPTURED,
     DR_COUNT
 };
 #define DR_FIRST DR_RACED
@@ -47,8 +47,13 @@ extern const struct diff_name_def DIFF_REASONS[DR_COUNT];
  *    CC_TYPE      a different type is type_changed;
  *    CC_CONTENT   a difference is proof the content changed: modified;
  *    CC_METADATA  a difference with content unchanged: metadata_only;
- *    CC_IDENTITY  the same, but about which object this is (ino: a file
- *                 replaced by rename with the same bytes);
+ *    CC_IDENTITY  the same, but about which object this is;
+ *    CC_DEVICE    identity as the entry's relation to its scope root's device
+ *                 (same device or not), per side -- never the raw number, which
+ *                 overlay, tmpfs and btrfs assign at mount time;
+ *    CC_INODE     identity within one device: compared only when the entry's
+ *                 dev is the same on both sides, and never across a remount of
+ *                 the scope root (ino: a file replaced by rename, same bytes);
  *    CC_CTIME     compared only when nothing else differs: then the change
  *                 is an attribute the manifest does not record;
  *    CC_FLAG      not compared; on either side, makes what `unknown_scope`
@@ -56,21 +61,38 @@ extern const struct diff_name_def DIFF_REASONS[DR_COUNT];
  *    CC_INFO      not compared (derived, or bookkeeping).
  *  `types` limits the class to those entry types; elsewhere the field is
  *  CC_INFO (a directory's size and mtime follow its listing, which its
- *  children report).
+ *  children report). `mount_roots` says whether it is compared on an entry
+ *  carrying `mount`. `absent` says what the field's absence on one side means
+ *  (test/expect/diff-fields.md pins all of these).
  *
- *  Every cell is explicit: 0 in any column (CC_UNSET, US_UNSET, DR_UNSET) is a
- *  missing cell, refused by gen_schema and by test_schema, and a classify
+ *  Every cell is explicit: 0 in any column (CC_UNSET, US_UNSET, DR_UNSET,
+ *  MR_UNSET, AM_UNSET) is a missing cell, refused by gen_schema and by test_schema, and a classify
  *  that meets one fails the diff. A field that is not a flag says so:
  *  US_NONE, DR_NONE.
  */
-enum change_class { CC_UNSET, CC_KEY, CC_TYPE, CC_CONTENT, CC_METADATA, CC_IDENTITY, CC_CTIME,
-                    CC_FLAG, CC_INFO };
+enum change_class { CC_UNSET, CC_KEY, CC_TYPE, CC_CONTENT, CC_METADATA, CC_IDENTITY, CC_DEVICE,
+                    CC_INODE, CC_CTIME, CC_FLAG, CC_INFO };
 enum unknown_scope { US_UNSET, US_NONE, US_CONTENT, US_METADATA, US_ALL };
+enum mount_roots { MR_UNSET, MR_COMPARED, MR_NOT_COMPARED };
+/* What an optional field's absence on one side means. */
+enum absent_means {
+    AM_UNSET,
+    AM_REQUIRED,         /* never absent */
+    AM_FLAG,             /* a flag: absent = not set */
+    AM_NONE,             /* absent = none, compared as such */
+    AM_NONE_IF_READ,     /* none where the attributes were read; else not compared (unknown) */
+    AM_UNKNOWN,          /* absent = could not be read: one side only is unknown */
+    AM_WITH_UNVERIFIED,  /* absent only with `unverified`, which makes content unknown */
+    AM_ONLY_ON_TYPES,    /* present exactly on its types */
+    AM_NA,               /* not compared */
+};
 struct field_change {
     enum change_class cls;
     unsigned types;             /* TBIT mask */
     enum unknown_scope unknown; /* CC_FLAG */
     enum diff_reason reason;    /* CC_FLAG */
+    enum mount_roots mount_roots;
+    enum absent_means absent;
     const char *why;            /* the spec's table (generated) */
 };
 extern const struct field_change DIFF_FIELDS[F_COUNT];
@@ -82,7 +104,8 @@ enum change_class diff_field_class(enum entry_field f, enum belay_entry_type t);
 /* The diff.v1 stream: a header line, one record per changed path, a trailer
  * of counts derived from the records. */
 enum diff_header_field { DH_VERSION, DH_SCOPES, DH_BEFORE_CREATED, DH_AFTER_CREATED,
-                         DH_BEFORE_HASH_MAX, DH_AFTER_HASH_MAX, DH_COUNT };
+                         DH_BEFORE_HASH_MAX, DH_AFTER_HASH_MAX, DH_SCOPE_REMOUNTED,
+                         DH_IDENTITY_COMPARED, DH_COUNT };
 enum diff_record_field { DF_PATH, DF_OUTCOME, DF_TYPE, DF_TYPE_BEFORE, DF_CHANGED, DF_UNKNOWN,
                          DF_FINDINGS, DF_COUNT };
 extern const struct line_field_def DIFF_HEADER_FIELDS[DH_COUNT];

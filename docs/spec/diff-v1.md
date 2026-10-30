@@ -15,9 +15,9 @@ in the manifests' path order (bytewise), and a trailer line. Readers MUST reject
 not know, and treat a missing trailer as a truncated diff.
 
 ```json
-{"belay_diff":1,"scopes":["/home/u/proj"],"before_created_ns":1761000000000000000,"after_created_ns":1761000600000000000,"before_hash_max_bytes":67108864,"after_hash_max_bytes":67108864}
+{"belay_diff":1,"scopes":["/home/u/proj"],"before_created_ns":1761000000000000000,"after_created_ns":1761000600000000000,"before_hash_max_bytes":67108864,"after_hash_max_bytes":67108864,"scope_remounted":false,"identity_compared":true}
 {"path":"src/main.c","outcome":"modified","type":"reg","changed":["size","mtime_ns","sha256"]}
-{"path":"build/","outcome":"unknown","type":"dir","unknown":["unstable"]}
+{"path":"build","outcome":"unknown","type":"dir","unknown":["unstable"]}
 {"belay_diff_end":2,"unchanged":1840,"added":0,"removed":0,"modified":1,"type_changed":0,"metadata_only":0,"unknown":1}
 ```
 
@@ -34,6 +34,8 @@ not know, and treat a missing trailer as a truncated diff.
 | `after_created_ns` | int | The later manifest's `created_ns`. |
 | `before_hash_max_bytes` | int | The earlier manifest's hash limit. When the two differ, a file hashed on one side and not the other is `unknown` unless its size proves a change. |
 | `after_hash_max_bytes` | int | The later manifest's hash limit. |
+| `scope_remounted` | bool | The scope root's `dev` differs between the manifests: it was remounted, and devices were numbered anew. |
+| `identity_compared` | bool | Whether `ino` was compared: never across a remount of the scope root, since an inode number means something only within one device. Content still compares by hash. |
 <!-- END GENERATED: diff-header -->
 
 ### Records
@@ -100,8 +102,10 @@ deepest entry whose path, followed by `/`, begins this path; the scope root `.` 
 An entry whose parent is missing from its own manifest (an orphan) is handled the same way; nothing
 looks a parent up.
 
-**Present on both sides.** Each field takes part in the comparison by its class (table below).
-Flags on **either** side make part of the comparison unknown: their reasons are collected.
+**Present on both sides.** Each field takes part in the comparison by its class, for the entry
+types, and on the entries (mount roots or not) that `test/expect/diff-fields.md` pins and the
+table below generates. Flags on **either** side make part of the comparison unknown: their reasons
+are collected.
 
 1. `raced` on either side: `unknown`. Its recorded fields may not be the state at the end of its
    walk, so not even a difference proves a change.
@@ -109,24 +113,45 @@ Flags on **either** side make part of the comparison unknown: their reasons are 
 3. **Content**: a content field that differs is proof (`size` for a regular file or symlink, the
    hash when both sides have one, the link target when neither side is `unreadable`, the device
    number). Proof gives `modified`. Without proof, content is unknown if a content-scoped flag
-   (`unverified`, `unstable`, `unreadable`, `mount`) is on either side -- a regular file without a
-   hash always carries `unverified`: `unknown`.
+   (`unverified`, `unstable`, `unreadable`, `mount`) is on either side: `unknown`. In particular,
+   a hash on one side and `unverified` on the other -- the two manifests' hash limits differ, or
+   the file could not be hashed -- is `unknown`, unless `size` differs, which proves `modified`.
 4. **Metadata and identity**: content unchanged and a metadata or identity field differs:
-   `metadata_only`. Without such a difference, `xattrs_unknown` on either side: `unknown`.
-5. Only `ctime_ns` differs: `metadata_only`, `changed` names `ctime_ns` -- an attribute the
-   manifest does not record changed.
+   `metadata_only`. Without such a difference, metadata is unknown, and the outcome `unknown`, if
+   either side carries `xattrs_unknown` (reason `xattrs_unknown`) or `iflags` is present on one
+   side only (reason `iflags_unknown`: an absent `iflags` means it could not be read).
+5. Only `ctime_ns` differs, on a regular file, symlink or directory that is not a mount root:
+   `metadata_only`, `changed` names `ctime_ns` -- an attribute the manifest does not record
+   changed.
 6. Otherwise `unchanged`.
 
-`changed`, for a path present on both sides: when the types differ, `["type"]`; otherwise every
-compared field that differs (content, metadata or identity, by its class for that type), whatever
-the outcome, and `ctime_ns` only under rule 5. A field is compared only where both sides know it:
-the hash when both have one, the link target when neither is `unreadable`, `iflags` when both
-have it (absent means not available), `caps` and `xattrs` when neither side carries
-`xattrs_unknown`. `unknown`, for an `unknown` outcome: the reason of every flag on either side, in
-the order of the reasons table; for the one-sided case, its one reason.
+**Devices and identity.** `dev` is not compared as a number: overlay, tmpfs and btrfs number their
+devices when they are mounted, so a remount would make every entry differ and bury a real change.
+Each side says instead whether the entry is on the same device as its scope root; a change in that
+is a real mount change (`metadata_only`, `changed` names `dev`). `ino` is compared only when the
+entry's `dev` is the same on both sides: an inode number means something only within one device.
+When the scope root's own `dev` differs between the two manifests -- a remount -- the header says
+so once (`scope_remounted`, `identity_compared`) and `ino` is compared for no entry; content still
+compares by hash.
 
-Nothing above can produce `unchanged` for a path on which either side carries `raced`, `unstable`,
-`unverified`, `unreadable`, `mount` or `xattrs_unknown`, nor for a path present on one side only.
+**Timestamps that move on use.** On a FIFO, socket or device node, and on a mount root,
+`mtime_ns` and `ctime_ns` are not compared: ttys and pipes stamp themselves when used, and a mount
+root's times belong to the mounted filesystem. Their mode, owner, group, inode, device relation
+and device number still compare, so a real `chmod` is still seen.
+
+`changed`, for a path present on both sides: when the types differ, `["type"]`; otherwise every
+compared field that differs (by its class for that type), whatever the outcome, and `ctime_ns` only
+under rule 5. A field is compared only where both sides know it: the hash when both have one, the
+link target when neither is `unreadable`, `iflags` when both have it, `caps` and `xattrs` where the
+attributes were read on both sides (neither carries `xattrs_unknown`, neither is a mount root --
+an absent `caps` or `xattrs` means none only where they were read). `unknown`, for an `unknown`
+outcome: the reasons of every flag on either side and of every field unknown under rule 4, in the
+order of the reasons table; for the one-sided case, its one reason.
+
+**An absent record means `unchanged`.** That holds only because every path that is not provably
+unchanged is emitted -- `unknown` included. Nothing above can produce `unchanged` for a path on
+which either side carries `raced`, `unstable`, `unverified`, `unreadable`, `mount` or
+`xattrs_unknown`, or `iflags` on one side only, nor for a path present on one side only.
 
 ## Reasons
 
@@ -141,6 +166,7 @@ Nothing above can produce `unchanged` for a path on which either side carries `r
 | `unreadable` | The entry's contents could not be captured. |
 | `mount` | A mount root: contents not captured, by design. |
 | `xattrs_unknown` | Extended attributes could not be read. |
+| `iflags_unknown` | Inode flags recorded on one side only: absent means they could not be read. |
 | `listing_incomplete` | Absent on a side whose nearest recorded ancestor directory is `unstable`: possibly present. |
 | `not_captured` | Absent on a side whose nearest recorded ancestor directory is `unreadable` or a `mount`: nothing below it was captured. |
 <!-- END GENERATED: diff-reasons -->
@@ -150,34 +176,34 @@ Nothing above can produce `unchanged` for a path on which either side carries `r
 <!-- BEGIN GENERATED: diff-fields -->
 <!-- From src/schema/diff_schema.c by tools/gen_schema.c. Edit there, then `make gen`. -->
 
-| field | class | for types | makes unknown | why |
-|---|---|---|---|---|
-| `path` | key |  |  | Pairs the entries. |
-| `type` | type | all |  | A different type is `type_changed`. |
-| `mode` | metadata | all |  | Permission bits (the type bits are `type`). |
-| `uid` | metadata | all |  | Owner. |
-| `gid` | metadata | all |  | Group. |
-| `size` | content | reg, lnk |  | Proof of a content change without a hash. A directory's follows its listing. |
-| `mtime_ns` | metadata | reg, lnk, fifo, sock, blk, chr |  | Settable by any writer. A directory's follows its listing. |
-| `ctime_ns` | ctime | all |  | Moves with every change; reported only when nothing else differs. |
-| `ino` | identity | all |  | Same bytes, new inode: replaced (rename-over, as dpkg installs). Hard links break and open descriptors keep the old file. |
-| `dev` | identity | all |  | Which filesystem holds it. |
-| `nlink` | identity | reg, lnk, fifo, sock, blk, chr |  | Hard links added or removed elsewhere. A directory's counts its subdirectories. |
-| `iflags` | metadata | all |  | Compared when both sides have it: absent means not available (known issue). |
-| `caps` | metadata | all |  | A file capability, added or removed: a privilege change. Not compared under `xattrs_unknown`. |
-| `xattrs` | metadata | all |  | Compared by the set's digest, so an inline set and a digest-only set compare. Not compared under `xattrs_unknown`. |
-| `xattrs_sha256` | not compared |  |  | Compared as `xattrs`. |
-| `xattrs_unknown` | flag |  | metadata | Metadata unknown unless another metadata field proves a change. |
-| `sha256` | content | reg |  | Content digest. |
-| `unverified` | flag |  | content | Content unknown unless size proves a change (different hash limits included). |
-| `unstable` | flag |  | content | Content (a directory's listing) unknown unless another content field proves a change. |
-| `rdev` | content | blk, chr |  | Which device the node refers to. |
-| `link_target` | content | lnk |  | Compared only when neither side is `unreadable` (empty means unknown). |
-| `target_outside_scope` | not compared |  |  | Derived from the target; advisory. |
-| `stored` | not compared |  |  | Bookkeeping: equal to `sha256`. |
-| `mount` | flag |  | content | Contents not captured. |
-| `unreadable` | flag |  | content | Contents unknown unless another content field proves a change. |
-| `raced` | flag |  | everything | Everything unknown: the recorded fields may not be the state at the end of the walk, so no difference is proof. |
+| field | class | for types | on mount roots | absent means | makes unknown | why |
+|---|---|---|---|---|---|---|
+| `path` | key |  | compared | required |  | Pairs the entries. |
+| `type` | type | all | compared | required |  | A different type is `type_changed`. |
+| `mode` | metadata | all | compared | required |  | Permission bits (the type bits are `type`). |
+| `uid` | metadata | all | compared | required |  | Owner. |
+| `gid` | metadata | all | compared | required |  | Group. |
+| `size` | content | reg, lnk | compared | required |  | Proof of a content change without a hash. A directory's follows its listing. |
+| `mtime_ns` | metadata | reg, lnk | not compared | required |  | Settable by any writer. Not compared on a directory (it follows the listing), on a FIFO, socket or device node, or on a mount root: those stamp themselves when used. |
+| `ctime_ns` | ctime | reg, dir, lnk | not compared | required |  | Moves with every change; reported only when nothing else differs. Not compared on a FIFO, socket or device node, or on a mount root. |
+| `ino` | identity: within one device | all | compared | required |  | Same bytes, new inode: replaced (rename-over, as dpkg installs). Compared only when the entry's `dev` is the same on both sides, never across a remount of the scope root. |
+| `dev` | identity: device relation | all | compared | required |  | Whether the entry is on its scope root's device, per side: a change is a real mount change. The raw number is not compared (assigned at mount time). |
+| `nlink` | identity | reg, lnk, fifo, sock, blk, chr | compared | required |  | Hard links added or removed elsewhere. A directory's counts its subdirectories. |
+| `iflags` | metadata | all | compared | unknown |  | On one side only it is `unknown` (reason `iflags_unknown`): absent means it could not be read. |
+| `caps` | metadata | all | compared | none if read |  | A file capability, added or removed: a privilege change. Compared only where the attributes were read (no `xattrs_unknown`, not a mount root). |
+| `xattrs` | metadata | all | compared | none if read |  | Compared by the set's digest (each element is `name=sha256(value)`), so an inline set and a digest-only set compare. Only where the attributes were read. |
+| `xattrs_sha256` | not compared |  | not compared | none if read |  | Compared as `xattrs`. |
+| `xattrs_unknown` | flag |  | compared | flag | metadata | Metadata unknown unless another metadata field proves a change. |
+| `sha256` | content | reg | compared | with unverified |  | Content digest. |
+| `unverified` | flag |  | compared | flag | content | Content unknown unless size proves a change (different hash limits included). |
+| `unstable` | flag |  | compared | flag | content | Content (a directory's listing) unknown unless another content field proves a change. |
+| `rdev` | content | blk, chr | compared | only on its types |  | Which device the node refers to. |
+| `link_target` | content | lnk | compared | only on its types |  | Compared only when neither side is `unreadable` (empty means unknown). |
+| `target_outside_scope` | not compared |  | not compared | n/a |  | Derived from the target; advisory. |
+| `stored` | not compared |  | not compared | none |  | Bookkeeping: equal to `sha256`. |
+| `mount` | flag |  | compared | flag | content | Contents not captured. |
+| `unreadable` | flag |  | compared | flag | content | Contents unknown unless another content field proves a change. |
+| `raced` | flag |  | compared | flag | everything | Everything unknown: the recorded fields may not be the state at the end of the walk, so no difference is proof. |
 <!-- END GENERATED: diff-fields -->
 
 ## Interpreters

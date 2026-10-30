@@ -33,6 +33,11 @@ struct me {
     const char *sha;                     /* reg: NULL means unverified */
     const char *target;                  /* lnk */
     bool unstable, unreadable, mount, raced, xattrs_unknown;
+    unsigned long long dev;              /* 0: 1 */
+    bool has_iflags;
+    unsigned long long iflags;
+    const char *caps, *xattrs;           /* caps hex; xattrs array body */
+    unsigned long long rdev;             /* blk, chr: 0 means 3 */
 };
 
 static char g_dir[256];
@@ -52,15 +57,22 @@ static void m_begin(const char *name, const char *scope, unsigned long long hash
 static void m_entry(struct me e) {
     const bool reg = strcmp(e.type, "reg") == 0, dir = strcmp(e.type, "dir") == 0;
     const bool lnk = strcmp(e.type, "lnk") == 0;
-    const unsigned tbits = reg ? 0100000 : dir ? 0040000 : lnk ? 0120000 : 0010000;
+    const bool chr = strcmp(e.type, "chr") == 0, blk = strcmp(e.type, "blk") == 0;
+    const bool sock = strcmp(e.type, "sock") == 0;
+    const unsigned tbits = reg ? 0100000 : dir ? 0040000 : lnk ? 0120000 : chr ? 0020000
+                         : blk ? 0060000 : sock ? 0140000 : 0010000;
     if (lnk && e.target != NULL && !e.unreadable) e.size = strlen(e.target);
     fprintf(g_f, "{\"path\":\"%s\",\"type\":\"%s\",\"mode\":%u,\"uid\":1,\"gid\":1,\"size\":%llu,"
-                 "\"mtime_ns\":%lld,\"ctime_ns\":%lld,\"ino\":%llu,\"dev\":1,\"nlink\":1",
+                 "\"mtime_ns\":%lld,\"ctime_ns\":%lld,\"ino\":%llu,\"dev\":%llu,\"nlink\":1",
             e.path, e.type, tbits | (e.mode ? e.mode : 0644), e.size, e.mtime ? e.mtime : 1,
-            e.ctime ? e.ctime : 1, e.ino ? e.ino : 7);
+            e.ctime ? e.ctime : 1, e.ino ? e.ino : 7, e.dev ? e.dev : 1);
+    if (e.has_iflags) fprintf(g_f, ",\"iflags\":%llu", e.iflags);
+    if (e.caps) fprintf(g_f, ",\"caps\":\"%s\"", e.caps);
+    if (e.xattrs) fprintf(g_f, ",\"xattrs\":[%s]", e.xattrs);
     if (e.xattrs_unknown) fprintf(g_f, ",\"xattrs_unknown\":true");
     if (reg) fprintf(g_f, e.sha ? ",\"sha256\":\"%s\"" : ",\"unverified\":true", e.sha);
     if (e.unstable) fprintf(g_f, ",\"unstable\":true");
+    if (chr || blk) fprintf(g_f, ",\"rdev\":%llu", e.rdev ? e.rdev : 3);
     if (lnk) fprintf(g_f, ",\"link_target\":\"%s\"", e.target ? e.target : "");
     if (e.mount) fprintf(g_f, ",\"mount\":true");
     if (e.unreadable) fprintf(g_f, ",\"unreadable\":true");
@@ -122,6 +134,83 @@ static bool has(const char *path, const char *fragment) {
 
 
 /* ---- the rules ---- */
+
+/* A2 (audit 2026-10): iflags recorded on one side only meant "not compared",
+ * and the path read as unchanged. Absent means the flags could not be read:
+ * unknown (pin: iflags, absent means unknown). */
+TEST(iflags_on_one_side_only_is_unknown) {
+    m_begin("before", "/s", 1000); ROOT(); E(.path = "f", .type = "reg", .size = 3, .sha = HA, .has_iflags = true, .iflags = 16); m_end();
+    m_begin("after", "/s", 1000); ROOT(); E(.path = "f", .type = "reg", .size = 3, .sha = HA); m_end();
+    REQUIRE(run() == 0);
+    ASSERT_TRUE(has("f", "\"outcome\":\"unknown\""));
+    ASSERT_TRUE(has("f", "\"unknown\":[\"iflags_unknown\"]"));
+    m_begin("after", "/s", 1000); ROOT(); E(.path = "f", .type = "reg", .size = 3, .sha = HA, .has_iflags = true, .iflags = 0); m_end();
+    REQUIRE(run() == 0);
+    ASSERT_TRUE(has("f", "\"outcome\":\"metadata_only\"") && has("f", "\"changed\":[\"iflags\"]"));
+}
+
+/* Item 1a (2026-10-30): an absent caps or xattrs means none only where the
+ * attributes were read; against xattrs_unknown it is unknown, never "no
+ * capabilities". */
+TEST(caps_and_xattrs_against_unreadable_attributes_are_unknown) {
+    m_begin("before", "/s", 1000); ROOT(); E(.path = "f", .type = "reg", .size = 3, .sha = HA, .caps = "0100000200200000", .xattrs = "\"user.a=" HB "\""); m_end();
+    m_begin("after", "/s", 1000); ROOT(); E(.path = "f", .type = "reg", .size = 3, .sha = HA, .xattrs_unknown = true); m_end();
+    REQUIRE(run() == 0);
+    ASSERT_TRUE(has("f", "\"outcome\":\"unknown\"") && has("f", "\"unknown\":[\"xattrs_unknown\"]"));
+    ASSERT_FALSE(has("f", "\"caps\"") || has("f", "\"xattrs\""));
+    /* read on both sides: a capability removed is a change */
+    m_begin("after", "/s", 1000); ROOT(); E(.path = "f", .type = "reg", .size = 3, .sha = HA, .xattrs = "\"user.a=" HB "\""); m_end();
+    REQUIRE(run() == 0);
+    ASSERT_TRUE(has("f", "\"outcome\":\"metadata_only\"") && has("f", "\"changed\":[\"caps\"]"));
+}
+
+/* Item 1b: dev is compared as the entry's relation to its scope root's
+ * device. An entry moving onto another device is a real mount change. */
+TEST(an_entry_moving_off_the_scope_roots_device_is_reported) {
+    m_begin("before", "/s", 1000); ROOT(); E(.path = "d", .type = "dir"); m_end();
+    m_begin("after", "/s", 1000); ROOT(); E(.path = "d", .type = "dir", .dev = 2); m_end();
+    REQUIRE(run() == 0);
+    ASSERT_TRUE(has("d", "\"outcome\":\"metadata_only\"") && has("d", "\"changed\":[\"dev\"]"));
+}
+
+/* Item 1b: a remount renumbers every device (overlay, tmpfs, btrfs). Once
+ * reported in the header, it is not a change of every entry; inode numbers
+ * are not compared across it; content still compares by hash. */
+TEST(a_remounted_scope_reports_once_and_still_compares_content) {
+    m_begin("before", "/s", 1000); ROOT(); E(.path = "f", .type = "reg", .size = 3, .sha = HA, .ino = 7);
+    E(.path = "g", .type = "reg", .size = 3, .sha = HA, .ino = 8); m_end();
+    m_begin("after", "/s", 1000); ROOT(.dev = 9); E(.path = "f", .type = "reg", .size = 3, .sha = HA, .ino = 70, .dev = 9);
+    E(.path = "g", .type = "reg", .size = 3, .sha = HB, .ino = 80, .dev = 9); m_end();
+    REQUIRE(run() == 0);
+    ASSERT_TRUE(strstr(g_text, "\"scope_remounted\":true,\"identity_compared\":false}") != NULL);
+    ASSERT_TRUE(record("f") == NULL);                    /* renumbered, nothing else */
+    ASSERT_TRUE(has("g", "\"outcome\":\"modified\"") && has("g", "\"changed\":[\"sha256\"]"));
+    ASSERT_TRUE(record(".") == NULL);
+}
+
+/* Item 1b: an inode number means something within one device only. */
+TEST(inode_numbers_compare_only_within_one_device) {
+    m_begin("before", "/s", 1000); ROOT(); E(.path = "f", .type = "reg", .size = 3, .sha = HA, .ino = 7, .dev = 5); m_end();
+    m_begin("after", "/s", 1000); ROOT(); E(.path = "f", .type = "reg", .size = 3, .sha = HA, .ino = 8, .dev = 6); m_end();
+    REQUIRE(run() == 0);
+    ASSERT_TRUE(record("f") == NULL);                    /* off the root's device on both sides */
+    ASSERT_TRUE(strstr(g_text, "\"scope_remounted\":false,\"identity_compared\":true}") != NULL);
+}
+
+/* Item 1c: ttys and FIFOs stamp themselves when used, and a mount root's
+ * times belong to the mounted filesystem: timestamps are not compared there,
+ * while a chmod still is. */
+TEST(node_and_mount_root_timestamps_are_not_compared) {
+    m_begin("before", "/s", 1000); ROOT(); E(.path = "c", .type = "chr"); E(.path = "m", .type = "dir", .mount = true, .dev = 2);
+    E(.path = "p", .type = "fifo"); m_end();
+    m_begin("after", "/s", 1000); ROOT(); E(.path = "c", .type = "chr", .mode = 0600, .mtime = 9, .ctime = 9);
+    E(.path = "m", .type = "dir", .mount = true, .dev = 2, .mtime = 9, .ctime = 9); E(.path = "p", .type = "fifo", .mtime = 9, .ctime = 9); m_end();
+    REQUIRE(run() == 0);
+    ASSERT_TRUE(record("p") == NULL);
+    ASSERT_TRUE(has("c", "\"outcome\":\"metadata_only\"") && has("c", "\"changed\":[\"mode\"]"));
+    ASSERT_TRUE(has("m", "\"outcome\":\"unknown\""));
+    ASSERT_FALSE(has("m", "mtime_ns") || has("m", "ctime_ns"));
+}
 
 TEST(identical_manifests_emit_no_record) {
     for (int side = 0; side < 2; side++) {
@@ -395,9 +484,11 @@ TEST(absence_below_a_file_is_known) {
 }
 
 /* The schema's promise, checked exhaustively: no combination of flags on
- * either side -- every flag field of DIFF_FIELDS, read from the schema, not
- * listed here -- classifies as unchanged, for any entry type, even when
- * every compared field is equal. */
+ * either side classifies as unchanged, for any entry type, even when every
+ * compared field is equal. The six flags are listed here by hand, from the
+ * spec (diff-v1, rules 1, 3 and 4), not read from DIFF_FIELDS: a flag the
+ * table demoted would otherwise drop out of this test with it (audit 2026-10,
+ * class 1). */
 static void set_flag(struct belay_entry *e, enum entry_field f) {
     switch (f) {
     case F_RACED: e->raced = true; break;
@@ -416,11 +507,10 @@ static void set_flag(struct belay_entry *e, enum entry_field f) {
 }
 
 TEST(no_flag_combination_on_either_side_is_unchanged) {
-    enum entry_field flags[F_COUNT];
-    int nf = 0;
-    for (int f = 0; f < F_COUNT; f++)
-        if (DIFF_FIELDS[f].cls == CC_FLAG) flags[nf++] = (enum entry_field)f;
-    ASSERT_TRUE(nf >= 6);
+    static const enum entry_field flags[] = { F_RACED, F_UNSTABLE, F_UNVERIFIED, F_UNREADABLE,
+                                              F_MOUNT, F_XATTRS_UNKNOWN };
+    const int nf = (int)(sizeof flags / sizeof flags[0]);
+    const struct diff_ctx ctx = { 0, 0, false };
     static struct belay_entry base, b, a;
     int checked = 0;
     for (int t = 0; t < ENTRY_TYPE_COUNT; t++) {
@@ -436,7 +526,7 @@ TEST(no_flag_combination_on_either_side_is_unchanged) {
                 if (mask & (1u << (nf + i))) set_flag(&a, flags[i]);
             }
             struct verdict v;
-            classify_both(&b, &a, &v);
+            REQUIRE(classify_both(&ctx, &b, &a, &v) == 0);
             REQUIRE_MSG(v.outcome != D_UNCHANGED, "type %d, flag mask %#x classified unchanged",
                         t, mask);
             REQUIRE_MSG(!(v.outcome == D_UNKNOWN && v.reasons == 0),
@@ -454,6 +544,12 @@ int main(void) {
     snprintf(cmd, sizeof cmd, "mkdir -p '%s'", g_dir);
     if (system(cmd) != 0) return 1;
     RUN(identical_manifests_emit_no_record);
+    RUN(iflags_on_one_side_only_is_unknown);
+    RUN(caps_and_xattrs_against_unreadable_attributes_are_unknown);
+    RUN(an_entry_moving_off_the_scope_roots_device_is_reported);
+    RUN(a_remounted_scope_reports_once_and_still_compares_content);
+    RUN(inode_numbers_compare_only_within_one_device);
+    RUN(node_and_mount_root_timestamps_are_not_compared);
     RUN(added_removed_and_modified_by_hash);
     RUN(different_hash_limits_are_unknown_unless_size_proves_a_change);
     RUN(new_inode_permissions_and_ctime_alone_are_metadata_only);

@@ -22,6 +22,8 @@ TEST(zero_is_the_missing_value_in_every_enum) {
     ASSERT_EQ_INT(0, D_UNDECIDED);
     ASSERT_EQ_INT(0, ANC_UNSET);
     ASSERT_EQ_INT(0, R_UNSET);
+    ASSERT_EQ_INT(0, MR_UNSET);
+    ASSERT_EQ_INT(0, AM_UNSET);
     ASSERT_TRUE(D_FIRST > D_UNDECIDED);
     ASSERT_TRUE(DR_FIRST > DR_NONE && DR_NONE > DR_UNSET);
 }
@@ -72,6 +74,8 @@ TEST(every_diff_field_cell_is_set) {
         if (c->unknown == US_UNSET) BELAY_FAIL("%s: unknown scope unset", n);
         if (c->reason == DR_UNSET) BELAY_FAIL("%s: reason unset", n);
         if (c->why == NULL) BELAY_FAIL("%s: no description", n);
+        if (c->mount_roots == MR_UNSET) BELAY_FAIL("%s: mount-root cell unset", n);
+        if (c->absent == AM_UNSET) BELAY_FAIL("%s: absent-means cell unset", n);
         if (c->types == 0) BELAY_FAIL("%s: no types", n);
         if (c->cls == CC_FLAG && (c->unknown == US_NONE || c->reason < DR_FIRST))
             BELAY_FAIL("%s: a flag needs a scope and a reason", n);

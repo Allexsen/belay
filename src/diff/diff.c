@@ -28,10 +28,11 @@
 #include <string.h>
 #include <unistd.h>
 
-/* The scope root's kind, which ancestry needs before the root's own line:
- * "." sorts after names such as "!x". Reads this manifest up to ".", which
- * holds only the few entries sorting before it. */
-static int root_kind(const char *path, enum anc *out) {
+/* The scope root's kind, which ancestry needs before the root's own line
+ * ("." sorts after names such as "!x"), and its device, which every entry's
+ * device relation needs. Reads this manifest up to ".", which holds only the
+ * few entries sorting before it. */
+static int root_kind(const char *path, enum anc *out, uint64_t *dev) {
     struct belay_manifest_reader *r;
     if (belay_manifest_open(path, &r) == -1) return -1;
     struct belay_entry *e = malloc(sizeof *e);
@@ -44,6 +45,7 @@ static int root_kind(const char *path, enum anc *out) {
     while ((got = belay_manifest_next(r, e)) == 1) {
         if (e->path_len == 1 && e->path[0] == '.') {
             *out = ancestry_kind(e);
+            *dev = e->dev;
             rc = 0;
             break;
         }
@@ -58,6 +60,7 @@ static int root_kind(const char *path, enum anc *out) {
 
 struct run {
     struct belay_manifest_reader *rb, *ra;
+    struct diff_ctx ctx;
     struct pair_state *pair;
     struct ancestry *anc;       /* [0] before, [1] after */
     struct emitter em;
@@ -93,13 +96,13 @@ static int run_pipeline(struct run *x) {
                       ha->scope);
         return -1;
     }
-    if (emit_header(&x->em, hb, ha) == -1) return -1;
+    if (emit_header(&x->em, hb, ha, x->ctx.remounted) == -1) return -1;
     const struct belay_entry *b, *a;
     int got;
     while ((got = pair_next(x->pair, &b, &a)) == 1) {
         struct verdict v;
         if (b != NULL && a != NULL) {
-            if (classify_both(b, a, &v) == -1) return -1;
+            if (classify_both(&x->ctx, b, a, &v) == -1) return -1;
         } else {
             const struct belay_entry *e = b != NULL ? b : a;
             const enum anc absent = ancestry_of(&x->anc[b != NULL ? 1 : 0], e->path, e->path_len);
@@ -122,7 +125,9 @@ int belay_diff(const char *before, const char *after, const char *out_path,
         return -1;
     }
     enum anc root_b, root_a;
-    if (root_kind(before, &root_b) == -1 || root_kind(after, &root_a) == -1) return -1;
+    uint64_t dev_b = 0, dev_a = 0;
+    if (root_kind(before, &root_b, &dev_b) == -1 || root_kind(after, &root_a, &dev_a) == -1)
+        return -1;
 
     struct run *x = calloc(1, sizeof *x);
     int rc = -1;
@@ -134,6 +139,8 @@ int belay_diff(const char *before, const char *after, const char *out_path,
     }
     ancestry_init(&x->anc[0], root_b);
     ancestry_init(&x->anc[1], root_a);
+    x->ctx = (struct diff_ctx){ .root_dev_before = dev_b, .root_dev_after = dev_a,
+                                .remounted = dev_b != dev_a };
     if (belay_manifest_open(before, &x->rb) == -1 || belay_manifest_open(after, &x->ra) == -1)
         goto done;
     if ((x->pair = pair_new(x->rb, x->ra)) == NULL) {
