@@ -117,7 +117,7 @@ static const struct fsops macos_ops = {
     .probe_end = macos_probe_noop,
     .clock = macos_clock,
     .tmpfile_in = macos_tmpfile_in,
-    .fsync = posix_fsync,
+    .fsync = posix_fsync,   /* orders writes; no drive flush: no F_FULLFSYNC, by decision */
 };
 
 const struct fsops *fsops_default(void) { return &macos_ops; }

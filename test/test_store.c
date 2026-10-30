@@ -185,6 +185,31 @@ TEST(planted_wrong_content_is_caught_by_verify) {
     belay_store_close(s);
 }
 
+/* Decided 2026-10-30: a copy's bytes are not synced, so a power loss can
+ * empty a copy or cut it short. Either fails verification on read, loudly
+ * (CORRUPT, naming what it hashes to), and never passes for the content its
+ * name promises. */
+TEST(a_copy_a_crash_emptied_or_cut_short_fails_verification) {
+    struct belay_store *s = NULL;
+    ASSERT_EQ_INT(0, belay_store_open(g_dir, &s));
+    const char *data = "content a power loss may take";
+    char hex[65], p[1024];
+    sha_hex(data, strlen(data), hex);
+    ASSERT_EQ_INT(0, put(s, data, hex));
+    ASSERT_EQ_INT(1, belay_store_verify(s, hex));
+    obj_path(hex, p, sizeof p);
+    const off_t lengths[] = { 7, 0 };                /* cut short, then emptied */
+    for (size_t i = 0; i < sizeof lengths / sizeof lengths[0]; i++) {
+        REQUIRE(truncate(p, lengths[i]) == 0);
+        ASSERT_EQ_INT(0, belay_store_verify(s, hex));
+        ASSERT_EQ_INT(BELAY_ERR_CORRUPT, belay_err_code());
+        ASSERT_TRUE(strstr(belay_err_msg(), "has content hashing to") != NULL);
+        belay_err_clear();
+    }
+    unlink(p);
+    belay_store_close(s);
+}
+
 TEST(abort_leaves_nothing) {
     struct belay_store *s = NULL;
     ASSERT_EQ_INT(0, belay_store_open(g_dir, &s));
@@ -372,6 +397,7 @@ int main(void) {
     RUN(duplicate_content_is_not_rewritten);
     RUN(planted_symlink_at_object_name_is_refused_not_followed);
     RUN(planted_wrong_content_is_caught_by_verify);
+    RUN(a_copy_a_crash_emptied_or_cut_short_fails_verification);
     RUN(abort_leaves_nothing);
     RUN(verify_reports_missing_object);
     RUN(store_directory_that_is_a_symlink_is_refused);
