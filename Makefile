@@ -137,11 +137,12 @@ ci-check:
 check: all lint ci-check gen-check measure test
 
 # Generated from the schemas in src/schema/ (entry.c, diff_schema.c): the
-# specs' tables and rules, and the fuzz target's invariants. `make gen` rewrites them;
-# `make gen-check` (part of `check`) fails when a committed one is stale.
+# specs' tables and rules -- documentation, a freshness check only. `make gen`
+# rewrites them; `make gen-check` (part of `check`) fails when one is stale.
+# The fuzz target's invariants are hand-written from test/expect/manifest-v1.md
+# instead (audit 2026-10, M4), so nothing that checks the code derives from it.
 GEN_TOOL	= $(BUILD)/tools/gen_schema
 GEN_SPEC	= docs/spec/manifest-v1.md docs/spec/diff-v1.md
-GEN_FUZZ	= test/fuzz/fuzz_invariants.gen.h
 
 $(GEN_TOOL): tools/gen_schema.c $(CORE_OBJ)
 	@mkdir -p $(dir $@)
@@ -149,15 +150,12 @@ $(GEN_TOOL): tools/gen_schema.c $(CORE_OBJ)
 
 gen: $(GEN_TOOL)
 	for f in $(GEN_SPEC); do $(GEN_TOOL) spec $$f > $$f.tmp && mv $$f.tmp $$f || exit 1; done
-	$(GEN_TOOL) fuzz > $(GEN_FUZZ).tmp && mv $(GEN_FUZZ).tmp $(GEN_FUZZ)
 
 gen-check: $(GEN_TOOL)
 	@fail=0; \
 	for f in $(GEN_SPEC); do \
 		$(GEN_TOOL) spec $$f > $$f.gen || fail=1; diff -u $$f $$f.gen || fail=1; rm -f $$f.gen; \
 	done; \
-	$(GEN_TOOL) fuzz > $(GEN_FUZZ).gen || fail=1; diff -u $(GEN_FUZZ) $(GEN_FUZZ).gen || fail=1; \
-	rm -f $(GEN_FUZZ).gen; \
 	if [ $$fail = 1 ]; then echo "gen-check: generated files are stale; run make gen"; exit 1; fi; \
 	echo "gen-check: generated files are current"
 
@@ -167,7 +165,7 @@ FUZZ_SRC	= $(wildcard test/fuzz/fuzz_*.c)
 FUZZ_BIN	= $(FUZZ_SRC:test/fuzz/%.c=$(BUILD)/fuzz/%)
 FUZZ_SECS	?= 30
 
-$(BUILD)/fuzz/%: test/fuzz/%.c $(CORE_SRC) $(GEN_FUZZ)
+$(BUILD)/fuzz/%: test/fuzz/%.c $(CORE_SRC)
 	@mkdir -p $(dir $@)
 	$(CC) -fsanitize=fuzzer,address,undefined -g -O1 $(WARN) $(INC) -o $@ $< $(CORE_SRC)
 
