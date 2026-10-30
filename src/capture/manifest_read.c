@@ -13,6 +13,7 @@
 #include "belay/manifest.h"
 #include "capture/entry.h"
 #include "capture/manifest_lex.h"
+#include "capture/manifest_stream.h"
 #include "belay/path.h"
 #include "belay/error.h"
 #include "belay/hash.h"
@@ -452,22 +453,6 @@ static int parse_header(const struct obj *o, struct belay_manifest_header *h) {
 /* Iterator                                                                  */
 /* ------------------------------------------------------------------------ */
 
-/*
- *  Directories recorded but not descended (unreadable, or a mount point):
- *  nothing may appear below them.
- *
- *  Entries are strictly sorted, so a sealed directory D can still have an
- *  entry below it only while the reader sits between D and D + "/" -- and
- *  every path in that range starts with D. ("D!x" sorts there too, which is
- *  why D cannot be dropped at its first non-descendant.) So the sealed
- *  directories still open are all prefixes of the previous path, a stack of
- *  their lengths is enough, and lengths strictly increase up the stack: at
- *  most one per byte of a path, however many directories the manifest seals.
- *  (The first version kept every sealed path: memory grew with the manifest,
- *  and scanning the list made 40k sealed directories take 1.9 s.)
- */
-#define SEALED_MAX 4096     /* > the longest path, so the stack cannot fill */
-
 struct belay_manifest_reader {
     FILE  *f;
     char  *line;            /* LINE_MAX_BYTES + 1 */
@@ -479,16 +464,7 @@ struct belay_manifest_reader {
     struct belay_manifest_stats  trailer;
     bool   have_trailer;
 
-    size_t n_entries, n_unreadable, n_unstable, n_mounts, n_raced;
-    bool   have_root;
-    bool   root_unreadable;
-
-    char   prev[4096];
-    size_t prev_len;
-    bool   have_prev;
-
-    size_t sealed[SEALED_MAX];  /* lengths of sealed prefixes of prev */
-    size_t n_sealed;
+    struct stream st;           /* rules over the sequence (manifest_stream.c) */
 };
 
 const struct belay_manifest_header *
@@ -563,23 +539,7 @@ static int parse_trailer(struct belay_manifest_reader *r, const struct obj *o) {
     uint64_t v[N];
     for (size_t i = 0; i < N; i++)
         if (get_u64(o, TRAILER_ORDER[i], true, &v[i], NULL) == -1) return -1;
-    if (v[0] != r->n_entries || v[2] != r->n_unreadable || v[3] != r->n_unstable ||
-        v[4] != r->n_mounts || v[5] != r->n_raced) {
-        belay_err_set(BELAY_ERR_CORRUPT, 0,
-                      "manifest: trailer says %llu entries / %llu unreadable / %llu unstable / "
-                      "%llu mounts / %llu raced, read %zu / %zu / %zu / %zu / %zu",
-                      (unsigned long long)v[0], (unsigned long long)v[2],
-                      (unsigned long long)v[3], (unsigned long long)v[4],
-                      (unsigned long long)v[5], r->n_entries, r->n_unreadable,
-                      r->n_unstable, r->n_mounts, r->n_raced);
-        return -1;
-    }
-    if (!r->have_root) return lex_corrupt("no entry for the scope root \".\"");
-    /* An unreadable root was not walked, so it is the only entry. Checked here
-     * rather than per entry because names sorting before "." (such as "!x")
-     * are read before the root itself. */
-    if (r->root_unreadable && r->n_entries != 1)
-        return lex_corrupt("entries recorded under an unreadable scope root");
+    if (stream_end(&r->st, v) == -1) return -1;
     r->trailer.entries    = (size_t)v[0];
     r->trailer.vanished   = (size_t)v[1];
     r->trailer.unreadable = (size_t)v[2];
@@ -600,7 +560,7 @@ int belay_manifest_next(struct belay_manifest_reader *r, struct belay_entry *e) 
     if (got == -1) { r->state = -1; return -1; }
     if (got == 0) {
         belay_err_set(BELAY_ERR_CORRUPT, 0,
-                      "manifest: no end marker after %zu entries (truncated?)", r->n_entries);
+                      "manifest: no end marker after %zu entries (truncated?)", r->st.n_entries);
         r->state = -1;
         return -1;
     }
@@ -625,63 +585,7 @@ int belay_manifest_next(struct belay_manifest_reader *r, struct belay_entry *e) 
     if (parse_entry(&o, e) == -1) return fail(r);
     if (entry_check_header(&r->header, e) == -1) return fail(r);
 
-    /* Strictly increasing raw-path order: the comparator merges two
-     * manifests and would mis-pair out-of-order or duplicated entries. */
-    size_t common = 0;          /* length of the prefix shared with prev */
-    if (r->have_prev) {
-        const size_t n = r->prev_len < e->path_len ? r->prev_len : e->path_len;
-        while (common < n && r->prev[common] == e->path[common]) common++;
-        const bool greater = common < n
-            ? (unsigned char)r->prev[common] < (unsigned char)e->path[common]
-            : r->prev_len < e->path_len;
-        if (!greater) {
-            lex_corrupt(common == n && r->prev_len == e->path_len ? "duplicate path"
-                                                               : "entries out of order");
-            return fail(r);
-        }
-    }
-    memcpy(r->prev, e->path, e->path_len);
-    r->prev_len = e->path_len;
-    r->have_prev = true;
-
-    /* Nothing below a directory that was not descended -- the writer never
-     * emits such an entry, and one appearing would contradict the flag that
-     * tells the comparator "contents unknown". A sealed prefix longer than
-     * the shared one is behind us for good. One of exactly the shared length
-     * is a prefix of this path: the byte after it decides -- '/' is an entry
-     * below it, above '/' is past its range, below '/' (as in "d!x") is
-     * neither. Shorter ones are untouched: this path agrees with prev there. */
-    while (r->n_sealed > 0 && r->sealed[r->n_sealed - 1] > common) r->n_sealed--;
-    if (r->n_sealed > 0 && r->sealed[r->n_sealed - 1] == common) {
-        const unsigned char next = (unsigned char)e->path[common];
-        if (next == '/') {
-            lex_corrupt("entry below an unreadable or mounted directory");
-            return fail(r);
-        }
-        if (next > '/') r->n_sealed--;
-    }
-    /* "." is not a prefix of the paths below it; an unreadable root is
-     * checked at the trailer instead (it must be the only entry). */
-    if (e->type == BELAY_T_DIR && (e->unreadable || e->is_mount) &&
-        !(e->path_len == 1 && e->path[0] == '.')) {
-        if (r->n_sealed == SEALED_MAX) {        /* unreachable: see SEALED_MAX */
-            lex_corrupt("too many nested sealed directories");
-            return fail(r);
-        }
-        r->sealed[r->n_sealed++] = e->path_len;
-    }
-
-    if (e->path_len == 1 && e->path[0] == '.') {
-        if (e->type != BELAY_T_DIR) { lex_corrupt("scope root is not a directory"); return fail(r); }
-        if (e->is_mount) { lex_corrupt("scope root flagged as a mount"); return fail(r); }
-        r->have_root = true;
-        r->root_unreadable = e->unreadable;
-    }
-    r->n_entries++;
-    if (e->unreadable) r->n_unreadable++;
-    if (e->unstable)   r->n_unstable++;
-    if (e->is_mount)   r->n_mounts++;
-    if (e->raced)    r->n_raced++;
+    if (stream_entry(&r->st, e) == -1) return fail(r);
     return 1;
 }
 
