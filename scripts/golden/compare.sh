@@ -24,7 +24,7 @@ build() {   # build <source tree> <out prefix>
     local src=$1 out=$2
     make -s -C "$src" all >/dev/null 2>&1
     local objs
-    objs=$( (find "$src/build/util" "$src/build/capture" "$src/build/interp" \
+    objs=$( (find "$src/build/util" "$src/build/schema" "$src/build/capture" "$src/build/diff" "$src/build/interp" \
                   "$src/build/platform" -name '*.o' 2>/dev/null || true) | sort)
     cc -O2 -std=c11 -I"$src/include" -o "$out.driver" "$HERE/driver.c" $objs
     cc -O2 -std=c11 -I"$src/include" -o "$out.reader" "$HERE/reader.c" $objs

@@ -1,9 +1,9 @@
-/* GENERATED from src/capture/entry.c by tools/gen_schema.c. Do not edit:
+/* GENERATED from src/schema/entry.c by tools/gen_schema.c. Do not edit:
  * change the schema, then `make gen`. */
 #ifndef BELAY_FUZZ_INVARIANTS_GEN_H
 #define BELAY_FUZZ_INVARIANTS_GEN_H
 
-#include "capture/entry.h"
+#include "schema/entry.h"
 
 #include <stdlib.h>
 

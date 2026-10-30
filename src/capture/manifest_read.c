@@ -16,7 +16,7 @@
 #define _GNU_SOURCE
 
 #include "belay/manifest.h"
-#include "capture/entry.h"
+#include "schema/entry.h"
 #include "capture/manifest_lex.h"
 #include "capture/manifest_decode.h"
 #include "capture/manifest_stream.h"

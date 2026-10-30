@@ -11,7 +11,7 @@
  *  The invariant checks matter as much as the crash check: a reader that
  *  silently produced a path containing a NUL would pass a memory-safety-only
  *  oracle while breaking the §5.1.1 rule. The schema's rules (which fields
- *  and flags go together) are generated from src/capture/entry.c into
+ *  and flags go together) are generated from src/schema/entry.c into
  *  fuzz_invariants.gen.h; what is checked by hand here is decoding: lengths,
  *  NULs, hex shape and canonical paths, which the schema does not describe.
  */

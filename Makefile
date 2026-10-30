@@ -26,7 +26,7 @@ PLATFORM_SRC	= src/platform/fsops_posix.c src/platform/fsops_linux.c
 else
 PLATFORM_SRC	= src/platform/fsops_posix.c src/platform/fsops_macos.c
 endif
-CORE_SRC	= $(wildcard src/util/*.c src/capture/*.c src/diff/*.c src/interp/*.c) $(PLATFORM_SRC)
+CORE_SRC	= $(wildcard src/util/*.c src/schema/*.c src/capture/*.c src/diff/*.c src/interp/*.c) $(PLATFORM_SRC)
 CORE_OBJ	= $(CORE_SRC:src/%.c=$(BUILD)/%.o)
 SAN_CORE_OBJ	= $(CORE_SRC:src/%.c=$(SAN_BUILD)/%.o)
 SESSION_SRC	= $(wildcard src/session/*.c)

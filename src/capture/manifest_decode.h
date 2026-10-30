@@ -9,7 +9,7 @@
 #define BELAY_CAPTURE_MANIFEST_DECODE_H
 
 #include "belay/manifest.h"
-#include "capture/entry.h"
+#include "schema/entry.h"
 #include "capture/manifest_lex.h"
 
 #include <stdint.h>

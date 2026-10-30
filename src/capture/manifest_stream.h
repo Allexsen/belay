@@ -8,7 +8,7 @@
 #define BELAY_CAPTURE_MANIFEST_STREAM_H
 
 #include "belay/manifest.h"
-#include "capture/entry.h"
+#include "schema/entry.h"
 
 #include <stdbool.h>
 #include <stddef.h>
