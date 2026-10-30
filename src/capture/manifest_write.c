@@ -293,8 +293,8 @@ int capture_write(const struct fsops *ops, const char *out_path, const char *sco
         belay_err_set(BELAY_ERR_IO, errno, "manifest: close failed");
         goto cleanup;
     }
-    /* The names of the copies it records survive a crash before it does;
-     * their bytes are verified on read (store.h). */
+    /* The names of the copies it records survive a crash before it does, as
+     * far as these syncs succeed; their bytes are verified on read (store.h). */
     belay_store_sync(wc->store);
     if (rename(outtmp, out_path) != 0) {
         belay_err_set(BELAY_ERR_IO, errno, "manifest: cannot rename into %s", out_path);
