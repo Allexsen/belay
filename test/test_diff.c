@@ -326,7 +326,7 @@ static enum belay_interp_result t_invalid(void *state, const struct belay_interp
 }
 static enum belay_interp_result t_verdict(void *state, const struct belay_interp_input *in,
                                           struct belay_findings *out) {
-    if (strcmp(in->outcome, "modified") == 0) (*(int *)state)++;
+    if (state != NULL && strcmp(in->outcome, "modified") == 0) (*(int *)state)++;
     (void)out;
     return BELAY_INTERP_DECLINE;
 }
