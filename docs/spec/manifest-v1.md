@@ -135,6 +135,9 @@ In addition to the grammar above:
 - **The scope root `.` is present**, exactly once, is a directory and is never a mount. If it is
   `unreadable`, it is the only entry.
 - **Nothing appears below a directory marked `unreadable` or `mount`.**
+- **`xattrs_sha256` is the sha256 of the bytes `xattrs` would hold between its brackets**, exactly
+  as a writer emits them -- each element in its double quotes, in order, joined by `,` with no
+  space -- so a set recorded inline in one manifest and by digest in another compares equal.
 
 The rest is generated from the schema the writer and reader both execute, so it cannot drift from
 them. An unreadable symlink with an **empty** target means "target unknown": no real symlink has
