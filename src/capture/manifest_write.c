@@ -210,7 +210,8 @@ int capture_write(const struct fsops *ops, const char *out_path, const char *sco
     while ((got = runs_next(wc->runs, &key, &klen, &val, &vlen)) == 1) {
         struct listing unused;
         if (cap_record_unpack(val, vlen, key, klen, ebuf, &unused) == -1) goto cleanup;
-        const int v = fgetc(verdicts);
+        const int v = cons_verdict_get(verdicts, key, klen);
+        if (v == -1) goto cleanup;
         if (v == VERDICT_LISTING) outcome_apply(ebuf, FACET_LISTING, OUT_CHANGED, &wc->tally);
         if (v == VERDICT_ENTRY)   outcome_apply(ebuf, FACET_ENTRY, OUT_CHANGED, &wc->tally);
         /* The schema the reader enforces, enforced here first: a writer bug
@@ -231,6 +232,11 @@ int capture_write(const struct fsops *ops, const char *out_path, const char *sco
         }
     }
     if (got == -1) goto cleanup;
+    if (fgetc(verdicts) != EOF) {
+        belay_err_set(BELAY_ERR_INTERNAL, 0,
+                      "manifest: internal error: more re-check verdicts than records");
+        goto cleanup;
+    }
     if (wc->tally.invalid != 0) {
         belay_err_set(BELAY_ERR_INTERNAL, 0,
                       "manifest: internal error: %zu outcome(s) the effect table does not define",
