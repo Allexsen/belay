@@ -112,11 +112,11 @@ check-san: $(SAN_TEST_BIN)
 
 check: all gen-check measure test
 
-# Generated from the entry schema (src/capture/entry.c): the spec's field
-# rules and the fuzz target's invariants. `make gen` rewrites them;
+# Generated from the schemas in src/schema/ (entry.c, diff_schema.c): the
+# specs' tables and rules, and the fuzz target's invariants. `make gen` rewrites them;
 # `make gen-check` (part of `check`) fails when a committed one is stale.
 GEN_TOOL	= $(BUILD)/tools/gen_schema
-GEN_SPEC	= docs/spec/manifest-v1.md
+GEN_SPEC	= docs/spec/manifest-v1.md docs/spec/diff-v1.md
 GEN_FUZZ	= test/fuzz/fuzz_invariants.gen.h
 
 $(GEN_TOOL): tools/gen_schema.c $(CORE_OBJ)
@@ -124,13 +124,16 @@ $(GEN_TOOL): tools/gen_schema.c $(CORE_OBJ)
 	$(CC) $(CFLAGS) $(WARN) $(INC) -MMD -MP -o $@ $< $(CORE_OBJ)
 
 gen: $(GEN_TOOL)
-	$(GEN_TOOL) spec $(GEN_SPEC) > $(GEN_SPEC).tmp && mv $(GEN_SPEC).tmp $(GEN_SPEC)
+	for f in $(GEN_SPEC); do $(GEN_TOOL) spec $$f > $$f.tmp && mv $$f.tmp $$f || exit 1; done
 	$(GEN_TOOL) fuzz > $(GEN_FUZZ).tmp && mv $(GEN_FUZZ).tmp $(GEN_FUZZ)
 
 gen-check: $(GEN_TOOL)
 	@fail=0; \
-	$(GEN_TOOL) spec $(GEN_SPEC) | diff -u $(GEN_SPEC) - || fail=1; \
-	$(GEN_TOOL) fuzz | diff -u $(GEN_FUZZ) - || fail=1; \
+	for f in $(GEN_SPEC); do \
+		$(GEN_TOOL) spec $$f > $$f.gen || fail=1; diff -u $$f $$f.gen || fail=1; rm -f $$f.gen; \
+	done; \
+	$(GEN_TOOL) fuzz > $(GEN_FUZZ).gen || fail=1; diff -u $(GEN_FUZZ) $(GEN_FUZZ).gen || fail=1; \
+	rm -f $(GEN_FUZZ).gen; \
 	if [ $$fail = 1 ]; then echo "gen-check: generated files are stale; run make gen"; exit 1; fi; \
 	echo "gen-check: generated files are current"
 
