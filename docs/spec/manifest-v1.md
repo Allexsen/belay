@@ -368,6 +368,25 @@ sandbox, so these are limits of dev-tier and live checks, not of the trust model
 holds bytes that match no state of the file"; its first correction said that holds on Linux
 6.13+ with fine-grained timestamps. Neither holds while a write is in flight.)
 
+## What survives a power loss
+
+**Once a manifest is published, every copy it names is durable**: the copy's name survives a
+power loss. **A store commit alone does not make a copy's name durable.** Before the manifest is
+renamed into place, belay syncs every directory holding the name of a copy the manifest names --
+the copy's fan-out directory, the store directory and its parent -- once each, however many copies
+it holds. The manifest itself is synced before its rename, and its directory after. A sync that
+cannot be done (a directory belay cannot open) or that fails is not an error: by then the files
+are complete and in place.
+
+A copy's bytes are not synced: that costs 4.5-5.4 s per 2,000 new files, and a lost copy is
+detected. A copy a power loss emptied or cut short no longer hashes to its name, so it fails
+verification on read, and it is never used: content that fails verification is an error, never
+a copy.
+
+On macOS, `fsync(2)` does not make the drive write its cache to the medium, and belay does not
+use `F_FULLFSYNC`: there, these syncs order the writes but do not ensure they reach the disk before
+a power loss. (macOS already keeps copies without the writer probe, above.)
+
 ## Path encoding
 
 POSIX paths are **bytes**, not text. They may contain anything except `/` and NUL.

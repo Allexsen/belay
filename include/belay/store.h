@@ -15,7 +15,8 @@
  *  already exists keeps the existing file (dedup without rewriting), and
  *  objects are not fsynced individually -- only the directories that hold
  *  their names are, by belay_store_sync -- so an object may be stale,
- *  planted or truncated by a crash. belay_store_verify() hashes an object and checks
+ *  planted or truncated by a crash (manifest-v1, "What survives a power
+ *  loss"; on macOS fsync does not reach the disk). belay_store_verify() hashes an object and checks
  *  it against its own name; every consumer must call it before trusting
  *  content.
  */
