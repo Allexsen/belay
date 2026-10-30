@@ -77,13 +77,13 @@ const struct field_change DIFF_FIELDS[F_COUNT] = {
                    "mount change. The raw number is not compared (assigned at mount time)." },
     [F_NLINK]  = { CC_IDENTITY, T_ALL & ~T_DIR, US_NONE, DR_NONE, C, AM_REQUIRED,
                    "Hard links added or removed elsewhere. A directory's counts its subdirectories." },
-    [F_IFLAGS] = { CC_METADATA, T_ALL, US_NONE, DR_NONE, C, AM_UNKNOWN,
+    [F_IFLAGS] = { CC_METADATA, T_ALL, US_NONE, DR_NONE, NC, AM_UNKNOWN,
                    "On one side only it is `unknown` (reason `iflags_unknown`): absent means it "
-                   "could not be read." },
-    [F_CAPS]   = { CC_METADATA, T_ALL, US_NONE, DR_NONE, C, AM_NONE_IF_READ,
+                   "could not be read. Never read on a mount root, so not compared there." },
+    [F_CAPS]   = { CC_METADATA, T_ALL, US_NONE, DR_NONE, NC, AM_NONE_IF_READ,
                    "A file capability, added or removed: a privilege change. Compared only where "
                    "the attributes were read (no `xattrs_unknown`, not a mount root)." },
-    [F_XATTRS] = { CC_METADATA, T_ALL, US_NONE, DR_NONE, C, AM_NONE_IF_READ,
+    [F_XATTRS] = { CC_METADATA, T_ALL, US_NONE, DR_NONE, NC, AM_NONE_IF_READ,
                    "Compared by the set's digest (each element is `name=sha256(value)`), so an "
                    "inline set and a digest-only set compare. Only where the attributes were read." },
     [F_XATTRS_SHA256] = { CC_INFO, T_ALL, US_NONE, DR_NONE, NC, AM_NONE_IF_READ,

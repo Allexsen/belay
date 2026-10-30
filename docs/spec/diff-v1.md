@@ -147,7 +147,8 @@ are collected.
 4. **Metadata and identity**: content unchanged and a metadata or identity field differs:
    `metadata_only`. Without such a difference, metadata is unknown, and the outcome `unknown`, if
    either side carries `xattrs_unknown` (reason `xattrs_unknown`) or `iflags` is present on one
-   side only (reason `iflags_unknown`: an absent `iflags` means it could not be read).
+   side only (reason `iflags_unknown`: an absent `iflags` means it could not be read), on an entry
+   that is not a mount root.
 5. Only `ctime_ns` differs, on a regular file or symlink that is not a mount root:
    `metadata_only`, `changed` names `ctime_ns` -- an attribute the manifest does not record
    changed.
@@ -165,7 +166,10 @@ compares by hash.
 **Timestamps that move on use.** On a FIFO, socket or device node, and on a mount root,
 `mtime_ns` and `ctime_ns` are not compared: ttys and pipes stamp themselves when used, and a mount
 root's times belong to the mounted filesystem. Their mode, owner, group, inode, device relation
-and device number still compare, so a real `chmod` is still seen.
+and device number still compare, so a real `chmod` is still seen. A mount root's own `iflags`,
+`caps` and `xattrs` are never read (manifest-v1, rule 22), so they are not compared on an entry
+that is a mount root on either side: a directory that became a mount root, or stopped being one,
+is `unknown` for the reason `mount`, with no reason that claims something could not be read.
 
 **A directory's own timestamps.** A directory's `mtime_ns` and `ctime_ns` are not compared either:
 they move whenever a name is added, removed or renamed in it, and the records of its children
@@ -180,8 +184,8 @@ count.
 compared field that differs (by its class for that type), whatever the outcome, and `ctime_ns` only
 under rule 5. A field is compared only where both sides know it: the hash when both have one, the
 link target when neither is `unreadable`, `iflags` when both have it, `caps` and `xattrs` where the
-attributes were read on both sides (neither carries `xattrs_unknown`, neither is a mount root --
-an absent `caps` or `xattrs` means none only where they were read). `unknown`, for an `unknown`
+attributes were read on both sides (neither carries `xattrs_unknown` -- an absent `caps` or
+`xattrs` means none only where they were read), and none of the three on a mount root. `unknown`, for an `unknown`
 outcome: the reasons of every flag on either side and, when the types are the same, of every field
 unknown under rule 4 (across a type change no field is compared), in the order of the reasons
 table; for the one-sided case, its one reason.
@@ -229,9 +233,9 @@ one side only.
 | `ino` | identity: within one device | all | compared | required |  | Same bytes, new inode: replaced (rename-over, as dpkg installs). Compared only when the entry's `dev` is the same on both sides, never across a remount of the scope root. |
 | `dev` | identity: device relation | all | compared | required |  | Whether the entry is on its scope root's device, per side: a change is a real mount change. The raw number is not compared (assigned at mount time). |
 | `nlink` | identity | reg, lnk, fifo, sock, blk, chr | compared | required |  | Hard links added or removed elsewhere. A directory's counts its subdirectories. |
-| `iflags` | metadata | all | compared | unknown |  | On one side only it is `unknown` (reason `iflags_unknown`): absent means it could not be read. |
-| `caps` | metadata | all | compared | none if read |  | A file capability, added or removed: a privilege change. Compared only where the attributes were read (no `xattrs_unknown`, not a mount root). |
-| `xattrs` | metadata | all | compared | none if read |  | Compared by the set's digest (each element is `name=sha256(value)`), so an inline set and a digest-only set compare. Only where the attributes were read. |
+| `iflags` | metadata | all | not compared | unknown |  | On one side only it is `unknown` (reason `iflags_unknown`): absent means it could not be read. Never read on a mount root, so not compared there. |
+| `caps` | metadata | all | not compared | none if read |  | A file capability, added or removed: a privilege change. Compared only where the attributes were read (no `xattrs_unknown`, not a mount root). |
+| `xattrs` | metadata | all | not compared | none if read |  | Compared by the set's digest (each element is `name=sha256(value)`), so an inline set and a digest-only set compare. Only where the attributes were read. |
 | `xattrs_sha256` | not compared |  | not compared | none if read |  | Compared as `xattrs`. |
 | `xattrs_unknown` | flag |  | compared | flag | metadata | Metadata unknown unless another metadata field proves a change. |
 | `sha256` | content | reg | compared | with unverified |  | Content digest. |

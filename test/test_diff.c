@@ -235,6 +235,23 @@ TEST(node_and_mount_root_timestamps_are_not_compared) {
     ASSERT_TRUE(has("b", "\"outcome\":\"modified\"") && has("b", "\"changed\":[\"size\"]"));
 }
 
+/* Pin PR #12 (review F6): a mount root's iflags, caps and xattrs are never
+ * read (manifest rule 22), so they are not compared there. A directory that
+ * becomes a mount root, or stops being one, is unknown for the reason mount
+ * alone -- not iflags_unknown, which says something could not be read. */
+TEST(a_mount_roots_unread_attributes_are_not_compared) {
+    for (int way = 0; way < 2; way++) {
+        m_begin(way ? "after" : "before", "/s", 1000); ROOT();
+        E(.path = "m", .type = "dir", .has_iflags = true, .iflags = 16, .xattrs = "\"user.a=" HB "\"");
+        m_end();
+        m_begin(way ? "before" : "after", "/s", 1000); ROOT();
+        E(.path = "m", .type = "dir", .mount = true, .dev = 2); m_end();
+        REQUIRE(run() == 0);
+        ASSERT_TRUE(has("m", "\"outcome\":\"unknown\",\"type\":\"dir\",\"changed\":[\"dev\"],"
+                             "\"unknown\":[\"mount\"]}"));
+    }
+}
+
 /* Decided F2: a tree that changed while it was walked makes the whole result
  * provisional (manifest-v1, obligations on a consumer), and only the trailers
  * say so for `vanished`, which leaves no record. */
@@ -906,6 +923,7 @@ int main(void) {
     RUN(a_remounted_scope_reports_once_and_still_compares_content);
     RUN(inode_numbers_compare_only_within_one_device);
     RUN(node_and_mount_root_timestamps_are_not_compared);
+    RUN(a_mount_roots_unread_attributes_are_not_compared);
     RUN(added_removed_and_modified_by_hash);
     RUN(different_hash_limits_are_unknown_unless_size_proves_a_change);
     RUN(new_inode_permissions_and_ctime_alone_are_metadata_only);

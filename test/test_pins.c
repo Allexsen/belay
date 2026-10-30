@@ -277,7 +277,6 @@ TEST(mount_root_cells_follow_the_pin) {
         const struct pin_row *p = &PIN[f];
         for (int t = 0; t < ENTRY_TYPE_COUNT; t++) {
             if (!(p->types & TBIT(t)) || expected(p->cls) == D_UNDECIDED) continue;
-            if (f == F_CAPS || f == F_XATTRS) continue;          /* never read there: rule O2 */
             struct belay_entry b, a;
             base_entry(&b, t);
             base_entry(&a, t);

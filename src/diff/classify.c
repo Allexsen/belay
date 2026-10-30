@@ -16,9 +16,10 @@
 static int differs(const struct diff_ctx *ctx, enum entry_field f, const struct belay_entry *b,
                    const struct belay_entry *a) {
     /* Extended attributes were read on both sides: none recorded means none.
-     * Under xattrs_unknown, or on a mount root (never read), they are not
-     * compared, and xattrs_unknown makes the metadata unknown (rule 4). */
-    const bool attrs_read = !b->xattrs_unknown && !a->xattrs_unknown && !b->is_mount && !a->is_mount;
+     * Under xattrs_unknown they are not compared, and the flag makes the
+     * metadata unknown (rule 4). A mount root's are never read: the table
+     * does not compare them there (pin, "on mount roots"). */
+    const bool attrs_read = !b->xattrs_unknown && !a->xattrs_unknown;
     switch (f) {
     case F_MODE:   return b->mode != a->mode;
     case F_UID:    return b->uid != a->uid;
