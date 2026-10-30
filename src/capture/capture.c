@@ -30,9 +30,12 @@ static enum belay_entry_type type_of(mode_t m) {
 /* Hashes by fd: no path is re-resolved, so there is no window between the
  * open and the read. When `tx` is non-NULL, stages the same bytes into the
  * store in the same pass: what is stored is exactly what was hashed. A store
- * write that fails drops the copy (*store_failed) and the hash goes on: the
- * store degrades, it never costs the entry (R11). `*binary` reports a NUL
- * within the first SNIFF_BYTES. 0, or -1 when the file could not be read. */
+ * write that fails -- an error write(2) returns: ENOSPC, EDQUOT, EIO, EFBIG --
+ * drops the copy (*store_failed) and the hash goes on: the store degrades, it
+ * never costs the entry (R11). (A file-size limit whose SIGXFSZ the host left
+ * at its default kills the process first, as it would any writer; belay does
+ * not change that disposition.) `*binary` reports a NUL within the first
+ * SNIFF_BYTES. 0, or -1 when the file could not be read. */
 static int hash_fd(const struct fsops *ops, int fd, unsigned char *buf, char hex_out[65],
                    uint64_t *nread, struct belay_store_tx *tx, bool *store_failed,
                    bool *binary) {

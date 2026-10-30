@@ -1354,7 +1354,11 @@ TEST(a_store_that_cannot_publish_a_copy_keeps_the_entry) {
 TEST(a_store_that_fails_mid_copy_keeps_the_entry) {
     reset();
     /* 256 KiB of text: the copy outgrows a 64 KiB file-size limit, while the
-     * manifest and the walk's temporary files stay far below it. */
+     * manifest and the walk's temporary files stay far below it. The child
+     * ignores SIGXFSZ so that the limit is an error write(2) returns (EFBIG),
+     * a store write failure root cannot bypass; at the default disposition
+     * the kernel kills the writer instead, which belay leaves to the host
+     * (review F7). */
     char p[512];
     path(p, sizeof p, "big.txt");
     FILE *f = fopen(p, "wb");
