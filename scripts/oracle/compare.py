@@ -9,7 +9,13 @@ must agree on
   - every record: path and its spelling (path / path_b64), outcome, type,
     type_before, `changed` exactly (order included), `unknown` as a set, the
     records' order;
-  - the trailer: every count, belay_diff_end, the key order.
+  - the trailer: every key, its value and their order (belay_diff_end, the
+    outcome counts, dir_timestamps_only, each manifest's vanished, unstable
+    and raced, provisional, the two sha256); and, whatever the reference
+    says, the driver's trailer against the "### Trailer" paragraph: the
+    outcome counts add up to the paths, dir_timestamps_only is among
+    unchanged, provisional is exactly "one of the six is not 0",
+    belay_diff_end is the records emitted.
   The order inside `unknown` is "the order of the reasons table", a
   GENERATED table this oracle may not read; instead every record of the run
   must respect one single order of the reasons (printed at the end).
@@ -86,6 +92,9 @@ G_TS_SPECIAL = 'timestamps: not compared on fifo/sock/blk/chr'
 G_TS_MOUNT = 'timestamps: not compared on mount roots'
 G_O2 = 'caps/xattrs: none only if read (O2)'
 G_IFLAGS = 'iflags on one side only -> unknown (iflags_unknown)'
+G_IFLAGS_MOUNT = 'iflags: not compared on a mount root (pin column `on mount roots`)'
+G_DIR_TS = "a directory's own timestamps: unchanged, counted in dir_timestamps_only (O5)"
+G_RACED_ANC = 'one side only, below a raced non-directory: unknown, raced'
 
 
 def group_changed(f, trace, typ):
@@ -188,13 +197,18 @@ def compare_record(path, exp, got, trace, orders):
     if set(ue) != set(ug):
         for r in sorted(set(ue) ^ set(ug)):
             if r == 'iflags_unknown':
-                groups.append(G_IFLAGS)
+                groups.append(G_IFLAGS_MOUNT if 'not-on-mount-root:iflags' in trace else G_IFLAGS)
             else:
                 unexplained.append('reason ' + r)
     elif ug:
         orders.append(ug)
     if exp['outcome'] != g.get('outcome'):
-        unexplained.append('outcome %s, not %s' % (g.get('outcome'), exp['outcome']))
+        if 'raced-ancestor' in trace:
+            groups.append(G_RACED_ANC)
+        elif 'dir-timestamps-counted' in trace:
+            groups.append(G_DIR_TS)
+        else:
+            unexplained.append('outcome %s, not %s' % (g.get('outcome'), exp['outcome']))
     if unexplained and not any(not x.startswith('OTHER') for x in groups):
         groups.append('OTHER: %s (reference: %s)' % ('; '.join(unexplained), ','.join(trace)))
     return sorted(set(groups))
@@ -261,9 +275,23 @@ def run_pair(ran, stem, orders):
     for k, v in trailer:
         if not same(v, gt.get(k)):
             result['trailer'].append(('trailer: ' + k, v, gt.get(k)))
+    # The driver's trailer against the "### Trailer" paragraph itself, whatever
+    # the reference computed.
     if gt.get('belay_diff_end') != len(got_records):
         result['trailer'].append(('trailer: belay_diff_end is not the records emitted',
                                   len(got_records), gt.get('belay_diff_end')))
+    counted = [gt.get(o) for o in ref.OUTCOMES]
+    if all(type(c) is int for c in counted) and sum(counted) != len(traces):
+        result['trailer'].append(('trailer: the outcome counts do not add up to the paths',
+                                  len(traces), sum(counted)))
+    dto, unch = gt.get(ref.DIR_TIMESTAMPS_ONLY), gt.get('unchanged')
+    if type(dto) is int and type(unch) is int and not 0 <= dto <= unch:
+        result['trailer'].append(('trailer: dir_timestamps_only is not among unchanged',
+                                  unch, dto))
+    six = [gt.get(w + c) for w in ('before_', 'after_') for c in ref.INPUT_COUNTS]
+    if all(type(c) is int for c in six) and gt.get('provisional') is not any(six):
+        result['trailer'].append(('trailer: provisional is not "any of the six is not 0"',
+                                  any(six), gt.get('provisional')))
     return result
 
 # ---------------------------------------------------------------------------
@@ -509,7 +537,7 @@ def main():
         pair_coverage(stem, cells, optional, scen, fpairs)
         name = os.path.basename(stem)
         for k, v in res.get('expected_trailer', [])[1:]:
-            if k in ref.OUTCOMES:
+            if k in ref.OUTCOMES or k == ref.DIR_TIMESTAMPS_ONLY:
                 outcomes[k] += v
         if res['status'] != 'ok':
             rejected += 1
