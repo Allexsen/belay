@@ -117,15 +117,15 @@ static int fail(struct belay_manifest_reader *r) {
 }
 
 static int parse_trailer(struct belay_manifest_reader *r, const struct obj *o) {
-    uint64_t v[6];
+    uint64_t v[TR_COUNT];
     if (decode_trailer(o, v) == -1) return -1;
     if (stream_end(&r->st, v) == -1) return -1;
-    r->trailer.entries    = (size_t)v[0];
-    r->trailer.vanished   = (size_t)v[1];
-    r->trailer.unreadable = (size_t)v[2];
-    r->trailer.unstable   = (size_t)v[3];
-    r->trailer.mounts     = (size_t)v[4];
-    r->trailer.raced      = (size_t)v[5];
+    r->trailer.entries    = (size_t)v[TR_ENTRIES];
+    r->trailer.vanished   = (size_t)v[TR_VANISHED];
+    r->trailer.unreadable = (size_t)v[TR_UNREADABLE];
+    r->trailer.unstable   = (size_t)v[TR_UNSTABLE];
+    r->trailer.mounts     = (size_t)v[TR_MOUNTS];
+    r->trailer.raced      = (size_t)v[TR_RACED];
     return 0;
 }
 

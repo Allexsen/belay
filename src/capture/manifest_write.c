@@ -241,11 +241,15 @@ int capture_write(const struct fsops *ops, const char *out_path, const char *sco
     /* The trailer makes a manifest self-delimiting: a file cut off at a line
      * boundary would otherwise be indistinguishable from a complete one with
      * fewer entries. It also records what the walk could not capture. */
-    if (fprintf(out,
-                "{\"belay_manifest_end\":%zu,\"vanished\":%zu"
-                ",\"unreadable\":%zu,\"unstable\":%zu,\"mounts\":%zu,\"raced\":%zu}\n",
-                tally.entries, wc->tally.vanished, tally.unreadable, tally.unstable,
-                tally.mounts, tally.raced) < 0) {
+    const size_t tv[TR_COUNT] = {
+        [TR_ENTRIES] = tally.entries, [TR_VANISHED] = wc->tally.vanished,
+        [TR_UNREADABLE] = tally.unreadable, [TR_UNSTABLE] = tally.unstable,
+        [TR_MOUNTS] = tally.mounts, [TR_RACED] = tally.raced,
+    };
+    int tw = fputc('{', out) == EOF ? -1 : 0;
+    for (size_t i = 0; i < TR_COUNT && tw >= 0; i++)
+        tw = fprintf(out, "%s\"%s\":%zu", i ? "," : "", TRAILER_FIELDS[i].name, tv[i]);
+    if (tw < 0 || fputs("}\n", out) == EOF) {
         belay_err_set(BELAY_ERR_IO, errno, "manifest: trailer write failed");
         goto cleanup;
     }

@@ -32,13 +32,16 @@ static uint32_t present_fields(const struct obj *o) {
             p |= FBIT(f);
     return p;
 }
-static const char *const HEADER_ORDER[] = {
-    "belay_manifest", "created_ns", "scopes", "scopes_b64", "hash", "hash_max_bytes",
-    "store_max_bytes"
-};
-static const char *const TRAILER_ORDER[] = {
-    "belay_manifest_end", "vanished", "unreadable", "unstable", "mounts", "raced"
-};
+/* Header and trailer keys in canonical order, from the schema; the header's
+ * fields each followed by their base64 spelling where they have one. */
+static size_t header_keys(const char *keys[2 * H_COUNT]) {
+    size_t n = 0;
+    for (size_t f = 0; f < H_COUNT; f++) {
+        keys[n++] = HEADER_FIELDS[f].name;
+        if (HEADER_FIELDS[f].alt != NULL) keys[n++] = HEADER_FIELDS[f].alt;
+    }
+    return n;
+}
 
 static int bad_kind(const char *key, const char *want) {
     belay_err_set(BELAY_ERR_CORRUPT, 0, "manifest: \"%s\" must be %s", key, want);
@@ -398,11 +401,12 @@ int decode_entry(const struct obj *o, struct belay_entry *e) {
     return entry_check(e, present_fields(o));
 }
 
-int decode_trailer(const struct obj *o, uint64_t v[6]) {
-    enum { N = sizeof TRAILER_ORDER / sizeof TRAILER_ORDER[0] };
-    if (lex_order(o, TRAILER_ORDER, N) == -1) return -1;
-    for (size_t i = 0; i < N; i++)
-        if (get_u64(o, TRAILER_ORDER[i], true, &v[i], NULL) == -1) return -1;
+int decode_trailer(const struct obj *o, uint64_t v[TR_COUNT]) {
+    const char *keys[TR_COUNT];
+    for (size_t i = 0; i < TR_COUNT; i++) keys[i] = TRAILER_FIELDS[i].name;
+    if (lex_order(o, keys, TR_COUNT) == -1) return -1;
+    for (size_t i = 0; i < TR_COUNT; i++)
+        if (get_u64(o, keys[i], true, &v[i], NULL) == -1) return -1;
     return 0;
 }
 
@@ -410,7 +414,7 @@ int decode_header(const struct obj *o, struct belay_manifest_header *h) {
     memset(h, 0, sizeof *h);
     uint64_t ver;
     bool present;
-    if (get_u64(o, "belay_manifest", false, &ver, &present) == -1) return -1;
+    if (get_u64(o, HEADER_FIELDS[H_VERSION].name, false, &ver, &present) == -1) return -1;
     if (!present) return lex_corrupt("missing header");
     if (ver != BELAY_MANIFEST_VERSION) {
         /* Refused rather than read: a newer writer may use fields whose
@@ -420,24 +424,26 @@ int decode_header(const struct obj *o, struct belay_manifest_header *h) {
         return -1;
     }
     h->version = ver;
-    if (lex_order(o, HEADER_ORDER, sizeof HEADER_ORDER / sizeof HEADER_ORDER[0]) == -1) return -1;
+    const char *keys[2 * H_COUNT];
+    if (lex_order(o, keys, header_keys(keys)) == -1) return -1;
 
-    if (get_i64(o, "created_ns", &h->created_ns) == -1 ||
-        get_u64(o, "hash_max_bytes", true, &h->hash_max_bytes, NULL) == -1 ||
-        get_u64(o, "store_max_bytes", true, &h->store_max_bytes, NULL) == -1)
+    if (get_i64(o, HEADER_FIELDS[H_CREATED].name, &h->created_ns) == -1 ||
+        get_u64(o, HEADER_FIELDS[H_HASH_MAX].name, true, &h->hash_max_bytes, NULL) == -1 ||
+        get_u64(o, HEADER_FIELDS[H_STORE_MAX].name, true, &h->store_max_bytes, NULL) == -1)
         return -1;
 
-    const struct pair *hp = lex_get(o, "hash");
+    const struct pair *hp = lex_get(o, HEADER_FIELDS[H_HASH].name);
     if (hp == NULL || hp->kind != V_STR || hp->vlen != 6 || memcmp(hp->val, "sha256", 6) != 0)
         return lex_corrupt("header hash is not sha256");
 
     /* The scope is what makes two manifests comparable at all. Exactly one in
      * this version, as JSON or (not UTF-8) base64. */
-    const struct pair *sj = lex_get(o, "scopes");
-    const struct pair *sb = lex_get(o, "scopes_b64");
+    const char *sk = HEADER_FIELDS[H_SCOPES].name, *sk64 = HEADER_FIELDS[H_SCOPES].alt;
+    const struct pair *sj = lex_get(o, sk);
+    const struct pair *sb = lex_get(o, sk64);
     if ((sj == NULL) == (sb == NULL)) return lex_corrupt("header needs exactly one of scopes, scopes_b64");
     const struct pair *sp = sj ? sj : sb;
-    if (sp->kind != V_ARR) return bad_kind(sj ? "scopes" : "scopes_b64", "an array");
+    if (sp->kind != V_ARR) return bad_kind(sj ? sk : sk64, "an array");
     if (sp->nelem != 1) {
         belay_err_set(sp->nelem == 0 ? BELAY_ERR_CORRUPT : BELAY_ERR_UNSUPPORTED, 0,
                       "manifest: header must name exactly one scope");

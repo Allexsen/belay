@@ -126,6 +126,38 @@ const struct entry_field_def ENTRY_FIELDS[F_COUNT] = {
         "what no longer holds.)" },
 };
 
+const struct line_field_def HEADER_FIELDS[H_COUNT] = {
+    [H_VERSION] = { "belay_manifest", NULL, "int",
+        "Format version. A reader MUST reject a version it does not know." },
+    [H_CREATED] = { "created_ns", NULL, "int",
+        "Wall clock at creation, nanoseconds since the epoch. Informational only -- never used "
+        "for comparison, per §6.3." },
+    [H_SCOPES] = { "scopes", "scopes_b64", "array",
+        "The resolved scope root, exactly one in this version. A scope that is not valid UTF-8 "
+        "is written as `scopes_b64` (base64 elements) instead, never both." },
+    [H_HASH] = { "hash", NULL, "string", "Digest algorithm for the `sha256` field." },
+    [H_HASH_MAX] = { "hash_max_bytes", NULL, "int",
+        "Regular files larger than this are recorded without a hash (see `unverified`)." },
+    [H_STORE_MAX] = { "store_max_bytes", NULL, "int",
+        "Size threshold for copying content into `store/`." },
+};
+
+const struct line_field_def TRAILER_FIELDS[TR_COUNT] = {
+    [TR_ENTRIES] = { "belay_manifest_end", NULL, "int", "Number of entries, including `.`." },
+    [TR_VANISHED] = { "vanished", NULL, "int",
+        "Entries that disappeared between being listed and being read. Non-zero means the tree "
+        "was changing during the walk, so the manifest is not a single instant." },
+    [TR_UNREADABLE] = { "unreadable", NULL, "int", "Entries carrying `unreadable`." },
+    [TR_UNSTABLE] = { "unstable", NULL, "int",
+        "Entries carrying `unstable` (files and directories). Non-zero means the manifest is "
+        "not a consistent single-instant snapshot." },
+    [TR_MOUNTS] = { "mounts", NULL, "int",
+        "Entries carrying `mount`: boundaries whose contents were not captured." },
+    [TR_RACED] = { "raced", NULL, "int",
+        "Entries carrying `raced`. Non-zero means the tree was changing during the walk, so the "
+        "manifest is not a single instant." },
+};
+
 #define T_REG  TBIT(BELAY_T_REG)
 #define T_DIR  TBIT(BELAY_T_DIR)
 #define T_LNK  TBIT(BELAY_T_LNK)

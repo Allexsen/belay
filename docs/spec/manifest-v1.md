@@ -53,14 +53,18 @@ are not permitted anywhere.
 {"belay_manifest":1,"created_ns":1761000000000000000,"scopes":["/home/u/proj"],"hash":"sha256","hash_max_bytes":67108864,"store_max_bytes":65536}
 ```
 
-| field | type | meaning |
+<!-- BEGIN GENERATED: header -->
+<!-- From src/capture/entry.c by tools/gen_schema.c. Edit there, then `make gen`. -->
+
+| field | kind | meaning |
 |---|---|---|
-| `belay_manifest` | int | format version. A reader MUST reject a version it does not know. |
-| `created_ns` | int | wall clock at creation, nanoseconds since the epoch. Informational only — never used for comparison, per §6.3. |
-| `scopes` | array | the resolved scope root, exactly one in this version. A scope that is not valid UTF-8 is written as `scopes_b64` (base64 elements) instead, never both. |
-| `hash` | string | digest algorithm for the `sha256` field |
-| `hash_max_bytes` | int | regular files larger than this are recorded without a hash (see `unverified`) |
-| `store_max_bytes` | int | size threshold for copying content into `store/` |
+| `belay_manifest` | int | Format version. A reader MUST reject a version it does not know. |
+| `created_ns` | int | Wall clock at creation, nanoseconds since the epoch. Informational only -- never used for comparison, per §6.3. |
+| `scopes` / `scopes_b64` | array | The resolved scope root, exactly one in this version. A scope that is not valid UTF-8 is written as `scopes_b64` (base64 elements) instead, never both. |
+| `hash` | string | Digest algorithm for the `sha256` field. |
+| `hash_max_bytes` | int | Regular files larger than this are recorded without a hash (see `unverified`). |
+| `store_max_bytes` | int | Size threshold for copying content into `store/`. |
+<!-- END GENERATED: header -->
 
 ## Entries
 
@@ -115,10 +119,8 @@ owner is invisible.
 In addition to the grammar above:
 
 - **Fields appear in one fixed order**, optional ones omitted, never reordered; unknown fields
-  may appear only after every known one. The entry order is generated below. Header:
-  `belay_manifest`, `created_ns`, `scopes`|`scopes_b64`, `hash`, `hash_max_bytes`,
-  `store_max_bytes`. Trailer: `belay_manifest_end`, `vanished`, `unreadable`, `unstable`, `mounts`,
-  `raced`.
+  may appear only after every known one. The orders, for entries, header and trailer, are
+  generated below.
 - **No key appears twice** in one line. "First wins" would let two different lines mean the same
   thing.
 - **Boolean flags are spelled exactly `"key":true`**, and are absent otherwise. Any other value
@@ -147,6 +149,11 @@ an empty target, so it cannot be confused with one.
   `nlink`, `iflags`, `caps`, `xattrs`, `xattrs_sha256`, `xattrs_unknown`, `sha256`, `unverified`,
   `unstable`, `rdev`, `link_target`|`link_target_b64`, `target_outside_scope`, `stored`, `mount`,
   `unreadable`, `raced`.
+- **Header fields, in order:**
+  `belay_manifest`, `created_ns`, `scopes`|`scopes_b64`, `hash`, `hash_max_bytes`,
+  `store_max_bytes`.
+- **Trailer fields, in order:**
+  `belay_manifest_end`, `vanished`, `unreadable`, `unstable`, `mounts`, `raced`.
 - **`type` is one of these, and `mode`'s type bits (`S_IFMT`, octal) match it:**
   `reg` 100000, `dir` 040000, `lnk` 120000, `fifo` 010000, `sock` 140000, `blk` 060000, `chr`
   020000.
@@ -203,14 +210,18 @@ schema (diff.v1), every format change needs an explicit version bump.
 {"belay_manifest_end":12345,"vanished":0,"unreadable":2,"unstable":0,"mounts":1,"raced":0}
 ```
 
-| field | meaning |
-|---|---|
-| `belay_manifest_end` | number of entries, including `.` |
-| `vanished` | entries that disappeared between being listed and being read. Non-zero means the tree was changing during the walk, so the manifest is not a single instant. |
-| `unreadable` | entries carrying `unreadable` |
-| `unstable` | entries carrying `unstable` (files and directories). Non-zero means the manifest is not a consistent single-instant snapshot. |
-| `mounts` | entries carrying `mount`: boundaries whose contents were not captured |
-| `raced` | entries carrying `raced`. Non-zero means the tree was changing during the walk, so the manifest is not a single instant. |
+<!-- BEGIN GENERATED: trailer -->
+<!-- From src/capture/entry.c by tools/gen_schema.c. Edit there, then `make gen`. -->
+
+| field | kind | meaning |
+|---|---|---|
+| `belay_manifest_end` | int | Number of entries, including `.`. |
+| `vanished` | int | Entries that disappeared between being listed and being read. Non-zero means the tree was changing during the walk, so the manifest is not a single instant. |
+| `unreadable` | int | Entries carrying `unreadable`. |
+| `unstable` | int | Entries carrying `unstable` (files and directories). Non-zero means the manifest is not a consistent single-instant snapshot. |
+| `mounts` | int | Entries carrying `mount`: boundaries whose contents were not captured. |
+| `raced` | int | Entries carrying `raced`. Non-zero means the tree was changing during the walk, so the manifest is not a single instant. |
+<!-- END GENERATED: trailer -->
 
 A manifest is a complete record of one instant only when `vanished`, `unreadable`, `unstable` and
 `raced` are all zero, and it covers everything in the scope only when `mounts` is zero too.

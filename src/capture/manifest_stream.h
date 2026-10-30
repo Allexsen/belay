@@ -8,6 +8,7 @@
 #define BELAY_CAPTURE_MANIFEST_STREAM_H
 
 #include "belay/manifest.h"
+#include "capture/entry.h"
 
 #include <stdbool.h>
 #include <stddef.h>
@@ -45,8 +46,8 @@ struct stream {
 /* One entry, in file order. 0, or -1 with the error set. */
 int stream_entry(struct stream *s, const struct belay_entry *e);
 
-/* The trailer's six values, in TRAILER order (entries, vanished, unreadable,
- * unstable, mounts, raced), against what was read. 0, or -1. */
-int stream_end(const struct stream *s, const uint64_t v[6]);
+/* The trailer's values (indexed by enum trailer_field) against what was
+ * read. 0, or -1. */
+int stream_end(const struct stream *s, const uint64_t v[TR_COUNT]);
 
 #endif
