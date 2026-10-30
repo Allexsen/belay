@@ -75,7 +75,7 @@ struct walk_ctx {
 enum { V_OK = 0, V_VANISHED = 2, V_RACED = 3, V_UNREADABLE = 4,
        W_INCOMPLETE = 5 /* walk(): the listing could not be fully captured */ };
 
-/* Verdicts of the end-of-walk re-check, one byte per record. */
+/* Verdicts of the end-of-walk re-check, one per record (cons_verdict_put). */
 enum { VERDICT_NONE, VERDICT_LISTING, VERDICT_ENTRY };
 
 struct tmpdir {
@@ -123,6 +123,12 @@ bool cons_file_read(const struct stat *opened, const struct stat *after, uint64_
 bool cons_link_read(const struct stat *recorded, const struct stat *again, size_t target_len);
 enum outcome cons_dir_opened(const struct stat *recorded, const struct stat *opened);
 int  cap_recheck(struct walk_ctx *wc, int root_fd, struct belay_entry *e, FILE *verdicts);
+/* A re-check verdict travels to the output pass with a hash of its record's
+ * key, checked against the record it is applied to: a stream misaligned but of
+ * the right length is an internal error, never a flag on the wrong entry
+ * (audit 2026-10, M9). get returns the verdict, or -1 with the error set. */
+int  cons_verdict_put(FILE *f, int v, const unsigned char *key, uint32_t klen);
+int  cons_verdict_get(FILE *f, const unsigned char *key, uint32_t klen);
 
 /* publish.c */
 FILE *cap_tmpfile(void *ctx);

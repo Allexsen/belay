@@ -177,8 +177,8 @@ static int relist(const struct fsops *ops, int fd, struct listing *now) {
 /* How the end-of-walk re-check treats an entry: a directory whose listing
  * was recorded is re-checked as a listing (a change flags it unstable),
  * unless it is unstable already; everything else as an entry (a change flags
- * it raced). The verdict of each record goes, one byte per record in sorted
- * order, to a side stream the output pass reads back. */
+ * it raced). The verdict of each record goes, in sorted order and with a hash
+ * of the record's key, to a side stream the output pass reads back. */
 enum { RC_NONE, RC_LISTING, RC_ENTRY };
 
 static int recheck_kind(const struct belay_entry *e) {
@@ -249,6 +249,43 @@ static int recheck_one(struct rstack *rs, struct walk_ctx *wc, const struct bela
     return 0;
 }
 
+/* FNV-1a, 64 bits: what a verdict carries of its record's key. It detects a
+ * misaligned stream, nothing adversarial (the stream is belay's own). */
+static uint64_t key_hash(const unsigned char *key, uint32_t klen) {
+    uint64_t h = 0xcbf29ce484222325u;
+    for (uint32_t i = 0; i < klen; i++) h = (h ^ key[i]) * 0x100000001b3u;
+    return h;
+}
+
+enum { VERDICT_BYTES = 9 };     /* the verdict, then the key hash */
+
+int cons_verdict_put(FILE *f, int v, const unsigned char *key, uint32_t klen) {
+    unsigned char b[VERDICT_BYTES];
+    const uint64_t h = key_hash(key, klen);
+    b[0] = (unsigned char)v;
+    for (int i = 0; i < 8; i++) b[1 + i] = (unsigned char)(h >> (8 * i));
+    if (fwrite(b, 1, sizeof b, f) != sizeof b) {
+        belay_err_set(BELAY_ERR_IO, errno, "manifest: re-check: write failed");
+        return -1;
+    }
+    return 0;
+}
+
+int cons_verdict_get(FILE *f, const unsigned char *key, uint32_t klen) {
+    unsigned char b[VERDICT_BYTES];
+    uint64_t h = 0;
+    const size_t n = fread(b, 1, sizeof b, f);
+    for (int i = 0; n == sizeof b && i < 8; i++) h |= (uint64_t)b[1 + i] << (8 * i);
+    if (n != sizeof b || h != key_hash(key, klen) ||
+        (b[0] != VERDICT_NONE && b[0] != VERDICT_LISTING && b[0] != VERDICT_ENTRY)) {
+        belay_err_set(BELAY_ERR_INTERNAL, 0,
+                      "manifest: internal error: re-check verdict for \"%.*s\" %s", (int)klen,
+                      (const char *)key, n != sizeof b ? "missing" : "misaligned");
+        return -1;
+    }
+    return b[0];
+}
+
 /* Re-checks every recorded entry, in sorted order, into `verdicts`. */
 int cap_recheck(struct walk_ctx *wc, int root_fd, struct belay_entry *e, FILE *verdicts) {
     struct rstack *rs = calloc(1, sizeof *rs);
@@ -270,10 +307,7 @@ int cap_recheck(struct walk_ctx *wc, int root_fd, struct belay_entry *e, FILE *v
         bool changed;
         if (recheck_one(rs, wc, e, &seen, kind, &changed) == -1) goto done;
         const int v = !changed ? VERDICT_NONE : kind == RC_LISTING ? VERDICT_LISTING : VERDICT_ENTRY;
-        if (fputc(v, verdicts) == EOF) {
-            belay_err_set(BELAY_ERR_IO, errno, "manifest: re-check: write failed");
-            goto done;
-        }
+        if (cons_verdict_put(verdicts, v, key, klen) == -1) goto done;
     }
     if (got == -1) goto done;
     if (fflush(verdicts) != 0 || fseek(verdicts, 0, SEEK_SET) != 0) {
