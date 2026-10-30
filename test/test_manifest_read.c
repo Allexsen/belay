@@ -110,6 +110,104 @@ static int read_it(const char *content) {
 }
 
 /* ---------- tests ---------- */
+#define H64C "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"
+
+/* One witness per schema rule (audit 2026-10, R2): a manifest whose only fault
+ * is that rule, which the reader must reject with that rule's own message.
+ * Removing any one rule makes its witness fail; before, eight rules could be
+ * removed with every check passing. Expectations are written here by hand. */
+#define W_BASE(type, mode, size) "{\"path\":\"w\",\"type\":\"" type "\",\"mode\":" #mode \
+    ",\"uid\":1,\"gid\":1,\"size\":" #size ",\"mtime_ns\":1,\"ctime_ns\":1,\"ino\":3,\"dev\":1,\"nlink\":1"
+#define WX "x:00"
+static const struct { const char *rule, *line, *msg; } WITNESSES[] = {
+    { "1",  W_BASE("reg", 16877, 5) ",\"sha256\":\"" EMPTY_SHA "\"}", "mode's type bits disagree with type" },
+    { "2",  W_BASE("reg", 33188, 5) ",\"xattrs\":[\"user.a=" EMPTY_SHA "\"],\"xattrs_sha256\":\"" EMPTY_SHA "\",\"sha256\":\"" EMPTY_SHA "\"}", "both xattrs and xattrs_sha256" },
+    { "3",  W_BASE("reg", 33188, 5) ",\"caps\":\"01\",\"xattrs_unknown\":true,\"sha256\":\"" EMPTY_SHA "\"}", "xattrs_unknown with recorded attributes" },
+    { "4",  W_BASE("dir", 16877, 1) ",\"caps\":\"01\"}", "caps on a non-regular file" },
+    { "5",  W_BASE("reg", 33188, 5) ",\"sha256\":\"" EMPTY_SHA "\",\"unverified\":true}", "both sha256 and unverified" },
+    { "5b", W_BASE("reg", 33188, 5) "}", "regular file with neither sha256 nor unverified" },
+    { "6",  W_BASE("reg", 33188, 5) ",\"sha256\":\"" EMPTY_SHA "\",\"unstable\":true}", "unstable or unreadable file without unverified" },
+    { "7",  W_BASE("reg", 33188, 5) ",\"unverified\":true,\"unstable\":true,\"unreadable\":true}", "file both unstable and unreadable" },
+    { "8",  W_BASE("reg", 33188, 5) ",\"unverified\":true,\"unstable\":true,\"mount\":true}", "mounted file with read flags" },
+    { "9",  W_BASE("dir", 16877, 1) ",\"sha256\":\"" EMPTY_SHA "\"}", "hash fields on a directory" },
+    { "10", W_BASE("dir", 16877, 1) ",\"raced\":true}", "raced on a listed directory" },
+    { "11", W_BASE("dir", 16877, 1) ",\"unstable\":true,\"unreadable\":true}", "directory flags unreadable, unstable and mount are exclusive" },
+    { "12", W_BASE("lnk", 41471, 1) ",\"unverified\":true,\"link_target\":\"t\"}", "file-only fields on a symlink" },
+    { "13", W_BASE("fifo", 4516, 0) ",\"unreadable\":true}", "read flags on a node that is never read" },
+    { "14", W_BASE("reg", 33188, 5) ",\"sha256\":\"" EMPTY_SHA "\",\"stored\":\"" H64C "\"}", "stored key does not match sha256" },
+    { "15", W_BASE("chr", 8630, 0) "}", "device without rdev" },
+    { "16", W_BASE("lnk", 41471, 0) "}", "symlink without a target" },
+    { "17", W_BASE("reg", 33188, 5) ",\"sha256\":\"" EMPTY_SHA "\",\"target_outside_scope\":true}", "target_outside_scope on a non-symlink" },
+    { "18", W_BASE("lnk", 41471, 0) ",\"link_target\":\"\"}", "symlink with an empty target" },
+    { "19", W_BASE("lnk", 41471, 5) ",\"link_target\":\"t\"}", "symlink size disagrees with its target's length" },
+    { "20", W_BASE("lnk", 41471, 0) ",\"link_target\":\"\",\"target_outside_scope\":true,\"unreadable\":true}", "target_outside_scope on an unknown target" },
+    { "21", W_BASE("reg", 33188, 5) ",\"sha256\":\"" EMPTY_SHA "\",\"mount\":true}", "hash on a mount point" },
+    { "22", W_BASE("dir", 16877, 1) ",\"iflags\":0,\"mount\":true}", "extended metadata on a mount point" },
+    { "header 1", W_BASE("reg", 33188, 67108865) ",\"sha256\":\"" EMPTY_SHA "\"}", "hash on a file larger than hash_max_bytes" },
+    { "header 1b", W_BASE("reg", 33188, 5) ",\"unverified\":true}", "unverified file within hash_max_bytes, with no reason" },
+    { "header 2", W_BASE("lnk", 41471, 4) ",\"link_target\":\"/etc\"}", "target_outside_scope missing on a link leaving the scope" },
+};
+
+TEST(every_schema_rule_has_a_witness_rejected_for_that_rule) {
+    for (size_t i = 0; i < sizeof WITNESSES / sizeof WITNESSES[0]; i++) {
+        char buf[4096];
+        snprintf(buf, sizeof buf, HDR "%s\n", WITNESSES[i].line);
+        if (read_it(buf) != -1) {
+            BELAY_FAIL("rule %s: its witness was accepted", WITNESSES[i].rule);
+        } else if (strstr(belay_err_msg(), WITNESSES[i].msg) == NULL) {
+            BELAY_FAIL("rule %s: rejected for another reason: %s", WITNESSES[i].rule, belay_err_msg());
+        }
+        belay_err_clear();
+    }
+}
+
+/* Reader gaps the audit found (mutants RD-02/06/15/18/19/27 passed every
+ * check). Each asserts the reason, not only the rejection. */
+TEST(a_duplicate_key_is_rejected_as_a_duplicate) {
+    ASSERT_EQ_INT(-1, read_it(HDR "{\"path\":\"a\",\"path\":\"b\",\"type\":\"reg\"}\n"));
+    ASSERT_TRUE(strstr(belay_err_msg(), "duplicate key") != NULL);
+    belay_err_clear();
+}
+
+TEST(a_json_string_must_be_valid_utf8) {
+    ASSERT_EQ_INT(-1, read_it(HDR "{\"path\":\"a\xff\",\"type\":\"reg\",\"mode\":33188,\"uid\":1,"
+                                  "\"gid\":1,\"size\":5,\"mtime_ns\":1,\"ctime_ns\":1,\"ino\":3,\"dev\":1,"
+                                  "\"nlink\":1,\"sha256\":\"" EMPTY_SHA "\"}\n"));
+    ASSERT_TRUE(strstr(belay_err_msg(), "is not UTF-8") != NULL);
+    belay_err_clear();
+}
+
+TEST(nothing_may_follow_the_trailer) {
+    write_raw(HDR ROOT_E "{\"belay_manifest_end\":1,\"vanished\":0,\"unreadable\":0,\"unstable\":0,"
+                         "\"mounts\":0,\"raced\":0}\n" ENTRY_REG("z"));
+    ASSERT_EQ_INT(-1, belay_manifest_read(g_path, collect, NULL));
+    ASSERT_TRUE(strstr(belay_err_msg(), "data after the end marker") != NULL);
+    belay_err_clear();
+}
+
+TEST(a_number_beyond_64_bits_is_rejected) {
+    ASSERT_EQ_INT(-1, read_it(HDR "{\"path\":\"a\",\"type\":\"reg\",\"mode\":33188,\"uid\":1,"
+                                  "\"gid\":1,\"size\":99999999999999999999,\"mtime_ns\":1,\"ctime_ns\":1,"
+                                  "\"ino\":3,\"dev\":1,\"nlink\":1,\"sha256\":\"" EMPTY_SHA "\"}\n"));
+    ASSERT_TRUE(strstr(belay_err_msg(), "size out of range") != NULL);
+    belay_err_clear();
+}
+
+TEST(iflags_and_the_trailers_vanished_count_are_decoded) {
+    ASSERT_EQ_INT(0, read_it(HDR W_BASE("reg", 33188, 5) ",\"iflags\":16,\"sha256\":\"" EMPTY_SHA "\"}\n"));
+    ASSERT_EQ_INT(1, (int)g_n);
+    ASSERT_TRUE(g_n == 1 && g_e[0].has_iflags && g_e[0].iflags == 16);
+    write_raw(HDR ROOT_E "{\"belay_manifest_end\":1,\"vanished\":3,\"unreadable\":0,\"unstable\":0,"
+                         "\"mounts\":0,\"raced\":0}\n");
+    struct belay_manifest_reader *r;
+    REQUIRE(belay_manifest_open(g_path, &r) == 0);
+    static struct belay_entry e;
+    while (belay_manifest_next(r, &e) == 1) {}
+    const struct belay_manifest_stats *t = belay_manifest_trailer(r);
+    ASSERT_TRUE(t != NULL && t->vanished == 3);
+    belay_manifest_close(r);
+}
+
 
 TEST(reads_a_well_formed_entry) {
     ASSERT_EQ_INT(0, read_it(HDR ENTRY_REG("src/main.c")));
@@ -532,14 +630,24 @@ TEST(round_trips_the_writers_output) {
  *  exists to prevent.
  */
 TEST(rejects_traversal_and_absolute_entry_paths) {
-    const char *bad[] = { "..", "../x", "a/../../b", "a/..", "/etc/shadow", "/" };
+    /* Each fixture is a valid entry except for its path, so the path check is
+     * the only thing that can reject it (audit 2026-10: these lines once had
+     * neither sha256 nor unverified, so rule 5 rejected them all first and the
+     * test passed with ".." accepted). */
+    static const struct { const char *path, *msg; } bad[] = {
+        { "..", "\"..\" component" }, { "../x", "\"..\" component" },
+        { "a/../../b", "\"..\" component" }, { "a/..", "\"..\" component" },
+        { "/etc/shadow", "absolute" }, { "/", "absolute" },
+    };
     for (size_t i = 0; i < sizeof bad / sizeof bad[0]; i++) {
         char line[2048];
         snprintf(line, sizeof line,
                  "%s{\"path\":\"%s\",\"type\":\"reg\",\"mode\":33188,\"uid\":1,"
                  "\"gid\":1,\"size\":1,\"mtime_ns\":1,\"ctime_ns\":1,"
-                 "\"ino\":1,\"dev\":1,\"nlink\":1}\n", HDR, bad[i]);
-        if (read_it(line) != -1) BELAY_FAIL("accepted traversal path: %s", bad[i]);
+                 "\"ino\":1,\"dev\":1,\"nlink\":1,\"sha256\":\"" EMPTY_SHA "\"}\n", HDR, bad[i].path);
+        if (read_it(line) != -1) BELAY_FAIL("accepted traversal path: %s", bad[i].path);
+        else if (strstr(belay_err_msg(), bad[i].msg) == NULL)
+            BELAY_FAIL("%s rejected for another reason: %s", bad[i].path, belay_err_msg());
         belay_err_clear();
     }
 }
@@ -1091,6 +1199,12 @@ TEST(decoder_reads_every_schema_field_once) {
 
 int main(void) {
     RUN(reads_a_well_formed_entry);
+    RUN(every_schema_rule_has_a_witness_rejected_for_that_rule);
+    RUN(a_duplicate_key_is_rejected_as_a_duplicate);
+    RUN(a_json_string_must_be_valid_utf8);
+    RUN(nothing_may_follow_the_trailer);
+    RUN(a_number_beyond_64_bits_is_rejected);
+    RUN(iflags_and_the_trailers_vanished_count_are_decoded);
     RUN(rejects_traversal_and_absolute_entry_paths);
     RUN(allows_dotdot_lookalike_components);
     RUN(reads_unreadable_flag);
