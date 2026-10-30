@@ -1,2 +1,3 @@
 each_directory_made_has_its_parent_synced
+an_existing_entry_that_is_not_a_directory_is_an_error
 mkdir_p_makes_every_directory

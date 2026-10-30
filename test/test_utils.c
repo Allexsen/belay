@@ -8,6 +8,8 @@
 #include "belay_test.h"
 #include "utils.h"
 
+#include <errno.h>
+#include <stdbool.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -15,13 +17,30 @@
 #include <unistd.h>
 
 static char g_dir[256];
-static char g_synced[8][512];
+
+/* Each sync: the directory synced (by its fd) and whether the directory
+ * just made existed at that moment. */
+static struct { dev_t dev; ino_t ino; bool made_exists; } g_sync[8];
 static int g_n;
 
-static void record(const char *dir, void *ctx) {
+static int record(void *ctx, int dirfd, const char *made) {
     (void)ctx;
-    if (g_n < 8) snprintf(g_synced[g_n], sizeof g_synced[g_n], "%s", dir);
+    struct stat st, m;
+    if (g_n < 8 && fstat(dirfd, &st) == 0) {
+        g_sync[g_n].dev = st.st_dev;
+        g_sync[g_n].ino = st.st_ino;
+        g_sync[g_n].made_exists = lstat(made, &m) == 0 && S_ISDIR(m.st_mode);
+    }
     g_n++;
+    return 0;
+}
+
+/* Whether sync `i` was of the directory at `path`, once the one made in it
+ * existed. */
+static bool synced(int i, const char *path) {
+    struct stat d;
+    return i < g_n && stat(path, &d) == 0 && g_sync[i].dev == d.st_dev &&
+           g_sync[i].ino == d.st_ino && g_sync[i].made_exists;
 }
 
 static void fresh(void) {
@@ -35,17 +54,16 @@ static void fresh(void) {
  * order; a directory that is there already syncs nothing. */
 TEST(each_directory_made_has_its_parent_synced) {
     fresh();
-    char path[512], want[4][512];
+    char path[512], a[512], ab[512];
     snprintf(path, sizeof path, "%s/a/b/c", g_dir);
-    snprintf(want[0], sizeof want[0], "/tmp");
-    snprintf(want[1], sizeof want[1], "%s", g_dir);
-    snprintf(want[2], sizeof want[2], "%s/a", g_dir);
-    snprintf(want[3], sizeof want[3], "%s/a/b", g_dir);
+    snprintf(a, sizeof a, "%s/a", g_dir);
+    snprintf(ab, sizeof ab, "%s/a/b", g_dir);
     ASSERT_EQ_INT(0, mkdir_p_with(path, 0700, record, NULL));
     ASSERT_EQ_INT(4, g_n);
-    for (int i = 0; i < 4 && i < g_n; i++)
-        if (strcmp(g_synced[i], want[i]) != 0)
-            BELAY_FAIL("sync %d: %s, want %s", i, g_synced[i], want[i]);
+    ASSERT_TRUE(synced(0, "/tmp"));
+    ASSERT_TRUE(synced(1, g_dir));
+    ASSERT_TRUE(synced(2, a));
+    ASSERT_TRUE(synced(3, ab));
     struct stat st;
     ASSERT_EQ_INT(0, stat(path, &st));
     ASSERT_EQ_INT(0700, (int)(st.st_mode & 07777));
@@ -55,7 +73,34 @@ TEST(each_directory_made_has_its_parent_synced) {
     snprintf(path, sizeof path, "%s/a/b/d/", g_dir);    /* one more level; trailing slash */
     ASSERT_EQ_INT(0, mkdir_p_with(path, 0700, record, NULL));
     ASSERT_EQ_INT(1, g_n);
-    ASSERT_TRUE(strcmp(g_synced[0], want[3]) == 0);
+    ASSERT_TRUE(synced(0, ab));
+    ASSERT_EQ_INT(0, stat(path, &st));
+    ASSERT_EQ_INT(0700, (int)(st.st_mode & 07777));     /* the target's mode, not 0755 */
+}
+
+/* Review r3, F8: an entry that exists but is not a directory -- a file, a
+ * dangling symlink -- is an error (ENOTDIR), never a directory made. A
+ * symlink to a directory is one, as for mkdir -p. */
+TEST(an_existing_entry_that_is_not_a_directory_is_an_error) {
+    fresh();
+    REQUIRE(mkdir(g_dir, 0700) == 0);
+    char f[512], l[512], d[512], ld[512];
+    snprintf(f, sizeof f, "%s/f", g_dir);
+    snprintf(l, sizeof l, "%s/l", g_dir);
+    snprintf(d, sizeof d, "%s/d", g_dir);
+    snprintf(ld, sizeof ld, "%s/ld", g_dir);
+    FILE *fp = fopen(f, "w");
+    REQUIRE(fp != NULL);
+    fclose(fp);
+    REQUIRE(symlink("nowhere", l) == 0);
+    REQUIRE(mkdir(d, 0700) == 0 && symlink("d", ld) == 0);
+    errno = 0;
+    ASSERT_EQ_INT(-1, mkdir_p(f, 0700));
+    ASSERT_EQ_INT(ENOTDIR, errno);
+    errno = 0;
+    ASSERT_EQ_INT(-1, mkdir_p(l, 0700));
+    ASSERT_EQ_INT(ENOTDIR, errno);
+    ASSERT_EQ_INT(0, mkdir_p(ld, 0700));
 }
 
 /* mkdir_p itself (the real sync) makes the whole path. */
@@ -72,6 +117,7 @@ TEST(mkdir_p_makes_every_directory) {
 int main(void) {
     snprintf(g_dir, sizeof g_dir, "/tmp/belay_utils_%d", (int)getpid());
     RUN(each_directory_made_has_its_parent_synced);
+    RUN(an_existing_entry_that_is_not_a_directory_is_an_error);
     RUN(mkdir_p_makes_every_directory);
     fresh();
     return belay_test_report();
