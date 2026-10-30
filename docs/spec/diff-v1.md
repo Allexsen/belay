@@ -18,7 +18,7 @@ not know, and treat a missing trailer as a truncated diff.
 {"belay_diff":1,"scopes":["/home/u/proj"],"before_created_ns":1761000000000000000,"after_created_ns":1761000600000000000,"before_hash_max_bytes":67108864,"after_hash_max_bytes":67108864,"scope_remounted":false,"identity_compared":true}
 {"path":"src/main.c","outcome":"modified","type":"reg","changed":["size","mtime_ns","sha256"]}
 {"path":"build","outcome":"unknown","type":"dir","unknown":["unstable"]}
-{"belay_diff_end":2,"unchanged":1840,"added":0,"removed":0,"modified":1,"type_changed":0,"metadata_only":0,"unknown":1,"before_vanished":0,"before_unstable":0,"before_raced":0,"after_vanished":0,"after_unstable":1,"after_raced":0,"provisional":true,"before_sha256":"9f2c...","after_sha256":"41ab..."}
+{"belay_diff_end":2,"unchanged":1840,"added":0,"removed":0,"modified":1,"type_changed":0,"metadata_only":0,"unknown":1,"dir_timestamps_only":0,"before_vanished":0,"before_unstable":0,"before_raced":0,"after_vanished":0,"after_unstable":1,"after_raced":0,"provisional":true,"before_sha256":"9f2c...","after_sha256":"41ab..."}
 ```
 
 ### Header
@@ -69,6 +69,7 @@ not know, and treat a missing trailer as a truncated diff.
 | `type_changed` | int | Paths whose outcome is `type_changed`. |
 | `metadata_only` | int | Paths whose outcome is `metadata_only`. |
 | `unknown` | int | Paths whose outcome is `unknown`. |
+| `dir_timestamps_only` | int | Directories counted in `unchanged` whose `mtime_ns` or `ctime_ns` differs: a directory's own timestamps move with every name added, removed or renamed in it, which the records of its children report. |
 | `before_vanished` | int | The earlier manifest's `vanished`: entries gone while its tree was walked. |
 | `before_unstable` | int | The earlier manifest's `unstable`. |
 | `before_raced` | int | The earlier manifest's `raced`. |
@@ -87,12 +88,12 @@ not know, and treat a missing trailer as a truncated diff.
 
 | name | meaning |
 |---|---|
-| `unchanged` | Every compared field equal and nothing unknown. Counted in the trailer, never emitted. |
+| `unchanged` | Every compared field equal and nothing unknown. Counted in the trailer, never emitted. A directory whose own timestamps alone differ is `unchanged` (its timestamps are not compared), and counted again in `dir_timestamps_only`. |
 | `added` | Present after, absent before, and the absence is known. |
 | `removed` | Present before, absent after, and the absence is known. |
 | `modified` | Content changed: a content field differs (hash, size, link target, device number). |
 | `type_changed` | The entry's type differs. |
-| `metadata_only` | Content unchanged; metadata or identity differs (`changed` names the fields). A `ctime_ns` change alone is listed too: an attribute the manifest does not record changed. |
+| `metadata_only` | Content unchanged; metadata or identity differs (`changed` names the fields). A `ctime_ns` change alone on a regular file or symlink is listed too: an attribute the manifest does not record changed. |
 | `unknown` | Neither side proves a change, and something prevents proving there was none (`unknown` names why). Never read as unchanged. |
 <!-- END GENERATED: diff-outcomes -->
 
@@ -129,7 +130,7 @@ are collected.
    `metadata_only`. Without such a difference, metadata is unknown, and the outcome `unknown`, if
    either side carries `xattrs_unknown` (reason `xattrs_unknown`) or `iflags` is present on one
    side only (reason `iflags_unknown`: an absent `iflags` means it could not be read).
-5. Only `ctime_ns` differs, on a regular file, symlink or directory that is not a mount root:
+5. Only `ctime_ns` differs, on a regular file or symlink that is not a mount root:
    `metadata_only`, `changed` names `ctime_ns` -- an attribute the manifest does not record
    changed.
 6. Otherwise `unchanged`.
@@ -148,6 +149,14 @@ compares by hash.
 root's times belong to the mounted filesystem. Their mode, owner, group, inode, device relation
 and device number still compare, so a real `chmod` is still seen.
 
+**A directory's own timestamps.** A directory's `mtime_ns` and `ctime_ns` are not compared either:
+they move whenever a name is added, removed or renamed in it, and the records of its children
+report those changes. A directory whose only difference is its own timestamps is therefore
+`unchanged` and gets no record; the trailer counts it in `dir_timestamps_only`, which is part of
+`unchanged`. What this hides: an attribute the manifest does not record (a `trusted.*` extended
+attribute when belay does not run as root) that changes on a directory is seen only in that
+count.
+
 `changed`, for a path present on both sides: when the types differ, `["type"]`; otherwise every
 compared field that differs (by its class for that type), whatever the outcome, and `ctime_ns` only
 under rule 5. A field is compared only where both sides know it: the hash when both have one, the
@@ -158,10 +167,12 @@ outcome: the reasons of every flag on either side and, when the types are the sa
 unknown under rule 4 (across a type change no field is compared), in the order of the reasons
 table; for the one-sided case, its one reason.
 
-**An absent record means `unchanged`.** That holds only because every path that is not provably
-unchanged is emitted -- `unknown` included. Nothing above can produce `unchanged` for a path on
-which either side carries `raced`, `unstable`, `unverified`, `unreadable`, `mount` or
-`xattrs_unknown`, or `iflags` on one side only, nor for a path present on one side only.
+**An absent record means `unchanged`** -- for a directory, possibly with its own timestamps
+changed, which the trailer counts in `dir_timestamps_only`. That holds only because every other
+path that is not provably unchanged is emitted -- `unknown` included. Nothing above can produce
+`unchanged` for a path on which either side carries `raced`, `unstable`, `unverified`,
+`unreadable`, `mount` or `xattrs_unknown`, or `iflags` on one side only, nor for a path present on
+one side only.
 
 ## Reasons
 
@@ -195,7 +206,7 @@ which either side carries `raced`, `unstable`, `unverified`, `unreadable`, `moun
 | `gid` | metadata | all | compared | required |  | Group. |
 | `size` | content | reg, lnk | compared | required |  | Proof of a content change without a hash. A directory's follows its listing. |
 | `mtime_ns` | metadata | reg, lnk | not compared | required |  | Settable by any writer. Not compared on a directory (it follows the listing), on a FIFO, socket or device node, or on a mount root: those stamp themselves when used. |
-| `ctime_ns` | ctime | reg, dir, lnk | not compared | required |  | Moves with every change; reported only when nothing else differs. Not compared on a FIFO, socket or device node, or on a mount root. |
+| `ctime_ns` | ctime | reg, lnk | not compared | required |  | Moves with every change; reported only when nothing else differs. Not compared on a directory (it moves with the listing, which its children report: the trailer counts such directories), on a FIFO, socket or device node, or on a mount root. |
 | `ino` | identity: within one device | all | compared | required |  | Same bytes, new inode: replaced (rename-over, as dpkg installs). Compared only when the entry's `dev` is the same on both sides, never across a remount of the scope root. |
 | `dev` | identity: device relation | all | compared | required |  | Whether the entry is on its scope root's device, per side: a change is a real mount change. The raw number is not compared (assigned at mount time). |
 | `nlink` | identity | reg, lnk, fifo, sock, blk, chr | compared | required |  | Hard links added or removed elsewhere. A directory's counts its subdirectories. |

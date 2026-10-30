@@ -18,6 +18,7 @@ struct emitter {
     FILE *f;
     char *line;                 /* EMIT_LINE_CAP */
     size_t count[D_OUTCOME_COUNT];
+    size_t dir_timestamps;      /* of count[D_UNCHANGED] */
     size_t records;
     bool provisional;           /* set by emit_trailer */
 };

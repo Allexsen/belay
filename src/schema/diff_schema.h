@@ -111,14 +111,15 @@ enum diff_record_field { DF_PATH, DF_OUTCOME, DF_TYPE, DF_TYPE_BEFORE, DF_CHANGE
 extern const struct line_field_def DIFF_HEADER_FIELDS[DH_COUNT];
 extern const struct line_field_def DIFF_RECORD_FIELDS[DF_COUNT];
 /* The trailer: DIFF_TRAILER_END, then one count per outcome, named as the
- * outcome, in enum order, then DIFF_TRAILER_FIELDS: what the two manifests'
- * trailers said, whether that makes the result provisional, and each input's
- * digest (decided F2; audit L4). The header cannot carry them: it is written
- * before either trailer is read. */
+ * outcome, in enum order, then DIFF_TRAILER_FIELDS: the unchanged directories
+ * whose own timestamps differ (decided F5), what the two manifests' trailers
+ * said, whether that makes the result provisional, and each input's digest
+ * (decided F2; audit L4). The header cannot carry them: it is written before
+ * either trailer is read. */
 extern const struct line_field_def DIFF_TRAILER_END;
-enum diff_trailer_field { DT_BEFORE_VANISHED, DT_BEFORE_UNSTABLE, DT_BEFORE_RACED,
-                          DT_AFTER_VANISHED, DT_AFTER_UNSTABLE, DT_AFTER_RACED, DT_PROVISIONAL,
-                          DT_BEFORE_SHA256, DT_AFTER_SHA256, DT_COUNT };
+enum diff_trailer_field { DT_DIR_TIMESTAMPS_ONLY, DT_BEFORE_VANISHED, DT_BEFORE_UNSTABLE,
+                          DT_BEFORE_RACED, DT_AFTER_VANISHED, DT_AFTER_UNSTABLE, DT_AFTER_RACED,
+                          DT_PROVISIONAL, DT_BEFORE_SHA256, DT_AFTER_SHA256, DT_COUNT };
 extern const struct line_field_def DIFF_TRAILER_FIELDS[DT_COUNT];
 
 #endif

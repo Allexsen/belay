@@ -122,7 +122,13 @@ int classify_both(const struct diff_ctx *ctx, const struct belay_entry *b,
              differs(ctx, F_CTIME, b, a) == 1) {
         v->outcome = D_METADATA_ONLY;
         v->changed |= FBIT(F_CTIME);
-    } else v->outcome = D_UNCHANGED;                                /* rule 6 */
+    } else {
+        v->outcome = D_UNCHANGED;                                   /* rule 6 */
+        /* A directory's own timestamps move with its listing, which its
+         * children's records report: not compared, only counted (F5). */
+        v->dir_timestamps = a->type == BELAY_T_DIR && (differs(ctx, F_MTIME, b, a) == 1 ||
+                                                       differs(ctx, F_CTIME, b, a) == 1);
+    }
     if (v->outcome == D_UNKNOWN) v->reasons = reasons;
     BELAY_CHECK(v->outcome != D_UNDECIDED, -1);
     return 0;

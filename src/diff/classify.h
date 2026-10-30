@@ -22,6 +22,7 @@ struct verdict {
     enum diff_outcome outcome;
     uint32_t changed;           /* FBIT: compared fields that differ */
     uint32_t reasons;           /* DRBIT: why unknown (outcome unknown only) */
+    bool dir_timestamps;        /* unchanged, a directory whose own timestamps differ (F5) */
 };
 
 /* A path present on both sides. 0, or -1 with BELAY_ERR_INTERNAL when the

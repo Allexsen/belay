@@ -103,7 +103,9 @@ int emit_path(struct emitter *em, const struct belay_entry *before,
               const struct belay_entry *after, const struct verdict *v,
               const struct belay_findings *findings) {
     BELAY_CHECK(v->outcome >= D_FIRST && v->outcome < D_OUTCOME_COUNT, -1);
+    BELAY_CHECK(!v->dir_timestamps || v->outcome == D_UNCHANGED, -1);
     em->count[v->outcome]++;
+    em->dir_timestamps += v->dir_timestamps;
     if (v->outcome == D_UNCHANGED) return 0;
     const struct line_field_def *R = DIFF_RECORD_FIELDS;
     const struct belay_entry *e = after != NULL ? after : before;
@@ -155,6 +157,9 @@ int emit_trailer(struct emitter *em, const struct diff_inputs *in) {
     if (ap(&b, "{\"%s\":%zu", DIFF_TRAILER_END.name, em->records) == -1) return -1;
     for (int o = D_FIRST; o < D_OUTCOME_COUNT; o++)
         if (ap(&b, ",\"%s\":%zu", DIFF_OUTCOMES[o].name, em->count[o]) == -1) return -1;
+    if (ap(&b, ",\"%s\":%zu", DIFF_TRAILER_FIELDS[DT_DIR_TIMESTAMPS_ONLY].name,
+           em->dir_timestamps) == -1)
+        return -1;
     const struct { enum diff_trailer_field f; size_t v; } counts[] = {
         { DT_BEFORE_VANISHED, in->before->vanished }, { DT_BEFORE_UNSTABLE, in->before->unstable },
         { DT_BEFORE_RACED, in->before->raced },       { DT_AFTER_VANISHED, in->after->vanished },
