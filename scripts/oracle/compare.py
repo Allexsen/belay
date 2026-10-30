@@ -104,6 +104,7 @@ G_IFLAGS = 'iflags on one side only -> unknown (iflags_unknown)'
 G_IFLAGS_MOUNT = 'iflags: not compared on a mount root (pin column `on mount roots`)'
 G_DIR_TS = "a directory's own timestamps: unchanged, counted in dir_timestamps_only (O5)"
 G_RACED_ANC = 'one side only, below a raced non-directory: unknown, raced'
+G_TYPE_BEFORE = 'type_before on every path whose types differ, raced or not'
 
 
 def group_changed(f, trace, typ):
@@ -135,7 +136,9 @@ def contradicts_itself(g):
     inputs were (rule 3: proof gives `modified`; rule 4: `metadata_only` is a
     metadata or identity difference with content unchanged; `changed` is
     ["type"] when the types differ; `unknown` only on an `unknown` outcome;
-    `changed` and `unknown` never on a path present on one side only)."""
+    `changed` and `unknown` never on a path present on one side only;
+    `type_before` exactly where the types differ, "whatever the outcome --
+    `type_changed`, or `unknown` when `raced` is on either side")."""
     o, ch, un = g.get('outcome'), g.get('changed', []), g.get('unknown', [])
     if o not in ref.OUTCOMES or o == 'unchanged':
         return 'outcome %r' % o
@@ -143,6 +146,12 @@ def contradicts_itself(g):
         return '%s with changed/unknown' % o
     if o == 'type_changed' and ch != ['type']:
         return 'type_changed whose changed is %s' % ch
+    if o == 'type_changed' and 'type_before' not in g:
+        return 'type_changed with no type_before'
+    if 'type_before' in g and (o not in ('type_changed', 'unknown') or ch != ['type'] or
+                               g['type_before'] == g.get('type')):
+        return '%s with type_before %r, type %r and changed %s' % (o, g['type_before'],
+                                                                   g.get('type'), ch)
     if o == 'modified' and not set(ch) & CONTENT_FIELDS:
         return 'modified with no content field in changed'
     if o == 'metadata_only' and (not ch or set(ch) & (CONTENT_FIELDS | {'type'})):
@@ -180,9 +189,10 @@ def compare_record(path, exp, got, trace, orders):
                              'unknown'}
         if extra:
             groups.append('OTHER: record has %s' % sorted(extra))
-        for k in ('type', 'type_before'):
-            if not same(exp.get(k), g.get(k)):
-                groups.append('OTHER: %s' % k)
+        if not same(exp.get('type'), g.get('type')):
+            groups.append('OTHER: type')
+        if not same(exp.get('type_before'), g.get('type_before')):
+            groups.append(G_TYPE_BEFORE if 'type' in trace else 'OTHER: type_before')
     # What differs; each item is blamed on the field-level rule that explains
     # it. What no field explains (an outcome, a reason, a ctime_ns listed only
     # under rule 5) is a consequence of the blamed fields when there are any
@@ -410,9 +420,11 @@ SCENARIOS = (['dev relation: an entry leaves the root device',
                 for v in ('becomes', 'stops being') for x in ('iflags', 'xattrs')]
              + ['a directory is a mount root on one side only, xattrs_unknown on the other',
                 'a regular file is a mount root on one side only, caps on the other']
-             # Rule 1 before rule 2, `raced` on one side only.
+             # Rule 1 before rule 2, `raced` on one side only or on both; each
+             # record keeps its `type_before` ("whatever the outcome").
              + ['a raced type change, raced %s only%s' % (s, i) for s in ('before', 'after')
                 for i in ('', ', iflags on the raced side only', ', iflags on the other side only')]
+             + ['a raced type change, raced on both sides']
              # "### Trailer", and "`before` is the first manifest given".
              + ['vanished on one side only, nothing flagged and no record',
                 'every walk count differs between the two manifests',
@@ -493,6 +505,8 @@ def pair_coverage(stem, cells, optional, scen, fpairs):
                 if ('iflags' in rc) != ('iflags' in oth):
                     tags.add('a raced type change, raced %s only, iflags on the %s side only'
                              % (side, 'raced' if 'iflags' in rc else 'other'))
+            elif b.get('raced'):
+                tags.add('a raced type change, raced on both sides')
             continue
         t = b['type']
         rel_b, rel_a = b['dev'] == rb, a['dev'] == ra

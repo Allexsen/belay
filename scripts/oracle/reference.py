@@ -8,8 +8,8 @@ Its only sources:
     second, whatever their `created_ns` say"), the "### Trailer" paragraph,
     "How an outcome is decided" (one-sided paths, rules 1-6), "Devices and
     identity", "Timestamps that move on use", "A directory's own timestamps",
-    the `changed` / `unknown` paragraph and "An absent record means
-    `unchanged`";
+    the `type_before` sentence, the `changed` / `unknown` paragraph and "An
+    absent record means `unchanged`";
   - test/expect/diff-fields.md, READ AT RUN TIME: for each field its
     `compared as`, `for types`, `on mount roots` and `absent means`, and the
     outcome rules O1-O5;
@@ -26,7 +26,9 @@ What the prose leaves to generated tables:
     table") is NOT predicted here: compare.py compares the reasons as a set,
     plus one global order that every record must respect;
   - the order of the outcome counts in the trailer ("in the order of the
-    outcomes table") is the one the "Shape" example shows.
+    outcomes table") is the one the "Shape" example shows;
+  - the order of a record's keys after `path`, `outcome` and `type` (the
+    record table is generated): compare.py does not check it.
 One thing no allowed source gives at all: how `xattrs_sha256` is computed
 from a set (see values_differ).
 """
@@ -524,8 +526,11 @@ def diff(before, after):
             continue
         e = a if a is not None else b
         rec = {'path': p, 'outcome': out, 'type': e['type']}
-        if out == 'type_changed':
-            rec['type_before'] = b['type']          # ambiguity A7: the record table is generated
+        # "`type_before`, for a path present on both sides whose types differ:
+        # the type before, whatever the outcome -- `type_changed`, or `unknown`
+        # when `raced` is on either side."
+        if b is not None and a is not None and b['type'] != a['type']:
+            rec['type_before'] = b['type']
         if changed:
             rec['changed'] = changed
         if out == 'unknown':
