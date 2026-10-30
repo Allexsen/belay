@@ -105,6 +105,7 @@ G_IFLAGS_MOUNT = 'iflags: not compared on a mount root (pin column `on mount roo
 G_DIR_TS = "a directory's own timestamps: unchanged, counted in dir_timestamps_only (O5)"
 G_RACED_ANC = 'one side only, below a raced non-directory: unknown, raced'
 G_TYPE_BEFORE = 'type_before on every path whose types differ, raced or not'
+G_DIGEST = 'xattrs: an inline set against a digest, by the formula (manifest-v1)'
 
 
 def group_changed(f, trace, typ):
@@ -123,6 +124,8 @@ def group_changed(f, trace, typ):
             return G_TS_SPECIAL
     if f in ('caps', 'xattrs') and any(t.startswith('O2-not-read') for t in trace):
         return G_O2
+    if f == 'xattrs' and 'inline-vs-digest:xattrs' in trace:
+        return G_DIGEST
     if 'not-for-type:' + f in trace:
         return 'for types: %s not compared on %s' % (f, typ)
     return None
@@ -351,6 +354,10 @@ NOT_ON_DIR = {f for f, s in ref.FIELDS.items()
               if s.cls in CELL_CLASSES and not s.applies('dir')} - DIR_TS
 ALWAYS_ON_DIR = {f for f, s in ref.FIELDS.items()
                  if s.cls == ref.METADATA and s.applies('dir') and s.absent == 'required'}
+# The metadata the pin compares on every type, always present (mode, owner).
+ALWAYS = {f for f, s in ref.FIELDS.items()
+          if s.cls == ref.METADATA and s.types is None and s.absent == 'required'}
+SPELLED = {'xattrs'} | set(ref.SPELLINGS['xattrs'])     # xattrs, xattrs_sha256
 
 
 def flagged(e):
@@ -425,6 +432,13 @@ SCENARIOS = (['dev relation: an entry leaves the root device',
              + ['a raced type change, raced %s only%s' % (s, i) for s in ('before', 'after')
                 for i in ('', ', iflags on the raced side only', ', iflags on the other side only')]
              + ['a raced type change, raced on both sides']
+             # xattrs_sha256: "the sha256 of the bytes `xattrs` would hold between
+             # its brackets", so an inline set and its digest compare equal.
+             + ['xattrs: a set inline on one side and %s by digest on the other, nothing else '
+                'differing' % k for k in ('the same set', 'a different set')]
+             + ['xattrs: a set inline on one side and the same set by digest on the other, '
+                'beside another difference',
+                'xattrs: different sets by digest on both sides, nothing else differing']
              # "### Trailer", and "`before` is the first manifest given".
              + ['vanished on one side only, nothing flagged and no record',
                 'every walk count differs between the two manifests',
@@ -563,6 +577,19 @@ def pair_coverage(stem, cells, optional, scen, fpairs):
                 tags.add('a directory is a mount root on one side only, xattrs_unknown on the other')
             if t == 'reg' and 'caps' in other:
                 tags.add('a regular file is a mount root on one side only, caps on the other')
+        xb, xa = ref.value(b, 'xattrs'), ref.value(a, 'xattrs')
+        if xb and xa and (xb[0] != xa[0] or xb[0] != 'xattrs'):
+            alone = D <= SPELLED and quiet(b, a)
+            same_set = ref.as_digest(xb) == ref.as_digest(xa)
+            if xb[0] != xa[0] and alone:
+                tags.add('xattrs: a set inline on one side and %s by digest on the other, '
+                         'nothing else differing' % ('the same set' if same_set
+                                                     else 'a different set'))
+            if xb[0] != xa[0] and same_set and (D - SPELLED) & ALWAYS:
+                tags.add('xattrs: a set inline on one side and the same set by digest on the '
+                         'other, beside another difference')
+            if xb[0] == xa[0] and not same_set and alone:
+                tags.add('xattrs: different sets by digest on both sides, nothing else differing')
         if ('iflags' in b) != ('iflags' in a):
             tags.add('iflags on one side only on a ' + t)
         for s1, s2 in ((b, a), (a, b)):

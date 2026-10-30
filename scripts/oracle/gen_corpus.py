@@ -32,7 +32,8 @@ The corpus has three parts:
     one; every optional field present on one side only; and the scenarios:
     dev relation, scope remounts, timestamps on fifo/sock/blk/chr, on mount
     roots and a directory's own, iflags on one side, caps/xattrs under
-    xattrs_unknown and beside a mount root, O1 with and without a size
+    xattrs_unknown and beside a mount root, an xattr set inline against
+    its digest (the same set and another), O1 with and without a size
     change, hash limits, sealing and unsealing directories, unstable
     listings, one-sided paths below raced and plain non-directories,
     one-sided raced entries, the trailer's walk counts, the root itself,
@@ -56,7 +57,7 @@ depends on the seed or on the random pairs, which add variety only. The
 same seed gives the same corpus, byte for byte.
 Nothing here comes from the generated spec tables or from the C code.
 """
-import base64, copy, json, os, random, sys
+import base64, copy, hashlib, json, os, random, sys
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 REPO = os.path.normpath(os.path.join(HERE, '..', '..'))
@@ -1935,6 +1936,81 @@ def mount_root_attributes(w, rng):
                    build, scenarios=scen)
 
 
+def digest_of(items):
+    """A set's xattrs_sha256, as manifest-v1.md defines it ("Field rules a
+    reader MUST enforce"): "the sha256 of the bytes `xattrs` would hold
+    between its brackets, exactly as a writer emits them" -- this writer:
+    enc_obj() joins jstr() of each element with ",". (The reference computes
+    it on its own, from the "Encoding" grammar; each pair built here is
+    checked to show that both agree.)"""
+    return hashlib.sha256(','.join(jstr(x) for x in items).encode('utf-8')).hexdigest()
+
+
+def large_xattr_set(rng):
+    """A set whose array body is over 8192 bytes, so one a writer records by
+    digest, never inline: "At most 8192 bytes of array body; a larger set is
+    recorded as `xattrs_sha256` instead" (manifest-v1.md, entries table -- a
+    generated block, used here only to build an input, never to decide an
+    outcome). Recorded inline it would be another byte representation of the
+    same state, which a reader rejects ("every manifest state has exactly one
+    byte representation, and a reader MUST reject anything else",
+    "Encoding"); the C reader was seen to ("xattrs longer than the inline
+    limit"). So it appears here by digest only."""
+    items, body = [], -1
+    while body <= 8192:
+        items.append('user.x%04d=%s' % (len(items), hexs(rng)))
+        body += len(items[-1]) + 3                  # its quotes, and a comma
+    return items
+
+
+def xattrs_spellings(w, rng):
+    """An xattr set inline on one side and by digest on the other: the same
+    set "compares equal" (manifest-v1.md, "Field rules a reader MUST
+    enforce") -- no record when nothing else differs, and not in `changed`
+    beside another difference --; a different set differs, inline against a
+    digest and digest against digest. Nothing is flagged, so that the set
+    alone decides. Both sides are valid under test/expect/manifest-v1.md: no
+    `xattrs` with a digest (rule 2), no `xattrs_unknown` (rule 3), not a
+    mount (rule 22). An inline set is always one a writer inlines; so the
+    same set by digest is a small one (no reader can tell a set's size from
+    its digest, and no pin rule ties the digest to a size), and a set a
+    writer records by digest (large_xattr_set) is on a digest side only."""
+    alone = 'xattrs: a set inline on one side and %s by digest on the other, nothing else ' \
+            'differing'
+    tags = {'same': alone % 'the same set',
+            'same, mode': 'xattrs: a set inline on one side and the same set by digest on the '
+                          'other, beside another difference',
+            'different': alone % 'a different set',
+            'different, large by digest': alone % 'a different set',
+            'both by digest, large': 'xattrs: different sets by digest on both sides, nothing '
+                                     'else differing'}
+    for typ in TYPE_NAMES:
+        for how, tag in tags.items():
+            def build(rng, typ=typ, how=how):
+                t = base_tree(rng)
+                e = clear_flags(subject(rng, t, typ), t, rng)
+                e.pop('xattrs_sha256', None)
+                s = large_xattr_set(rng) if how == 'both by digest, large' else xattr_set(rng)
+                n, v = s[-1].split('=', 1)
+                s2 = s[:-1] + ['%s=%s' % (n, unlike(hexs(rng), v))]     # another set
+                if how == 'different, large by digest':
+                    s2 = large_xattr_set(rng)
+                e['xattrs'] = s
+                e2 = {k: x for k, x in e.items() if k != 'xattrs'}
+                if how.startswith('same'):
+                    e2['xattrs_sha256'] = digest_of(s)
+                    if how == 'same, mode':
+                        e2['mode'] = (e['mode'] & S_IFMT) | other(rng, PERMS, e['mode'] & 0o7777)
+                elif how.startswith('different'):
+                    e2['xattrs_sha256'] = digest_of(s2)
+                else:
+                    del e['xattrs']
+                    e['xattrs_sha256'], e2['xattrs_sha256'] = digest_of(s), digest_of(s2)
+                return with_subject(t, e, e2)
+            w.targeted(rng, 'xattrs inline and by digest on a %s: %s' % (typ, how), build,
+                       scenarios=[tag])
+
+
 def trailer_counts(w, rng):
     """What the trailer says about each walk ("### Trailer"): `vanished` on
     one side only with nothing flagged and every entry equal, so no record
@@ -1986,6 +2062,7 @@ def targeted(w, rng):
     dir_timestamps(w, rng)
     below_a_non_directory(w, rng)
     mount_root_attributes(w, rng)
+    xattrs_spellings(w, rng)
     trailer_counts(w, rng)
 
 
