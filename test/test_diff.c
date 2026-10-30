@@ -579,6 +579,37 @@ TEST(new_inode_permissions_and_ctime_alone_are_metadata_only) {
     ASSERT_TRUE(has("c", "\"outcome\":\"metadata_only\",\"type\":\"reg\",\"changed\":[\"ctime_ns\"]"));
 }
 
+/* Decided F5 (pin O5): a directory's own timestamps move with its listing,
+ * which its children's records report. A directory whose only difference is
+ * its timestamps is unchanged, not emitted, and counted in the trailer; any
+ * other difference or flag still gets its record, without the timestamps. */
+TEST(a_directorys_own_timestamps_are_counted_never_emitted) {
+    m_begin("before", "/s", 1000); ROOT();
+    E(.path = "a", .type = "dir"); E(.path = "c", .type = "dir"); E(.path = "f", .type = "fifo");
+    E(.path = "m", .type = "dir"); E(.path = "p", .type = "dir"); E(.path = "q", .type = "dir");
+    E(.path = "s", .type = "dir"); m_end();
+    m_begin("after", "/s", 1000); ROOT();
+    E(.path = "a", .type = "dir", .mtime = 9, .ctime = 9);       /* a name added in it */
+    E(.path = "a/x", .type = "reg", .size = 3, .sha = HA);
+    E(.path = "c", .type = "dir", .ctime = 9);                   /* ctime alone */
+    E(.path = "f", .type = "fifo", .mtime = 9, .ctime = 9);      /* not a directory: not counted */
+    E(.path = "m", .type = "dir", .mtime = 9);                   /* mtime alone */
+    E(.path = "p", .type = "dir", .mode = 0700, .ctime = 9);     /* a chmod: its record */
+    E(.path = "q", .type = "dir", .ctime = 9, .unstable = true); /* a flag: unknown */
+    E(.path = "s", .type = "dir"); m_end();                      /* nothing differs */
+    REQUIRE(run() == 0);
+    ASSERT_TRUE(record("a") == NULL && record("c") == NULL && record("m") == NULL);
+    ASSERT_TRUE(record("f") == NULL && record("s") == NULL);
+    ASSERT_TRUE(has("a/x", "\"outcome\":\"added\""));
+    ASSERT_TRUE(has("p", "\"outcome\":\"metadata_only\",\"type\":\"dir\",\"changed\":[\"mode\"]}"));
+    ASSERT_TRUE(has("q", "\"outcome\":\"unknown\",\"type\":\"dir\",\"unknown\":[\"unstable\"]}"));
+    ASSERT_TRUE(strstr(g_text, "\"unchanged\":6,\"added\":1,\"removed\":0,\"modified\":0,"
+                               "\"type_changed\":0,\"metadata_only\":1,\"unknown\":1,"
+                               "\"dir_timestamps_only\":3,") != NULL);
+    ASSERT_EQ_INT(3, (int)g_st.dir_timestamps_only);
+    ASSERT_EQ_INT(6, (int)g_st.unchanged);
+}
+
 TEST(type_change_names_the_type_before) {
     m_begin("before", "/s", 1000);
     ROOT(.mode = 0755);
@@ -848,6 +879,7 @@ int main(void) {
     RUN(added_removed_and_modified_by_hash);
     RUN(different_hash_limits_are_unknown_unless_size_proves_a_change);
     RUN(new_inode_permissions_and_ctime_alone_are_metadata_only);
+    RUN(a_directorys_own_timestamps_are_counted_never_emitted);
     RUN(type_change_names_the_type_before);
     RUN(raced_is_unknown_even_when_a_field_differs);
     RUN(unknown_attributes_never_read_as_unchanged);

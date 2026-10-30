@@ -259,7 +259,7 @@ int diff_run(const char *before, const char *after, const char *out_path,
             .records = x->em.records, .unchanged = c[D_UNCHANGED], .added = c[D_ADDED],
             .removed = c[D_REMOVED], .modified = c[D_MODIFIED], .type_changed = c[D_TYPE_CHANGED],
             .metadata_only = c[D_METADATA_ONLY], .unknown = c[D_UNKNOWN],
-            .provisional = x->em.provisional,
+            .dir_timestamps_only = x->em.dir_timestamps, .provisional = x->em.provisional,
         };
     }
     rc = 0;

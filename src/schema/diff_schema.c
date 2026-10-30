@@ -2,7 +2,9 @@
 
 const struct diff_name_def DIFF_OUTCOMES[D_OUTCOME_COUNT] = {
     [D_UNCHANGED]     = { "unchanged",
-        "Every compared field equal and nothing unknown. Counted in the trailer, never emitted." },
+        "Every compared field equal and nothing unknown. Counted in the trailer, never emitted. "
+        "A directory whose own timestamps alone differ is `unchanged` (its timestamps are not "
+        "compared), and counted again in `dir_timestamps_only`." },
     [D_ADDED]         = { "added", "Present after, absent before, and the absence is known." },
     [D_REMOVED]       = { "removed", "Present before, absent after, and the absence is known." },
     [D_MODIFIED]      = { "modified",
@@ -10,8 +12,8 @@ const struct diff_name_def DIFF_OUTCOMES[D_OUTCOME_COUNT] = {
     [D_TYPE_CHANGED]  = { "type_changed", "The entry's type differs." },
     [D_METADATA_ONLY] = { "metadata_only",
         "Content unchanged; metadata or identity differs (`changed` names the fields). A "
-        "`ctime_ns` change alone is listed too: an attribute the manifest does not record "
-        "changed." },
+        "`ctime_ns` change alone on a regular file or symlink is listed too: an attribute the "
+        "manifest does not record changed." },
     [D_UNKNOWN]       = { "unknown",
         "Neither side proves a change, and something prevents proving there was none "
         "(`unknown` names why). Never read as unchanged." },
@@ -59,9 +61,11 @@ const struct field_change DIFF_FIELDS[F_COUNT] = {
                    "Settable by any writer. Not compared on a directory (it follows the listing), "
                    "on a FIFO, socket or device node, or on a mount root: those stamp themselves "
                    "when used." },
-    [F_CTIME]  = { CC_CTIME, T_REG | T_LNK | T_DIR, US_NONE, DR_NONE, NC, AM_REQUIRED,
+    [F_CTIME]  = { CC_CTIME, T_REG | T_LNK, US_NONE, DR_NONE, NC, AM_REQUIRED,
                    "Moves with every change; reported only when nothing else differs. Not "
-                   "compared on a FIFO, socket or device node, or on a mount root." },
+                   "compared on a directory (it moves with the listing, which its children "
+                   "report: the trailer counts such directories), on a FIFO, socket or device "
+                   "node, or on a mount root." },
     [F_INO]    = { CC_INODE, T_ALL, US_NONE, DR_NONE, C, AM_REQUIRED,
                    "Same bytes, new inode: replaced (rename-over, as dpkg installs). Compared only "
                    "when the entry's `dev` is the same on both sides, never across a remount of "
@@ -153,6 +157,10 @@ const struct line_field_def DIFF_TRAILER_END = { "belay_diff_end", NULL, "int",
     "included." };
 
 const struct line_field_def DIFF_TRAILER_FIELDS[DT_COUNT] = {
+    [DT_DIR_TIMESTAMPS_ONLY] = { "dir_timestamps_only", NULL, "int",
+        "Directories counted in `unchanged` whose `mtime_ns` or `ctime_ns` differs: a "
+        "directory's own timestamps move with every name added, removed or renamed in it, which "
+        "the records of its children report." },
     [DT_BEFORE_VANISHED] = { "before_vanished", NULL, "int",
         "The earlier manifest's `vanished`: entries gone while its tree was walked." },
     [DT_BEFORE_UNSTABLE] = { "before_unstable", NULL, "int", "The earlier manifest's `unstable`." },
