@@ -1,0 +1,2 @@
+each_directory_made_has_its_parent_synced
+mkdir_p_makes_every_directory
