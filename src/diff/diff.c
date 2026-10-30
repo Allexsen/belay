@@ -14,11 +14,13 @@
 
 #include "ancestry.h"
 #include "classify.h"
+#include "diff_run.h"
 #include "emit.h"
 #include "pair.h"
 
 #include "belay/error.h"
 #include "belay/interp.h"
+#include "belay/json.h"
 #include "belay/manifest.h"
 
 #include <errno.h>
@@ -93,23 +95,44 @@ struct run {
     char tmp[PATH_MAX + 16];
     char abs[2 * PATH_MAX];     /* scope + "/" + path, for interpreter dispatch */
     struct belay_findings findings;
+    const struct belay_interp *const *interp;
+    void *state[BELAY_INTERP_COUNT];
+    bool begun;
 };
 
-/* The interpreter that claims this path explains the change, if it can. */
-static int explain(struct run *x, const struct belay_entry *b, const struct belay_entry *a,
-                   const char *scope) {
+/* The interpreter that claims this path explains the change, if it can. What
+ * it returns can only add to the record, and its failures stay in its own
+ * output (R11): an error is the finding "could not interpret", a finding that
+ * is not valid UTF-8 becomes "invalid finding". */
+static void explain(struct run *x, const struct belay_entry *b, const struct belay_entry *a,
+                    const struct verdict *v, const char *scope) {
     const struct belay_entry *e = a != NULL ? a : b;
     const size_t sl = strlen(scope), sep = sl > 1 ? 1 : 0;
     x->findings.n = 0;
-    if (sl + sep + e->path_len >= sizeof x->abs) return 0;
+    if (sl + sep + e->path_len >= sizeof x->abs) return;
     memcpy(x->abs, scope, sl);
     if (sep) x->abs[sl] = '/';
     memcpy(x->abs + sl + sep, e->path, e->path_len);
     struct belay_claim claim;
     belay_interp_classify(x->abs, sl + sep + e->path_len, &claim);
-    const struct belay_interp_input in = { e->path, e->path_len, b, a };
-    if (belay_interp_explain(claim.interp, &in, &x->findings) == BELAY_INTERP_ERROR) return -1;
-    return 0;
+    const struct belay_interp *it = x->interp[claim.interp];
+    if (it->explain == NULL) return;
+    const struct belay_interp_input in = { e->path, e->path_len, b, a,
+                                           DIFF_OUTCOMES[v->outcome].name, v->changed, NULL };
+    const enum belay_interp_result r = it->explain(x->state[claim.interp], &in, &x->findings);
+    if (r == BELAY_INTERP_ERROR) {
+        x->findings.n = 0;
+        belay_findings_add(&x->findings, "could not interpret");
+    } else if (r != BELAY_INTERP_FINDINGS) {
+        x->findings.n = 0;
+    }
+    for (size_t i = 0; i < x->findings.n && i < BELAY_FINDINGS_MAX; i++) {
+        char *f = x->findings.item[i];
+        if (!belay_utf8_valid(f, strnlen(f, BELAY_FINDING_BYTES)) ||
+            strnlen(f, BELAY_FINDING_BYTES) == BELAY_FINDING_BYTES)
+            memcpy(f, "invalid finding", sizeof "invalid finding");
+    }
+    if (x->findings.n > BELAY_FINDINGS_MAX) x->findings.n = BELAY_FINDINGS_MAX;
 }
 
 static int run_pipeline(struct run *x) {
@@ -143,7 +166,7 @@ static int run_pipeline(struct run *x) {
         }
         if (b != NULL) ancestry_feed(&x->anc[0], b);
         if (a != NULL) ancestry_feed(&x->anc[1], a);
-        if (v.outcome != D_UNCHANGED && explain(x, b, a, hb->scope) == -1) return -1;
+        if (v.outcome != D_UNCHANGED) explain(x, b, a, &v, hb->scope);
         if (emit_path(&x->em, b, a, &v, v.outcome != D_UNCHANGED ? &x->findings : NULL) == -1)
             return -1;
     }
@@ -157,7 +180,16 @@ static int run_pipeline(struct run *x) {
 
 int belay_diff(const char *before, const char *after, const char *out_path,
                struct belay_diff_stats *stats) {
-    if (before == NULL || after == NULL || out_path == NULL) {
+    const struct belay_interp *builtin[BELAY_INTERP_COUNT];
+    for (int i = 0; i < BELAY_INTERP_COUNT; i++)
+        builtin[i] = belay_interp_builtin((enum belay_interp_id)i);
+    return diff_run(before, after, out_path, stats, builtin);
+}
+
+int diff_run(const char *before, const char *after, const char *out_path,
+             struct belay_diff_stats *stats,
+             const struct belay_interp *const interp[BELAY_INTERP_COUNT]) {
+    if (before == NULL || after == NULL || out_path == NULL || interp == NULL) {
         belay_err_set(BELAY_ERR_INVALID, 0, "diff: null argument");
         return -1;
     }
@@ -198,6 +230,10 @@ int belay_diff(const char *before, const char *after, const char *out_path,
         close(fd);
         goto done;
     }
+    x->interp = interp;
+    for (int i = 0; i < BELAY_INTERP_COUNT; i++)
+        x->state[i] = interp[i]->begin != NULL ? interp[i]->begin() : NULL;
+    x->begun = true;
     if (emit_open(&x->em, x->out) == -1 || run_pipeline(x) == -1) goto done;
     if (fflush(x->out) != 0 || fsync(fileno(x->out)) != 0) {
         belay_err_set(BELAY_ERR_IO, errno, "diff: write failed");
@@ -222,6 +258,8 @@ int belay_diff(const char *before, const char *after, const char *out_path,
     }
     rc = 0;
 done:
+    for (int i = 0; x->begun && i < BELAY_INTERP_COUNT; i++)
+        if (interp[i]->end != NULL) interp[i]->end(x->state[i]);
     if (x->out != NULL) fclose(x->out);
     if (tmp_live) unlink(x->tmp);
     emit_close(&x->em);

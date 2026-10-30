@@ -11,6 +11,7 @@
 #include "belay/error.h"
 #include "belay/hash.h"
 #include "diff/classify.h"
+#include "diff/diff_run.h"
 
 #include <stdarg.h>
 #include <stdbool.h>
@@ -299,6 +300,78 @@ TEST(the_trailer_names_both_inputs_by_their_digest) {
         snprintf(want, sizeof want, "\"%s_sha256\":\"%s\"", side[k], hex);
         ASSERT_TRUE(strstr(g_text, want) != NULL);
     }
+}
+
+/* F3 / R11: an interpreter can only add to a record, and its failures stay
+ * in its own output. Run through diff_run with a test interpreter in the
+ * binary slot, which every unclaimed path reaches. */
+static int g_begun, g_ended, g_saw_modified;
+static void *t_begin(void) { g_begun++; return &g_saw_modified; }
+static void t_end(void *state) { g_ended += state == &g_saw_modified; }
+static enum belay_interp_result t_error(void *state, const struct belay_interp_input *in,
+                                        struct belay_findings *out) {
+    (void)state; (void)in;
+    belay_findings_add(out, "half-written");
+    return BELAY_INTERP_ERROR;
+}
+static enum belay_interp_result t_invalid(void *state, const struct belay_interp_input *in,
+                                          struct belay_findings *out) {
+    (void)state; (void)in;
+    belay_findings_add(out, "ok \xff\xfe");
+    belay_findings_add(out, "fine");
+    return BELAY_INTERP_FINDINGS;
+}
+static enum belay_interp_result t_verdict(void *state, const struct belay_interp_input *in,
+                                          struct belay_findings *out) {
+    if (strcmp(in->outcome, "modified") == 0) (*(int *)state)++;
+    (void)out;
+    return BELAY_INTERP_DECLINE;
+}
+static int run_with(const struct belay_interp *t) {
+    const struct belay_interp *table[BELAY_INTERP_COUNT];
+    for (int i = 0; i < BELAY_INTERP_COUNT; i++) table[i] = belay_interp_builtin((enum belay_interp_id)i);
+    table[BELAY_INTERP_BINARY] = t;
+    char b[400], a[400];
+    snprintf(b, sizeof b, "%s/before", g_dir);
+    snprintf(a, sizeof a, "%s/after", g_dir);
+    g_text[0] = '\0';
+    if (diff_run(b, a, g_out, &g_st, table) != 0) return -1;
+    FILE *f = fopen(g_out, "rb");
+    const size_t n = fread(g_text, 1, sizeof g_text - 1, f);
+    g_text[n] = '\0';
+    fclose(f);
+    return 0;
+}
+
+TEST(an_interpreter_error_is_a_finding_never_a_failed_diff) {
+    m_begin("before", "/s", 1000); ROOT(); E(.path = "f", .type = "reg", .size = 3, .sha = HA); m_end();
+    m_begin("after", "/s", 1000); ROOT(); E(.path = "f", .type = "reg", .size = 3, .sha = HB); m_end();
+    const struct belay_interp t = { BELAY_INTERP_BINARY, NULL, t_error, NULL };
+    REQUIRE(run_with(&t) == 0);
+    ASSERT_TRUE(has("f", "\"outcome\":\"modified\""));
+    ASSERT_TRUE(has("f", "\"findings\":[\"could not interpret\"]"));
+}
+
+TEST(a_finding_that_is_not_utf8_is_replaced) {
+    m_begin("before", "/s", 1000); ROOT(); E(.path = "f", .type = "reg", .size = 3, .sha = HA); m_end();
+    m_begin("after", "/s", 1000); ROOT(); E(.path = "f", .type = "reg", .size = 3, .sha = HB); m_end();
+    const struct belay_interp t = { BELAY_INTERP_BINARY, NULL, t_invalid, NULL };
+    REQUIRE(run_with(&t) == 0);
+    ASSERT_TRUE(has("f", "\"findings\":[\"invalid finding\",\"fine\"]"));
+    ASSERT_TRUE(strchr(g_text, '\xff') == NULL);
+}
+
+TEST(an_interpreter_sees_the_verdict_and_keeps_its_state_over_one_diff) {
+    m_begin("before", "/s", 1000); ROOT(); E(.path = "f", .type = "reg", .size = 3, .sha = HA);
+    E(.path = "g", .type = "reg", .size = 3, .sha = HA); m_end();
+    m_begin("after", "/s", 1000); ROOT(); E(.path = "f", .type = "reg", .size = 3, .sha = HB);
+    E(.path = "g", .type = "reg", .size = 4, .sha = HB); m_end();
+    g_begun = g_ended = g_saw_modified = 0;
+    const struct belay_interp t = { BELAY_INTERP_BINARY, t_begin, t_verdict, t_end };
+    REQUIRE(run_with(&t) == 0);
+    ASSERT_EQ_INT(1, g_begun);
+    ASSERT_EQ_INT(1, g_ended);
+    ASSERT_EQ_INT(2, g_saw_modified);
 }
 
 TEST(identical_manifests_emit_no_record) {
@@ -651,6 +724,9 @@ int main(void) {
     RUN(a_tree_that_changed_while_walked_makes_the_diff_provisional);
     RUN(the_output_is_never_an_input_however_spelled);
     RUN(the_trailer_names_both_inputs_by_their_digest);
+    RUN(an_interpreter_error_is_a_finding_never_a_failed_diff);
+    RUN(a_finding_that_is_not_utf8_is_replaced);
+    RUN(an_interpreter_sees_the_verdict_and_keeps_its_state_over_one_diff);
     RUN(names_sorting_before_the_root_see_its_flags);
     RUN(manifests_of_different_scopes_are_refused_with_no_output);
     RUN(an_unreadable_links_unknown_target_is_not_a_change);

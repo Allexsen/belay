@@ -5,3 +5,4 @@ git_claims_refs_hooks_and_hashes_the_index
 git_objects_and_packs_are_not_claimed
 unclaimed_and_hostile_inputs_fall_back_to_binary
 names_are_stable
+a_long_finding_is_cut_between_characters

@@ -22,6 +22,7 @@
 #define BELAY_INTERP_H
 
 #include <stddef.h>
+#include <stdint.h>
 
 enum belay_interp_id {
     BELAY_INTERP_BINARY = 0,    /* fallback: size + hash; claims nothing */
@@ -51,12 +52,15 @@ const char *belay_interp_name(enum belay_interp_id id);
 
 /*
  *  Explaining a change (diff.v1, "Interpreters"). For a path whose outcome
- *  is not unchanged, the interpreter that claims it receives {path, before,
- *  after} and returns findings -- short strings, emitted as the record's
- *  "findings" -- or declines. Findings are annotations only: nothing here
- *  can set or change the outcome, so an interpreter cannot hide a change.
- *  Declining is always safe. In this version every interpreter declines;
- *  Phase 4 adds pip, dpkg, git and text.
+ *  is not unchanged, the interpreter that claims it receives the path, both
+ *  entries and the core's verdict, and returns findings -- short strings,
+ *  emitted as the record's "findings" -- or declines. Findings are
+ *  annotations only: nothing here can set or change the outcome, so an
+ *  interpreter cannot hide a change. Its failures degrade to its own output
+ *  (R11): an error is the finding "could not interpret", a finding that is
+ *  not valid UTF-8 is replaced by "invalid finding", and neither stops the
+ *  diff. In this version every interpreter declines; Phase 4 adds pip, dpkg,
+ *  git and text.
  */
 #define BELAY_FINDINGS_MAX   16
 #define BELAY_FINDING_BYTES  256
@@ -66,23 +70,38 @@ struct belay_findings {
     char item[BELAY_FINDINGS_MAX][BELAY_FINDING_BYTES];
 };
 
-/* Appends one finding (truncated to BELAY_FINDING_BYTES - 1). 0, or -1 when
+/* Appends one finding, truncated to BELAY_FINDING_BYTES - 1 bytes on a
+ * character boundary, never inside a UTF-8 sequence. 0, or -1 when
  * BELAY_FINDINGS_MAX are already recorded. */
 int belay_findings_add(struct belay_findings *f, const char *text);
 
 struct belay_entry;
+struct belay_content;                   /* stored copies by hash: no store reaches the diff yet */
 struct belay_interp_input {
     const char *path;                   /* relative to the scope */
     size_t path_len;
     const struct belay_entry *before;   /* NULL: added */
     const struct belay_entry *after;    /* NULL: removed */
+    const char *outcome;                /* the core's verdict, read-only: a diff.v1 outcome */
+    uint32_t changed;                   /* the fields that differ: bit i is the manifest's
+                                           field i (its key order) */
+    const struct belay_content *content;  /* NULL in this version */
 };
 
 enum belay_interp_result { BELAY_INTERP_FINDINGS, BELAY_INTERP_DECLINE, BELAY_INTERP_ERROR };
 
-/* Runs interpreter `id` on one change. `out` is cleared first. */
-enum belay_interp_result belay_interp_explain(enum belay_interp_id id,
-                                              const struct belay_interp_input *in,
-                                              struct belay_findings *out);
+/* One interpreter. Over one diff: begin once before the first path (its
+ * state, or NULL), explain for each path it claims (`out` cleared first),
+ * end once after the last -- also when the diff fails. Any may be NULL. */
+struct belay_interp {
+    enum belay_interp_id id;
+    void *(*begin)(void);
+    enum belay_interp_result (*explain)(void *state, const struct belay_interp_input *in,
+                                        struct belay_findings *out);
+    void (*end)(void *state);
+};
+
+/* The built-in interpreter for `id`. */
+const struct belay_interp *belay_interp_builtin(enum belay_interp_id id);
 
 #endif /* BELAY_INTERP_H */

@@ -6,6 +6,7 @@
  */
 #include "belay_test.h"
 #include "belay/interp.h"
+#include "belay/json.h"
 
 #include <string.h>
 
@@ -92,6 +93,21 @@ TEST(names_are_stable) {
     ASSERT_EQ_STR("unknown", belay_interp_name(BELAY_INTERP_COUNT));
 }
 
+/* F3: a finding is cut on a character boundary, never inside a UTF-8
+ * sequence -- interpreter text comes from file content. */
+TEST(a_long_finding_is_cut_between_characters) {
+    char text[600];
+    size_t w = 0;                                /* two-byte characters: the 255-byte cut */
+    while (w + 2 < sizeof text) { text[w++] = '\xc3'; text[w++] = '\xa9'; }   /* falls inside one */
+    text[w] = '\0';
+    struct belay_findings f = { 0 };
+    ASSERT_EQ_INT(0, belay_findings_add(&f, text));
+    const size_t n = strlen(f.item[0]);
+    ASSERT_TRUE(n <= BELAY_FINDING_BYTES - 1);
+    ASSERT_TRUE(belay_utf8_valid(f.item[0], n));
+    ASSERT_EQ_INT(BELAY_FINDING_BYTES - 2, (int)n);
+}
+
 int main(void) {
     RUN(dpkg_claims_status_and_baseline_databases);
     RUN(dpkg_near_misses_are_not_claimed);
@@ -100,5 +116,6 @@ int main(void) {
     RUN(git_objects_and_packs_are_not_claimed);
     RUN(unclaimed_and_hostile_inputs_fall_back_to_binary);
     RUN(names_are_stable);
+    RUN(a_long_finding_is_cut_between_characters);
     return belay_test_report();
 }
