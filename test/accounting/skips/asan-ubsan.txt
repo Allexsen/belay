@@ -1,0 +1,3 @@
+# Tests allowed to skip in the asan-ubsan CI job, one "<binary> <test>" per line.
+# Any other skip, or a test listed here that runs, fails the job (test/belay_test.h).
+# None: unprivileged user namespaces are enabled for this job, so every test runs.

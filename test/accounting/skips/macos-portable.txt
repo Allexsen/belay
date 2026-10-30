@@ -1,0 +1,15 @@
+# Tests allowed to skip in the macos-portable CI job, one "<binary> <test>" per line.
+# Any other skip, or a test listed here that runs, fails the job (test/belay_test.h).
+# Linux-only facilities (namespaces, statx, O_TMPFILE, tmpfs xattrs) and APFS limits
+# (no non-UTF-8 names; symlink targets shorter than 4095 bytes).
+test_manifest_write non_utf8_path_uses_base64
+test_manifest_write review_longest_legal_link_target_is_recorded
+test_manifest_write review_non_utf8_scope_produces_valid_header
+test_manifest_write r3_output_inside_the_scope_is_not_a_change
+test_manifest_write w6_large_xattr_set_is_recorded_by_digest
+test_races r4_validator_never_enters_a_mount_that_appeared
+test_races r4_mount_over_the_scope_root_flags_the_root
+test_races w6_file_capability_is_recorded
+test_races r2_overlay_scope_files_are_hashed_not_flagged_as_mounts
+test_races r3_file_bind_mounted_from_another_fs_is_a_boundary_with_or_without_statx
+test_races r3_one_statx_eperm_is_recorded_and_does_not_switch_statx_off

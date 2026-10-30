@@ -1,0 +1,7 @@
+nist_known_vectors
+nist_million_a
+padding_boundaries
+streaming_equals_one_shot
+empty_updates_are_noops
+handles_binary_data
+hex_encode_is_lowercase_and_terminated

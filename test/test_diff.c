@@ -348,8 +348,7 @@ TEST(capabilities_are_not_compared_when_attributes_are_unknown) {
     buf[n] = '\0';
     fclose(f);
     char *at = strstr(buf, "\"nlink\":1,\"sha256\"");
-    ASSERT_TRUE(at != NULL);
-    if (at == NULL) return;
+    REQUIRE(at != NULL);
     f = fopen(p, "wb");
     fwrite(buf, 1, (size_t)(at - buf) + strlen("\"nlink\":1"), f);
     fputs(",\"caps\":\"0100000200200000\"", f);
@@ -433,14 +432,10 @@ TEST(no_flag_combination_on_either_side_is_unchanged) {
             }
             struct verdict v;
             classify_both(&b, &a, &v);
-            if (v.outcome == D_UNCHANGED) {
-                BELAY_FAIL("type %d, flag mask %#x classified unchanged", t, mask);
-                return;
-            }
-            if (v.outcome == D_UNKNOWN && v.reasons == 0) {
-                BELAY_FAIL("type %d, flag mask %#x unknown with no reason", t, mask);
-                return;
-            }
+            REQUIRE_MSG(v.outcome != D_UNCHANGED, "type %d, flag mask %#x classified unchanged",
+                        t, mask);
+            REQUIRE_MSG(!(v.outcome == D_UNKNOWN && v.reasons == 0),
+                        "type %d, flag mask %#x unknown with no reason", t, mask);
             checked++;
         }
     }

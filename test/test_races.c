@@ -1019,46 +1019,50 @@ static int mount_over_scope_child(void) {
 
 #endif
 
-static void run_child(int (*child)(void)) {
+/* The child's exit status: 0 passed, 77 cannot run here (no namespace), else
+ * the step that failed. The TEST decides what a 77 means (SKIP). */
+static int run_child(int (*child)(void)) {
 #ifdef __linux__
     const pid_t pid = fork();
     if (pid == 0) _exit(child());
     int status = 0;
     waitpid(pid, &status, 0);
-    const int rc = WIFEXITED(status) ? WEXITSTATUS(status) : 99;
-    if (rc == 77) { printf("      (skipped: no unprivileged user+mount namespace here)\n"); return; }
-    ASSERT_EQ_INT(0, rc);
+    return WIFEXITED(status) ? WEXITSTATUS(status) : 99;
 #else
     (void)child;
+    return 77;
 #endif
 }
 
 TEST(r4_validator_never_enters_a_mount_that_appeared) {
 #ifndef __linux__
-    printf("      (skipped: Linux only -- mounts in a user namespace)\n");
+    SKIP("Linux only -- mounts in a user namespace");
 #else
     reset();
     mk("scope"); mk("scope/D");
     touch("scope/D/inner.txt", "recorded before the mount");
-    run_child(mount_after_walk_child);
+    const int rc = run_child(mount_after_walk_child);
+    if (rc == 77) SKIP("no unprivileged user+mount namespace here");
+    ASSERT_EQ_INT(0, rc);
 #endif
 }
 
 TEST(r4_mount_over_the_scope_root_flags_the_root) {
 #ifndef __linux__
-    printf("      (skipped: Linux only -- mounts in a user namespace)\n");
+    SKIP("Linux only -- mounts in a user namespace");
 #else
     reset();
     mk("scope"); mk("scope/A");
     touch("scope/A/f", "x");
-    run_child(mount_over_scope_child);
+    const int rc = run_child(mount_over_scope_child);
+    if (rc == 77) SKIP("no unprivileged user+mount namespace here");
+    ASSERT_EQ_INT(0, rc);
 #endif
 }
 
 TEST(w6_file_capability_is_recorded) {
 #ifndef __linux__
-    printf("      (skipped: Linux only -- file capabilities need a user namespace)\n");
-    return;
+    SKIP("Linux only -- file capabilities need a user namespace");
 #else
     reset();
     touch("capfile", "#!/bin/true\n");
@@ -1067,7 +1071,7 @@ TEST(w6_file_capability_is_recorded) {
     int status = 0;
     waitpid(pid, &status, 0);
     const int rc = WIFEXITED(status) ? WEXITSTATUS(status) : 99;
-    if (rc == 77) { printf("      (skipped: cannot set a file capability here)\n"); return; }
+    if (rc == 77) SKIP("cannot set a file capability here");
     ASSERT_EQ_INT(0, rc);
 #endif
 }
@@ -1087,8 +1091,7 @@ TEST(w6_unreadable_xattrs_are_unknown_not_none) {
 
 TEST(r2_overlay_scope_files_are_hashed_not_flagged_as_mounts) {
 #ifndef __linux__
-    printf("      (skipped: Linux only -- overlayfs in a user namespace)\n");
-    return;
+    SKIP("Linux only -- overlayfs in a user namespace");
 #else
     reset();
     mk("lower"); mk("up"); mk("merged");
@@ -1098,15 +1101,14 @@ TEST(r2_overlay_scope_files_are_hashed_not_flagged_as_mounts) {
     int status = 0;
     waitpid(pid, &status, 0);
     const int rc = WIFEXITED(status) ? WEXITSTATUS(status) : 99;
-    if (rc == 77) { printf("      (skipped: no unprivileged user+mount namespace here)\n"); return; }
+    if (rc == 77) SKIP("no unprivileged user+mount namespace here");
     ASSERT_EQ_INT(0, rc);
 #endif
 }
 
 TEST(r3_file_bind_mounted_from_another_fs_is_a_boundary_with_or_without_statx) {
 #ifndef __linux__
-    printf("      (skipped: Linux only -- bind mounts in a user namespace)\n");
-    return;
+    SKIP("Linux only -- bind mounts in a user namespace");
 #else
     reset();
     mk("fs"); mk("scope");
@@ -1116,7 +1118,7 @@ TEST(r3_file_bind_mounted_from_another_fs_is_a_boundary_with_or_without_statx) {
     int status = 0;
     waitpid(pid, &status, 0);
     const int rc = WIFEXITED(status) ? WEXITSTATUS(status) : 99;
-    if (rc == 77) { printf("      (skipped: no unprivileged user+mount namespace here)\n"); return; }
+    if (rc == 77) SKIP("no unprivileged user+mount namespace here");
     ASSERT_EQ_INT(0, rc);
 #endif
 }
@@ -1170,8 +1172,7 @@ TEST(r3_file_changed_after_it_was_read_is_raced) {
  * cannot be stat'ed), and statx stays in use, in this walk and the next. */
 TEST(r3_one_statx_eperm_is_recorded_and_does_not_switch_statx_off) {
 #ifndef __linux__
-    printf("      (skipped: Linux only -- statx)\n");
-    return;
+    SKIP("Linux only -- statx");
 #else
     reset();
     mk("d");
