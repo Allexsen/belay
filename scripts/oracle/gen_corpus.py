@@ -28,13 +28,15 @@ The corpus has three parts:
     both ways round -- compared cells and the cells the pin excludes (a
     FIFO's mtime, a directory's nlink); every two compared fields of a type
     differing together, and a few changes as tools make them (rewrite,
-    chmod+chown, setcap, ...); every type change; every optional field
-    present on one side only; and the scenarios: dev relation, scope
-    remounts, timestamps on fifo/sock/blk/chr and mount roots, iflags on one
-    side, caps/xattrs under xattrs_unknown, O1 with and without a size
+    chmod+chown, setcap, ...); every type change, raced on both sides or on
+    one; every optional field present on one side only; and the scenarios:
+    dev relation, scope remounts, timestamps on fifo/sock/blk/chr, on mount
+    roots and a directory's own, iflags on one side, caps/xattrs under
+    xattrs_unknown and beside a mount root, O1 with and without a size
     change, hash limits, sealing and unsealing directories, unstable
-    listings, one-sided raced entries, the root itself, names sorting before
-    ".", non-UTF-8 and escaped names;
+    listings, one-sided paths below raced and plain non-directories,
+    one-sided raced entries, the trailer's walk counts, the root itself,
+    names sorting before ".", non-UTF-8 and escaped names;
   - random pairs: n-bases random trees, each with four mutated variants
     (several changes at once), compared in both directions and with
     themselves;
@@ -791,6 +793,26 @@ def hashed(e, t, rng, least=0):
     return e
 
 
+def clear_flags(e, t, rng):
+    """e with no flag of the diff pin: its attributes read, nothing unstable,
+    unreadable, mounted or raced, a regular file hashed."""
+    for k in compare.ref.FLAGS:
+        e.pop(k, None)
+    if e['type'] == 'reg':
+        hashed(e, t, rng)
+    return e
+
+
+def unflagged_tree(rng):
+    """A tree in which no entry carries a flag of the diff pin."""
+    t = Tree(rng)
+    for _ in range(rng.randrange(2, 9)):
+        e = subject(rng, t, random_type(rng))
+        t.e[e['path']] = clear_flags(e, t, rng)
+    clear_flags(t.e[b'.'], t, rng)
+    return t
+
+
 def in_context(ctx, e, t, rng):
     """The entry as it is in one context, the same on both sides; None for a
     type the context cannot hold (CONTEXT_TYPES)."""
@@ -1008,8 +1030,6 @@ def cells(w, rng):
                     scen = []
                     if f in TS and ctx == 'mount':
                         scen.append('only %s differs on a mount root' % f)
-                    if f in TS and ctx == 'plain' and typ in SPECIAL:
-                        scen.append('only %s differs on a %s' % (f, typ))
                     if var == 'non-utf8':
                         scen.append('a non-UTF-8 link target that differs')
                     w.targeted(rng, 'only %s differs on a %s (%s%s)' %
@@ -1142,6 +1162,46 @@ def type_changes(w, rng):
                     w.targeted(rng, 'type %s -> %s (%s%s)' % (t1, t2, ctx,
                                ', iflags on one side' if one else ''), build,
                                cells=[('type', t1)], optional=opt, scenarios=scen)
+
+
+def raced_type_changes(w, rng):
+    """A type change with `raced` on one side only (written both ways round:
+    the after side, then the before side), with iflags on neither side, on
+    the raced side only or on the other side only. Rule 1 comes before rule
+    2: `unknown`, reason `raced`, and across a type change no field is
+    compared, so no iflags_unknown. A regular file on the side that did not
+    race is hashed, so that no other flag gives a reason: reg {iflags,
+    sha256} -> lnk {raced} is `unknown`, `changed` ["type"], `unknown`
+    ["raced"] (the reviewer's case)."""
+    for t1 in TYPE_NAMES:
+        for t2 in TYPE_NAMES:
+            if t1 == t2:
+                continue
+            for where in (None, 'raced', 'other'):
+                def build(rng, t1=t1, t2=t2, where=where):
+                    t = base_tree(rng)
+                    e = subject(rng, t, t1)
+                    if t1 == 'reg':
+                        hashed(e, t, rng)
+                    e.pop('xattrs_unknown', None)
+                    e.pop('iflags', None)
+                    e2 = change_type(e, t2, t, rng)
+                    if e2 is None:
+                        return None
+                    e2['raced'] = True
+                    if t2 == 'dir':
+                        e2['unreadable'] = True      # rule 10
+                    if where == 'raced':
+                        e2['iflags'] = rng.choice(IFLAGS)
+                    elif where == 'other':
+                        e['iflags'] = rng.choice(IFLAGS)
+                    return with_subject(t, e, e2)
+                suffix = {None: '', 'raced': ', iflags on the raced side only',
+                          'other': ', iflags on the other side only'}[where]
+                w.targeted(rng, 'type %s -> %s, raced after only%s' % (t1, t2, suffix), build,
+                           cells=[('type', t1)],
+                           scenarios=['a raced type change, raced %s only%s' % (s, suffix)
+                                      for s in ('after', 'before')])
 
 
 def one_sided_feasible(f, var, typ, ctx):
@@ -1664,6 +1724,9 @@ def scenarios(w, rng):
         else:
             tags = ['a one-sided path whose nearest ancestor on the other side is not a '
                     'directory']
+        if how == 'reg-mount':
+            tags.append('a path missing below a non-directory that carries unreadable or mount, '
+                        'not raced')
         for _ in range(2):
             w.targeted(rng, 'one-sided below: ' + how, build, scenarios=tags)
 
@@ -1688,12 +1751,240 @@ def scenarios(w, rng):
                    scenarios=['a path sorting before "."', 'a non-UTF-8 path'])
 
 
+def dir_timestamps(w, rng):
+    """A directory's own timestamps (diff-v1 "A directory's own timestamps",
+    pin O5), and a FIFO's, socket's or device node's ("Timestamps that move
+    on use"): alone, with nothing flagged -- no record; counted in
+    dir_timestamps_only for a directory, not for the others. Then a
+    directory's beside a field not compared on it (still counted), beside a
+    compared field, under a flag on both sides or on one, and with iflags on
+    one side only: each keeps its record."""
+    for typ in ['dir'] + list(SPECIAL):
+        for which in (('mtime_ns',), ('ctime_ns',), TS):
+            def build(rng, typ=typ, which=which):
+                t = base_tree(rng)
+                e = clear_flags(subject(rng, t, typ), t, rng)
+                e2 = dict(e)
+                for f in which:
+                    e2[f] = e[f] + rng.randrange(1, 10 ** 12)
+                return with_subject(t, e, e2)
+            if typ == 'dir':
+                tag = 'a directory whose only difference is its ' + ' and '.join(which)
+            elif len(which) == 1:
+                tag = 'only %s differs on a %s' % (which[0], typ)
+            else:
+                tag = 'only mtime_ns and ctime_ns differ on a %s' % typ
+            w.targeted(rng, 'only %s on a %s, nothing flagged' % (' and '.join(which), typ),
+                       build, scenarios=[tag])
+    for which in (('ctime_ns',), ('mtime_ns',), TS):
+        def build(rng, which=which):
+            t = base_tree(rng, rng.randrange(1, 6))
+            clear_flags(t.e[b'.'], t, rng)
+            a = t.copy()
+            for f in which:
+                a.e[b'.'][f] += rng.randrange(1, 10 ** 12)
+            return t, a
+        w.targeted(rng, 'the root: only its %s, nothing flagged' % ' and '.join(which), build,
+                   scenarios=['the root, whose only differences are its own timestamps'])
+    beside = {'nlink': 'a directory whose timestamps and a field not compared on it differ',
+              'size': 'a directory whose timestamps and a field not compared on it differ',
+              'mode': 'a directory whose timestamps and a compared field differ',
+              'uid': 'a directory whose timestamps and a compared field differ',
+              'iflags on one side': 'a directory whose timestamps differ, iflags on one side '
+                                    'only',
+              'unstable after': 'a directory whose timestamps differ, a flag on one side only',
+              'xattrs_unknown after': 'a directory whose timestamps differ, a flag on one side '
+                                      'only'}
+    for extra, tag in beside.items():
+        def build(rng, extra=extra):
+            t = base_tree(rng)
+            e = clear_flags(subject(rng, t, 'dir'), t, rng)
+            if extra == 'iflags on one side':
+                e['iflags'] = rng.choice(IFLAGS)
+            e2 = dict(e, mtime_ns=e['mtime_ns'] + 5, ctime_ns=e['ctime_ns'] + 7)
+            if extra == 'nlink':
+                e2['nlink'] += 1
+            elif extra == 'size':
+                e2['size'] += 4096
+            elif extra == 'mode':
+                e2['mode'] = (e['mode'] & S_IFMT) | other(rng, PERMS, e['mode'] & 0o7777)
+            elif extra == 'uid':
+                e2['uid'] = other(rng, IDS, e['uid'])
+            elif extra == 'iflags on one side':
+                del e2['iflags']
+            elif extra == 'unstable after':
+                e2['unstable'] = True
+            elif extra == 'xattrs_unknown after':
+                for k in ('caps', 'xattrs', 'xattrs_sha256'):
+                    e2.pop(k, None)
+                e2['xattrs_unknown'] = True
+            return with_subject(t, e, e2)
+        w.targeted(rng, "a directory's timestamps, with %s" % extra, build, scenarios=[tag])
+    for ctx in ('unstable', 'unreadable', 'xattrs_unknown', 'raced', 'mount'):
+        def build(rng, ctx=ctx):
+            t = base_tree(rng)
+            e = in_context(ctx, clear_flags(subject(rng, t, 'dir'), t, rng), t, rng)
+            return with_subject(t, e, dict(e, mtime_ns=e['mtime_ns'] + 3,
+                                           ctime_ns=e['ctime_ns'] + 3))
+        w.targeted(rng, "a directory's timestamps, %s on both sides" % ctx, build,
+                   scenarios=['a directory whose only difference is its timestamps, flagged '
+                              'alike on both sides'])
+
+
+SIBLINGS = (b'!x', b'-x', b'.x')       # names that sort between d and d/...: '!', '-', '.' < '/'
+
+
+def below_a_non_directory(w, rng):
+    """A path present on one side only whose nearest recorded ancestor on the
+    other side is not a directory (diff-v1, "Present on one side only"):
+    `unknown`, reason `raced`, when that ancestor carries raced -- "it may
+    have become a directory holding this path" --, else the absence is known:
+    only a directory carrying unreadable or mount seals. The directory d, in
+    the root, becomes the non-directory; one level below it (d/f, d/e) and
+    two (d/e/g) are on the first side only, and never raced themselves.
+    Beside d, names that sort between d and its children, so that the
+    stream passes them before it reaches d/...: d.x with a child on both
+    sides; d!x a directory with a child (d!x/y) on the first side and a
+    non-raced FIFO on the second, so the absence of d!x/y is known whatever
+    d is; d-x on the first side only, beside d, not below it."""
+    for typ in ('reg', 'lnk', 'fifo', 'sock', 'blk', 'chr'):
+        for how in ('raced', 'plain', 'unreadable', 'mount'):
+            if how == 'unreadable' and typ not in CONTEXT_TYPES['unreadable']:
+                continue                                # rule 13
+            def build(rng, typ=typ, how=how):
+                t = base_tree(rng, rng.randrange(0, 4))
+                p = fresh_path(t, rng, parent=b'.')
+                while p in t.e or any(p + s in t.e for s in SIBLINGS):
+                    p += b'0'                           # free, and its siblings free
+                t.e[p] = new_entry(rng, t, p, 'dir', extras=False)
+                for q, ty in ((b'/f', random_type(rng)), (b'/e', 'dir'),
+                              (b'/e/g', random_type(rng)), (b'!x', 'dir'),
+                              (b'!x/y', random_type(rng)), (b'-x', random_type(rng)),
+                              (b'.x', 'dir'), (b'.x/z', random_type(rng))):
+                    t.e[p + q] = new_entry(rng, t, p + q, ty, extras=ty != 'dir')
+                a = t.copy()
+                a.drop_below(p)
+                x = change_type(a.e[p], typ, a, rng)
+                if x is None:
+                    return None
+                if how == 'raced':
+                    x['raced'] = True
+                elif how == 'unreadable':
+                    x['unreadable'] = True
+                    x.pop('target_outside_scope', None)
+                    settle_hash(x, a, rng)              # a regular file: unverified
+                elif how == 'mount':
+                    x = in_context('mount', x, a, rng)
+                a.e[p] = x
+                a.drop_below(p + b'!x')
+                a.e[p + b'!x'] = change_type(a.e[p + b'!x'], 'fifo', a, rng)
+                del a.e[p + b'-x']
+                return t, a
+            kind = 'raced' if how == 'raced' else 'non-raced'
+            scen = ['a path missing below a %s non-directory, %s deep' % (kind, n)
+                    for n in ('one level', 'two levels')]
+            if how == 'raced':
+                scen += ['a path missing below a raced non-directory, with names sorting '
+                         'between it and its children',
+                         "a path missing beside or below a name that extends a raced "
+                         "non-directory's, not below it"]
+            if how in ('unreadable', 'mount'):
+                scen.append('a path missing below a non-directory that carries unreadable or '
+                            'mount, not raced')
+            w.targeted(rng, 'below a %s %s, one and two levels, siblings between' % (how, typ),
+                       build, scenarios=scen)
+
+
+def mount_root_attributes(w, rng):
+    """An entry that becomes a mount root (written both ways round: or stops
+    being one) with iflags, caps or xattrs read on the other side, or that
+    side's attributes unreadable: a mount root's own are never read
+    (manifest-v1 rule 22), so whether they compare there is the pin's `on
+    mount roots` column."""
+    plan = [('dir', ('iflags',)), ('dir', ('xattrs',)), ('dir', ('xattrs_sha256',)),
+            ('dir', ('iflags', 'xattrs')), ('dir', ('xattrs_unknown',)),
+            ('dir', ('iflags', 'xattrs_unknown')), ('reg', ('caps',)),
+            ('reg', ('iflags', 'caps', 'xattrs')), ('lnk', ('iflags', 'xattrs')),
+            ('fifo', ('iflags',))]
+    for typ, attrs in plan:
+        def build(rng, typ=typ, attrs=attrs):
+            t = base_tree(rng)
+            e = subject(rng, t, typ)
+            for k in ATTRS:
+                e.pop(k, None)
+            for k in attrs:
+                e[k] = {'iflags': lambda: rng.choice(IFLAGS), 'caps': lambda: caps_hex(rng),
+                        'xattrs': lambda: xattr_set(rng), 'xattrs_sha256': lambda: hexs(rng),
+                        'xattrs_unknown': lambda: True}[k]()
+            return with_subject(t, e, in_context('mount', e, t, rng))
+        scen = []
+        if typ == 'dir':
+            for verb in ('becomes', 'stops being'):
+                if 'iflags' in attrs:
+                    scen.append('a directory %s a mount root, iflags on the other side' % verb)
+                if 'xattrs' in attrs or 'xattrs_sha256' in attrs:
+                    scen.append('a directory %s a mount root, xattrs on the other side' % verb)
+            if 'xattrs_unknown' in attrs:
+                scen.append('a directory is a mount root on one side only, xattrs_unknown on '
+                            'the other')
+        if typ == 'reg' and 'caps' in attrs:
+            scen.append('a regular file is a mount root on one side only, caps on the other')
+        w.targeted(rng, 'a %s becomes a mount root, %s read before' % (typ, '+'.join(attrs)),
+                   build, scenarios=scen)
+
+
+def trailer_counts(w, rng):
+    """What the trailer says about each walk ("### Trailer"): `vanished` on
+    one side only with nothing flagged and every entry equal, so no record
+    could say so; every one of the six counts different on the two sides; all
+    six 0, so `provisional` is false."""
+    for _ in range(2):
+        def build(rng):
+            t = unflagged_tree(rng)
+            a = t.copy()
+            a.vanished = rng.choice([1, 2, 5])
+            return t, a
+        w.targeted(rng, 'vanished on one side only, nothing else', build,
+                   scenarios=['vanished on one side only, nothing flagged and no record'])
+    def build(rng):
+        t = unflagged_tree(rng)
+        x = subject(rng, t, 'fifo')
+        x['raced'] = True
+        t.e[x['path']] = x
+        t.vanished = 1
+        a = t.copy()                            # 1, 0, 1 before; 3, 1, 2 after
+        a.vanished = 3
+        y = subject(rng, a, 'reg')
+        y['raced'] = True
+        a.e[y['path']] = y
+        z = subject(rng, a, 'dir', extras=False)
+        z['unstable'] = True
+        a.e[z['path']] = z
+        return t, a
+    w.targeted(rng, 'every walk count differs', build,
+               scenarios=['every walk count differs between the two manifests'])
+    def build(rng):
+        t = unflagged_tree(rng)
+        a = t.copy()
+        p = rng.choice(sorted(a.e))
+        a.e[p]['mode'] = (a.e[p]['mode'] & S_IFMT) | other(rng, PERMS, a.e[p]['mode'] & 0o7777)
+        return t, a
+    w.targeted(rng, 'a mode change, every walk count 0', build,
+               scenarios=['provisional false: every walk count is 0',
+                          'the first manifest was created after the second'])
+
+
 def targeted(w, rng):
     cells(w, rng)
     field_pairs(w, rng)
     type_changes(w, rng)
+    raced_type_changes(w, rng)
     optional_one_sided(w, rng)
     scenarios(w, rng)
+    dir_timestamps(w, rng)
+    below_a_non_directory(w, rng)
+    mount_root_attributes(w, rng)
+    trailer_counts(w, rng)
 
 
 # ---------------------------------------------------------------------------

@@ -40,10 +40,12 @@ the generator's labels (coverage(), required(), gate()):
     order of `changed`);
   - every optional field is present on one side only in some pair;
   - every named scenario (SCENARIOS) occurs: the device relation and
-    remounts, timestamps on fifo/sock/blk/chr and on mount roots, iflags on
-    one side, caps/xattrs under xattrs_unknown, O1 with and without a size
-    change, one-sided paths below sealed, unstable and non-directory
-    ancestors, type changes, ...
+    remounts, timestamps on fifo/sock/blk/chr and on mount roots, a
+    directory's own timestamps alone (pin O5) and beside another difference
+    or a flag, iflags on one side, caps/xattrs under xattrs_unknown and
+    beside a mount root, O1, one-sided paths below sealed, unstable and
+    non-directory ancestors (raced or not, one and two levels down), raced
+    type changes (raced on one side or both), the trailer's walk counts, ...
 gen_corpus.py builds every required item deterministically and checks each
 targeted pair, and then the targeted pairs alone, with these same functions;
 here the gate runs again over the whole corpus.
@@ -330,6 +332,27 @@ def required_cells():
 
 
 OPTIONAL = [f for f, s in ref.FIELDS.items() if s.absent != 'required']
+TS = ('mtime_ns', 'ctime_ns')                   # "Timestamps that move on use"
+DIR_TS = set(ref.DIR_TIMESTAMPS)                # a directory's own: the fields pin O5 names
+ONE_SIDED_UNKNOWN = {f for f, s in ref.FIELDS.items() if s.absent == 'unknown'}
+# Fields of a compared class that the pin compares on no directory (its size,
+# its link count), and the metadata it always compares on one (mode, owner).
+NOT_ON_DIR = {f for f, s in ref.FIELDS.items()
+              if s.cls in CELL_CLASSES and not s.applies('dir')} - DIR_TS
+ALWAYS_ON_DIR = {f for f, s in ref.FIELDS.items()
+                 if s.cls == ref.METADATA and s.applies('dir') and s.absent == 'required'}
+
+
+def flagged(e):
+    return any(e.get(f) for f in ref.FLAGS)
+
+
+def quiet(b, a):
+    """Nothing on either side makes anything unknown: no flag of the pin, no
+    field whose absence means unknown present on one side only."""
+    return not flagged(b) and not flagged(a) and all((f in b) == (f in a)
+                                                     for f in ONE_SIDED_UNKNOWN)
+
 
 SCENARIOS = (['dev relation: an entry leaves the root device',
               'dev relation: an entry joins the root device',
@@ -357,7 +380,44 @@ SCENARIOS = (['dev relation: an entry leaves the root device',
                 'a one-sided path whose nearest ancestor on the other side is not a directory',
                 'a one-sided path below a plain directory below an unstable one',
                 'a non-UTF-8 link target that differs',
-                'three or more compared fields differ on one entry'])
+                'three or more compared fields differ on one entry']
+             # "A directory's own timestamps" (pin O5): no record, counted in
+             # dir_timestamps_only -- unless something else differs or is unknown.
+             + ['a directory whose only difference is its ' + w
+                for w in ('mtime_ns', 'ctime_ns', 'mtime_ns and ctime_ns')]
+             + ['the root, whose only differences are its own timestamps',
+                'a directory whose timestamps and a field not compared on it differ',
+                'a directory whose timestamps and a compared field differ',
+                'a directory whose only difference is its timestamps, flagged alike on both sides',
+                'a directory whose timestamps differ, iflags on one side only',
+                'a directory whose timestamps differ, a flag on one side only']
+             + ['only mtime_ns and ctime_ns differ on a %s' % t for t in SPECIAL]
+             # "Present on one side only": the nearest recorded ancestor on the
+             # side that lacks the path is not a directory.
+             + ['a path missing below a %s non-directory, %s deep' % (r, n)
+                for r in ('raced', 'non-raced') for n in ('one level', 'two levels')]
+             + ['a path missing below a non-directory that carries unreadable or mount, '
+                'not raced',
+                # ... with names that sort between that ancestor and its
+                # children (d!x, d.x between d and d/...), and a path whose
+                # name extends the raced one's (d-x, d!x/y), not below it.
+                'a path missing below a raced non-directory, with names sorting between it '
+                'and its children',
+                "a path missing beside or below a name that extends a raced non-directory's, "
+                "not below it"]
+             # A mount root's iflags, caps and xattrs are never read (rule 22).
+             + ['a directory %s a mount root, %s on the other side' % (v, x)
+                for v in ('becomes', 'stops being') for x in ('iflags', 'xattrs')]
+             + ['a directory is a mount root on one side only, xattrs_unknown on the other',
+                'a regular file is a mount root on one side only, caps on the other']
+             # Rule 1 before rule 2, `raced` on one side only.
+             + ['a raced type change, raced %s only%s' % (s, i) for s in ('before', 'after')
+                for i in ('', ', iflags on the raced side only', ', iflags on the other side only')]
+             # "### Trailer", and "`before` is the first manifest given".
+             + ['vanished on one side only, nothing flagged and no record',
+                'every walk count differs between the two manifests',
+                'provisional false: every walk count is 0',
+                'the first manifest was created after the second'])
 
 
 def only_field_cell(b, a, D):
@@ -427,6 +487,12 @@ def pair_coverage(stem, cells, optional, scen, fpairs):
                 tags.add('a raced type change, iflags on one side only'
                          if b.get('raced') or a.get('raced') else
                          'a type change, iflags on one side only')
+            if bool(b.get('raced')) != bool(a.get('raced')):
+                side, rc, oth = ('before', b, a) if b.get('raced') else ('after', a, b)
+                tags.add('a raced type change, raced %s only' % side)
+                if ('iflags' in rc) != ('iflags' in oth):
+                    tags.add('a raced type change, raced %s only, iflags on the %s side only'
+                             % (side, 'raced' if 'iflags' in rc else 'other'))
             continue
         t = b['type']
         rel_b, rel_a = b['dev'] == rb, a['dev'] == ra
@@ -443,13 +509,46 @@ def pair_coverage(stem, cells, optional, scen, fpairs):
             tags.add('a non-UTF-8 link target that differs')
         if not rel_a and not rel_b and b['dev'] != a['dev'] and rb == ra:
             tags.add('dev number changes, off the root device on both sides')
-        for f in ('mtime_ns', 'ctime_ns'):
-            if D == {f} and t in SPECIAL:
+        for f in TS:
+            if D == {f} and t in SPECIAL and quiet(b, a):
                 tags.add('only %s differs on a %s' % (f, t))
             if D == {f} and b.get('mount') and a.get('mount'):
                 tags.add('only %s differs on a mount root' % f)
+        if D == set(TS) and t in SPECIAL and quiet(b, a):
+            tags.add('only mtime_ns and ctime_ns differ on a %s' % t)
         if bool(b.get('mount')) != bool(a.get('mount')) and D & {'mtime_ns', 'ctime_ns'}:
             tags.add('a mount root on one side only, its timestamps differ')
+        dts = D & DIR_TS
+        if t == 'dir' and dts:
+            rest = D - dts
+            if quiet(b, a):
+                if not rest:
+                    tags.add('a directory whose only difference is its ' +
+                             ' and '.join(f for f in ref.DIR_TIMESTAMPS if f in dts))
+                    if p == b'.':
+                        tags.add('the root, whose only differences are its own timestamps')
+                elif rest <= NOT_ON_DIR:
+                    tags.add('a directory whose timestamps and a field not compared on it differ')
+                if rest & ALWAYS_ON_DIR:
+                    tags.add('a directory whose timestamps and a compared field differ')
+            elif not rest and flagged(b):
+                tags.add('a directory whose only difference is its timestamps, flagged alike on '
+                         'both sides')
+            if rest and rest <= ONE_SIDED_UNKNOWN and not flagged(b) and not flagged(a) and \
+                    not quiet(b, a):
+                tags.add('a directory whose timestamps differ, iflags on one side only')
+            if rest & set(ref.FLAGS):
+                tags.add('a directory whose timestamps differ, a flag on one side only')
+        if bool(b.get('mount')) != bool(a.get('mount')):
+            other, verb = (a, 'stops being') if b.get('mount') else (b, 'becomes')
+            if t == 'dir' and 'iflags' in other:
+                tags.add('a directory %s a mount root, iflags on the other side' % verb)
+            if t == 'dir' and ('xattrs' in other or 'xattrs_sha256' in other):
+                tags.add('a directory %s a mount root, xattrs on the other side' % verb)
+            if t == 'dir' and other.get('xattrs_unknown'):
+                tags.add('a directory is a mount root on one side only, xattrs_unknown on the other')
+            if t == 'reg' and 'caps' in other:
+                tags.add('a regular file is a mount root on one side only, caps on the other')
         if ('iflags' in b) != ('iflags' in a):
             tags.add('iflags on one side only on a ' + t)
         for s1, s2 in ((b, a), (a, b)):
@@ -479,6 +578,18 @@ def pair_coverage(stem, cells, optional, scen, fpairs):
             tags.add('scope remount: content differs by hash')
     if hb['hash_max_bytes'] != ha['hash_max_bytes']:
         tags.add('hash limits differ')
+    # The trailer: each manifest's own walk counts.
+    tb, ta = ref.trailer_of(stem + '.before')[0], ref.trailer_of(stem + '.after')[0]
+    cb, ca = [tb[c] for c in ref.INPUT_COUNTS], [ta[c] for c in ref.INPUT_COUNTS]
+    if not any(cb) and not any(ca):
+        tags.add('provisional false: every walk count is 0')
+    if all(x != y for x, y in zip(cb, ca)):
+        tags.add('every walk count differs between the two manifests')
+    if (tb['vanished'] == 0) != (ta['vanished'] == 0) and set(eb) == set(ea) and \
+            all(eb[p] == ea[p] and not flagged(eb[p]) for p in eb):
+        tags.add('vanished on one side only, nothing flagged and no record')
+    if hb['created_ns'] > ha['created_ns']:
+        tags.add('the first manifest was created after the second')
     for p in set(eb) | set(ea):
         if p < b'.':
             tags.add('a path sorting before "."')
@@ -498,6 +609,25 @@ def pair_coverage(stem, cells, optional, scen, fpairs):
         if anc['type'] != 'dir':
             tags.add('a one-sided path whose nearest ancestor on the other side is not a '
                      'directory')
+            # The path itself not raced, so that only its ancestor can decide.
+            level = {1: 'one level', 2: 'two levels'}.get(p.count(b'/') -
+                                                          anc['path'].count(b'/'))
+            if level and not present[p].get('raced'):
+                tags.add('a path missing below a %s non-directory, %s deep'
+                         % ('raced' if anc.get('raced') else 'non-raced', level))
+                if not anc.get('raced') and (anc.get('unreadable') or anc.get('mount')):
+                    tags.add('a path missing below a non-directory that carries unreadable or '
+                             'mount, not raced')
+                if anc.get('raced') and any(anc['path'] < q < anc['path'] + b'/'
+                                            for q in lacking):
+                    tags.add('a path missing below a raced non-directory, with names sorting '
+                             'between it and its children')
+        if not present[p].get('raced') and not (anc['type'] != 'dir' and anc.get('raced')) \
+                and any(r['type'] != 'dir' and r.get('raced') and q != b'.' and q != p and
+                        p.startswith(q) and not p.startswith(q + b'/')
+                        for q, r in lacking.items()):
+            tags.add("a path missing beside or below a name that extends a raced "
+                     "non-directory's, not below it")
         if anc['type'] == 'dir' and not any(anc.get(k) for k in ('unstable', 'unreadable',
                                                                  'mount')):
             q = anc['path']
