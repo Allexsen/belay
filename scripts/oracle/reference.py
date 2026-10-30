@@ -280,8 +280,9 @@ def both_sides(b, a, ctx):
     if b['type'] != a['type']:                                   # rule 2 (after rule 1)
         trace.append('type')
         if 'everything' in scopes:                               # rule 1
-            unk = one_sided_unknown({b['type'], a['type']})
-            return 'unknown', ['type'], flags + [f + '_unknown' for f in unk], trace + ['rule1']
+            # "...and, when the types are the same, of every field unknown
+            # under rule 4": across a type change no field is compared
+            return 'unknown', ['type'], flags, trace + ['rule1']
         return 'type_changed', ['type'], [], trace + ['rule2']
 
     t = a['type']
