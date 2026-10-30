@@ -972,17 +972,24 @@ def type_changes(w, rng):
             if t1 == t2:
                 continue
             for ctx in ('plain', 'offdev', 'xattrs_unknown', 'raced', 'mount', 'unreadable'):
-                def build(rng, t1=t1, t2=t2, ctx=ctx):
-                    t = base_tree(rng)
-                    e = place(rng, t, t1)
-                    e = e and in_context(ctx, e, t, rng)
-                    e2 = e and change_type(e, t2, t, rng)
-                    if not e2:
-                        return None
-                    a = t.copy()
-                    t.e[e['path']], a.e[e['path']] = e, e2
-                    return t, a
-                try_pair(w, rng, 'type %s -> %s (%s)' % (t1, t2, ctx), build)
+                # iflags read on one side only: across a type change no field
+                # is compared, so it adds no reason, raced or not
+                for one in ((False, True) if ctx in ('plain', 'raced') else (False,)):
+                    def build(rng, t1=t1, t2=t2, ctx=ctx, one=one):
+                        t = base_tree(rng)
+                        e = place(rng, t, t1)
+                        e = e and in_context(ctx, e, t, rng)
+                        e2 = e and change_type(e, t2, t, rng)
+                        if not e2:
+                            return None
+                        if one:
+                            e = dict(e, iflags=e.get('iflags', 16))
+                            e2.pop('iflags', None)
+                        a = t.copy()
+                        t.e[e['path']], a.e[e['path']] = e, e2
+                        return t, a
+                    try_pair(w, rng, 'type %s -> %s (%s%s)' % (t1, t2, ctx,
+                             ', iflags on one side' if one else ''), build)
 
 
 ATTRS = ('iflags', 'caps', 'xattrs', 'xattrs_sha256', 'xattrs_unknown')

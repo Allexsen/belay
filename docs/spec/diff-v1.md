@@ -145,8 +145,9 @@ under rule 5. A field is compared only where both sides know it: the hash when b
 link target when neither is `unreadable`, `iflags` when both have it, `caps` and `xattrs` where the
 attributes were read on both sides (neither carries `xattrs_unknown`, neither is a mount root --
 an absent `caps` or `xattrs` means none only where they were read). `unknown`, for an `unknown`
-outcome: the reasons of every flag on either side and of every field unknown under rule 4, in the
-order of the reasons table; for the one-sided case, its one reason.
+outcome: the reasons of every flag on either side and, when the types are the same, of every field
+unknown under rule 4 (across a type change no field is compared), in the order of the reasons
+table; for the one-sided case, its one reason.
 
 **An absent record means `unchanged`.** That holds only because every path that is not provably
 unchanged is emitted -- `unknown` included. Nothing above can produce `unchanged` for a path on

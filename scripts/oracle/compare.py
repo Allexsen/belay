@@ -314,6 +314,8 @@ SCENARIOS = (['dev relation: an entry leaves the root device',
                 'a directory sealed on one side, with entries below it on the other',
                 'a child on one side only below an unstable directory', 'a type change',
                 'a raced entry on one side only',
+                'a type change, iflags on one side only',
+                'a raced type change, iflags on one side only',
                 'a path sorting before "." on one side only, the other root sealed or unstable',
                 'a path sorting before "." changes device relation',
                 'a path sorting before "." in a remounted pair',
@@ -386,6 +388,10 @@ def pair_coverage(stem, cells, optional, scen, fpairs):
                 optional[f] += 1
         if b['type'] != a['type']:
             tags.add('a type change')
+            if ('iflags' in b) != ('iflags' in a):
+                tags.add('a raced type change, iflags on one side only'
+                         if b.get('raced') or a.get('raced') else
+                         'a type change, iflags on one side only')
             continue
         t = b['type']
         rel_b, rel_a = b['dev'] == rb, a['dev'] == ra
