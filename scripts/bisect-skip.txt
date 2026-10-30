@@ -1,0 +1,62 @@
+# Commits on main that fail `make check` at their own position, and why.
+# Skip them when bisecting. List them on main first: bisect checks out older
+# trees, which may predate this file.
+#
+#   skip=$(scripts/bisect-skip.sh)
+#   git bisect start <bad> <good>
+#   git bisect skip $skip
+#
+# One commit per line: its author date and its subject, separated by a tab.
+# A rebase merge gives every commit a new hash but keeps both, so this list is
+# written before the merge and scripts/bisect-skip.sh finds the commits on
+# main.
+#
+# Rule (2026-10-30): when a pin PR (test/expect/) merges ahead of an open
+# branch, that branch is rebased so every commit on it passes against the new
+# pin before it merges, or its failing commits are added here with the reason.
+
+# PR #9 (Phase 3: the diff core and the 2026-10 audit's S0-S6), merged by
+# rebase. Pins #11 (a directory's own ctime_ns is not compared) and #12
+# (iflags, caps and xattrs are not compared on a mount root) merged ahead of
+# it. From the commit that added test_pins until the commit that follows #11's
+# pin, the code follows neither: test_pins fails
+# diff_fields_pin_and_table_agree_both_ways,
+# every_field_type_cell_classifies_as_its_pin_says and
+# mount_root_cells_follow_the_pin. Established 2026-10-30 by `make check` on
+# every commit of the branch, each from a fresh export.
+2026-10-30T15:57:53+04:00	test(pins): the code against test/expect, in both directions
+2026-10-30T15:57:53+04:00	test(reader): a witness per schema rule; the reader gaps the audit found
+2026-10-30T15:57:53+04:00	fuzz: the invariants hand-written from the format pin; gen_schema documents only
+2026-10-30T16:12:51+04:00	test(reader): every negative test asserts its reason
+2026-10-30T16:20:26+04:00	test: the gaps the S2 gate found; rule 5 loses a dead guard
+2026-10-30T16:37:29+04:00	oracle: rewritten from the prose and the pins, by a separate author
+2026-10-30T16:37:29+04:00	oracle: a raced type change with iflags on one side; the spec says which
+2026-10-30T16:42:21+04:00	capture: a directory's listing takes the names it recorded, nothing else
+2026-10-30T16:43:39+04:00	capture: each re-check verdict carries its record's key hash
+2026-10-30T16:47:22+04:00	capture: the content store degrades, it never costs the capture
+2026-10-30T16:53:35+04:00	test(capture): the decisions no test could see, and one tree for all
+2026-10-30T16:58:54+04:00	test(races): a rewritten file's attributes are unknown on macOS
+2026-10-30T17:04:22+04:00	reader: an orphan is rejected
+2026-10-30T17:04:38+04:00	reader: a key this version does not define is rejected
+2026-10-30T17:04:38+04:00	reader: the trailer is found by the codec's name for it
+2026-10-30T17:14:56+04:00	diff: one open per manifest, the output never an input, a trailer that says what was compared
+2026-10-30T17:17:46+04:00	interp: the hook degrades, never fails the diff; verdict, content and state restored
+2026-10-30T17:19:27+04:00	test: conservation of every manifest fact; no files left in /tmp
+2026-10-30T17:20:49+04:00	test(diff): the state test fails by assertion, not a crash, when begin is skipped
+2026-10-30T18:01:08+04:00	interp: findings cannot be written past the cap, nor made valid by the cut
+2026-10-30T18:01:08+04:00	diff: scopes refused before any entry; a published output is success; buffers cleared
+2026-10-30T18:01:17+04:00	spec: ctime on nodes and mount roots as decided; store degrades on write errors, not signals
+2026-10-30T18:01:17+04:00	oracle: enough attempts that the coverage gate does not depend on the seed
+
+# The same branch, from the commit that follows #11's pin until the one that
+# follows #12's: test_pins fails diff_fields_pin_and_table_agree_both_ways and
+# mount_root_cells_follow_the_pin.
+2026-10-30T19:48:25+04:00	diff: a directory's own timestamps are counted, not emitted (decided F5)
+2026-10-30T19:49:27+04:00	diff: a path missing below a raced non-directory is unknown (review F5)
+2026-10-30T19:55:55+04:00	capture: a published manifest's directory is synced, and stored copies'
+2026-10-30T20:15:27+04:00	spec: the diff trailer in prose; before and after are the first and second manifests
+2026-10-30T20:40:13+04:00	store: a sync covers every name a capture relies on, up to the store's parent
+2026-10-30T20:20:57+04:00	oracle: the reference follows F5, the raced ancestor and the trailer prose
+2026-10-30T21:04:48+04:00	oracle: every required pair built once, by construction, and checked
+2026-10-30T21:13:25+04:00	oracle: the gate requires the new cases, built on purpose
+2026-10-30T21:19:53+04:00	spec: a directory's own timestamps, worded as pin O5

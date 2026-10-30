@@ -34,6 +34,19 @@ make clean
 Tests live in `test/`, one binary per `test/test_*.c`, using the header-only harness in
 `test/belay_test.h`. No external dependencies: the portable parts must build on macOS too.
 
+## Bisecting
+
+A few commits on main fail `make check` at their own position: a pin change (`test/expect/`)
+merged ahead of the branch that follows it, and that branch kept every commit. They are listed,
+with the reason, in [`scripts/bisect-skip.txt`](scripts/bisect-skip.txt). Skip them, listing them
+on main first, since bisect checks out older trees:
+
+```sh
+skip=$(scripts/bisect-skip.sh)
+git bisect start <bad> <good>
+git bisect skip $skip
+```
+
 ## Blast-radius review
 
 Some code can damage a contributor's or user's real filesystem. Changes to any of the following get
