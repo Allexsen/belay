@@ -29,4 +29,4 @@ NOTES/
 experiments/
 bin/
 tmp/
-repos/
+repos/__pycache__/
