@@ -44,9 +44,9 @@ no prose behind it: the author approved it with this table (2026-10-30).
 | ino | identity: within one device | all | compared | required | decision Q3 (same content, new inode is `metadata_only` naming `ino`); decision (b): rule O3 |
 | dev | identity: device relation | all | compared | required | decision (b): the raw number is not compared (overlay, tmpfs and btrfs renumber devices at mount); a change in the relation is a real mount change |
 | nlink | identity | reg, lnk, fifo, sock, blk, chr | compared | required | proposed: a directory's link count counts its subdirectories |
-| iflags | metadata | all | compared | unknown | manifest-v1 obligations: "A change in `iflags` ... is a metadata change"; decision F7: one-sided fields are unknown |
-| caps | metadata | all | compared | none if read | manifest-v1 obligations; diff-v1: compared "when neither side carries `xattrs_unknown`"; decision (a) |
-| xattrs | metadata | all | compared | none if read | manifest-v1 obligations ("the xattr set"); decision (a); each element is `name=sha256(value)`, so the set and its digest cover values, not only names (verified 2026-10-30) |
+| iflags | metadata | all | not compared | unknown | manifest-v1 obligations: "A change in `iflags` ... is a metadata change"; decision F7: one-sided fields are unknown; not on mount roots: manifest-v1 rule 22, never read there |
+| caps | metadata | all | not compared | none if read | manifest-v1 obligations; diff-v1: compared "when neither side carries `xattrs_unknown`"; decision (a) |
+| xattrs | metadata | all | not compared | none if read | manifest-v1 obligations ("the xattr set"); decision (a); each element is `name=sha256(value)`, so the set and its digest cover values, not only names (verified 2026-10-30) |
 | xattrs_sha256 | not compared | all | not compared | none if read | proposed: the digest-only spelling of `xattrs`, compared as `xattrs` |
 | xattrs_unknown | flag: metadata unknown | all | compared | flag | diff-v1, rule 4 |
 | sha256 | content | reg | compared | with unverified | diff-v1, rule 3: "the hash when both sides have one"; rule O1 |
