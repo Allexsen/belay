@@ -1,9 +1,15 @@
 #include "classify.h"
 
+#include "util/check.h"
+
 #include <string.h>
 
-/* Whether field `f` differs between the two sides: 1 yes, 0 no, -1 not
- * compared (a side does not know it). Every case of enum entry_field. */
+/* differs(): 1 yes, 0 no, -1 not compared (a side does not know it). */
+#define NOT_COMPARED (-1)
+#define NO_ANSWER    (-2)   /* a field with no case: an internal error, never "not compared" */
+
+/* Whether field `f` differs between the two sides. Every case of enum
+ * entry_field, and nothing after the switch that could pass for an answer. */
 static int differs(enum entry_field f, const struct belay_entry *b, const struct belay_entry *a) {
     const bool xu = b->xattrs_unknown || a->xattrs_unknown;
     switch (f) {
@@ -33,21 +39,25 @@ static int differs(enum entry_field f, const struct belay_entry *b, const struct
                memcmp(b->link_target, a->link_target, b->link_target_len) != 0;
     case F_PATH: case F_TYPE: case F_XATTRS_SHA256: case F_XATTRS_UNKNOWN: case F_UNVERIFIED:
     case F_UNSTABLE: case F_TARGET_OUTSIDE: case F_STORED: case F_MOUNT: case F_UNREADABLE:
-    case F_RACED: case F_COUNT:
-        return -1;
+    case F_RACED:
+        return NOT_COMPARED;
+    case F_COUNT:
+        break;
     }
-    return -1;
+    return NO_ANSWER;
 }
 
-void classify_both(const struct belay_entry *b, const struct belay_entry *a, struct verdict *v) {
-    memset(v, 0, sizeof *v);
+int classify_both(const struct belay_entry *b, const struct belay_entry *a, struct verdict *v) {
+    memset(v, 0, sizeof *v);                                /* D_UNDECIDED */
     /* Flags on either side: their reasons, and what they make unknown. */
     const uint32_t flags = entry_present(b) | entry_present(a);
     uint32_t reasons = 0;
     bool raced = false, content_unknown = false, meta_unknown = false;
     for (int f = 0; f < F_COUNT; f++) {
         const struct field_change *c = &DIFF_FIELDS[f];
+        BELAY_CHECK(c->cls != CC_UNSET && c->unknown != US_UNSET && c->reason != DR_UNSET, -1);
         if (c->cls != CC_FLAG || !(flags & FBIT(f))) continue;
+        BELAY_CHECK(c->reason >= DR_FIRST && c->reason < DR_COUNT && c->unknown != US_NONE, -1);
         reasons |= DRBIT(c->reason);
         raced |= c->unknown == US_ALL;
         content_unknown |= c->unknown == US_CONTENT;
@@ -58,13 +68,16 @@ void classify_both(const struct belay_entry *b, const struct belay_entry *a, str
         v->changed = FBIT(F_TYPE);
         v->outcome = raced ? D_UNKNOWN : D_TYPE_CHANGED;
         if (raced) v->reasons = reasons;
-        return;
+        return 0;
     }
     bool content_diff = false, meta_diff = false;
     for (int f = 0; f < F_COUNT; f++) {
         const enum change_class cls = diff_field_class((enum entry_field)f, a->type);
+        BELAY_CHECK(cls != CC_UNSET, -1);
         if (cls != CC_CONTENT && cls != CC_METADATA && cls != CC_IDENTITY) continue;
-        if (differs((enum entry_field)f, b, a) != 1) continue;
+        const int d = differs((enum entry_field)f, b, a);
+        BELAY_CHECK(d != NO_ANSWER, -1);
+        if (d != 1) continue;
         v->changed |= FBIT(f);
         if (cls == CC_CONTENT) content_diff = true;
         else meta_diff = true;
@@ -82,13 +95,17 @@ void classify_both(const struct belay_entry *b, const struct belay_entry *a, str
         v->changed |= FBIT(F_CTIME);
     } else v->outcome = D_UNCHANGED;                                /* rule 6 */
     if (v->outcome == D_UNKNOWN) v->reasons = reasons;
+    BELAY_CHECK(v->outcome != D_UNDECIDED, -1);
+    return 0;
 }
 
-void classify_one(const struct belay_entry *present, bool is_after, enum anc absent,
-                  struct verdict *v) {
-    memset(v, 0, sizeof *v);
+int classify_one(const struct belay_entry *present, bool is_after, enum anc absent,
+                 struct verdict *v) {
+    memset(v, 0, sizeof *v);                                /* D_UNDECIDED */
+    BELAY_CHECK(absent == ANC_NONE || absent == ANC_INCOMPLETE || absent == ANC_SEALED, -1);
     if (absent == ANC_SEALED) v->reasons = DRBIT(DR_NOT_CAPTURED);
     else if (absent == ANC_INCOMPLETE) v->reasons = DRBIT(DR_LISTING_INCOMPLETE);
     else if (present->raced) v->reasons = DRBIT(DR_RACED);
     v->outcome = v->reasons ? D_UNKNOWN : is_after ? D_ADDED : D_REMOVED;
+    return 0;
 }

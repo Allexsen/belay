@@ -42,45 +42,45 @@ const struct diff_name_def DIFF_REASONS[DR_COUNT] = {
 #define T_DEV  (TBIT(BELAY_T_BLK) | TBIT(BELAY_T_CHR))
 
 const struct field_change DIFF_FIELDS[F_COUNT] = {
-    [F_PATH]   = { CC_KEY, T_ALL, US_NONE, 0, "Pairs the entries." },
-    [F_TYPE]   = { CC_TYPE, T_ALL, US_NONE, 0, "A different type is `type_changed`." },
-    [F_MODE]   = { CC_METADATA, T_ALL, US_NONE, 0, "Permission bits (the type bits are `type`)." },
-    [F_UID]    = { CC_METADATA, T_ALL, US_NONE, 0, "Owner." },
-    [F_GID]    = { CC_METADATA, T_ALL, US_NONE, 0, "Group." },
-    [F_SIZE]   = { CC_CONTENT, T_REG | T_LNK, US_NONE, 0,
+    [F_PATH]   = { CC_KEY, T_ALL, US_NONE, DR_NONE, "Pairs the entries." },
+    [F_TYPE]   = { CC_TYPE, T_ALL, US_NONE, DR_NONE, "A different type is `type_changed`." },
+    [F_MODE]   = { CC_METADATA, T_ALL, US_NONE, DR_NONE, "Permission bits (the type bits are `type`)." },
+    [F_UID]    = { CC_METADATA, T_ALL, US_NONE, DR_NONE, "Owner." },
+    [F_GID]    = { CC_METADATA, T_ALL, US_NONE, DR_NONE, "Group." },
+    [F_SIZE]   = { CC_CONTENT, T_REG | T_LNK, US_NONE, DR_NONE,
                    "Proof of a content change without a hash. A directory's follows its listing." },
-    [F_MTIME]  = { CC_METADATA, T_ALL & ~T_DIR, US_NONE, 0,
+    [F_MTIME]  = { CC_METADATA, T_ALL & ~T_DIR, US_NONE, DR_NONE,
                    "Settable by any writer. A directory's follows its listing." },
-    [F_CTIME]  = { CC_CTIME, T_ALL, US_NONE, 0,
+    [F_CTIME]  = { CC_CTIME, T_ALL, US_NONE, DR_NONE,
                    "Moves with every change; reported only when nothing else differs." },
-    [F_INO]    = { CC_IDENTITY, T_ALL, US_NONE, 0,
+    [F_INO]    = { CC_IDENTITY, T_ALL, US_NONE, DR_NONE,
                    "Same bytes, new inode: replaced (rename-over, as dpkg installs). Hard links "
                    "break and open descriptors keep the old file." },
-    [F_DEV]    = { CC_IDENTITY, T_ALL, US_NONE, 0, "Which filesystem holds it." },
-    [F_NLINK]  = { CC_IDENTITY, T_ALL & ~T_DIR, US_NONE, 0,
+    [F_DEV]    = { CC_IDENTITY, T_ALL, US_NONE, DR_NONE, "Which filesystem holds it." },
+    [F_NLINK]  = { CC_IDENTITY, T_ALL & ~T_DIR, US_NONE, DR_NONE,
                    "Hard links added or removed elsewhere. A directory's counts its subdirectories." },
-    [F_IFLAGS] = { CC_METADATA, T_ALL, US_NONE, 0,
+    [F_IFLAGS] = { CC_METADATA, T_ALL, US_NONE, DR_NONE,
                    "Compared when both sides have it: absent means not available (known issue)." },
-    [F_CAPS]   = { CC_METADATA, T_ALL, US_NONE, 0,
+    [F_CAPS]   = { CC_METADATA, T_ALL, US_NONE, DR_NONE,
                    "A file capability, added or removed: a privilege change. Not compared under "
                    "`xattrs_unknown`." },
-    [F_XATTRS] = { CC_METADATA, T_ALL, US_NONE, 0,
+    [F_XATTRS] = { CC_METADATA, T_ALL, US_NONE, DR_NONE,
                    "Compared by the set's digest, so an inline set and a digest-only set compare. "
                    "Not compared under `xattrs_unknown`." },
-    [F_XATTRS_SHA256] = { CC_INFO, T_ALL, US_NONE, 0, "Compared as `xattrs`." },
+    [F_XATTRS_SHA256] = { CC_INFO, T_ALL, US_NONE, DR_NONE, "Compared as `xattrs`." },
     [F_XATTRS_UNKNOWN] = { CC_FLAG, T_ALL, US_METADATA, DR_XATTRS_UNKNOWN,
                    "Metadata unknown unless another metadata field proves a change." },
-    [F_SHA256] = { CC_CONTENT, T_REG, US_NONE, 0, "Content digest." },
+    [F_SHA256] = { CC_CONTENT, T_REG, US_NONE, DR_NONE, "Content digest." },
     [F_UNVERIFIED] = { CC_FLAG, T_ALL, US_CONTENT, DR_UNVERIFIED,
                    "Content unknown unless size proves a change (different hash limits included)." },
     [F_UNSTABLE] = { CC_FLAG, T_ALL, US_CONTENT, DR_UNSTABLE,
                    "Content (a directory's listing) unknown unless another content field proves "
                    "a change." },
-    [F_RDEV]   = { CC_CONTENT, T_DEV, US_NONE, 0, "Which device the node refers to." },
-    [F_LINK_TARGET] = { CC_CONTENT, T_LNK, US_NONE, 0,
+    [F_RDEV]   = { CC_CONTENT, T_DEV, US_NONE, DR_NONE, "Which device the node refers to." },
+    [F_LINK_TARGET] = { CC_CONTENT, T_LNK, US_NONE, DR_NONE,
                    "Compared only when neither side is `unreadable` (empty means unknown)." },
-    [F_TARGET_OUTSIDE] = { CC_INFO, T_ALL, US_NONE, 0, "Derived from the target; advisory." },
-    [F_STORED] = { CC_INFO, T_ALL, US_NONE, 0, "Bookkeeping: equal to `sha256`." },
+    [F_TARGET_OUTSIDE] = { CC_INFO, T_ALL, US_NONE, DR_NONE, "Derived from the target; advisory." },
+    [F_STORED] = { CC_INFO, T_ALL, US_NONE, DR_NONE, "Bookkeeping: equal to `sha256`." },
     [F_MOUNT]  = { CC_FLAG, T_ALL, US_CONTENT, DR_MOUNT, "Contents not captured." },
     [F_UNREADABLE] = { CC_FLAG, T_ALL, US_CONTENT, DR_UNREADABLE,
                    "Contents unknown unless another content field proves a change." },
@@ -91,6 +91,7 @@ const struct field_change DIFF_FIELDS[F_COUNT] = {
 
 enum change_class diff_field_class(enum entry_field f, enum belay_entry_type t) {
     const struct field_change *c = &DIFF_FIELDS[f];
+    if (c->cls == CC_UNSET) return CC_UNSET;            /* a missing row: never "not compared" */
     return (c->types & TBIT(t)) ? c->cls : CC_INFO;
 }
 

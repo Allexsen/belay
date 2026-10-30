@@ -57,6 +57,7 @@ struct entry_field_def {
 extern const struct entry_field_def ENTRY_FIELDS[F_COUNT];
 
 enum entry_rule_kind {
+    R_UNSET,        /* 0: a row without a kind -- violated by every entry (fails closed) */
     R_FORBID,       /* none of `a` */
     R_IMPLIES,      /* any of `a` requires any of `b` */
     R_EXCLUSIVE,    /* at most one of `a` */

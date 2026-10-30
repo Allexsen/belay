@@ -406,7 +406,12 @@ static void set_flag(struct belay_entry *e, enum entry_field f) {
     case F_UNREADABLE: e->unreadable = true; break;
     case F_MOUNT: e->is_mount = true; break;
     case F_XATTRS_UNKNOWN: e->xattrs_unknown = true; break;
-    default: BELAY_FAIL("flag field %d has no setter here", (int)f);
+    case F_PATH: case F_TYPE: case F_MODE: case F_UID: case F_GID: case F_SIZE: case F_MTIME:
+    case F_CTIME: case F_INO: case F_DEV: case F_NLINK: case F_IFLAGS: case F_CAPS: case F_XATTRS:
+    case F_XATTRS_SHA256: case F_SHA256: case F_RDEV: case F_LINK_TARGET: case F_TARGET_OUTSIDE:
+    case F_STORED: case F_COUNT:
+        BELAY_FAIL("flag field %d has no setter here", (int)f);
+        break;
     }
 }
 

@@ -99,11 +99,11 @@ static int run_pipeline(struct run *x) {
     while ((got = pair_next(x->pair, &b, &a)) == 1) {
         struct verdict v;
         if (b != NULL && a != NULL) {
-            classify_both(b, a, &v);
+            if (classify_both(b, a, &v) == -1) return -1;
         } else {
             const struct belay_entry *e = b != NULL ? b : a;
             const enum anc absent = ancestry_of(&x->anc[b != NULL ? 1 : 0], e->path, e->path_len);
-            classify_one(e, a != NULL, absent, &v);
+            if (classify_one(e, a != NULL, absent, &v) == -1) return -1;
         }
         if (b != NULL) ancestry_feed(&x->anc[0], b);
         if (a != NULL) ancestry_feed(&x->anc[1], a);

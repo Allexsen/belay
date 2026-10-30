@@ -2,6 +2,7 @@
 
 #include "belay/error.h"
 #include "belay/json.h"
+#include "util/check.h"
 
 #include <errno.h>
 #include <stdarg.h>
@@ -99,6 +100,7 @@ int emit_header(struct emitter *em, const struct belay_manifest_header *hb,
 int emit_path(struct emitter *em, const struct belay_entry *before,
               const struct belay_entry *after, const struct verdict *v,
               const struct belay_findings *findings) {
+    BELAY_CHECK(v->outcome >= D_FIRST && v->outcome < D_OUTCOME_COUNT, -1);
     em->count[v->outcome]++;
     if (v->outcome == D_UNCHANGED) return 0;
     const struct line_field_def *R = DIFF_RECORD_FIELDS;
@@ -124,7 +126,7 @@ int emit_path(struct emitter *em, const struct belay_entry *before,
     if (v->outcome == D_UNKNOWN && v->reasons) {
         if (ap(&b, ",\"%s\":[", R[DF_UNKNOWN].name) == -1) return -1;
         const char *sep = "";
-        for (int r = 0; r < DR_COUNT; r++) {
+        for (int r = DR_FIRST; r < DR_COUNT; r++) {
             if (!(v->reasons & DRBIT(r))) continue;
             if (ap(&b, "%s\"%s\"", sep, DIFF_REASONS[r].name) == -1) return -1;
             sep = ",";
@@ -149,7 +151,7 @@ int emit_path(struct emitter *em, const struct belay_entry *before,
 int emit_trailer(struct emitter *em) {
     struct buf b = { em->line, 0 };
     if (ap(&b, "{\"%s\":%zu", DIFF_TRAILER_END.name, em->records) == -1) return -1;
-    for (int o = 0; o < D_OUTCOME_COUNT; o++)
+    for (int o = D_FIRST; o < D_OUTCOME_COUNT; o++)
         if (ap(&b, ",\"%s\":%zu", DIFF_OUTCOMES[o].name, em->count[o]) == -1) return -1;
     if (ap(&b, "}") == -1) return -1;
     return put_line(em, &b);

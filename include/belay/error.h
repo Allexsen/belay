@@ -30,7 +30,8 @@ enum belay_err_code {
     BELAY_ERR_RANGE,        /* value or buffer out of bounds */
     BELAY_ERR_UNSUPPORTED,  /* valid request, not supported here */
     BELAY_ERR_CORRUPT,      /* on-disk data failed validation */
-    BELAY_ERR_NOMEM
+    BELAY_ERR_NOMEM,
+    BELAY_ERR_INTERNAL      /* an invariant of belay's own failed: a bug, never a pass */
 };
 
 /* Records an error. `sys_errno` is the captured errno, or 0 when not from a

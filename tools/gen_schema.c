@@ -195,34 +195,37 @@ static void schema_block(void) {
 
 /* ---- diff.v1 (src/schema/diff_schema.c) ---- */
 
-static void names_table(const struct diff_name_def *d, size_t n) {
+static void names_table(const struct diff_name_def *d, size_t first, size_t n) {
     printf("| name | meaning |\n|---|---|\n");
-    for (size_t i = 0; i < n; i++) {
+    for (size_t i = first; i < n; i++) {
         if (strchr(d[i].description, '|') != NULL) abort();
         printf("| `%s` | %s |\n", d[i].name, d[i].description);
     }
 }
-static void diff_outcomes_block(void) { names_table(DIFF_OUTCOMES, D_OUTCOME_COUNT); }
-static void diff_reasons_block(void) { names_table(DIFF_REASONS, DR_COUNT); }
+static void diff_outcomes_block(void) { names_table(DIFF_OUTCOMES, D_FIRST, D_OUTCOME_COUNT); }
+static void diff_reasons_block(void) { names_table(DIFF_REASONS, DR_FIRST, DR_COUNT); }
 static void diff_header_block(void) { line_table(DIFF_HEADER_FIELDS, DH_COUNT); }
 static void diff_record_block(void) { line_table(DIFF_RECORD_FIELDS, DF_COUNT); }
 static void diff_trailer_block(void) {
     struct line_field_def t[1 + D_OUTCOME_COUNT];
     char doc[D_OUTCOME_COUNT][96];
-    t[0] = DIFF_TRAILER_END;
-    for (size_t i = 0; i < D_OUTCOME_COUNT; i++) {
+    size_t n = 0;
+    t[n++] = DIFF_TRAILER_END;
+    for (size_t i = D_FIRST; i < D_OUTCOME_COUNT; i++) {
         snprintf(doc[i], sizeof doc[i], "Paths whose outcome is `%s`.", DIFF_OUTCOMES[i].name);
-        t[1 + i] = (struct line_field_def){ DIFF_OUTCOMES[i].name, NULL, "int", doc[i] };
+        t[n++] = (struct line_field_def){ DIFF_OUTCOMES[i].name, NULL, "int", doc[i] };
     }
-    line_table(t, 1 + D_OUTCOME_COUNT);
+    line_table(t, n);
 }
 
 static const char *const CLASS_NAMES[] = {
+    [CC_UNSET] = NULL,                  /* refused before anything is generated */
     [CC_KEY] = "key", [CC_TYPE] = "type", [CC_CONTENT] = "content", [CC_METADATA] = "metadata",
     [CC_IDENTITY] = "identity", [CC_CTIME] = "ctime", [CC_FLAG] = "flag", [CC_INFO] = "not compared",
 };
 static const char *const SCOPE_NAMES[] = {
-    [US_NONE] = "", [US_CONTENT] = "content", [US_METADATA] = "metadata", [US_ALL] = "everything",
+    [US_UNSET] = NULL, [US_NONE] = "", [US_CONTENT] = "content", [US_METADATA] = "metadata",
+    [US_ALL] = "everything",
 };
 static void diff_fields_block(void) {
     printf("| field | class | for types | makes unknown | why |\n|---|---|---|---|---|\n");
@@ -348,6 +351,8 @@ static int fuzz(void) {
         char applies[32];
         snprintf(applies, sizeof applies, on, r->types);
         switch (r->kind) {
+        case R_UNSET:
+            abort();                    /* refused by tables_complete() first */
         case R_FORBID:
             printf("    if (%s && (p & 0x%07xu)) abort();  /* on %s: never %s */\n",
                    applies, r->a, ty, a);
@@ -386,7 +391,53 @@ static int fuzz(void) {
     return 0;
 }
 
+/* Every cell of every table explicit (audit 2026-10, R1): a missing row or a
+ * short one compiles to zeros, and zero is a sentinel nothing may generate
+ * from. Checked here independently of test/test_schema.c. */
+static int tables_complete(void) {
+    int bad = 0;
+#define REFUSE(...) do { fprintf(stderr, "gen_schema: " __VA_ARGS__); fputc('\n', stderr); bad = 1; } while (0)
+    for (int f = 0; f < F_COUNT; f++) {
+        const struct entry_field_def *d = &ENTRY_FIELDS[f];
+        if (d->name == NULL || d->kind == NULL || d->description == NULL)
+            REFUSE("ENTRY_FIELDS[%d] is incomplete", f);
+        const struct field_change *c = &DIFF_FIELDS[f];
+        const char *n = d->name ? d->name : "?";
+        if (c->cls == CC_UNSET) REFUSE("DIFF_FIELDS[%s]: class unset", n);
+        if (c->unknown == US_UNSET) REFUSE("DIFF_FIELDS[%s]: unknown scope unset", n);
+        if (c->reason == DR_UNSET) REFUSE("DIFF_FIELDS[%s]: reason unset", n);
+        if (c->why == NULL) REFUSE("DIFF_FIELDS[%s]: no description", n);
+        if (c->cls == CC_FLAG && (c->unknown == US_NONE || c->reason < DR_FIRST))
+            REFUSE("DIFF_FIELDS[%s]: a flag needs a scope and a reason", n);
+        if (c->cls != CC_FLAG && (c->unknown != US_NONE || c->reason != DR_NONE))
+            REFUSE("DIFF_FIELDS[%s]: only a flag has a scope and a reason", n);
+        if (c->types == 0) REFUSE("DIFF_FIELDS[%s]: no types", n);
+    }
+    for (size_t i = 0; i < ENTRY_RULE_COUNT; i++) {
+        const struct entry_rule *r = &ENTRY_RULES[i];
+        if (r->kind == R_UNSET) REFUSE("ENTRY_RULES[%zu]: kind unset", i);
+        if (r->types == 0) REFUSE("ENTRY_RULES[%zu]: applies to no type", i);
+        if (r->kind == R_CHECK ? r->check == NULL : r->a == 0) REFUSE("ENTRY_RULES[%zu]: empty", i);
+        if (r->msg == NULL || r->doc == NULL) REFUSE("ENTRY_RULES[%zu]: no message or doc", i);
+        if ((r->kind == R_EXACTLY_ONE || r->kind == R_PRESENT_IFF) && r->msg2 == NULL)
+            REFUSE("ENTRY_RULES[%zu]: no second message", i);
+    }
+    for (int i = D_FIRST; i < D_OUTCOME_COUNT; i++)
+        if (DIFF_OUTCOMES[i].name == NULL || DIFF_OUTCOMES[i].description == NULL)
+            REFUSE("DIFF_OUTCOMES[%d] is incomplete", i);
+    for (int i = DR_FIRST; i < DR_COUNT; i++)
+        if (DIFF_REASONS[i].name == NULL || DIFF_REASONS[i].description == NULL)
+            REFUSE("DIFF_REASONS[%d] is incomplete", i);
+    for (int i = 0; i < H_COUNT; i++)
+        if (HEADER_FIELDS[i].name == NULL) REFUSE("HEADER_FIELDS[%d] is incomplete", i);
+    for (int i = 0; i < TR_COUNT; i++)
+        if (TRAILER_FIELDS[i].name == NULL) REFUSE("TRAILER_FIELDS[%d] is incomplete", i);
+#undef REFUSE
+    return !bad;
+}
+
 int main(int argc, char **argv) {
+    if (!tables_complete()) return 1;
     if (argc == 3 && strcmp(argv[1], "spec") == 0) return spec(argv[2]);
     if (argc == 2 && strcmp(argv[1], "fuzz") == 0) return fuzz();
     fprintf(stderr, "usage: gen_schema spec <file> | gen_schema fuzz\n");

@@ -65,8 +65,14 @@ static int put_field(const struct belay_entry *e, enum entry_field f, char *buf,
     case F_XATTRS_SHA256: return ap(buf, cap, w, "\"%s\":\"%s\"", k, e->xattrs_sha256_hex);
     case F_SHA256: return ap(buf, cap, w, "\"%s\":\"%s\"", k, e->sha256_hex);
     case F_STORED: return ap(buf, cap, w, "\"%s\":\"%s\"", k, e->stored_hex);
-    default:       return ap(buf, cap, w, "\"%s\":true", k);   /* the flags */
+    case F_XATTRS_UNKNOWN: case F_UNVERIFIED: case F_UNSTABLE: case F_TARGET_OUTSIDE:
+    case F_MOUNT: case F_UNREADABLE: case F_RACED:
+        return ap(buf, cap, w, "\"%s\":true", k);                /* the flags */
+    case F_COUNT:
+        break;
     }
+    belay_err_set(BELAY_ERR_INTERNAL, 0, "manifest: internal error: no encoder for field %d", (int)f);
+    return -1;
 }
 
 int entry_serialize(const struct belay_entry *e, char *buf, size_t cap, size_t *len) {

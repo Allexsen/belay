@@ -19,7 +19,8 @@
 
 #include <stddef.h>
 
-enum anc { ANC_NONE, ANC_INCOMPLETE, ANC_SEALED };
+/* ANC_UNSET (0) is no answer at all; classify fails on it (audit 2026-10, R1). */
+enum anc { ANC_UNSET, ANC_NONE, ANC_INCOMPLETE, ANC_SEALED };
 
 #define ANC_PATH_MAX 4096
 
