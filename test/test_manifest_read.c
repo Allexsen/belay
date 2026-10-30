@@ -465,16 +465,22 @@ TEST(reads_optional_flags) {
     ASSERT_TRUE(g_e[1].is_mount);
 }
 
-/* Unknown fields must be ignored so the format can grow (spec requirement). */
-TEST(ignores_unknown_fields) {
-    /* Unknown (informational) fields are allowed after every known field. */
-    ASSERT_EQ_INT(0, read_it(HDR "{\"path\":\"a\",\"type\":\"reg\","
+/* A key this version does not define is rejected, in an entry, the header
+ * or the trailer (decided 2026-10-30): a reader skipping it would read what
+ * it means as absent. The format grows only with a version bump. */
+TEST(an_unknown_key_is_rejected_wherever_it_appears) {
+    EXPECT_REJECT("entry", read_it(HDR "{\"path\":\"a\",\"type\":\"reg\","
                                  "\"mode\":33188,\"uid\":1,\"gid\":1,\"size\":1,"
                                  "\"mtime_ns\":1,\"ctime_ns\":1,\"ino\":1,"
                                  "\"dev\":1,\"nlink\":1,\"sha256\":\"" EMPTY_SHA "\","
-                                 "\"future_field\":42,\"another\":\"x\"}\n"));
-    ASSERT_EQ_INT(1, (int)g_n);
-    ASSERT_EQ_STR("a", g_e[0].path);
+                                 "\"future_field\":42}\n"), "unknown key \"future_field\"");
+    EXPECT_REJECT("header", read_it("{\"belay_manifest\":1,\"created_ns\":0,\"scopes\":[\"/s\"],"
+                                    "\"hash\":\"sha256\",\"hash_max_bytes\":67108864,"
+                                    "\"store_max_bytes\":65536,\"host\":\"x\"}\n"),
+                  "unknown key \"host\"");
+    write_raw(HDR ROOT_E "{\"belay_manifest_end\":1,\"vanished\":0,\"unreadable\":0,\"unstable\":0,"
+                         "\"mounts\":0,\"raced\":0,\"elapsed_ns\":5}\n");
+    EXPECT_REJECT("trailer", belay_manifest_read(g_path, collect, NULL), "unknown key \"elapsed_ns\"");
 }
 
 TEST(rejects_out_of_range_numbers) {
@@ -972,10 +978,10 @@ TEST(r2_reader_rejects_remaining_non_canonical_forms) {
           HDR ROOT_E "{\"path\":\"f\",\"mode\":33188,\"type\":\"reg\",\"uid\":1,\"gid\":1,"
           "\"size\":1,\"mtime_ns\":1,\"ctime_ns\":1,\"ino\":2,\"dev\":1,\"nlink\":1" SHA_F "}\n" TRL(2, 0),
           "fields out of canonical order" },
-        { "known field after an unknown one",
+        { "an unknown key among known ones",
           HDR ROOT_E "{\"path\":\"f\",\"type\":\"reg\",\"mode\":33188,\"uid\":1,\"gid\":1,"
           "\"size\":1,\"mtime_ns\":1,\"ctime_ns\":1,\"ino\":2,\"dev\":1,\"nlink\":1,\"x\":1" SHA_F "}\n" TRL(2, 0),
-          "a known field follows an unknown one" },
+          "unknown key \"x\"" },
         { "header fields out of order",
           "{\"created_ns\":0,\"belay_manifest\":1,\"scopes\":[\"/s\"],\"hash\":\"sha256\","
           "\"hash_max_bytes\":1,\"store_max_bytes\":1}\n" ROOT_E TRL(1, 0), "fields out of canonical order" },
@@ -1330,7 +1336,7 @@ int main(void) {
     RUN(rejects_hash_and_unverified_together);
     RUN(rejects_symlink_without_target_and_vice_versa);
     RUN(reads_optional_flags);
-    RUN(ignores_unknown_fields);
+    RUN(an_unknown_key_is_rejected_wherever_it_appears);
     RUN(rejects_out_of_range_numbers);
     RUN(accepts_negative_timestamps);
     RUN(key_text_inside_a_value_is_not_a_key);
