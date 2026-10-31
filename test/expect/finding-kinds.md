@@ -17,8 +17,11 @@ explicit OK. Removing a kind or changing a field's meaning is a diff.v1 version 
 - `text` is the row's template with each `{field}` replaced by its value, at most 1,024 bytes.
 - A finding that breaks any of this -- an unknown kind, a missing or extra field, a value of the
   wrong type or over its bound, text that is not the template's -- is replaced by `invalid_finding`.
-- A record carries at most 4,096 findings; past that, one final `and_more` counts the rest
-  (decision Q4). An event record (`diff-events.md`) is one finding.
+- `and_more`, `could_not_interpret` and `invalid_finding` are the core's (interpreter `core`): an
+  interpreter that adds one has it replaced by `invalid_finding` (decision P5).
+- A record carries at most 4,096 findings: past that, its 4,096th place is one `and_more` counting
+  the findings from that place on, itself included (decisions Q4, P5). An event record
+  (`diff-events.md`) is one finding.
 
 ## Kinds
 
@@ -26,9 +29,9 @@ explicit OK. Removing a kind or changing a field's meaning is a diff.v1 version 
 
 | kind | interpreter | level | fields | text | meaning |
 |---|---|---|---|---|---|
-| could_not_interpret | any | path | -- | `could not interpret` | The interpreter failed on this path (R11); nothing else from it here. |
-| invalid_finding | any | path | -- | `invalid finding` | A finding that broke the rules above, replaced. |
-| and_more | any | path | n: int | `and {n} more` | The findings past the 4,096th of this record, counted. |
+| could_not_interpret | core | path, event | -- | `could not interpret` | The interpreter failed on this path (R11), nothing else from it here; or, as an event, on the paths it names (diff-events E6, E10). |
+| invalid_finding | core | path, event | -- | `invalid finding` | A finding that broke the rules above, replaced; or, as an event, an event that did (diff-events E9). |
+| and_more | core | path, event | n: int | `and {n} more` | In the 4,096th place of a record past 4,096 findings, or the 65,536th of an interpreter's events past 65,536: the findings or events from that place on, itself included, counted. |
 | content_unavailable | text, pip, dpkg, git | path, event | reason: string, side: string | `content unavailable ({side}): {reason}` | The interpreter needs the stored copy of a path it claims, on a side where the path exists, and cannot read it. reason: `no_store` (the diff was given no store), `missing`, `too_large` (over the interpreter's bound), `corrupt` (does not hash to its name). side: `before` or `after`, one finding per side. Never a silent decline (decision 2026-10-31). pip and dpkg, which emit events from that content, also emit one `content_unavailable` event per reason, with side `before` or `after` when all its paths share it, else `both`, naming the paths: a consumer never reads "no packages changed" where the change could not be read. |
 | text_changed | text | path | lines_added: int, lines_deleted: int, first_changed_line: int | `+{lines_added} -{lines_deleted} lines, first change at line {first_changed_line}` | Stored on both sides. lines_deleted = before's lines minus the longest common subsequence of lines, lines_added = after's minus it; first_changed_line: 1-based, in before, the first line past the common prefix. |
 | text_rewritten | text | path | lines_before: int, lines_after: int, first_changed_line: int | `rewritten: {lines_before} lines before, {lines_after} after, first change at line {first_changed_line}` | As text_changed, when the two differ in more than 2,000 lines (edit distance): the counts are not computed. |
@@ -49,9 +52,9 @@ explicit OK. Removing a kind or changing a field's meaning is a diff.v1 version 
 | git_ref_created | git | path | ref: string, to: string | `created {ref} at {to}` | A ref appeared (a loose ref, or a line of packed-refs). |
 | git_ref_deleted | git | path | ref: string, from: string | `deleted {ref} (was {from})` | A ref went away. |
 | git_ref_moved | git | path | ref: string, from: string, to: string | `{ref} {from} -> {to}` | A ref names another commit. |
-| git_hook_added | git | path | hook: string, executable: bool | `hook {hook} added` | |
-| git_hook_removed | git | path | hook: string | `hook {hook} removed` | |
-| git_hook_changed | git | path | hook: string, executable: bool | `hook {hook} changed` | Its content changed. |
+| git_hook_added | git | path | hook: string, executable: bool, target: string | `hook {hook} added` | A regular file or a symlink appeared (decision P3: git follows a symlinked hook). target: the link's target, empty for a file. executable: the owner's bit for a file; true for a symlink (its target's mode is not recorded). |
+| git_hook_removed | git | path | hook: string, target: string | `hook {hook} removed` | target: the removed link's target, empty for a file. |
+| git_hook_changed | git | path | hook: string, executable: bool, target: string | `hook {hook} changed` | Its content changed, a link's target changed, or it changed between a file and a symlink. target and executable as in git_hook_added, after. |
 | git_hook_executable_changed | git | path | hook: string, executable: bool | `hook {hook} executable: {executable}` | Only its executable bit changed. |
 | git_index_changed | git | path | -- | `index changed` | `.git/index` (hashed, never stored). |
 | git_reflog_appended | git | path | ref: string, entries: int | `{ref}: {entries} reflog entries` | Entries appended to the ref's reflog. |
