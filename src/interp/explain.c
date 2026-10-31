@@ -1,21 +1,22 @@
 /*
- *  Interpreter explanations (belay/interp.h). One built-in per interpreter;
- *  one with no explain declines. Every built-in declines until each lands in
- *  its own file: the binary fallback has nothing to add to the core's
- *  outcome.
+ *  Interpreter explanations (belay/interp.h): the built-in for each id, one
+ *  file each (text.c, pip.c, dpkg.c, git.c); one with no explain declines.
  */
-#include "belay/interp.h"
+#include "builtins.h"
 
 #include <string.h>
 
-static const struct belay_interp BUILTIN[BELAY_INTERP_COUNT] = {
-    [BELAY_INTERP_BINARY] = { BELAY_INTERP_BINARY, NULL, NULL, NULL },
-    [BELAY_INTERP_TEXT]   = { BELAY_INTERP_TEXT, NULL, NULL, NULL },
-    [BELAY_INTERP_PIP]    = { BELAY_INTERP_PIP, NULL, NULL, NULL },
-    [BELAY_INTERP_DPKG]   = { BELAY_INTERP_DPKG, NULL, NULL, NULL },
-    [BELAY_INTERP_GIT]    = { BELAY_INTERP_GIT, NULL, NULL, NULL },
+/* The binary fallback declines: size and hash are already in the record. */
+static const struct belay_interp BINARY = { BELAY_INTERP_BINARY, NULL, NULL, NULL };
+
+static const struct belay_interp *const BUILTIN[BELAY_INTERP_COUNT] = {
+    [BELAY_INTERP_BINARY] = &BINARY,
+    [BELAY_INTERP_TEXT]   = &INTERP_TEXT,
+    [BELAY_INTERP_PIP]    = &INTERP_PIP,
+    [BELAY_INTERP_DPKG]   = &INTERP_DPKG,
+    [BELAY_INTERP_GIT]    = &INTERP_GIT,
 };
 
 const struct belay_interp *belay_interp_builtin(enum belay_interp_id id) {
-    return (unsigned)id < BELAY_INTERP_COUNT ? &BUILTIN[id] : &BUILTIN[BELAY_INTERP_BINARY];
+    return (unsigned)id < BELAY_INTERP_COUNT ? BUILTIN[id] : BUILTIN[BELAY_INTERP_BINARY];
 }

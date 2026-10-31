@@ -650,6 +650,71 @@ TEST(the_store_reaches_an_interpreter_through_the_options) {
     belay_err_clear();
 }
 
+/* The built-ins end to end, through belay_diff: dispatch, an interpreter,
+ * the emitter. `data` stored under its own name in `store`; *hex its name. */
+static void store_put(const char *store, const char *data, char hex[65]) {
+    struct belay_sha256 h;
+    uint8_t d[32];
+    char p[600];
+    belay_sha256_init(&h);
+    belay_sha256_update(&h, data, strlen(data));
+    belay_sha256_final(&h, d);
+    belay_hex_encode(hex, d, sizeof d);
+    mkdir(store, 0700);
+    snprintf(p, sizeof p, "%s/%.2s", store, hex);
+    mkdir(p, 0700);
+    snprintf(p, sizeof p, "%s/%.2s/%s", store, hex, hex + 2);
+    FILE *f = fopen(p, "wb");
+    if (f == NULL) return;
+    fputs(data, f);
+    fclose(f);
+}
+
+/* Q6: unclaimed and stored on both sides is text; its record says how. */
+TEST(a_stored_text_file_is_explained_in_its_record) {
+    char store[400], hb[65], ha[65];
+    snprintf(store, sizeof store, "%s/store", g_dir);
+    store_put(store, "a\nb\n", hb);
+    store_put(store, "a\nc\nd\n", ha);
+    m_begin("before", "/s", 1000); ROOT(); E(.path = "f.txt", .type = "reg", .size = 4, .sha = hb, .stored = hb);
+    E(.path = "g", .type = "reg", .size = 4, .sha = HA); m_end();
+    m_begin("after", "/s", 1000); ROOT(); E(.path = "f.txt", .type = "reg", .size = 6, .sha = ha, .stored = ha);
+    E(.path = "g", .type = "reg", .size = 5, .sha = HB); m_end();
+    const struct belay_diff_opts o = { .store_dir = store };
+    char b[400], a[400];
+    snprintf(b, sizeof b, "%s/before", g_dir);
+    snprintf(a, sizeof a, "%s/after", g_dir);
+    REQUIRE(belay_diff(b, a, g_out, &o, &g_st) == 0);
+    FILE *f = fopen(g_out, "rb");
+    REQUIRE(f != NULL);
+    g_text[fread(g_text, 1, sizeof g_text - 1, f)] = '\0';
+    fclose(f);
+    ASSERT_TRUE(has("f.txt", "\"findings\":[{\"kind\":\"text_changed\",\"lines_added\":2,"
+                             "\"lines_deleted\":1,\"first_changed_line\":2,"
+                             "\"text\":\"+2 -1 lines, first change at line 2\"}]}"));
+    ASSERT_FALSE(has("g", "findings"));                       /* not stored: binary declines */
+}
+
+/* Decision 2026-10-31: a changed dpkg status, diffed with no store, says so
+ * on its record and as an event: never "no packages changed". */
+TEST(a_changed_dpkg_status_without_a_store_is_never_no_change) {
+    m_begin("before", "/s", 1000); ROOT();
+    E(.path = "var", .type = "dir", .mode = 0755, .ino = 2); E(.path = "var/lib", .type = "dir", .mode = 0755, .ino = 3);
+    E(.path = "var/lib/dpkg", .type = "dir", .mode = 0755, .ino = 4);
+    E(.path = "var/lib/dpkg/status", .type = "reg", .size = 9, .sha = HA, .stored = HA); m_end();
+    m_begin("after", "/s", 1000); ROOT();
+    E(.path = "var", .type = "dir", .mode = 0755, .ino = 2); E(.path = "var/lib", .type = "dir", .mode = 0755, .ino = 3);
+    E(.path = "var/lib/dpkg", .type = "dir", .mode = 0755, .ino = 4);
+    E(.path = "var/lib/dpkg/status", .type = "reg", .size = 9, .sha = HB, .stored = HB); m_end();
+    REQUIRE(run() == 0);
+    ASSERT_TRUE(has("var/lib/dpkg/status", "{\"kind\":\"content_unavailable\",\"reason\":\"no_store\","
+                                           "\"side\":\"before\""));
+    ASSERT_TRUE(strstr(g_text, "{\"event\":\"content_unavailable\",\"interp\":\"dpkg\",\"reason\":\"no_store\","
+                               "\"side\":\"both\",\"text\":\"content unavailable (both): no_store\","
+                               "\"paths\":[\"var/lib/dpkg/status\"]}\n{\"belay_diff_end\":1,") != NULL);
+    ASSERT_TRUE(strstr(g_text, ",\"events\":1,") != NULL);
+}
+
 /* R6 (audit 2026-10): every fact a manifest's header and trailer carry is
  * checked by the reader, carried into the diff, or ignored for a stated
  * reason -- this table, written by hand, against the schema's keys both
@@ -1151,6 +1216,8 @@ int main(void) {
     RUN(a_diff_with_no_events_says_zero);
     RUN(a_failed_end_hook_is_one_event_naming_its_paths);
     RUN(a_failed_diff_ends_its_interpreters_without_a_sink);
+    RUN(a_stored_text_file_is_explained_in_its_record);
+    RUN(a_changed_dpkg_status_without_a_store_is_never_no_change);
     RUN(the_store_reaches_an_interpreter_through_the_options);
     RUN(different_scopes_are_refused_before_any_entry_is_read);
     RUN(a_published_output_is_success_even_where_its_directory_cannot_be_synced);

@@ -29,6 +29,8 @@ struct git_reflog_entry {
     const char *old_oid, *new_oid, *operation;      /* into the buffer */
     size_t oid_len, operation_len;
     size_t line;
+    const char *message;                            /* everything after the tab */
+    size_t message_len;
 };
 typedef int (*git_reflog_fn)(const struct git_reflog_entry *e, void *ctx);
 /* A reflog: each "<old> <new> <identity> <time> <zone>\t<message>" line, in
