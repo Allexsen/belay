@@ -69,9 +69,20 @@ def same(x, y):
     """Equality that does not take True for 1."""
     if type(x) is not type(y):
         return False
-    if isinstance(x, list):
+    if isinstance(x, (list, tuple)):
         return len(x) == len(y) and all(same(a, b) for a, b in zip(x, y))
     return x == y
+
+
+_REF = {}
+
+
+def ref_diff(stem):
+    """reference.diff() of the pair at stem, computed once per process (the
+    comparison and the coverage gate both read it)."""
+    if stem not in _REF:
+        _REF[stem] = ref.diff(stem + '.before', stem + '.after')
+    return _REF[stem]
 
 
 def is_utf8(b):
@@ -92,7 +103,19 @@ def show(d):
     d = dict(d)
     if isinstance(d.get('path'), bytes):
         d['path'] = repr(d['path'])
-    return json.dumps(d, ensure_ascii=False)
+    return json.dumps(unpairs(d), ensure_ascii=False)
+
+
+def unpairs(v):
+    """A value parsed with object_pairs_hook=list, its objects as dicts (for
+    messages)."""
+    if isinstance(v, dict):
+        return {k: unpairs(x) for k, x in v.items()}
+    if isinstance(v, list) and v and all(isinstance(x, tuple) and len(x) == 2 for x in v):
+        return {k: unpairs(x) for k, x in v}
+    if isinstance(v, list):
+        return [unpairs(x) for x in v]
+    return v
 
 # ---------------------------------------------------------------------------
 # Comparing one pair.
@@ -168,6 +191,18 @@ def contradicts_itself(g):
         return 'unknown with no reason'
     if o != 'unknown' and 'unknown' in g:
         return '%s with reasons' % o
+    # "Interpreters": `findings` is "absent when none"; "for a path whose
+    # outcome is `unknown` or `metadata_only` it adds nothing (a git hook's
+    # executable bit excepted, which is metadata)".
+    fs = g.get('findings')
+    if fs is not None:
+        if not isinstance(fs, list) or not fs:
+            return 'an empty or malformed `findings`'
+        kinds = [dict(f).get('kind') if isinstance(f, list) else None for f in fs]
+        if o == 'unknown':
+            return 'unknown with findings %s' % kinds
+        if o == 'metadata_only' and set(kinds) - {'git_hook_executable_changed'}:
+            return 'metadata_only with findings %s' % kinds
     return None
 
 
@@ -194,7 +229,7 @@ def compare_record(path, exp, got, trace, orders):
         if keys[:3] != [want_spelling, 'outcome', 'type'] or len(set(keys)) != len(keys):
             groups.append('OTHER: record keys %s' % keys)
         extra = set(keys) - {want_spelling, 'outcome', 'type', 'type_before', 'changed',
-                             'unknown'}
+                             'unknown', 'findings'}
         if extra:
             groups.append('OTHER: record has %s' % sorted(extra))
         if not same(exp.get('type'), g.get('type')):
@@ -231,6 +266,14 @@ def compare_record(path, exp, got, trace, orders):
                 unexplained.append('reason ' + r)
     elif ug:
         orders.append(ug)
+    # Findings: exactly -- every finding, its keys in order, its values and
+    # their JSON types (run_pair checks the bytes too).
+    if not missing and not same(exp.get('findings'), g.get('findings')):
+        it = [t for t in trace if t.startswith('interp:')]
+        groups.append('FINDINGS (%s): %s' % (','.join(it) or 'no interpreter',
+                                             ','.join(t for t in trace if t.startswith(
+                                                 ('unavailable-', 'hook-', 'index-', 'reflog-',
+                                                  'interp-'))) or '-'))
     if exp['outcome'] != g.get('outcome'):
         if 'raced-ancestor' in trace:
             groups.append(G_RACED_ANC)
@@ -255,20 +298,45 @@ def run_driver(driver, stem):
 
 def run_pair(ran, stem, orders):
     rc, err, raw = ran
-    res = ref.diff(stem + '.before', stem + '.after')
+    res = ref_diff(stem)
     if res is None:
         return {'status': 'corpus-error', 'why': 'a same-scope pair with different scopes'}
-    header, records, trailer, traces = res
+    header, records, events, trailer, traces = res
     if rc != 0 or raw is None:
         return {'status': 'rejected', 'why': '%s (exit %d)' % (err, rc),
                 'expected_trailer': trailer}
     lines = raw.split(b'\n')
     if lines[-1] != b'':
         return {'status': 'malformed', 'why': 'no final newline'}
-    objs = [json.loads(l.decode('utf-8'), object_pairs_hook=list) for l in lines[:-1]]
-    got_header, got_records, got_trailer = objs[0], objs[1:-1], objs[-1]
-    result = {'status': 'ok', 'header': [], 'records': [], 'trailer': [],
+    lines = lines[:-1]
+    objs = [json.loads(l.decode('utf-8'), object_pairs_hook=list) for l in lines]
+    got_header, body, got_trailer = objs[0], objs[1:-1], objs[-1]
+    # E1: the path records, then the event records (a line whose first key is
+    # `event`), then the trailer.
+    first_event = next((i for i, o in enumerate(body) if o and o[0][0] == 'event'), len(body))
+    got_records, got_events = body[:first_event], body[first_event:]
+    raw_records, raw_events = lines[1:1 + first_event], lines[1 + first_event:-1]
+    result = {'status': 'ok', 'header': [], 'records': [], 'trailer': [], 'events': [],
               'expected_trailer': trailer}
+    if any(not o or o[0][0] != 'event' for o in got_events):
+        result['events'].append(('E1: a path record after an event record', None, None))
+    # Event records, byte for byte against the reference's rendering (E2-E4).
+    want_events = [ref.canonical(ev) for ev in events]
+    if raw_events != want_events:
+        for i in range(max(len(want_events), len(raw_events))):
+            w = want_events[i] if i < len(want_events) else None
+            g = raw_events[i] if i < len(raw_events) else None
+            if w != g:
+                result['events'].append(('event record %d' % i, w, g))
+    # A record's findings, byte for byte: `"findings":` and the reference's
+    # rendering of the list, in the record's line.
+    exp_findings = {r['path']: r['findings'] for r in records if 'findings' in r}
+    for rec, line in zip(got_records, raw_records):
+        p, _ = rec_path(dict(rec))
+        if p in exp_findings and \
+                b'"findings":' + ref.canonical(exp_findings[p]) not in line:
+            result['events'].append(('the bytes of the findings of %r' % p,
+                                     ref.canonical(exp_findings[p]), line))
     # header
     gk = [k for k, _ in got_header]
     ek = [k for k, _ in header]
@@ -309,10 +377,14 @@ def run_pair(ran, stem, orders):
     if gt.get('belay_diff_end') != len(got_records):
         result['trailer'].append(('trailer: belay_diff_end is not the records emitted',
                                   len(got_records), gt.get('belay_diff_end')))
+    if gt.get(ref.EVENTS) != len(got_events):                   # E7
+        result['trailer'].append(('trailer: events is not the event records emitted',
+                                  len(got_events), gt.get(ref.EVENTS)))
     counted = [gt.get(o) for o in ref.OUTCOMES]
-    if all(type(c) is int for c in counted) and sum(counted) != len(traces):
+    npaths = len(traces) - 1                    # b'': the end hooks' tags
+    if all(type(c) is int for c in counted) and sum(counted) != npaths:
         result['trailer'].append(('trailer: the outcome counts do not add up to the paths',
-                                  len(traces), sum(counted)))
+                                  npaths, sum(counted)))
     dto, unch = gt.get(ref.DIR_TIMESTAMPS_ONLY), gt.get('unchanged')
     if type(dto) is int and type(unch) is int and not 0 <= dto <= unch:
         result['trailer'].append(('trailer: dir_timestamps_only is not among unchanged',
@@ -822,7 +894,7 @@ def main():
     orders, by_group, header_issues = [], collections.defaultdict(list), collections.Counter()
     header_examples = {}
     full = header_only = differ = rejected = 0
-    rejected_examples, trailer_only = [], []
+    rejected_examples, trailer_only, event_issues = [], [], []
     outcomes = collections.Counter()
     with concurrent.futures.ThreadPoolExecutor(max_workers=os.cpu_count() or 4) as pool:
         ran = list(pool.map(lambda s: run_driver(driver, s), stems))
@@ -840,10 +912,14 @@ def main():
         for k, v, g in res['header']:
             header_issues[k] += 1
             header_examples.setdefault(k, (name, v, g))
+        if res['events']:
+            event_issues.append((name, label(stem), res['events']))
         if res['records']:
             differ += 1
             for groups, p, e, g in res['records']:
                 by_group[' + '.join(groups)].append((name, label(stem), p, e, g))
+        elif res['events']:
+            differ += 1
         elif res['trailer']:
             differ += 1
             trailer_only.append((name, label(stem), res['trailer'][:3]))
@@ -868,8 +944,15 @@ def main():
             for name, lab, p, e, g in items[:2]:
                 print('      %s [%s] %r' % (name, lab, p))
                 print('         expected %s' % (show(ref.encode_record(e)) if e else '(no record)'))
-                print('         got      %s' % (json.dumps(dict(g), ensure_ascii=False)
+                print('         got      %s' % (json.dumps(unpairs(g), ensure_ascii=False)
                                                 if g else '(no record)'))
+    if event_issues:
+        print('== event records or the bytes of findings disagree in %d pairs:'
+              % len(event_issues))
+        for name, lab, issues in event_issues[:6]:
+            print('   %s [%s]' % (name, lab))
+            for what, w, g in issues[:4]:
+                print('      %s\n         expected %s\n         got      %s' % (what, w, g))
     for name, lab, issues in trailer_only[:5]:
         print('== trailer only: %s [%s] %s' % (name, lab, issues))
     for ex in rejected_examples:
