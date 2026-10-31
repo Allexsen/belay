@@ -31,6 +31,9 @@ struct scope {
 /* Test hook: called between realpath() and the open that checks it, so a
  * test can swap a component in the window. NULL in the binary. */
 extern void (*scope_resolve_hook)(const char *resolved);
+/* Test hook: called after the scope was resolved and just before the walk
+ * opens it again. NULL in the binary. */
+extern void (*state_capture_hook)(const char *scope);
 
 /* Resolves `arg` once: lexical checks, realpath(), then the result opened
  * one component at a time from "/" with O_NOFOLLOW -- a component swapped

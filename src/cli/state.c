@@ -28,6 +28,7 @@
 #endif
 
 void (*scope_resolve_hook)(const char *resolved) = NULL;
+void (*state_capture_hook)(const char *scope) = NULL;
 
 int scope_resolve(const char *arg, struct scope *out) {
     if (arg == NULL || arg[0] == '\0') {
@@ -371,6 +372,7 @@ int state_capture(struct state *st, const struct capture_req *req, struct checkp
         .expect_root = true, .root_dev = st->scope.dev, .root_ino = st->scope.ino,
     };
     struct belay_manifest_stats s;
+    if (state_capture_hook != NULL) state_capture_hook(st->scope.path);
     if (belay_manifest_write(manifest, st->scope.path, &o, &s) == -1) return -1;
     if (previous != NULL && !s.prefilter && s.prefilter_skipped != NULL) {
         snprintf(c.full_reason, sizeof c.full_reason, "%s", s.prefilter_skipped);
