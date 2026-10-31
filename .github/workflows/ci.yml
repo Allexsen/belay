@@ -116,6 +116,11 @@ jobs:
           BASE: ${{ github.event.pull_request.base.sha || github.event.before }}
           HEAD: ${{ github.event.pull_request.head.sha || github.sha }}
         run: ./scripts/check-dco.sh "$BASE" "$HEAD"
+      - name: the manifest addendum is append-only
+        env:
+          BASE: ${{ github.event.pull_request.base.sha || github.event.before }}
+          HEAD: ${{ github.event.pull_request.head.sha || github.sha }}
+        run: ./scripts/check-addendum.sh "$BASE" "$HEAD"
 
   docker:
     name: docker
