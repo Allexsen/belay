@@ -7,6 +7,7 @@ linux-x86_64 | platform summary | setup
 linux-x86_64 | enable unprivileged user namespaces | setup
 linux-x86_64 | build + test | check
 linux-x86_64 | diff oracle (belay_diff against a naive reference) | check
+linux-x86_64 | package reference (dpkg and pip against an independent reference) | check
 linux-arm64 | actions/checkout@v5 | setup
 linux-arm64 | uname -m | setup
 linux-arm64 | platform summary | setup
