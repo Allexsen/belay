@@ -253,14 +253,16 @@ int belay_store_commit(struct belay_store_tx *tx, const char *hex) {
     return rc;
 }
 
-/* Syncs directory `name`, relative to `dfd`, or fails naming it. */
-static int sync_one(const struct belay_store *s, int dfd, const char *name, const char *what) {
+/* Syncs directory `name`, relative to `dfd` -- with the adapter's barrier
+ * when `last` -- or fails naming it. */
+static int sync_one(const struct belay_store *s, int dfd, const char *name, const char *what,
+                    bool last) {
     const int fd = openat(dfd, name, O_RDONLY | O_DIRECTORY | O_CLOEXEC);
     if (fd == -1) {
         belay_err_set(BELAY_ERR_IO, errno, "store: cannot open %s to sync it", what);
         return -1;
     }
-    if (s->ops->fsync(s->ops->ctx, fd) != 0) {
+    if ((last ? s->ops->barrier : s->ops->fsync)(s->ops->ctx, fd) != 0) {
         const int e = errno;
         close(fd);
         belay_err_set(BELAY_ERR_IO, e, "store: cannot sync %s", what);
@@ -289,12 +291,15 @@ int belay_store_sync(struct belay_store *s) {
         char prefix[3], what[32];
         snprintf(prefix, sizeof prefix, "%02x", i);
         snprintf(what, sizeof what, "fan-out directory %s/", prefix);
-        if (sync_one(s, s->dfd, prefix, what) == -1) return -1;
+        if (sync_one(s, s->dfd, prefix, what, false) == -1) return -1;
         s->named[i] = false;
     }
     if (!any) return 0;
-    if (sync_one(s, s->dfd, ".", "the store directory") == -1 ||
-        sync_one(s, s->dfd, "..", "the store directory's parent") == -1)
+    /* The last sync before the manifest's rename carries the barrier: on
+     * macOS, where fsync reaches neither the disk nor an order, it puts these
+     * names on the disk ahead of the rename, on this device. */
+    if (sync_one(s, s->dfd, ".", "the store directory", false) == -1 ||
+        sync_one(s, s->dfd, "..", "the store directory's parent", true) == -1)
         return -1;
     return 0;
 }

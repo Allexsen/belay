@@ -449,26 +449,36 @@ static void *t_dir_open(void *ctx, int dfd) {
 
 /* Every fsync the writer asks for: what the fd was, and whether the name
  * being published (g_sync_watch) and the manifest existed at that moment. */
-struct synced { dev_t dev; ino_t ino; bool dir, watched, manifest; };
+struct synced { dev_t dev; ino_t ino; bool dir, watched, manifest, barrier; };
 static struct synced g_sync[64];
 static size_t g_nsync;
 static const char *g_sync_watch;
 
-static int t_fsync(void *ctx, int fd) {
-    (void)ctx;
+static int t_sync(int fd, bool barrier) {
     struct stat st, w;
     if (fstat(fd, &st) == 0) {
         if (g_nsync < sizeof g_sync / sizeof g_sync[0])
             g_sync[g_nsync++] = (struct synced){
                 st.st_dev, st.st_ino, S_ISDIR(st.st_mode),
-                g_sync_watch != NULL && lstat(g_sync_watch, &w) == 0, lstat(g_m, &w) == 0 };
+                g_sync_watch != NULL && lstat(g_sync_watch, &w) == 0, lstat(g_m, &w) == 0,
+                barrier };
         if (g_arm == SYNC_DIR_EIO && S_ISDIR(st.st_mode)) {
             g_fired = 1;
             errno = EIO;
             return -1;
         }
     }
-    return g_real->fsync(g_real->ctx, fd);
+    return 0;
+}
+
+static int t_fsync(void *ctx, int fd) {
+    (void)ctx;
+    return t_sync(fd, false) == -1 ? -1 : g_real->fsync(g_real->ctx, fd);
+}
+
+static int t_barrier(void *ctx, int fd) {
+    (void)ctx;
+    return t_sync(fd, true) == -1 ? -1 : g_real->barrier(g_real->ctx, fd);
 }
 
 /* Whether directory `dir` was synced once the watched name existed. */
@@ -513,6 +523,7 @@ static void decorate(void) {
     g_ops.dir_open = t_dir_open;
     g_ops.writer_present = t_writer_present;
     g_ops.fsync = t_fsync;
+    g_ops.barrier = t_barrier;
 }
 
 static void arm(enum arm a, const char *x, const char *y) {
@@ -1508,6 +1519,14 @@ TEST(stored_copies_are_synced_once_per_directory_before_the_manifest) {
     ASSERT_EQ_INT(1, between);
     ASSERT_EQ_INT(1, syncs_of(g_store, &between));
     ASSERT_EQ_INT(1, between);
+    /* one barrier (F_BARRIERFSYNC on macOS), before the manifest is in place */
+    int barriers = 0;
+    for (size_t i = 0; i < g_nsync; i++)
+        if (g_sync[i].barrier) {
+            barriers++;
+            ASSERT_FALSE(g_sync[i].manifest);
+        }
+    ASSERT_EQ_INT(1, barriers);
 }
 
 /* Decided 2026-10-31: a store sync that fails before the manifest's rename

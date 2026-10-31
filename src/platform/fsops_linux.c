@@ -221,6 +221,7 @@ static const struct fsops linux_ops = {
     .clock = linux_clock,
     .tmpfile_in = linux_tmpfile_in,
     .fsync = posix_fsync,
+    .barrier = posix_fsync,     /* fsync reaches the disk here: nothing more to order */
 };
 
 const struct fsops *fsops_default(void) { return &linux_ops; }
