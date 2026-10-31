@@ -276,8 +276,10 @@ exists on (a capture stores small text files by default); any other is **binary*
 nothing: its size and hash are already in the record.
 
 **Content.** Interpreters read the stored copies through the store given to the diff (`belay_diff`'s
-options). Every copy read is hashed and must match its name, so a stale, planted or truncated copy
-is never read as content. When an interpreter needs a copy it cannot read, on a side where the path
+options): the directory a capture keeps copies in, each at `<store>/<the first two hex digits of
+its sha256>/<the other 62>`, named by the manifest entry's `stored`. Every copy read is hashed and
+must match its name, so a stale, planted or truncated copy is never read as content; one that is
+not a regular file (a symlink included) is `corrupt`. When an interpreter needs a copy it cannot read, on a side where the path
 exists, it says so: the finding `content_unavailable`, with `reason` `no_store` (the diff was given
 no store), `missing`, `too_large` (over the interpreter's bound) or `corrupt` (does not hash to its
 name), and `side`. It never declines silently there: pip and dpkg, whose package facts come from
