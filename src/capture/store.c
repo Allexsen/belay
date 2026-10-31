@@ -253,36 +253,50 @@ int belay_store_commit(struct belay_store_tx *tx, const char *hex) {
     return rc;
 }
 
+/* Syncs directory `name`, relative to `dfd`, or fails naming it. */
+static int sync_one(const struct belay_store *s, int dfd, const char *name, const char *what) {
+    const int fd = openat(dfd, name, O_RDONLY | O_DIRECTORY | O_CLOEXEC);
+    if (fd == -1) {
+        belay_err_set(BELAY_ERR_IO, errno, "store: cannot open %s to sync it", what);
+        return -1;
+    }
+    if (s->ops->fsync(s->ops->ctx, fd) != 0) {
+        const int e = errno;
+        close(fd);
+        belay_err_set(BELAY_ERR_IO, e, "store: cannot sync %s", what);
+        return -1;
+    }
+    close(fd);
+    return 0;
+}
+
 /* A name a commit returned -- renamed in, or found there, perhaps renamed by
  * an earlier capture that failed before its sync -- survives a crash only
  * once every directory on its way up is synced: its fan-out directory, the
  * store directory, whose fan-out names a failed commit may have made, and
- * the parent, which holds the store directory's own name (review of the
- * S6 completion, F2-F4). Each is synced once, however many names it holds:
- * one sync per object made a first capture of 2,000 small files 40 times
- * slower, and the first sync commits the journal for the rest. Never a
- * failure: the copies are complete and in place (decided 2026-10-30, as the
- * diff's output, review F3). */
-void belay_store_sync(struct belay_store *s) {
-    if (s == NULL) return;
+ * the parent, which holds the store directory's own name. Each is synced
+ * once, however many names it holds: one sync per object made a first
+ * capture of 2,000 small files 40 times slower, and the first sync commits
+ * the journal for the rest. A sync that fails, or a directory that cannot
+ * be opened for it, is an error naming the directory: the caller publishes
+ * nothing (decided 2026-10-31). */
+int belay_store_sync(struct belay_store *s) {
+    if (s == NULL) return 0;
     bool any = false;
     for (int i = 0; i < 256; i++) {
         if (!s->named[i]) continue;
-        s->named[i] = false;
         any = true;
-        char prefix[3];
+        char prefix[3], what[32];
         snprintf(prefix, sizeof prefix, "%02x", i);
-        const int pfd = openat(s->dfd, prefix, O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC);
-        if (pfd == -1) continue;
-        if (s->ops->fsync(s->ops->ctx, pfd) != 0) { /* nothing left to undo */ }
-        close(pfd);
+        snprintf(what, sizeof what, "fan-out directory %s/", prefix);
+        if (sync_one(s, s->dfd, prefix, what) == -1) return -1;
+        s->named[i] = false;
     }
-    if (!any) return;
-    if (s->ops->fsync(s->ops->ctx, s->dfd) != 0) { /* likewise */ }
-    const int up = openat(s->dfd, "..", O_RDONLY | O_DIRECTORY | O_CLOEXEC);
-    if (up == -1) return;
-    if (s->ops->fsync(s->ops->ctx, up) != 0) { /* likewise */ }
-    close(up);
+    if (!any) return 0;
+    if (sync_one(s, s->dfd, ".", "the store directory") == -1 ||
+        sync_one(s, s->dfd, "..", "the store directory's parent") == -1)
+        return -1;
+    return 0;
 }
 
 int belay_store_verify(struct belay_store *s, const char *hex) {

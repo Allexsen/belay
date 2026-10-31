@@ -293,9 +293,10 @@ int capture_write(const struct fsops *ops, const char *out_path, const char *sco
         belay_err_set(BELAY_ERR_IO, errno, "manifest: close failed");
         goto cleanup;
     }
-    /* The names of the copies it records survive a crash before it does, as
-     * far as these syncs succeed; their bytes are verified on read (store.h). */
-    belay_store_sync(wc->store);
+    /* The names of the copies it records survive a crash before it does, or
+     * it is not published (decided 2026-10-31); their bytes are verified on
+     * read (store.h). */
+    if (belay_store_sync(wc->store) == -1) goto cleanup;
     if (rename(outtmp, out_path) != 0) {
         belay_err_set(BELAY_ERR_IO, errno, "manifest: cannot rename into %s", out_path);
         goto cleanup;

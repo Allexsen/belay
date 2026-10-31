@@ -1510,25 +1510,36 @@ TEST(stored_copies_are_synced_once_per_directory_before_the_manifest) {
     ASSERT_EQ_INT(1, between);
 }
 
-/* A directory that cannot be synced fails nothing: the manifest and the copy
- * are complete and in place by then (as the diff's output, review F3). */
-TEST(a_directory_that_cannot_be_synced_fails_nothing) {
+/* Decided 2026-10-31: a store sync that fails before the manifest's rename
+ * stops the capture -- nothing is published, and the error names the
+ * directory -- so a published manifest's copies are always durable. */
+TEST(a_failed_store_sync_stops_the_capture) {
     reset();
     touch("f.txt", "content\n");
     usleep(20000);
     fresh_store();
     arm(SYNC_DIR_EIO, NULL, NULL);
     struct belay_manifest_stats st;
-    ASSERT_EQ_INT(0, check_store(&st));
+    ASSERT_EQ_INT(-1, check_store(&st));
     ASSERT_TRUE(g_fired);
-    const struct belay_entry *f = find("f.txt");
-    ASSERT_TRUE(f != NULL && f->has_stored);
-    ASSERT_EQ_INT(0, (int)st.store_failed);
+    ASSERT_EQ_INT(BELAY_ERR_IO, belay_err_code());
+    ASSERT_TRUE(strstr(belay_err_msg(), "cannot sync fan-out directory") != NULL);
+    ASSERT_TRUE(access(g_m, F_OK) != 0);                 /* nothing published */
+    belay_err_clear();
 }
 
-/* Audit 2026-10, the capture's surviving mutants: each case below passed
- * every check with its decision removed (CAP-WALK-08, CONS-08, CAP-X-02,
- * CAP-X-03, CAP-WALK-09). */
+/* A sync after the rename -- the manifest's directory -- that fails stops
+ * nothing: the manifest is complete and in place by then (as the diff's
+ * output). */
+TEST(a_failed_sync_after_the_rename_fails_nothing) {
+    reset();
+    touch("f.txt", "content\n");
+    arm(SYNC_DIR_EIO, NULL, NULL);
+    struct belay_manifest_stats st;
+    ASSERT_EQ_INT(0, check(&st));
+    ASSERT_TRUE(g_fired);
+    ASSERT_TRUE(find("f.txt") != NULL);
+}
 
 /* Gone between its stat and its open: not recorded, counted as vanished;
  * its directory changed while it was walked. */
@@ -1730,7 +1741,8 @@ int main(void) {
     RUN(a_store_that_fails_mid_copy_keeps_the_entry);
     RUN(a_published_manifest_and_its_directory_are_synced);
     RUN(stored_copies_are_synced_once_per_directory_before_the_manifest);
-    RUN(a_directory_that_cannot_be_synced_fails_nothing);
+    RUN(a_failed_store_sync_stops_the_capture);
+    RUN(a_failed_sync_after_the_rename_fails_nothing);
     RUN(a_file_gone_between_its_stat_and_open_is_counted);
     RUN(a_short_read_is_unstable_never_a_wrong_hash);
     RUN(an_attribute_that_cannot_be_read_makes_them_unknown);
