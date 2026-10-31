@@ -6,7 +6,7 @@
  */
 #include "belay_test.h"
 #include "belay/interp.h"
-#include "belay/json.h"
+#include "belay/manifest.h"
 
 #include <string.h>
 
@@ -103,42 +103,27 @@ TEST(names_are_stable) {
     ASSERT_EQ_STR("unknown", belay_interp_name(BELAY_INTERP_COUNT));
 }
 
-/* F3: a finding is cut on a character boundary, never inside a UTF-8
- * sequence -- interpreter text comes from file content. */
-TEST(a_long_finding_is_cut_between_characters) {
-    char text[600];
-    size_t w = 0;                                /* two-byte characters: the 255-byte cut */
-    while (w + 2 < sizeof text) { text[w++] = '\xc3'; text[w++] = '\xa9'; }   /* falls inside one */
-    text[w] = '\0';
-    struct belay_findings f = { 0 };
-    ASSERT_EQ_INT(0, belay_findings_add(&f, text));
-    const size_t n = strlen(f.item[0]);
-    ASSERT_TRUE(n <= BELAY_FINDING_BYTES - 1);
-    ASSERT_TRUE(belay_utf8_valid(f.item[0], n));
-    ASSERT_EQ_INT(BELAY_FINDING_BYTES - 2, (int)n);
-}
+/* The string findings these replaced (reviews F2, F3, F9: a cut inside a
+ * UTF-8 sequence, a write past the cap, bad text made valid by a cut) have no
+ * counterpart: a structured finding is never cut -- one over its bound is
+ * invalid_finding (test_findings). */
 
-/* Review F2: an interpreter controls `n`; past the cap the helper must not
- * write (it compared with ==). A guard after the buffer catches a write. */
-TEST(no_finding_is_added_past_the_cap) {
-    static struct { struct belay_findings f; char guard[2 * BELAY_FINDING_BYTES]; } g;
-    memset(&g, 0, sizeof g);
-    g.f.n = BELAY_FINDINGS_MAX + 1;
-    ASSERT_EQ_INT(-1, belay_findings_add(&g.f, "x"));
-    for (size_t i = 0; i < sizeof g.guard; i++) if (g.guard[i] != 0) { BELAY_FAIL("byte %zu of the guard written", i); break; }
-}
-
-/* Review F9: a cut backs up at most three bytes, the most a UTF-8 sequence
- * continues; text that is not UTF-8 stays so, for the emitter to replace,
- * rather than turning into a valid prefix by losing its bad bytes. */
-TEST(a_cut_never_makes_bad_text_look_valid) {
-    char text[400];
-    memcpy(text, "abc", 3);
-    memset(text + 3, 0x80, sizeof text - 4);
-    text[sizeof text - 1] = '\0';
-    struct belay_findings f = { 0 };
-    ASSERT_EQ_INT(0, belay_findings_add(&f, text));
-    ASSERT_FALSE(belay_utf8_valid(f.item[0], strlen(f.item[0])));
+/* Decided 2026-10-31 (Q6, reconciled with Q2): an unclaimed path is TEXT when
+ * it is stored on every side it exists on; a claim always wins. */
+TEST(text_is_an_unclaimed_path_stored_on_every_side_it_exists_on) {
+    struct belay_entry s = { 0 }, u = { 0 };
+    s.has_stored = true;
+    const struct belay_claim none = { BELAY_INTERP_BINARY, BELAY_KEEP_DEFAULT };
+    const struct belay_claim pip = { BELAY_INTERP_PIP, BELAY_KEEP_STORE };
+    ASSERT_EQ_INT(BELAY_INTERP_TEXT, belay_interp_dispatch(&none, &s, &s));
+    ASSERT_EQ_INT(BELAY_INTERP_TEXT, belay_interp_dispatch(&none, NULL, &s));    /* added */
+    ASSERT_EQ_INT(BELAY_INTERP_TEXT, belay_interp_dispatch(&none, &s, NULL));    /* removed */
+    ASSERT_EQ_INT(BELAY_INTERP_BINARY, belay_interp_dispatch(&none, &s, &u));
+    ASSERT_EQ_INT(BELAY_INTERP_BINARY, belay_interp_dispatch(&none, &u, &s));
+    ASSERT_EQ_INT(BELAY_INTERP_BINARY, belay_interp_dispatch(&none, NULL, &u));
+    ASSERT_EQ_INT(BELAY_INTERP_BINARY, belay_interp_dispatch(&none, NULL, NULL));
+    ASSERT_EQ_INT(BELAY_INTERP_PIP, belay_interp_dispatch(&pip, &u, &u));
+    ASSERT_EQ_INT(BELAY_INTERP_PIP, belay_interp_dispatch(&pip, &s, &s));
 }
 
 int main(void) {
@@ -150,8 +135,6 @@ int main(void) {
     RUN(git_objects_and_packs_are_not_claimed);
     RUN(unclaimed_and_hostile_inputs_fall_back_to_binary);
     RUN(names_are_stable);
-    RUN(a_long_finding_is_cut_between_characters);
-    RUN(no_finding_is_added_past_the_cap);
-    RUN(a_cut_never_makes_bad_text_look_valid);
+    RUN(text_is_an_unclaimed_path_stored_on_every_side_it_exists_on);
     return belay_test_report();
 }

@@ -12,6 +12,9 @@
 #define _GNU_SOURCE
 #include "belay/diff.h"
 
+#include "interp/findings_internal.h"
+#include "schema/finding_schema.h"
+
 #include "ancestry.h"
 #include "classify.h"
 #include "diff_run.h"
@@ -94,46 +97,59 @@ struct run {
     char tmp[PATH_MAX + 16];
     char abs[2 * PATH_MAX];     /* scope + "/" + path, for interpreter dispatch */
     struct belay_findings findings;
+    struct belay_events events;
     const struct belay_interp *const *interp;
     struct belay_content *content;      /* NULL: no store */
     void *state[BELAY_INTERP_COUNT];
-    bool begun;
+    bool begun, ended;
 };
 
 /* The interpreter that claims this path explains the change, if it can. What
- * it returns can only add to the record, and its failures stay in its own
- * output (R11): an error is the finding "could not interpret", a finding that
- * is not valid UTF-8 becomes "invalid finding". */
-static void explain(struct run *x, const struct belay_entry *b, const struct belay_entry *a,
-                    const struct verdict *v, const char *scope) {
+ * it adds can only add to the record, and its failures stay in its own output
+ * (R11): an error is the one finding could_not_interpret, and a finding that
+ * breaks its kind's row is invalid_finding (belay_finding checks each). */
+static int explain(struct run *x, const struct belay_entry *b, const struct belay_entry *a,
+                   const struct verdict *v, const char *scope) {
     const struct belay_entry *e = a != NULL ? a : b;
     const size_t sl = strlen(scope), sep = sl > 1 ? 1 : 0;
-    memset(&x->findings, 0, sizeof x->findings);   /* nothing of the last path survives */
-    if (sl + sep + e->path_len >= sizeof x->abs) return;
+    findings_reset(&x->findings, BELAY_INTERP_BINARY);    /* nothing of the last path survives */
+    if (sl + sep + e->path_len >= sizeof x->abs) return 0;
     memcpy(x->abs, scope, sl);
     if (sep) x->abs[sl] = '/';
     memcpy(x->abs + sl + sep, e->path, e->path_len);
     struct belay_claim claim;
     belay_interp_classify(x->abs, sl + sep + e->path_len, &claim);
-    const struct belay_interp *it = x->interp[claim.interp];
-    if (it->explain == NULL) return;
-    const struct belay_interp_input in = { e->path, e->path_len, b, a,
+    const enum belay_interp_id id = belay_interp_dispatch(&claim, b, a);
+    const struct belay_interp *it = x->interp[id];
+    if (it->explain == NULL) return 0;
+    if (it->end != NULL && events_claim(&x->events, id, e->path, e->path_len) == -1) return -1;
+    findings_reset(&x->findings, id);
+    const struct belay_interp_input in = { e->path, e->path_len, x->abs, sl + sep + e->path_len, b, a,
                                            DIFF_OUTCOMES[v->outcome].name, v->changed,
                                            x->content };
-    const enum belay_interp_result r = it->explain(x->state[claim.interp], &in, &x->findings);
-    if (r == BELAY_INTERP_ERROR) {
-        memset(&x->findings, 0, sizeof x->findings);
-        belay_findings_add(&x->findings, "could not interpret");
-    } else if (r != BELAY_INTERP_FINDINGS) {
-        x->findings.n = 0;
+    const enum belay_interp_result r = it->explain(x->state[id], &in, &x->findings);
+    if (findings_oom(&x->findings)) return -1;
+    if (r == BELAY_INTERP_FINDINGS) return 0;
+    findings_reset(&x->findings, id);
+    if (r == BELAY_INTERP_DECLINE) return 0;
+    return belay_finding(&x->findings, FK_COULD_NOT_INTERPRET, NULL, 0);
+}
+
+/* Each end hook, with the sink for its events; one that fails, or added an
+ * event that broke its kind's row, has its events replaced by one
+ * could_not_interpret naming the paths it was given (diff-events E6). */
+static int end_all(struct run *x) {
+    x->ended = true;
+    for (int i = 0; i < BELAY_INTERP_COUNT; i++) {
+        if (x->interp[i]->end == NULL) continue;
+        x->events.interp = i;
+        const enum belay_interp_result r = x->interp[i]->end(x->state[i], &x->events);
+        if (events_oom(&x->events, i)) return -1;
+        if ((r == BELAY_INTERP_ERROR || events_broken(&x->events, i)) &&
+            events_failed(&x->events, i) == -1)
+            return -1;
     }
-    for (size_t i = 0; i < x->findings.n && i < BELAY_FINDINGS_MAX; i++) {
-        char *f = x->findings.item[i];
-        if (!belay_utf8_valid(f, strnlen(f, BELAY_FINDING_BYTES)) ||
-            strnlen(f, BELAY_FINDING_BYTES) == BELAY_FINDING_BYTES)
-            memcpy(f, "invalid finding", sizeof "invalid finding");
-    }
-    if (x->findings.n > BELAY_FINDINGS_MAX) x->findings.n = BELAY_FINDINGS_MAX;
+    return 0;
 }
 
 /* Manifests of different scopes are never compared: refused on their
@@ -173,11 +189,11 @@ static int run_pipeline(struct run *x) {
         }
         if (b != NULL) ancestry_feed(&x->anc[0], b);
         if (a != NULL) ancestry_feed(&x->anc[1], a);
-        if (v.outcome != D_UNCHANGED) explain(x, b, a, &v, hb->scope);
+        if (v.outcome != D_UNCHANGED && explain(x, b, a, &v, hb->scope) == -1) return -1;
         if (emit_path(&x->em, b, a, &v, v.outcome != D_UNCHANGED ? &x->findings : NULL) == -1)
             return -1;
     }
-    if (got == -1) return -1;
+    if (got == -1 || end_all(x) == -1 || emit_events(&x->em, &x->events) == -1) return -1;
     char sb[65], sa[65];
     if (belay_manifest_digest(x->rb, sb) == -1 || belay_manifest_digest(x->ra, sa) == -1) return -1;
     const struct diff_inputs in = { belay_manifest_trailer(x->rb), belay_manifest_trailer(x->ra),
@@ -242,6 +258,7 @@ int diff_run(const char *before, const char *after, const char *out_path,
         goto done;
     }
     x->interp = interp;
+    events_init(&x->events);
     for (int i = 0; i < BELAY_INTERP_COUNT; i++)
         x->state[i] = interp[i]->begin != NULL ? interp[i]->begin() : NULL;
     x->begun = true;
@@ -261,7 +278,7 @@ int diff_run(const char *before, const char *after, const char *out_path,
     if (stats != NULL) {
         const size_t *c = x->em.count;
         *stats = (struct belay_diff_stats){
-            .records = x->em.records, .unchanged = c[D_UNCHANGED], .added = c[D_ADDED],
+            .records = x->em.records, .events = x->em.events, .unchanged = c[D_UNCHANGED], .added = c[D_ADDED],
             .removed = c[D_REMOVED], .modified = c[D_MODIFIED], .type_changed = c[D_TYPE_CHANGED],
             .metadata_only = c[D_METADATA_ONLY], .unknown = c[D_UNKNOWN],
             .dir_timestamps_only = x->em.dir_timestamps, .provisional = x->em.provisional,
@@ -269,8 +286,10 @@ int diff_run(const char *before, const char *after, const char *out_path,
     }
     rc = 0;
 done:
-    for (int i = 0; x->begun && i < BELAY_INTERP_COUNT; i++)
-        if (interp[i]->end != NULL) interp[i]->end(x->state[i]);
+    for (int i = 0; x->begun && !x->ended && i < BELAY_INTERP_COUNT; i++)
+        if (interp[i]->end != NULL) interp[i]->end(x->state[i], NULL);
+    findings_free(&x->findings);
+    events_free(&x->events);
     if (x->out != NULL) fclose(x->out);
     if (tmp_live) unlink(x->tmp);
     emit_close(&x->em);

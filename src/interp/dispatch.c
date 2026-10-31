@@ -1,5 +1,7 @@
 #include "belay/interp.h"
 
+#include "belay/manifest.h"
+
 #include <fnmatch.h>
 #include <string.h>
 
@@ -62,6 +64,16 @@ void belay_interp_classify(const char *abs_path, size_t len, struct belay_claim 
             return;
         }
     }
+}
+
+enum belay_interp_id belay_interp_dispatch(const struct belay_claim *claim,
+                                           const struct belay_entry *before,
+                                           const struct belay_entry *after) {
+    if (claim->interp != BELAY_INTERP_BINARY) return claim->interp;
+    if ((before == NULL && after == NULL) || (before != NULL && !before->has_stored) ||
+        (after != NULL && !after->has_stored))
+        return BELAY_INTERP_BINARY;
+    return BELAY_INTERP_TEXT;
 }
 
 const char *belay_interp_name(enum belay_interp_id id) {

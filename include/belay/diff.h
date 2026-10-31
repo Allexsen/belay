@@ -15,7 +15,8 @@
 
 /* What one diff decided, path by path. */
 struct belay_diff_stats {
-    size_t records;             /* lines emitted between header and trailer */
+    size_t records;             /* path records emitted */
+    size_t events;              /* event records emitted, after the path records */
     size_t unchanged, added, removed, modified, type_changed, metadata_only, unknown;
     size_t dir_timestamps_only; /* of unchanged: directories whose own timestamps alone differ */
     bool provisional;           /* either tree changed while it was walked (trailer) */
@@ -24,7 +25,8 @@ struct belay_diff_stats {
 /* How a diff is run. All optional: NULL options mean the defaults. */
 struct belay_diff_opts {
     const char *store_dir;      /* the content store captures kept copies in; NULL: none,
-                                   and interpreters that need content decline */
+                                   and a path whose interpreter needs content gets the
+                                   finding content_unavailable, reason no_store */
 };
 
 /*

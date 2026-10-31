@@ -12,6 +12,8 @@
  */
 #include "schema/entry.h"
 #include "schema/diff_schema.h"
+#include "schema/finding_schema.h"
+#include "belay/interp.h"
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -243,6 +245,43 @@ static void diff_fields_block(void) {
     }
 }
 
+/* ---- findings and events (src/schema/finding_schema.c) ---- */
+
+static void diff_findings_block(void) {
+    static const char *const T[] = { [FT_UNSET] = NULL, [FT_INT] = "int", [FT_STRING] = "string",
+                                     [FT_BOOL] = "bool" };
+    printf("| kind | interpreter | level | fields | text | meaning |\n|---|---|---|---|---|---|\n");
+    for (int k = FK_UNSET + 1; k < FK_COUNT; k++) {
+        const struct finding_kind_def *d = &FINDING_KINDS[k];
+        char in[128] = "", fl[256] = "";
+        size_t w = 0;
+        if (d->interps == IN_ANY) snprintf(in, sizeof in, "any");
+        else
+            for (int i = 0; i < BELAY_INTERP_COUNT; i++)
+                if (d->interps & (1u << i))
+                    w += (size_t)snprintf(in + w, sizeof in - w, "%s%s", w ? ", " : "",
+                                          belay_interp_name((enum belay_interp_id)i));
+        w = 0;
+        for (int f = 0; f < FINDING_FIELDS_MAX && d->field[f].name; f++) {
+            if (T[d->field[f].type] == NULL) abort();
+            w += (size_t)snprintf(fl + w, sizeof fl - w, "%s%s: %s", w ? ", " : "", d->field[f].name,
+                                  T[d->field[f].type]);
+        }
+        if (strchr(d->meaning, '|') != NULL || strchr(d->text, '|') != NULL) abort();
+        printf("| `%s` | %s | %s | %s | `%s` | %s |\n", d->name, in,
+               d->levels == (LV_PATH | LV_EVENT) ? "path, event" : d->levels == LV_EVENT ? "event" : "path",
+               w ? fl : "--", d->text, d->meaning);
+    }
+}
+
+static void diff_events_block(void) {
+    printf("| rule | statement |\n|---|---|\n");
+    for (int i = 0; i < EVENT_RULE_COUNT; i++) {
+        if (strchr(EVENT_RULES[i].statement, '|') != NULL) abort();
+        printf("| %s | %s |\n", EVENT_RULES[i].id, EVENT_RULES[i].statement);
+    }
+}
+
 /* Every generated block, and the spec file it belongs in: each file must
  * hold each of its blocks exactly once. */
 static const struct {
@@ -261,6 +300,8 @@ static const struct {
     { "diff-outcomes", "diff-v1.md", "src/schema/diff_schema.c", diff_outcomes_block },
     { "diff-reasons", "diff-v1.md", "src/schema/diff_schema.c", diff_reasons_block },
     { "diff-fields", "diff-v1.md", "src/schema/diff_schema.c", diff_fields_block },
+    { "diff-findings", "diff-v1.md", "src/schema/finding_schema.c", diff_findings_block },
+    { "diff-events", "diff-v1.md", "src/schema/finding_schema.c", diff_events_block },
 };
 #define NBLOCKS (sizeof BLOCKS / sizeof BLOCKS[0])
 

@@ -117,7 +117,7 @@ extern const struct line_field_def DIFF_RECORD_FIELDS[DF_COUNT];
  * (decided F2; audit L4). The header cannot carry them: it is written before
  * either trailer is read. */
 extern const struct line_field_def DIFF_TRAILER_END;
-enum diff_trailer_field { DT_DIR_TIMESTAMPS_ONLY, DT_BEFORE_VANISHED, DT_BEFORE_UNSTABLE,
+enum diff_trailer_field { DT_DIR_TIMESTAMPS_ONLY, DT_EVENTS, DT_BEFORE_VANISHED, DT_BEFORE_UNSTABLE,
                           DT_BEFORE_RACED, DT_AFTER_VANISHED, DT_AFTER_UNSTABLE, DT_AFTER_RACED,
                           DT_PROVISIONAL, DT_BEFORE_SHA256, DT_AFTER_SHA256, DT_COUNT };
 extern const struct line_field_def DIFF_TRAILER_FIELDS[DT_COUNT];

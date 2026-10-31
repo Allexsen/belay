@@ -20,6 +20,7 @@ struct emitter {
     size_t count[D_OUTCOME_COUNT];
     size_t dir_timestamps;      /* of count[D_UNCHANGED] */
     size_t records;
+    size_t events;              /* event records, set by emit_events */
     bool provisional;           /* set by emit_trailer */
 };
 
@@ -34,6 +35,9 @@ int emit_header(struct emitter *em, const struct belay_manifest_header *before,
 int emit_path(struct emitter *em, const struct belay_entry *before,
               const struct belay_entry *after, const struct verdict *v,
               const struct belay_findings *findings);
+
+/* The event records, after the last path record (diff-events E1). */
+int emit_events(struct emitter *em, const struct belay_events *ev);
 
 /* What the two manifests said, read to their ends: their trailers and their
  * digests. */

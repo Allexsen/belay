@@ -21,6 +21,7 @@
 #ifndef BELAY_INTERP_H
 #define BELAY_INTERP_H
 
+#include <stdbool.h>
 #include <stddef.h>
 #include <stdint.h>
 
@@ -51,32 +52,51 @@ void belay_interp_classify(const char *abs_path, size_t len, struct belay_claim 
 
 const char *belay_interp_name(enum belay_interp_id id);
 
-/*
- *  Explaining a change (diff.v1, "Interpreters"). For a path whose outcome
- *  is not unchanged, the interpreter that claims it receives the path, both
- *  entries and the core's verdict, and returns findings -- short strings,
- *  emitted as the record's "findings" -- or declines. Findings are
- *  annotations only: nothing here can set or change the outcome, so an
- *  interpreter cannot hide a change. Its failures degrade to its own output
- *  (R11): an error is the finding "could not interpret", a finding that is
- *  not valid UTF-8 is replaced by "invalid finding", and neither stops the
- *  diff. In this version every interpreter declines; Phase 4 adds pip, dpkg,
- *  git and text.
- */
-#define BELAY_FINDINGS_MAX   16
-#define BELAY_FINDING_BYTES  256
-
-struct belay_findings {
-    size_t n;
-    char item[BELAY_FINDINGS_MAX][BELAY_FINDING_BYTES];
-};
-
-/* Appends one finding, truncated to BELAY_FINDING_BYTES - 1 bytes on a
- * character boundary, never inside a UTF-8 sequence. 0, or -1 when
- * BELAY_FINDINGS_MAX are already recorded. */
-int belay_findings_add(struct belay_findings *f, const char *text);
-
 struct belay_entry;
+
+/* The interpreter that explains a path in a diff, from its claim and its two
+ * entries (NULL where absent): the claim's, or TEXT for an unclaimed path
+ * that is stored on every side it exists on (decision 2026-10-31, Q6). */
+enum belay_interp_id belay_interp_dispatch(const struct belay_claim *claim,
+                                           const struct belay_entry *before,
+                                           const struct belay_entry *after);
+
+/*
+ *  Explaining a change (diff.v1, "Interpreters"; pins test/expect/finding-
+ *  kinds.md and diff-events.md). For a path whose outcome is not unchanged,
+ *  the interpreter that claims it receives the path, both entries, the
+ *  core's verdict and the stored content, and adds structured findings
+ *  about that path; facts about a package are event records, added by its
+ *  end hook once every path has been seen. Findings are annotations only:
+ *  nothing here can set or change an outcome. An interpreter gives each
+ *  finding's kind and field values; the core checks them against the kind's
+ *  row (a finding that breaks it becomes invalid_finding) and renders the
+ *  text from the kind's template. Failures degrade to the interpreter's own
+ *  output (R11): an error is the finding could_not_interpret.
+ */
+
+/* One field value, in the kind's field order: `s`/`len` for a string,
+ * `i` for an int, `b` for a bool. */
+struct belay_fv { const char *s; size_t len; uint64_t i; bool b; };
+
+struct belay_findings;          /* one path's findings, kept by the core */
+struct belay_events;            /* one interpreter's events over one diff */
+
+/* Is s/len a string field's value the core accepts (at most 1,024 bytes,
+ * UTF-8, no NUL)? An interpreter that must not emit what would be replaced
+ * checks with this, the core's own rule. */
+bool belay_finding_string_ok(const char *s, size_t len);
+
+/* Adds a finding of `kind` (enum finding_kind, src/schema/finding_schema.h)
+ * to the path being explained. Past 4,096 on one record they are counted
+ * into one final and_more. 0, or -1 (out of memory: the diff fails). */
+int belay_finding(struct belay_findings *f, int kind, const struct belay_fv *v, size_t n);
+
+/* Adds an event of `kind` listing `npaths` paths (relative to the scope;
+ * sorted and deduplicated by the core). Past 65,536 for one interpreter they
+ * are counted into one final and_more. 0, or -1 (out of memory). */
+int belay_event(struct belay_events *ev, int kind, const struct belay_fv *v, size_t n,
+                const char *const *paths, const size_t *path_lens, size_t npaths);
 
 /*
  *  Stored copies, read back for an interpreter (decision 2026-10-31, Q1:
@@ -94,14 +114,16 @@ void belay_content_close(struct belay_content *c);
 
 /* Object `sha256_hex`, read whole when it is at most `max` bytes. 0 with
  * *buf (malloc'd, NUL after the last byte; the caller frees it) and *len; or
- * -1 with belay_err: CORRUPT when it is absent, not a regular file, or does
- * not hash to its name; RANGE when it is larger than `max`; INVALID when
+ * -1 with belay_err: CORRUPT when it is absent (errno ENOENT), not a regular
+ * file, or does not hash to its name; RANGE when it is larger than `max`; INVALID when
  * `sha256_hex` is not 64 lowercase hex digits; IO, NOMEM. */
 int  belay_content_get(const struct belay_content *c, const char *sha256_hex, size_t max,
                        unsigned char **buf, size_t *len);
 struct belay_interp_input {
     const char *path;                   /* relative to the scope */
     size_t path_len;
+    const char *abs_path;               /* scope + "/" + path: what dispatch matched */
+    size_t abs_len;
     const struct belay_entry *before;   /* NULL: added */
     const struct belay_entry *after;    /* NULL: removed */
     const char *outcome;                /* the core's verdict, read-only: a diff.v1 outcome */
@@ -113,14 +135,18 @@ struct belay_interp_input {
 enum belay_interp_result { BELAY_INTERP_FINDINGS, BELAY_INTERP_DECLINE, BELAY_INTERP_ERROR };
 
 /* One interpreter. Over one diff: begin once before the first path (its
- * state, or NULL), explain for each path it claims (`out` cleared first),
- * end once after the last -- also when the diff fails. Any may be NULL. */
+ * state, or NULL), explain for each path it claims (`out` empty at first),
+ * end once after the last -- with `ev` to add its events to after a diff
+ * that read every path, NULL when the diff failed and only the state is to
+ * be freed. An end that returns BELAY_INTERP_ERROR has its events replaced
+ * by one could_not_interpret event naming the paths it was given (diff-
+ * events E6). Any may be NULL. */
 struct belay_interp {
     enum belay_interp_id id;
     void *(*begin)(void);
     enum belay_interp_result (*explain)(void *state, const struct belay_interp_input *in,
                                         struct belay_findings *out);
-    void (*end)(void *state);
+    enum belay_interp_result (*end)(void *state, struct belay_events *ev);
 };
 
 /* The built-in interpreter for `id`. */
