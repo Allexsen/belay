@@ -28,7 +28,7 @@ no prose behind it: the author approved it with this table (2026-10-30).
 - `absent means`, for an optional field:
   - `none`: compared as absent.
   - `none if read`: rule O2.
-  - `unknown`: present on one side only makes the outcome `unknown`.
+  - `unknown`: present on one side only makes the outcome `unknown`, except across a type change (O6).
   - Otherwise why absence cannot occur.
 
 | field | compared as | for types | on mount roots | absent means | source |
@@ -69,3 +69,5 @@ no prose behind it: the author approved it with this table (2026-10-30).
 | O3 | `ino` is compared only when the entry's `dev` is the same on both sides: inode numbers are meaningful within one device. When the scope root's `dev` differs between the two manifests (a remount), the diff header reports it once and states that identity was not compared; `ino` is then compared for no entry, and content still compares by hash. | decision 2026-10-30 (b) |
 | O4 | An absent record means `unchanged`, or a directory whose only difference is its own timestamps, which the trailer counts (O5). That holds only because every other path that is not provably unchanged is emitted -- `unknown` always included. | decision 2026-10-30 (f); decision F5 |
 | O5 | A directory whose `ctime_ns` or `mtime_ns` differs while every compared field is equal and no flag makes anything unknown is not emitted: its listing is recorded through its children, and its timestamps move with every change below it. The diff trailer counts such directories. | decision F5 (review m1-phase3 round 1, F5: every parent of every added or removed file got a ctime-only record) |
+| O6 | A field whose absence means `unknown` (`iflags`), present on one side only: `unknown` (reason `iflags_unknown`), unless the type differs, which gives `type_changed` (rule 2) -- or, with `raced`, `unknown` for the flags' reasons alone (O7). | independent re-check of the oracle edits, 2026-10-30, edit 1; rule 2; O1's form |
+| O7 | Across a type change no field is compared: `changed` is `["type"]`, and when `raced` makes the outcome `unknown` (rule 1) its reasons are those of the flags on either side, never a field's (no `iflags_unknown`). | diff-v1: "when the types are the same, of every field unknown under rule 4 (across a type change no field is compared)" |
