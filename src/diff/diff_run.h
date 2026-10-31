@@ -9,7 +9,7 @@
 #include "belay/interp.h"
 
 int diff_run(const char *before, const char *after, const char *out_path,
-             struct belay_diff_stats *stats,
+             const struct belay_diff_opts *opts, struct belay_diff_stats *stats,
              const struct belay_interp *const interp[BELAY_INTERP_COUNT]);
 
 #endif

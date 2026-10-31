@@ -36,7 +36,8 @@ enum belay_interp_id {
 enum belay_keep {
     BELAY_KEEP_DEFAULT = 0,     /* store only if under the size threshold and text */
     BELAY_KEEP_HASH,            /* claimed, hash only, never stored */
-    BELAY_KEEP_STORE            /* claimed, always stored whatever its size */
+    BELAY_KEEP_STORE,           /* claimed, always stored whatever its size */
+    BELAY_KEEP_STORE_BOUNDED    /* claimed, stored within the store limit, text or not */
 };
 
 struct belay_claim {
@@ -76,7 +77,28 @@ struct belay_findings {
 int belay_findings_add(struct belay_findings *f, const char *text);
 
 struct belay_entry;
-struct belay_content;                   /* stored copies by hash: no store reaches the diff yet */
+
+/*
+ *  Stored copies, read back for an interpreter (decision 2026-10-31, Q1:
+ *  the store reaches the diff through belay_diff's options). The store is
+ *  opened read-only and never created; every object read is hashed and must
+ *  match its name, so a stale, planted or truncated copy is an error, never
+ *  content.
+ */
+struct belay_content;
+
+/* 0, or -1 with belay_err when `store_dir` cannot be opened as a directory
+ * (a symlink in its last component included). */
+int  belay_content_open(const char *store_dir, struct belay_content **out);
+void belay_content_close(struct belay_content *c);
+
+/* Object `sha256_hex`, read whole when it is at most `max` bytes. 0 with
+ * *buf (malloc'd, NUL after the last byte; the caller frees it) and *len; or
+ * -1 with belay_err: CORRUPT when it is absent, not a regular file, or does
+ * not hash to its name; RANGE when it is larger than `max`; INVALID when
+ * `sha256_hex` is not 64 lowercase hex digits; IO, NOMEM. */
+int  belay_content_get(const struct belay_content *c, const char *sha256_hex, size_t max,
+                       unsigned char **buf, size_t *len);
 struct belay_interp_input {
     const char *path;                   /* relative to the scope */
     size_t path_len;
@@ -85,7 +107,7 @@ struct belay_interp_input {
     const char *outcome;                /* the core's verdict, read-only: a diff.v1 outcome */
     uint32_t changed;                   /* the fields that differ: bit i is the manifest's
                                            field i (its key order) */
-    const struct belay_content *content;  /* NULL in this version */
+    const struct belay_content *content;  /* NULL when the diff has no store */
 };
 
 enum belay_interp_result { BELAY_INTERP_FINDINGS, BELAY_INTERP_DECLINE, BELAY_INTERP_ERROR };

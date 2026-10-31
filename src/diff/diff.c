@@ -95,6 +95,7 @@ struct run {
     char abs[2 * PATH_MAX];     /* scope + "/" + path, for interpreter dispatch */
     struct belay_findings findings;
     const struct belay_interp *const *interp;
+    struct belay_content *content;      /* NULL: no store */
     void *state[BELAY_INTERP_COUNT];
     bool begun;
 };
@@ -117,7 +118,8 @@ static void explain(struct run *x, const struct belay_entry *b, const struct bel
     const struct belay_interp *it = x->interp[claim.interp];
     if (it->explain == NULL) return;
     const struct belay_interp_input in = { e->path, e->path_len, b, a,
-                                           DIFF_OUTCOMES[v->outcome].name, v->changed, NULL };
+                                           DIFF_OUTCOMES[v->outcome].name, v->changed,
+                                           x->content };
     const enum belay_interp_result r = it->explain(x->state[claim.interp], &in, &x->findings);
     if (r == BELAY_INTERP_ERROR) {
         memset(&x->findings, 0, sizeof x->findings);
@@ -184,15 +186,15 @@ static int run_pipeline(struct run *x) {
 }
 
 int belay_diff(const char *before, const char *after, const char *out_path,
-               struct belay_diff_stats *stats) {
+               const struct belay_diff_opts *opts, struct belay_diff_stats *stats) {
     const struct belay_interp *builtin[BELAY_INTERP_COUNT];
     for (int i = 0; i < BELAY_INTERP_COUNT; i++)
         builtin[i] = belay_interp_builtin((enum belay_interp_id)i);
-    return diff_run(before, after, out_path, stats, builtin);
+    return diff_run(before, after, out_path, opts, stats, builtin);
 }
 
 int diff_run(const char *before, const char *after, const char *out_path,
-             struct belay_diff_stats *stats,
+             const struct belay_diff_opts *opts, struct belay_diff_stats *stats,
              const struct belay_interp *const interp[BELAY_INTERP_COUNT]) {
     if (before == NULL || after == NULL || out_path == NULL || interp == NULL) {
         belay_err_set(BELAY_ERR_INVALID, 0, "diff: null argument");
@@ -208,6 +210,9 @@ int diff_run(const char *before, const char *after, const char *out_path,
         free(x);
         return -1;
     }
+    if (opts != NULL && opts->store_dir != NULL &&
+        belay_content_open(opts->store_dir, &x->content) == -1)
+        goto done;
     if (belay_manifest_open(before, &x->rb) == -1 || belay_manifest_open(after, &x->ra) == -1 ||
         same_scope(x) == -1 || find_root(x->rb, &x->root[0]) == -1 ||
         find_root(x->ra, &x->root[1]) == -1)
@@ -269,6 +274,7 @@ done:
     if (x->out != NULL) fclose(x->out);
     if (tmp_live) unlink(x->tmp);
     emit_close(&x->em);
+    belay_content_close(x->content);
     pair_free(x->pair);
     belay_manifest_close(x->rb);
     belay_manifest_close(x->ra);
