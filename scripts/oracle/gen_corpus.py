@@ -40,7 +40,14 @@ The corpus has three parts:
     `unverified` on the other side or not (pin O8), a mounted regular file
     whose type changes while raced on either side or both (O8 across a type
     change), the trailer's walk counts, the root itself,
-    names sorting before ".", non-UTF-8 and escaped names;
+    names sorting before ".", non-UTF-8 and escaped names; and the
+    interpreters with no store (interpreters()): text paths modified, added,
+    removed, metadata_only and unknown, a file stored on one side only, dpkg
+    status files (one or two per diff, a side with no stored copy, a type
+    change) and info files, pip RECORDs installed, removed, upgraded,
+    downgraded, version-changed, reinstalled, and the end hook's failures,
+    git hooks, the index, HEAD, loose refs, packed-refs, reflogs, a claimed
+    directory and an unclaimed file below .git/;
   - random pairs: n-bases random trees, each with four mutated variants
     (several changes at once), compared in both directions and with
     themselves;
