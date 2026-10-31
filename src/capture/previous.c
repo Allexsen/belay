@@ -103,12 +103,18 @@ bool prev_trusted(const struct prev_rec *r, const struct stat *st, int64_t refer
 int prev_load(const struct fsops *ops, const char *path, const char *scope, uint64_t root_dev,
               const struct belay_manifest_opts *opts, struct prev_index **out,
               struct prev_info *info, const char **why) {
+    (void)ops;
+    (void)root_dev;
     *out = NULL;
     *why = NULL;
     memset(info, 0, sizeof *info);
     info->newest_validated_ns = INT64_MIN;
     struct belay_manifest_reader *rd = NULL;
-    if (belay_manifest_open(path, &rd) == -1) return -1;
+    if (belay_manifest_open(path, &rd) == -1) {
+        belay_err_clear();
+        *why = "the previous checkpoint cannot be read";
+        return 1;
+    }
     const struct belay_manifest_header *h = belay_manifest_header(rd);
     if (strcmp(h->scope, scope) != 0) { *why = "the previous checkpoint is of another scope"; goto refuse; }
     if (h->hash_max_bytes != opts->hash_max_bytes || h->store_max_bytes != opts->store_max_bytes) {
@@ -143,25 +149,20 @@ int prev_load(const struct fsops *ops, const char *path, const char *scope, uint
         info->files++;
     }
     free(e);
-    if (got == -1) rc = -1;
+    if (got == -1) {
+        belay_err_clear();
+        rc = 1;
+        *why = "the previous checkpoint cannot be read";
+    }
     belay_manifest_close(rd);
     if (rc != 0) {
         prev_free(p);
-        if (rc == 1) *why = "the previous checkpoint is too large to index";
+        if (rc == 1 && *why == NULL) *why = "the previous checkpoint is too large to index";
         return rc;
     }
-    struct stat ms;
-    const int mfd = ops->openat(ops->ctx, AT_FDCWD, path, O_RDONLY | O_CLOEXEC);
-    if (mfd != -1) {
-        if (ops->fstat(ops->ctx, mfd, &ms) == 0) {
-            info->manifest_ctime_ns = ident_of_stat(&ms).ctime_ns;
-            info->same_device = (uint64_t)ms.st_dev == root_dev;
-        }
-        close(mfd);
-    }
-    info->reference_ns = info->newest_validated_ns;
-    if (info->same_device && info->manifest_ctime_ns > info->reference_ns)
-        info->reference_ns = info->manifest_ctime_ns;       /* git's index rule (Q2) */
+    /* R: the previous walk's start on the scope's clock, when known (opts);
+     * else its newest validated ctime (decision Q2's fallback). */
+    info->reference_ns = opts->previous_start_ns > 0 ? opts->previous_start_ns : info->newest_validated_ns;
     *out = p;
     return 0;
 refuse:

@@ -32,6 +32,7 @@
 
 #include "capture.h"
 #include "capture_internal.h"
+#include "ident.h"
 #include "serialize.h"
 #include "store_internal.h"
 
@@ -145,7 +146,23 @@ int capture_write(const struct fsops *ops, const char *out_path, const char *sco
     wc->root_dev = (uint64_t)rst.st_dev;
     wc->scope = real;
     wc->scope_len = strlen(real);
-    wc->newest_ctime_ns = INT64_MIN;
+    /* The root's own ctime counts: a change directly in the root moves it
+     * (review 2026-10-31, Phase 5, 4: without it, mark read every file again
+     * and said the clock went backwards). */
+    wc->newest_ctime_ns = ident_of_stat(&rst).ctime_ns;
+
+    /* When the walk began, on the scope filesystem's clock: the ctime of a
+     * probe file beside the output, when that is on the scope's device. A
+     * later mark trusts only files whose ctime is before it (previous.h). */
+    int64_t walk_start_ns = 0;
+    {
+        FILE *probe = cap_tmpfile(&td);
+        struct stat ps;
+        if (probe != NULL && ops->fstat(ops->ctx, fileno(probe), &ps) == 0 &&
+            (uint64_t)ps.st_dev == wc->root_dev)
+            walk_start_ns = ident_of_stat(&ps).ctime_ns;
+        if (probe != NULL) fclose(probe);
+    }
 
     struct prev_info pinfo = { 0 };
     const char *prev_why = NULL;
@@ -331,6 +348,7 @@ int capture_write(const struct fsops *ops, const char *out_path, const char *sco
         stats->newest_ctime_ns = wc->newest_ctime_ns;
         stats->previous_newest_ns = wc->prev != NULL ? pinfo.newest_validated_ns : INT64_MIN;
         stats->reference_ns = wc->reference_ns;
+        stats->walk_start_ns = walk_start_ns;
     }
     rc = 0;
 

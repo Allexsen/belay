@@ -29,6 +29,9 @@
 #include <stdbool.h>
 #include <stdint.h>
 #include <stdio.h>
+#include <unistd.h>
+#include <sys/stat.h>
+#include <fcntl.h>
 #include <stdlib.h>
 #include <string.h>
 
@@ -116,9 +119,16 @@ int belay_manifest_open(const char *path, struct belay_manifest_reader **out) {
         belay_err_set(BELAY_ERR_NOMEM, 0, "manifest: out of memory");
         return -1;
     }
-    r->f = fopen(path, "rb");
-    if (r->f == NULL) {
-        belay_err_set(BELAY_ERR_IO, errno, "manifest: cannot open %s", path);
+    /* O_NONBLOCK: a FIFO in a manifest's place never blocks the open; it is
+     * refused as not a regular file (review 2026-10-31, Phase 5, 2). */
+    const int fd = open(path, O_RDONLY | O_NONBLOCK | O_CLOEXEC);
+    struct stat st;
+    if (fd == -1 || fstat(fd, &st) == -1 || !S_ISREG(st.st_mode) || (r->f = fdopen(fd, "rb")) == NULL) {
+        if (fd != -1 && (fstat(fd, &st) == -1 || !S_ISREG(st.st_mode)))
+            belay_err_set(BELAY_ERR_CORRUPT, 0, "manifest: %s is not a regular file", path);
+        else
+            belay_err_set(BELAY_ERR_IO, errno, "manifest: cannot open %s", path);
+        if (fd != -1 && r->f == NULL) close(fd);
         belay_manifest_close(r);
         return -1;
     }
