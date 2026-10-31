@@ -34,17 +34,20 @@ CORE_OBJ	= $(CORE_SRC:src/%.c=$(BUILD)/%.o)
 SAN_CORE_OBJ	= $(CORE_SRC:src/%.c=$(SAN_BUILD)/%.o)
 SESSION_SRC	= $(wildcard src/session/*.c)
 TOP_SRC		= $(wildcard src/*.c)
+CLI_SRC		= $(wildcard src/cli/*.c)
+CLI_OBJ		= $(CLI_SRC:src/%.c=$(BUILD)/%.o) $(BUILD)/utils.o
+SAN_CLI_OBJ	= $(CLI_SRC:src/%.c=$(SAN_BUILD)/%.o) $(SAN_BUILD)/utils.o
 
 # The session engine depends on Linux-only headers (sched.h CLONE_*,
 # sys/mount.h, SYS_pivot_root), so it is excluded off Linux. On macOS the
 # build produces the portable core only.
-ifeq ($(UNAME_S),Linux)
-SRC	= $(TOP_SRC) $(CORE_SRC) $(SESSION_SRC)
-else
-SRC	= $(TOP_SRC) $(CORE_SRC)
-endif
-
+# The binary is the CLI and the core. The session engine is built on Linux
+# but not linked (decision 2026-10-31, Q7: unwired until M4).
+SRC	= $(TOP_SRC) $(CLI_SRC) $(CORE_SRC)
 OBJ	= $(SRC:src/%.c=$(BUILD)/%.o)
+ifeq ($(UNAME_S),Linux)
+SESSION_OBJ	= $(SESSION_SRC:src/%.c=$(BUILD)/%.o)
+endif
 
 # One binary per test/test_*.c. The harness is header-only, so each test
 # links only the units it exercises.
@@ -61,9 +64,9 @@ SAN_FLAGS	= -fsanitize=address,undefined -fno-omit-frame-pointer -g -O1
 SAN_BUILD	= $(BUILD)/san
 SAN_TEST_BIN	= $(TEST_SRC:test/%.c=$(SAN_BUILD)/test/%)
 
-.PHONY: all clean test check check-san fuzz bench platform fs-scenarios gen gen-check measure oracle reference lib lint ci-check
+.PHONY: e2e all clean test check check-san fuzz bench platform fs-scenarios gen gen-check measure oracle reference lib lint ci-check
 
-all: $(BIN)
+all: $(BIN) $(SESSION_OBJ)
 
 # Prints what this platform will build. Useful in CI logs.
 platform:
@@ -84,9 +87,9 @@ $(BUILD)/%.o: src/%.c
 # RUN() line was deleted fails the build instead of silently not running.
 TEST_FLAGS	= -Itest -Werror=unused-function -DBELAY_TEST_BIN='"$(notdir $@)"'
 
-$(BUILD)/test/%: test/%.c $(CORE_OBJ)
+$(BUILD)/test/%: test/%.c $(CORE_OBJ) $(CLI_OBJ)
 	@mkdir -p $(dir $@)
-	$(CC) $(CFLAGS) $(WARN) $(INC) $(TEST_FLAGS) -MMD -MP -o $@ $< $(CORE_OBJ) $(TEST_LDFLAGS)
+	$(CC) $(CFLAGS) $(WARN) $(INC) $(TEST_FLAGS) -MMD -MP -o $@ $< $(CORE_OBJ) $(CLI_OBJ) $(TEST_LDFLAGS)
 
 # The harness's own failure and accounting paths (scripts/selftest.sh).
 SELFTEST_BIN	= $(BUILD)/selftest/must_fail $(BUILD)/selftest/must_pass
@@ -105,18 +108,14 @@ $(SAN_BUILD)/%.o: src/%.c
 	@mkdir -p $(dir $@)
 	$(CC) $(SAN_FLAGS) $(WARN) $(INC) -MMD -MP -c $< -o $@
 
-$(SAN_BUILD)/test/%: test/%.c $(SAN_CORE_OBJ)
+$(SAN_BUILD)/test/%: test/%.c $(SAN_CORE_OBJ) $(SAN_CLI_OBJ)
 	@mkdir -p $(dir $@)
-	$(CC) $(SAN_FLAGS) $(WARN) $(INC) $(TEST_FLAGS) -MMD -MP -o $@ $< $(SAN_CORE_OBJ) $(TEST_LDFLAGS)
+	$(CC) $(SAN_FLAGS) $(WARN) $(INC) $(TEST_FLAGS) -MMD -MP -o $@ $< $(SAN_CORE_OBJ) $(SAN_CLI_OBJ) $(TEST_LDFLAGS)
 
 $(BUILD)/test/test_stress $(SAN_BUILD)/test/test_stress: TEST_LDFLAGS = -pthread
 
-# mkdir_p lives beside the CLI (src/utils.c), outside the core archive: its
-# test links it on its own.
-$(BUILD)/test/test_utils: $(BUILD)/utils.o
-$(BUILD)/test/test_utils: TEST_LDFLAGS = $(BUILD)/utils.o
-$(SAN_BUILD)/test/test_utils: $(SAN_BUILD)/utils.o
-$(SAN_BUILD)/test/test_utils: TEST_LDFLAGS = $(SAN_BUILD)/utils.o
+# mkdir_p lives beside the CLI (src/utils.c), outside the core archive; every
+# test links it with the CLI's objects (CLI_OBJ).
 
 # The self-test runs first: if the harness or the runner could not report a
 # failure, no test result would mean anything. Accounting (test/accounting/):
@@ -141,7 +140,13 @@ lint:
 ci-check:
 	@python3 scripts/check-ci.py
 
-check: all lint ci-check gen-check measure test
+check: all lint ci-check gen-check measure test e2e
+
+# M1's done criterion, end to end through the real binary, unprivileged
+# (scripts/e2e.sh). Part of `check`, so every job running it runs this:
+# docker (a non-root user) and macos-portable included.
+e2e: $(BIN)
+	@sh scripts/e2e.sh $(BIN)
 
 # Generated from the schemas in src/schema/ (entry.c, diff_schema.c): the
 # specs' tables and rules -- documentation, a freshness check only. `make gen`
