@@ -12,7 +12,9 @@
 #include <stdlib.h>
 #include <string.h>
 
-#define TEXT_MAX (16u * 1024u * 1024u)      /* bytes of one side read */
+#define TEXT_MAX   (16u * 1024u * 1024u)    /* bytes of one side read */
+#define TEXT_LINES 1048576u                 /* lines of one side: line_delta keeps 24 bytes
+                                               a line (review 2026-10-31, 12) */
 
 static bool is(const struct belay_interp_input *in, const char *outcome) {
     return strcmp(in->outcome, outcome) == 0;
@@ -29,7 +31,8 @@ static enum belay_interp_result explain(void *state, const struct belay_interp_i
     bool ok = true, error = false;
     for (int s = SIDE_BEFORE; s <= SIDE_AFTER; s++) {
         if (side_entry(in, (enum side)s) == NULL) continue;
-        const enum stored_why w = stored_read(in, (enum side)s, TEXT_MAX, &buf[s], &len[s]);
+        enum stored_why w = stored_read(in, (enum side)s, TEXT_MAX, &buf[s], &len[s]);
+        if (w == SW_OK && line_count((const char *)buf[s], len[s]) > TEXT_LINES) w = SW_TOO_LARGE;
         if (w == SW_OK) continue;
         ok = false;
         if (w == SW_ERROR) error = true;

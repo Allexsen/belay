@@ -4,11 +4,11 @@
  *  the interpreter and the file it is given; the rest, split at the first
  *  "\n--\n", is the stored copy before and after, written to a store as a
  *  capture would. For ANY content: no crash, no out-of-bounds access; the
- *  output valid UTF-8, one JSON line per event, each finding within its
- *  bounds; no built-in ever adds an event that breaks its kind's row (that
- *  would be E6 from a bug); text, pip and dpkg never an invalid_finding
- *  (their strings are checked before they are given); and the same bytes
- *  twice.
+ *  output valid UTF-8; every event line an object starting `{"event":"` and
+ *  ending `}`; at most 4,096 findings; no built-in ever adds an event that
+ *  breaks its kind's row (it fails its end hook instead, E6); text, pip and
+ *  dpkg never an invalid_finding (their strings are checked before they are
+ *  given); and the same bytes twice.
  */
 #define _GNU_SOURCE
 #include "belay/error.h"
@@ -93,6 +93,12 @@ static char *once(size_t which, const char *outcome, struct belay_entry *b, stru
     if (m == NULL || findings_write(&f, m) != 0 || fputs("\n", m) == EOF || events_write(&ev, m) != 0) abort();
     fclose(m);
     if (findings_count(&f) > FINDINGS_PER_RECORD) BROKEN("over 4,096 findings");
+    for (const char *l = memchr(out, '\n', *len); l != NULL && l + 1 < out + *len;) {
+        const char *e = memchr(l + 1, '\n', (size_t)(out + *len - l - 1));     /* each event line */
+        if (e == NULL || strncmp(l + 1, "{\"event\":\"", 10) != 0 || e[-1] != '}')
+            BROKEN("an event line that is not one object");
+        l = e;
+    }
     if (CASES[which].id != BELAY_INTERP_GIT && strstr(out, "\"invalid_finding\"") != NULL)
         BROKEN("an invalid_finding from text, pip or dpkg");
     findings_free(&f);

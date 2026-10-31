@@ -105,8 +105,9 @@ static enum belay_interp_result ref_file(const struct belay_interp_input *in, en
         if (ref_value(&s, SIDE_BEFORE, &from, &fl) == -1 || ref_value(&s, SIDE_AFTER, &to, &tl) == -1) {
             belay_err_clear();
             r = BELAY_INTERP_ERROR;
-        } else if (!reg(in, SIDE_BEFORE) && !reg(in, SIDE_AFTER)) {
-            r = BELAY_INTERP_DECLINE;
+        } else if ((!reg(in, SIDE_BEFORE) && !reg(in, SIDE_AFTER)) ||
+                   (reg(in, SIDE_BEFORE) && reg(in, SIDE_AFTER) && fl == tl && memcmp(from, to, fl) == 0)) {
+            r = BELAY_INTERP_DECLINE;           /* no file, or the same value: nothing moved */
         } else if (f == G_HEAD) {
             const struct belay_fv v[] = { FV(from, fl), FV(to, tl) };
             if (belay_finding(out, FK_GIT_HEAD_CHANGED, v, 2) == -1) r = BELAY_INTERP_ERROR;
@@ -218,13 +219,15 @@ static bool executable(const struct belay_entry *e) { return (e->mode & 0100) !=
 static enum belay_interp_result hook(const struct belay_interp_input *in, const char *name,
                                      size_t nl, struct belay_findings *out) {
     int rc;
-    if (in->before == NULL) {
+    const bool b = reg(in, SIDE_BEFORE), a = reg(in, SIDE_AFTER);
+    if (!b && !a) return BELAY_INTERP_DECLINE;          /* a directory, a link: no hook file */
+    if (!b) {
         const struct belay_fv v[] = { FV(name, nl), { .b = executable(in->after) } };
         rc = belay_finding(out, FK_GIT_HOOK_ADDED, v, 2);
-    } else if (in->after == NULL) {
+    } else if (!a) {
         const struct belay_fv v[] = { FV(name, nl) };
         rc = belay_finding(out, FK_GIT_HOOK_REMOVED, v, 1);
-    } else if (is(in, "modified") || is(in, "type_changed")) {
+    } else if (is(in, "modified")) {
         const struct belay_fv v[] = { FV(name, nl), { .b = executable(in->after) } };
         rc = belay_finding(out, FK_GIT_HOOK_CHANGED, v, 2);
     } else if (executable(in->before) != executable(in->after)) {      /* metadata_only */
@@ -266,6 +269,7 @@ static int moves(const struct git_reflog_entry *e, void *ctx) {
 
 static enum belay_interp_result reflog(const struct belay_interp_input *in, const char *ref,
                                        size_t rl, struct belay_findings *out) {
+    if (!reg(in, SIDE_BEFORE) && !reg(in, SIDE_AFTER)) return BELAY_INTERP_DECLINE;  /* a directory */
     if (!reg(in, SIDE_AFTER)) {                 /* every entry removed */
         const struct belay_fv v[] = { FV(ref, rl) };
         return belay_finding(out, FK_GIT_REFLOG_REWRITTEN, v, 1) == -1 ? BELAY_INTERP_ERROR
@@ -308,7 +312,7 @@ static enum belay_interp_result explain(void *state, const struct belay_interp_i
     const bool content = !is(in, "metadata_only");
     switch (f) {
     case G_INDEX: {
-        if (!content) return BELAY_INTERP_DECLINE;
+        if (!content || (!reg(in, SIDE_BEFORE) && !reg(in, SIDE_AFTER))) return BELAY_INTERP_DECLINE;
         return belay_finding(out, FK_GIT_INDEX_CHANGED, NULL, 0) == -1 ? BELAY_INTERP_ERROR
                                                                        : BELAY_INTERP_FINDINGS;
     }

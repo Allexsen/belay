@@ -176,6 +176,13 @@ static void gen_pip(void) {
     for (int i = 0; i < 1500; i++) bprintf(&a, "pkg/new/added_%d.py,sha256=%064d,10\n", i, i);
     name_put("record_before", &b);
     name_put("record_after", &a);
+    /* At the bound: 262,144 rows of 64 bytes, 16 MiB a side, every row changed. */
+    for (int i = 0; i < 262144; i++) {
+        bprintf(&b, "p/%08d.py,sha256=%034d,%07d\n", i, i, i);
+        bprintf(&a, "p/%08d.py,sha256=%034d,%07d\n", i, i + 1, i);
+    }
+    name_put("record_bound_before", &b);
+    name_put("record_bound_after", &a);
 }
 
 static void gen_text(void) {
@@ -253,6 +260,11 @@ static int run(const char *scenario) {
         st = belay_interp_builtin(id)->begin();
         const struct belay_entry b = entry("record_before"), a = entry("record_after");
         path(&k, id, st, c, "/s/sp/big-1.0.dist-info/RECORD", &b, &a, "modified");
+    } else if (strcmp(scenario, "pip_record_bound") == 0) {
+        id = BELAY_INTERP_PIP;
+        st = belay_interp_builtin(id)->begin();
+        const struct belay_entry b = entry("record_bound_before"), a = entry("record_bound_after");
+        path(&k, id, st, c, "/s/sp/big-1.0.dist-info/RECORD", &b, &a, "modified");
     } else if (strcmp(scenario, "pip_5000_upgrades") == 0 || strcmp(scenario, "pip_100k_installs") == 0) {
         id = BELAY_INTERP_PIP;
         st = belay_interp_builtin(id)->begin();
@@ -319,7 +331,7 @@ int main(int argc, char **argv) {
         gen_git();
         if (strcmp(argv[1], "gen") == 0) return 0;
         static const char *const S[] = { "none", "dpkg_3mb", "dpkg_bound", "pip_record_10k",
-                                         "pip_5000_upgrades", "pip_100k_installs", "text_200k_lines",
+                                         "pip_record_bound", "pip_5000_upgrades", "pip_100k_installs", "text_200k_lines",
                                          "git_packed_100k" };
         for (size_t i = 0; i < sizeof S / sizeof S[0]; i++) {
             fflush(stdout);

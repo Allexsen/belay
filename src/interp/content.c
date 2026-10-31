@@ -48,6 +48,8 @@ static bool lower_hex64(const char *h) {
     return h[64] == '\0';
 }
 
+#define EFTYPE_NOT_REG (-1)     /* not an errno: fstatat found no regular file */
+
 int belay_content_get(const struct belay_content *c, const char *hex, size_t max,
                       unsigned char **buf, size_t *len) {
     *buf = NULL;
@@ -56,19 +58,31 @@ int belay_content_get(const struct belay_content *c, const char *hex, size_t max
         belay_err_set(BELAY_ERR_INVALID, 0, "content: not an object name");
         return -1;
     }
+    /* Never opened unless it is a regular file: a FIFO would block the
+     * diff, a device could act on being opened (review 2026-10-31, 1 and 6).
+     * O_NONBLOCK covers a swap between the check and the open; fstat below
+     * checks the file that was opened. */
     const char prefix[3] = { hex[0], hex[1], '\0' };
+    struct stat st;
     const int pfd = openat(c->dfd, prefix, O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC);
-    const int fd = pfd == -1 ? -1 : openat(pfd, hex + 2, O_RDONLY | O_NOFOLLOW | O_CLOEXEC);
-    const int e = errno;
-    if (pfd != -1) close(pfd);
+    int fd = -1, e = errno;
+    if (pfd != -1) {
+        if (fstatat(pfd, hex + 2, &st, AT_SYMLINK_NOFOLLOW) == -1) e = errno;
+        else if (!S_ISREG(st.st_mode)) e = EFTYPE_NOT_REG;
+        else if ((fd = openat(pfd, hex + 2, O_RDONLY | O_NOFOLLOW | O_NONBLOCK | O_CLOEXEC)) == -1) e = errno;
+        close(pfd);
+    }
     if (fd == -1) {
-        if (e == ENOENT || e == ELOOP || e == ENOTDIR)
-            belay_err_set(BELAY_ERR_CORRUPT, e == ENOENT ? ENOENT : 0, "content: object %s is missing", hex);
-        else
+        if (e == ENOENT)
+            belay_err_set(BELAY_ERR_CORRUPT, ENOENT, "content: object %s is missing", hex);
+        else if (e == ENOMEM)
+            belay_err_set(BELAY_ERR_NOMEM, 0, "content: out of memory");
+        else if (e == EIO || e == EACCES || e == EPERM || e == EMFILE || e == ENFILE)
             belay_err_set(BELAY_ERR_IO, e, "content: cannot open object %s", hex);
+        else            /* a symlink, a non-directory prefix, anything not a regular file */
+            belay_err_set(BELAY_ERR_CORRUPT, 0, "content: object %s is not a regular file", hex);
         return -1;
     }
-    struct stat st;
     if (fstat(fd, &st) == -1 || !S_ISREG(st.st_mode)) {
         close(fd);
         belay_err_set(BELAY_ERR_CORRUPT, 0, "content: object %s is not a regular file", hex);

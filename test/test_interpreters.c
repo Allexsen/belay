@@ -73,6 +73,14 @@ static struct belay_entry file(const char *stored, unsigned mode) {
     return e;
 }
 
+static struct belay_entry other(enum belay_entry_type t, unsigned mode) {
+    struct belay_entry e;
+    memset(&e, 0, sizeof e);
+    e.type = t;
+    e.mode = mode;
+    return e;
+}
+
 /* ---- running one interpreter over paths, then its end hook ---- */
 
 struct run {
@@ -427,6 +435,36 @@ TEST(git_ref_that_cannot_be_parsed_could_not_be_interpreted) {
     r_free(&r);
 }
 
+/* Review 2026-10-31, findings 2 and 5: a side on which a claimed path is
+ * not a regular file counts as absent -- a new ref namespace's directory is
+ * no rewritten reflog, a directory under hooks/ no hook. */
+TEST(git_paths_that_are_not_files_are_absent) {
+    struct run r;
+    r_begin(&r, BELAY_INTERP_GIT, true);
+    const struct belay_entry d = other(BELAY_T_DIR, 0755), l = other(BELAY_T_LNK, 0777), x = file(NULL, 0755);
+    ASSERT_EQ_STR("", r_path(&r, "/s/r/.git/logs/refs/heads/feature", NULL, &d, "added"));
+    ASSERT_EQ_STR("", r_path(&r, "/s/r/.git/logs/refs/heads/feature", &d, NULL, "removed"));
+    ASSERT_EQ_STR("", r_path(&r, "/s/r/.git/hooks/pre-push.d", NULL, &d, "added"));
+    ASSERT_EQ_STR("", r_path(&r, "/s/r/.git/hooks/pre-commit", NULL, &l, "added"));
+    ASSERT_EQ_STR("", r_path(&r, "/s/r/.git/refs/heads/feature", NULL, &d, "added"));
+    ASSERT_EQ_STR("", r_path(&r, "/s/r/.git/index", NULL, &d, "added"));
+    ASSERT_EQ_STR(F1("{\"kind\":\"git_hook_removed\",\"hook\":\"post-merge\",\"text\":\"hook post-merge removed\"}"),
+                  r_path(&r, "/s/r/.git/hooks/post-merge", &x, &l, "type_changed"));
+    r_free(&r);
+}
+
+/* Review 2026-10-31, finding 9: a ref file rewritten with the same value
+ * names no move. */
+TEST(git_a_ref_rewritten_to_the_same_value_says_nothing) {
+    struct run r;
+    r_begin(&r, BELAY_INTERP_GIT, true);
+    const struct belay_entry a = file(put(OA "\n"), 0), b = file(put(OA "  \n"), 0);
+    const struct belay_entry h1 = file(put("ref: refs/heads/main\n"), 0), h2 = file(put("ref:  refs/heads/main\nextra\n"), 0);
+    ASSERT_EQ_STR("", r_path(&r, "/s/r/.git/refs/heads/main", &a, &b, "modified"));
+    ASSERT_EQ_STR("", r_path(&r, "/s/r/.git/HEAD", &h1, &h2, "modified"));
+    r_free(&r);
+}
+
 /* ================================= pip ================================= */
 
 #define SP "/s/lib/python3.12/site-packages/"
@@ -576,6 +614,45 @@ TEST(pip_what_cannot_be_named_or_paired_fails_the_end_hook) {
     r_path(&r, REC("numpy-1.26.3"), &e, NULL, "removed");
     r_path(&r, REC("numpy-2.1.0"), NULL, &e, "added");
     ASSERT_TRUE(strncmp(r_end(&r), "{\"event\":\"could_not_interpret\"", 30) == 0);
+    r_free(&r);
+}
+
+/* Review 2026-10-31, finding 4: a RECORD's rows are bounded (262,144); past
+ * that the side is too_large, never gigabytes of rows. */
+TEST(pip_a_record_past_its_row_bound_is_too_large) {
+    const size_t rows = 262145;
+    char *big = malloc(rows * 4 + 1);
+    REQUIRE(big != NULL);
+    for (size_t i = 0; i < rows; i++) memcpy(big + 4 * i, "x,,\n", 4);
+    big[rows * 4] = '\0';
+    struct run r;
+    r_begin(&r, BELAY_INTERP_PIP, true);
+    const struct belay_entry b = file(put("x,,\n"), 0), a = file(put(big), 0);
+    free(big);
+    ASSERT_EQ_STR(F1("{\"kind\":\"content_unavailable\",\"reason\":\"too_large\",\"side\":\"after\","
+                     "\"text\":\"content unavailable (after): too_large\"}"),
+                  r_path(&r, REC("six-1.16.0"), &b, &a, "modified"));
+    ASSERT_EQ_STR("{\"event\":\"content_unavailable\",\"interp\":\"pip\",\"reason\":\"too_large\",\"side\":\"after\","
+                  "\"text\":\"content unavailable (after): too_large\",\"paths\":[\"" REL("six-1.16.0") "\"]}\n",
+                  r_end(&r));
+    r_free(&r);
+}
+
+/* Review 2026-10-31, finding 12: a text side over 1,048,576 lines is
+ * too_large (the line diff keeps 24 bytes a line). */
+TEST(text_past_its_line_bound_is_too_large) {
+    const size_t n = 1048577;
+    char *nl = malloc(n + 1);
+    REQUIRE(nl != NULL);
+    memset(nl, '\n', n);
+    nl[n] = '\0';
+    struct run r;
+    r_begin(&r, BELAY_INTERP_TEXT, true);
+    const struct belay_entry a = file(put(nl), 0);
+    free(nl);
+    ASSERT_EQ_STR(F1("{\"kind\":\"content_unavailable\",\"reason\":\"too_large\",\"side\":\"after\","
+                     "\"text\":\"content unavailable (after): too_large\"}"),
+                  r_path(&r, "/s/lines", NULL, &a, "added"));
     r_free(&r);
 }
 
@@ -795,6 +872,27 @@ TEST(dpkg_a_field_with_a_nul_fails_the_end_hook_not_the_row) {
     r_free(&r);
 }
 
+/* Review 2026-10-31, finding 3: every value fits, but the event's text
+ * would not (two 600-byte versions): dpkg fails its own end hook (E6),
+ * rather than handing the core an event that breaks its row. */
+TEST(dpkg_an_event_whose_text_would_not_fit_fails_the_end_hook) {
+    static char b[2000], a[2000], v1[601], v2[601];
+    memset(v1, '1', 600);
+    memset(v2, '2', 600);
+    snprintf(b, sizeof b, "Package: bash\nStatus: install ok installed\nVersion: 5.1\n\n"
+                          "Package: big\nStatus: install ok installed\nVersion: %s\n", v1);
+    snprintf(a, sizeof a, "Package: bash\nStatus: install ok installed\nVersion: 5.2\n\n"
+                          "Package: big\nStatus: install ok installed\nVersion: %s\n", v2);
+    struct run r;
+    r_begin(&r, BELAY_INTERP_DPKG, true);
+    const struct belay_entry eb = file(put(b), 0), ea = file(put(a), 0);
+    r_path(&r, STATUS, &eb, &ea, "modified");
+    r.ev.interp = r.id;
+    ASSERT_EQ_INT(BELAY_INTERP_ERROR, r.it->end(r.state, &r.ev));
+    ASSERT_FALSE(events_broken(&r.ev, BELAY_INTERP_DPKG));
+    r_free(&r);
+}
+
 /* ================================ binary =============================== */
 
 TEST(binary_declines_everything) {
@@ -819,12 +917,16 @@ int main(void) {
     RUN(git_reflog_that_is_not_appended_to_is_rewritten);
     RUN(git_reflog_without_a_copy_is_content_unavailable);
     RUN(git_ref_that_cannot_be_parsed_could_not_be_interpreted);
+    RUN(git_paths_that_are_not_files_are_absent);
+    RUN(git_a_ref_rewritten_to_the_same_value_says_nothing);
     RUN(pip_installs_removals_and_version_changes_are_events);
     RUN(pip_pairs_within_one_directory_by_normalized_name);
     RUN(pip_reinstall_counts_files_by_record_row);
     RUN(pip_metadata_and_unproven_changes_add_nothing);
     RUN(pip_record_that_cannot_be_read_is_said_on_the_path_and_as_an_event);
     RUN(pip_what_cannot_be_named_or_paired_fails_the_end_hook);
+    RUN(pip_a_record_past_its_row_bound_is_too_large);
+    RUN(text_past_its_line_bound_is_too_large);
     RUN(dpkg_status_deltas_are_events_in_package_order);
     RUN(dpkg_a_new_status_installs_what_it_lists);
     RUN(dpkg_info_files_and_unproven_changes_add_nothing);
@@ -832,6 +934,7 @@ int main(void) {
     RUN(dpkg_status_that_cannot_be_parsed_fails_the_end_hook);
     RUN(empty_files_are_nothing_listed);
     RUN(dpkg_a_field_with_a_nul_fails_the_end_hook_not_the_row);
+    RUN(dpkg_an_event_whose_text_would_not_fit_fails_the_end_hook);
     RUN(binary_declines_everything);
     char cmd[400];
     snprintf(cmd, sizeof cmd, "rm -rf '%s'", g_store);

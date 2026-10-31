@@ -101,7 +101,7 @@ struct run {
     const struct belay_interp *const *interp;
     struct belay_content *content;      /* NULL: no store */
     void *state[BELAY_INTERP_COUNT];
-    bool begun, ended;
+    bool begun, ended[BELAY_INTERP_COUNT];  /* ended: each end hook is called once */
 };
 
 /* The interpreter that claims this path explains the change, if it can. What
@@ -139,10 +139,10 @@ static int explain(struct run *x, const struct belay_entry *b, const struct bela
  * event that broke its kind's row, has its events replaced by one
  * could_not_interpret naming the paths it was given (diff-events E6). */
 static int end_all(struct run *x) {
-    x->ended = true;
     for (int i = 0; i < BELAY_INTERP_COUNT; i++) {
         if (x->interp[i]->end == NULL) continue;
         x->events.interp = i;
+        x->ended[i] = true;
         const enum belay_interp_result r = x->interp[i]->end(x->state[i], &x->events);
         if (events_oom(&x->events, i)) return -1;
         if ((r == BELAY_INTERP_ERROR || events_broken(&x->events, i)) &&
@@ -286,8 +286,8 @@ int diff_run(const char *before, const char *after, const char *out_path,
     }
     rc = 0;
 done:
-    for (int i = 0; x->begun && !x->ended && i < BELAY_INTERP_COUNT; i++)
-        if (interp[i]->end != NULL) interp[i]->end(x->state[i], NULL);
+    for (int i = 0; x->begun && i < BELAY_INTERP_COUNT; i++)
+        if (!x->ended[i] && interp[i]->end != NULL) interp[i]->end(x->state[i], NULL);
     findings_free(&x->findings);
     events_free(&x->events);
     if (x->out != NULL) fclose(x->out);
