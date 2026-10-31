@@ -99,8 +99,23 @@ REASON_OF = {"no_store": "no_store", "missing_nostored": "missing", "missing_abs
              "too_large_rows": "too_large"}
 
 
-def check_cell(cell, mine):
-    """Did this pair's reference output show the cell it was built for?"""
+CNI = b"[" + ref.finding_json("could_not_interpret", {}) + b"]"
+
+
+def cni_records(mine):
+    """How many records the reference gives could_not_interpret."""
+    return sum(1 for f in mine.findings.values() if f == CNI)
+
+
+def no_unknown_findings(mine):
+    """An unknown path carries no path finding (P7)."""
+    return all(mine.findings.get(p) is None for p, o in mine.outcomes.items()
+               if o == "unknown" and p in mine.claims)
+
+
+def check_cell(cell, mine, belay=None):
+    """Did this pair's reference output show the cell it was built for?
+    (belay's parsed diff is used by one probe only: a claim's edge.)"""
     E = evs(mine)
     K = kinds(mine)
 
@@ -156,21 +171,95 @@ def check_cell(cell, mine):
         "pip.normalize_equal_paired": lambda: "pip_upgraded" in K and "pip_downgraded" in K,
         "pip.name_split_first_dash": lambda: has("pip_installed", name="typing",
                                                  version="extensions-4.8.0"),
-        "pip.E6.unnameable": lambda: K == ["could_not_interpret"],
-        "pip.E6.ambiguous": lambda: K == ["could_not_interpret"],
+        # E10: the file's could_not_interpret first (no name), the rest stand
+        "pip.E10.unnameable": lambda: K == ["could_not_interpret", "pip_upgraded", "pip_installed"]
+        and len(E[0]["paths" if "paths" in E[0] else "paths_b64"]) == 1
+        and cni_records(mine) == 1,
+        # in that name's place, naming the RECORDs, each record could_not_interpret
+        "pip.E10.ambiguous": lambda: ("pip_installed" in K or "pip_removed" in K)
+        and any(e["event"] == "could_not_interpret" and len(e["paths"]) >= 3
+                and cni_records(mine) == len(e["paths"]) for e in E),
+        "pip.E10.unparseable_record": lambda: K == ["could_not_interpret", "pip_reinstalled",
+                                                    "pip_installed"]
+        and cni_records(mine) == 1,
+        "dpkg.E9.oversized_text": lambda: K == ["dpkg_upgraded", "invalid_finding",
+                                                "dpkg_removed"],
+        "dpkg.E9.nul_value": lambda: K == ["dpkg_upgraded", "invalid_finding",
+                                           "dpkg_state_changed"],
+        "dpkg.E9.non_utf8_value": lambda: K == ["dpkg_upgraded", "invalid_finding",
+                                                "invalid_finding", "dpkg_removed"],
+        "dpkg.E10.unparseable_status": lambda: K == ["could_not_interpret", "dpkg_installed",
+                                                     "dpkg_upgraded"]
+        and E[0]["paths"] == ["var/lib/dpkg/status"] and cni_records(mine) == 1,
+        # P7
+        "pip.P7.unknown_pairs": lambda: has("pip_upgraded", provisional=True)
+        and has("pip_downgraded", provisional=True)
+        and any(e["event"] == "pip_installed" and "provisional" not in e for e in E)
+        and no_unknown_findings(mine),
+        "pip.P7.unknown_unpaired": lambda: has("pip_installed", provisional=True)
+        and sum(1 for e in E if e["event"] == "pip_removed" and e.get("provisional")) == 2
+        and any(e["event"] == "pip_removed" and "provisional" not in e for e in E)
+        and no_unknown_findings(mine),
+        "pip.P7.unknown_both_sides": lambda: K == ["pip_installed"]
+        and "unknown" in mine.outcomes.values() and no_unknown_findings(mine),
+        "dpkg.P7.unknown_status_readable": lambda: any(e.get("provisional") for e in E)
+        and "content_unavailable" not in K and no_unknown_findings(mine),
+        "dpkg.P7.unknown_status_no_store": lambda: K == ["content_unavailable"]
+        and E[0].get("provisional") is True and no_unknown_findings(mine),
+        "dpkg.P7.unknown_and_proven_no_store": lambda: K == ["content_unavailable"]
+        and E[0].get("provisional") is True and len(E[0]["paths"]) == 2
+        and no_unknown_findings(mine) and any(mine.findings.values()),
+        # no-name events first: could_not_interpret by path, content_unavailable by reason
+        "order.dpkg.no_name_first": lambda: K == ["could_not_interpret", "could_not_interpret",
+                                                  "content_unavailable", "content_unavailable",
+                                                  "dpkg_upgraded", "dpkg_installed"]
+        and E[0]["paths"][0] < E[1]["paths"][0]
+        and [E[2]["reason"], E[3]["reason"]] == ["missing", "corrupt"],
+        "order.pip.no_name_first": lambda: K == ["could_not_interpret", "could_not_interpret",
+                                                 "content_unavailable", "pip_installed",
+                                                 "could_not_interpret", "pip_installed"]
+        and E[0]["paths"][0] < E[1]["paths"][0],
         "pip.metadata_changes_nothing": lambda: not K and not any(mine.findings.values()),
         "pip.events_order": lambda: len(set(K)) >= 3 and len(K) >= 5,
         "paths_b64": lambda: any("paths_b64" in e for e in E),
         "random": lambda: True,
         "probe.dpkg.E5_bound": lambda: K.count("dpkg_installed") == ref.EVENT_BOUND - 1
         and K[-1] == "and_more",
-        "probe.dpkg.E6_line_not_a_field": lambda: K == ["could_not_interpret"],
-        "probe.dpkg.E6_value_not_string": lambda: K == ["could_not_interpret"],
-        "probe.dpkg.E6_paths_given": lambda: K == ["could_not_interpret"],
-        "probe.pip.E6_row_of_two_fields": lambda: K == ["could_not_interpret"],
-        "probe.pip.E6_record_not_utf8": lambda: K == ["could_not_interpret"],
-        "probe.dpkg.E6_event_text_over_1024": lambda: K == ["could_not_interpret"],
-        "probe.dpkg.md5sums_outside_info": lambda: K == ["could_not_interpret"],
+        "probe.dpkg.E10_line_not_a_field": lambda: K == ["could_not_interpret"]
+        and cni_records(mine) == 1,
+        "probe.dpkg.E9_value_not_string": lambda: K == ["invalid_finding"],
+        "probe.dpkg.E9_value_over_1024": lambda: K == ["invalid_finding", "dpkg_installed"],
+        "probe.dpkg.E9_version_over_1024": lambda: K == ["invalid_finding", "dpkg_installed"],
+        "probe.dpkg.long_value_without_event": lambda: K == ["dpkg_installed"],
+        "probe.dpkg.E10_names_the_file": lambda: K == ["could_not_interpret"]
+        and E[0]["paths"] == ["var/lib/dpkg/status"],
+        "probe.pip.E10_row_of_two_fields": lambda: K == ["could_not_interpret"],
+        "probe.pip.E10_row_of_four_fields": lambda: K == ["could_not_interpret"],
+        "probe.pip.E10_record_not_utf8": lambda: K == ["could_not_interpret"],
+        "probe.dpkg.E9_event_text_over_1024": lambda: K == ["invalid_finding"],
+        "probe.dpkg.unknown_E9_provisional": lambda: K == ["invalid_finding", "dpkg_installed"]
+        and all(e.get("provisional") for e in E) and no_unknown_findings(mine),
+        "probe.dpkg.unknown_E10_provisional": lambda: K == ["could_not_interpret",
+                                                           "dpkg_upgraded"]
+        and E[0].get("provisional") is True and "provisional" not in E[1]
+        and cni_records(mine) == 0,
+        "probe.pip.unknown_unnameable_one_side": lambda: K == ["could_not_interpret",
+                                                              "pip_installed"]
+        and E[0].get("provisional") is True and cni_records(mine) == 0,
+        "probe.pip.unknown_unnameable_both_sides": lambda: K == ["pip_installed"],
+        "probe.pip.ambiguous_with_unknown": lambda: K == ["could_not_interpret"]
+        and E[0].get("provisional") is True and cni_records(mine) == 2,
+        "probe.pip.E9_text_over_1024": lambda: K == ["pip_installed", "invalid_finding",
+                                                     "pip_installed"],
+        "probe.pip.unnameable_content_unavailable": lambda: K == ["could_not_interpret",
+                                                                 "content_unavailable"]
+        and cni_records(mine) == 1,
+        # The claim's edge, seen in belay's records: an .md5sums outside
+        # var/lib/dpkg/info/ is text (text_added), the one inside is dpkg's.
+        "probe.dpkg.md5sums_outside_info": lambda: belay is not None
+        and (belay[1].get(b"etc/foo.md5sums", (None, None))[1] or b"").startswith(
+            b'[{"kind":"text_added"')
+        and belay[1].get(b"var/lib/dpkg/info/curl.md5sums", (None, None))[1] is None,
     }
     if cell in simple:
         return bool(simple[cell]())
@@ -224,13 +313,14 @@ def main():
             for e in mine.events:
                 o = json.loads(e)
                 seen_kinds["%s %s" % (o["interp"], o["event"])] += 1
-            diffs = compare(parse_diff(out), mine)
+            belay = parse_diff(out)
+            diffs = compare(belay, mine)
             if diffs:
                 report.append("[%s]" % mode)
                 report += ["  " + x for x in diffs]
             for cell in case.tags[mode]:
                 declared.add(cell)
-                if check_cell(cell, mine):
+                if check_cell(cell, mine, belay):
                     hits[cell] += 1
                 else:
                     report.append("[%s] cell %s not shown by the reference's output" % (mode, cell))

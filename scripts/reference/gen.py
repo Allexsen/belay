@@ -42,6 +42,12 @@ def reg(content=None, store="ok", big=None, gen=0, raced=False, mode=0o100644,
             "raced": raced, "mode": mode, "unverified": unverified}
 
 
+def unreadable_dir():
+    """A directory belay could not list: nothing below it on that side, so a
+    path that is there on the other side is unknown."""
+    return {"type": "dir", "unreadable": True}
+
+
 def lnk(target, gen=0):
     return {"type": "lnk", "target": target, "gen": gen, "mode": 0o120777, "raced": False}
 
@@ -134,6 +140,8 @@ def entry_line(p, e, digest_of):
         kv += [jkey("mode", 0o40755), jkey("uid", 0), jkey("gid", 0), jkey("size", 4096),
                jkey("mtime_ns", 1750000000000000000), jkey("ctime_ns", 1750000000000000000),
                jkey("ino", ino), jkey("dev", DEV), jkey("nlink", 2)]
+        if e.get("unreadable"):
+            kv.append(jkey("unreadable", True))
         return b"{" + b",".join(kv) + b"}"
     if t == "lnk":
         size = len(e["target"])
@@ -174,8 +182,9 @@ def write_manifest(fn, tree, created_ns, digest_of):
     for p in sorted(t):
         lines.append(entry_line(p, t[p], digest_of))
     raced = sum(1 for e in t.values() if e.get("raced"))
-    lines.append(b'{"belay_manifest_end":%d,"vanished":0,"unreadable":0,"unstable":0,'
-                 b'"mounts":0,"raced":%d}' % (len(t), raced))
+    unreadable = sum(1 for e in t.values() if e.get("unreadable"))
+    lines.append(b'{"belay_manifest_end":%d,"vanished":0,"unreadable":%d,"unstable":0,'
+                 b'"mounts":0,"raced":%d}' % (len(t), unreadable, raced))
     with open(fn, "wb") as f:
         f.write(b"\n".join(lines) + b"\n")
 
@@ -451,9 +460,13 @@ def dist(site, name, version):
     return di + b"/RECORD", di + b"/METADATA"
 
 
-def put_dist(case, side, site, name, version, rows, gen=0, store="ok", term="\r\n"):
+def put_dist(case, side, site, name, version, rows, gen=0, store="ok", term="\r\n",
+             raced=False, raw=None):
+    """A dist-info on one side. raced: its RECORD raced (outcome unknown).
+    raw: the RECORD's bytes instead of `rows` rendered."""
     rec, meta = dist(site, name, version)
-    case.put(side, rec, reg(record_bytes(rows, term), store=store, gen=gen))
+    data = raw if raw is not None else record_bytes(rows, term)
+    case.put(side, rec, reg(data, store=store, gen=gen, raced=raced))
     case.put(side, meta, reg(b"Metadata-Version: 2.1\nName: " + name + b"\nVersion: " + version
                              + b"\n", gen=gen))
     if name:
@@ -477,14 +490,31 @@ def random_case(rng, i):
     roots = [b""] + ([b"chroot/bookworm/"] if rng.random() < 0.4 else [])
     if rng.random() < 0.05:
         roots.append(b"chroot/\xfe/")
+    def odd(data):
+        """Now and then, a status E9 or E10 applies to: a line that is no
+        field (E10), a stanza with a NUL or non-UTF-8 value, or one whose
+        event text is over 1,024 bytes (E9)."""
+        r = rng.random()
+        if r < 0.03:
+            return data + b"not a field\n"
+        if r < 0.05:
+            return data + b"\n" + stanza(b"odd-" + rng.choice(PKGS), rng.choice([b"1\0", b"1\xff"]),
+                                         rng.choice(INSTALLED + NOT_INSTALLED))
+        if r < 0.07:
+            return data + b"\n" + stanza(b"x" * rng.choice([600, 1025]), b"1." + b"0" * 500,
+                                         rng.choice(INSTALLED))
+        return data
+
     for root in roots:
         sp = root + b"var/lib/dpkg/status"
         db = rand_stanzas(rng, rng.randrange(0, 14))
         r = rng.random()
         if r < 0.1:
-            c.put("before", sp, reg(render_db(db), store=rng.choice(store_choices)))
+            c.put("before", sp, reg(odd(render_db(db)), store=rng.choice(store_choices),
+                                    raced=rng.random() < 0.1))
         elif r < 0.2:
-            c.put("after", sp, reg(render_db(db), store=rng.choice(store_choices)))
+            c.put("after", sp, reg(odd(render_db(db)), store=rng.choice(store_choices),
+                                   raced=rng.random() < 0.1))
         elif r < 0.25:
             c.both(sp, reg(render_db(db)))
         elif r < 0.28:
@@ -492,9 +522,9 @@ def random_case(rng, i):
             c.put("after", sp, lnk(b"status-new"))
         else:
             c.put("before", sp, reg(render_db(db), store=rng.choice(store_choices)))
-            c.put("after", sp, reg(render_db(mutate_db(rng, db)), gen=1,
+            c.put("after", sp, reg(odd(render_db(mutate_db(rng, db))), gen=1,
                                     store=rng.choice(store_choices),
-                                    raced=rng.random() < 0.03))
+                                    raced=rng.random() < 0.08))
         if rng.random() < 0.3:
             c.put("after", root + b"var/lib/dpkg/info/" + rng.choice(PKGS) + b".list",
                   reg(b"/usr/share/doc\n", gen=2))
@@ -511,21 +541,40 @@ def random_case(rng, i):
             v1, v2 = rand_pep440(rng), rand_pep440(rng)
             rows = rand_rows(rng, name, v1)
             term = rng.choice(["\r\n", "\n"])
-            op = rng.randrange(9)
+            op = rng.randrange(12)
             st = rng.choice(store_choices)
+            # P7: a RECORD that raced is unknown and still pairs
+            rc = rng.random() < 0.1
             if op == 0:
-                put_dist(c, "after", site, name, v1, rows, store=st, term=term)
+                put_dist(c, "after", site, name, v1, rows, store=st, term=term, raced=rc)
             elif op == 1:
-                put_dist(c, "before", site, name, v1, rows, store=st, term=term)
+                put_dist(c, "before", site, name, v1, rows, store=st, term=term, raced=rc)
             elif op == 2 and v1 != v2:
-                put_dist(c, "before", site, name, v1, rows, store=st, term=term)
+                put_dist(c, "before", site, name, v1, rows, store=st, term=term,
+                         raced=rng.random() < 0.1)
                 spell = respell(rng, name)
                 put_dist(c, "after", site, spell, v2, rand_rows(rng, spell, v2), gen=1,
-                         store=rng.choice(store_choices), term=term)
+                         store=rng.choice(store_choices), term=term, raced=rc)
+                if rng.random() < 0.15:        # E10: a name added twice, removed once
+                    spell2 = respell(rng, name)
+                    v3 = rand_pep440(rng)
+                    if (spell2, v3) != (spell, v2):
+                        put_dist(c, "after", site, spell2, v3, rand_rows(rng, spell2, v3),
+                                 gen=2, term=term)
             elif op == 3:
                 put_dist(c, "before", site, name, v1, rows, store=st, term=term)
-                put_dist(c, "after", site, name, v1, mutate_rows(rng, rows), gen=1,
-                         store=rng.choice(store_choices), term=term)
+                after_rows = mutate_rows(rng, rows)
+                raw = None
+                if rng.random() < 0.05:        # E10: a row of other than three fields
+                    raw = record_bytes(after_rows, term) + rng.choice(
+                        [b"x.py,sha256=X\n", b"x.py,h,1,extra\n", b"\xff,,\n"])
+                put_dist(c, "after", site, name, v1, after_rows, gen=1,
+                         store=rng.choice(store_choices), term=term, raced=rc, raw=raw)
+            elif op == 9:                      # E10: a dist-info that cannot be named
+                side = rng.choice(["before", "after"])
+                bad = rng.choice([name, name + b"-", b"-" + v1])
+                c.put(side, join(site, bad + b".dist-info", b"RECORD"),
+                      reg(record_bytes(rows, term), store=st, raced=rc))
             elif op == 4:                      # METADATA alone changes
                 rec, meta = dist(site, name, v1)
                 c.both(rec, reg(record_bytes(rows, term)))
@@ -796,34 +845,210 @@ def cell_pip_simple():
     return out
 
 
-def cell_pip_e6():
+BOTH = ("store", "nostore")
+
+
+def cell_pip_e10():
+    """E10 for pip: a file not interpreted is one could_not_interpret event
+    naming it; the other events stand. Naming and pairing read no content, so
+    those run with and without a store."""
     out = []
     S = SITES[0]
     rng = random.Random(77)
     for label, name, version in [("no-dash", b"nodash", None), ("empty-name", b"", b"1.0"),
                                  ("empty-version", b"foo", b""),
-                                 ("bad-utf8-name", b"f\xffo", b"1.0")]:
-        c = Case("pip-e6-unnameable-" + label)
+                                 ("bad-utf8-name", b"f\xffo", b"1.0"),
+                                 ("long-name", b"n" * 1025, b"1.0")]:
+        c = Case("pip-e10-unnameable-" + label, modes=BOTH)
         if version is None:
             di = S + b"/" + name + b".dist-info"
             c.put("after", di + b"/RECORD", reg(b"x,,\n"))
         else:
             put_dist(c, "after", S, name, version, rand_rows(rng, b"x", b"1"))
         put_dist(c, "after", S, b"six", b"1.16.0", rand_rows(rng, b"six", b"1.16.0"))
-        c.tag("pip.E6.unnameable")
+        put_dist(c, "before", S, b"attrs", b"1.0", rand_rows(rng, b"attrs", b"1.0"))
+        put_dist(c, "after", S, b"attrs", b"2.0", rand_rows(rng, b"attrs", b"2.0"), gen=1)
+        c.tag("pip.E10.unnameable")
         out.append(c)
-    c = Case("pip-e6-ambiguous")
+    c = Case("pip-e10-ambiguous", modes=BOTH)
     put_dist(c, "before", S, b"six", b"1.15.0", rand_rows(rng, b"six", b"1.15.0"))
     put_dist(c, "after", S, b"six", b"1.16.0", rand_rows(rng, b"six", b"1.16.0"))
     put_dist(c, "after", S, b"Six", b"1.17.0", rand_rows(rng, b"Six", b"1.17.0"))
     put_dist(c, "after", S, b"attrs", b"1.0", rand_rows(rng, b"attrs", b"1.0"))
-    c.tag("pip.E6.ambiguous")
+    put_dist(c, "before", S, b"zzz", b"1.0", rand_rows(rng, b"zzz", b"1.0"))
+    c.tag("pip.E10.ambiguous")
     out.append(c)
-    c = Case("pip-e6-ambiguous-2r1a")
+    c = Case("pip-e10-ambiguous-2r1a", modes=BOTH)
     put_dist(c, "before", S, b"six", b"1.15.0", rand_rows(rng, b"six", b"1.15.0"))
     put_dist(c, "before", S, b"SIX", b"1.14.0", rand_rows(rng, b"SIX", b"1.14.0"))
     put_dist(c, "after", S, b"six", b"1.16.0", rand_rows(rng, b"six", b"1.16.0"))
-    c.tag("pip.E6.ambiguous")
+    put_dist(c, "after", S, b"Six", b"1.14.0", rand_rows(rng, b"Six", b"1.14.0"))
+    put_dist(c, "after", S, b"zzz", b"1.0", rand_rows(rng, b"zzz", b"1.0"))
+    c.tag("pip.E10.ambiguous")
+    out.append(c)
+    # An unparseable RECORD: only a reinstall reads one, so with a store.
+    c = Case("pip-e10-unparseable-record")
+    r = rand_rows(rng, b"six", b"1.16.0")
+    put_dist(c, "before", S, b"six", b"1.16.0", r)
+    put_dist(c, "after", S, b"six", b"1.16.0", None, gen=1,
+             raw=record_bytes(r) + b"six/short.py,sha256=X\n")
+    r2 = rand_rows(rng, b"attrs", b"23.1.0")
+    put_dist(c, "before", S, b"attrs", b"23.1.0", r2)
+    put_dist(c, "after", S, b"attrs", b"23.1.0", mutate_rows(rng, r2), gen=1)
+    put_dist(c, "after", S, b"requests", b"2.31.0", rand_rows(rng, b"requests", b"2.31.0"))
+    c.tag("pip.E10.unparseable_record")
+    out.append(c)
+    return out
+
+
+def cell_dpkg_e9_e10():
+    """E9: an event that breaks its row is one invalid_finding event in its
+    place, the others intact. E10: a status that cannot be parsed is one
+    could_not_interpret event naming it, another root's events intact. Both
+    read content: with a store."""
+    out = []
+    sp = b"var/lib/dpkg/status"
+
+    c = Case("dpkg-e9-oversized-text")
+    c.put("before", sp, reg(status_bytes(base_db() + [stanza(b"aaa", b"1.0"),
+                                                      stanza(b"zzz", b"1.0")])))
+    c.put("after", sp, reg(status_bytes(base_db() + [
+        stanza(b"aaa", b"2.0"), stanza(b"m" * 600, b"1." + b"0" * 500)]), gen=1))
+    c.tag("dpkg.E9.oversized_text")
+    out.append(c)
+
+    c = Case("dpkg-e9-nul-value")
+    c.put("before", sp, reg(status_bytes(base_db() + [
+        stanza(b"aaa", b"1.0"), stanza(b"zzz", b"1.0", b"hold ok installed")])))
+    c.put("after", sp, reg(status_bytes(base_db() + [
+        stanza(b"aaa", b"2.0"), stanza(b"mmm", b"1.0\0rc1"), stanza(b"zzz", b"1.0")]), gen=1))
+    c.tag("dpkg.E9.nul_value")
+    out.append(c)
+
+    c = Case("dpkg-e9-non-utf8-value")
+    c.put("before", sp, reg(status_bytes(base_db() + [
+        stanza(b"aaa", b"1.0"), stanza(b"ccc", b"1.0"), stanza(b"zzz", b"1.0")])))
+    c.put("after", sp, reg(status_bytes(base_db() + [
+        stanza(b"aaa", b"2.0"), stanza(b"ccc", b"1.0", b"hold\xff ok installed"),
+        stanza(b"pk\xe9", b"1.0")]), gen=1))
+    c.tag("dpkg.E9.non_utf8_value")
+    out.append(c)
+
+    c = Case("dpkg-e10-unparseable-status")
+    c.put("before", sp, reg(status_bytes(base_db() + [stanza(b"curl", b"1.0-1")])))
+    c.put("after", sp, reg(status_bytes(base_db() + [stanza(b"curl", b"1.1-1")])
+                           + b"garbage line\n", gen=1))
+    sp2 = b"chroot/bookworm/var/lib/dpkg/status"
+    c.put("before", sp2, reg(status_bytes(base_db() + [stanza(b"curl", b"1.0-1", nonce=2)])))
+    c.put("after", sp2, reg(status_bytes(base_db() + [stanza(b"curl", b"1.1-1", nonce=2),
+                                                      stanza(b"apt", b"2.6.1")]), gen=1))
+    c.tag("dpkg.E10.unparseable_status")
+    out.append(c)
+    return out
+
+
+def cell_p7():
+    """P7: an event derived from a path whose outcome is unknown is
+    provisional; an unknown path carries no path finding."""
+    out = []
+    S, S2 = SITES[0], SITES[2]
+    rng = random.Random(707)
+    sp = b"var/lib/dpkg/status"
+    sp2 = b"chroot/bookworm/var/lib/dpkg/status"
+
+    c = Case("pip-p7-unknown-pairs", modes=BOTH)
+    put_dist(c, "before", S, b"six", b"1.15.0", rand_rows(rng, b"six", b"1.15.0"))
+    put_dist(c, "after", S, b"six", b"1.16.0", rand_rows(rng, b"six", b"1.16.0"), raced=True)
+    put_dist(c, "before", S, b"attrs", b"2.0", rand_rows(rng, b"attrs", b"2.0"), raced=True)
+    put_dist(c, "after", S, b"attrs", b"1.0", rand_rows(rng, b"attrs", b"1.0"))
+    put_dist(c, "after", S, b"requests", b"2.31.0", rand_rows(rng, b"requests", b"2.31.0"))
+    c.tag("pip.P7.unknown_pairs")
+    out.append(c)
+
+    c = Case("pip-p7-unknown-unpaired", modes=BOTH)
+    put_dist(c, "after", S, b"six", b"1.16.0", rand_rows(rng, b"six", b"1.16.0"), raced=True)
+    put_dist(c, "before", S, b"attrs", b"1.0", rand_rows(rng, b"attrs", b"1.0"), raced=True)
+    # unknown because the directory is unreadable on the side it lacks
+    put_dist(c, "before", S2, b"numpy", b"2.0", rand_rows(rng, b"numpy", b"2.0"))
+    c.put("after", S2, unreadable_dir())
+    put_dist(c, "before", S, b"wheel", b"0.41", rand_rows(rng, b"wheel", b"0.41"))
+    c.tag("pip.P7.unknown_unpaired")
+    out.append(c)
+
+    c = Case("pip-p7-unknown-both-sides", modes=BOTH)
+    r = rand_rows(rng, b"six", b"1.16.0")
+    put_dist(c, "before", S, b"six", b"1.16.0", r)
+    put_dist(c, "after", S, b"six", b"1.16.0", mutate_rows(rng, r), gen=1, raced=True)
+    put_dist(c, "after", S, b"requests", b"2.31.0", rand_rows(rng, b"requests", b"2.31.0"))
+    c.tag("pip.P7.unknown_both_sides")
+    out.append(c)
+
+    c = Case("dpkg-p7-unknown-status", modes=BOTH)
+    c.put("before", sp, reg(status_bytes(base_db() + [stanza(b"curl", b"1.0-1")])))
+    c.put("after", sp, reg(status_bytes(base_db() + [stanza(b"curl", b"2.0-1"),
+                                                     stanza(b"apt", b"2.6.1")]),
+                           gen=1, raced=True))
+    c.put("before", sp2, reg(status_bytes([stanza(b"x", b"1.0")])))
+    c.put("after", sp2, reg(status_bytes([stanza(b"x", b"1.1")]), gen=1))
+    c.tag("dpkg.P7.unknown_status_readable", "store")
+    c.tag("dpkg.P7.unknown_and_proven_no_store", "nostore")
+    out.append(c)
+
+    c = Case("dpkg-p7-unknown-status-alone", modes=BOTH)
+    c.put("before", sp, reg(status_bytes(base_db() + [stanza(b"curl", b"1.0-1")]), raced=True))
+    c.tag("dpkg.P7.unknown_status_readable", "store")
+    c.tag("dpkg.P7.unknown_status_no_store", "nostore")
+    out.append(c)
+
+    # unknown through an unreadable directory: the after side's status, read
+    c = Case("dpkg-p7-unknown-dir", modes=BOTH)
+    c.put("before", b"chroot/sid", unreadable_dir())
+    c.put("after", b"chroot/sid/" + sp, reg(status_bytes(base_db())))
+    c.tag("dpkg.P7.unknown_status_readable", "store")
+    c.tag("dpkg.P7.unknown_status_no_store", "nostore")
+    out.append(c)
+    return out
+
+
+def cell_order():
+    """Events with no name first, in the Kinds table's order (could_not_interpret
+    by path, then content_unavailable by reason), then the named ones."""
+    out = []
+    rng = random.Random(4711)
+
+    c = Case("order-dpkg-no-name-first")
+    good = status_bytes(base_db())
+    for root in (b"z/", b"a/"):
+        c.put("before", root + b"var/lib/dpkg/status", reg(good))
+        c.put("after", root + b"var/lib/dpkg/status", reg(good + b"garbage " + root + b"\n",
+                                                         gen=1))
+    # (other bytes than the others': one store state per object)
+    c.put("before", b"b/var/lib/dpkg/status", reg(good + b"\n\n\n", store="corrupt"))
+    c.put("after", b"b/var/lib/dpkg/status", reg(good + b"\n", gen=1))
+    c.put("before", b"m/var/lib/dpkg/status", reg(good))
+    c.put("after", b"m/var/lib/dpkg/status", reg(good + b"\n\n", store="absent", gen=1))
+    c.put("before", b"var/lib/dpkg/status", reg(status_bytes([stanza(b"aaa", b"1.0")])))
+    c.put("after", b"var/lib/dpkg/status", reg(status_bytes([stanza(b"aaa", b"2.0"),
+                                                             stanza(b"bbb", b"1.0")]), gen=1))
+    c.tag("order.dpkg.no_name_first")
+    out.append(c)
+
+    c = Case("order-pip-no-name-first")
+    S0, S1, S2 = SITES
+    r = rand_rows(rng, b"six", b"1.0")
+    put_dist(c, "before", S0, b"six", b"1.0", r)
+    put_dist(c, "after", S0, b"six", b"1.0", None, gen=1,
+             raw=record_bytes(r) + b"six/short.py,sha256=X\n")
+    c.put("after", S2 + b"/nodash.dist-info/RECORD", reg(b"x,,\n"))
+    r = rand_rows(rng, b"attrs", b"1.0")
+    put_dist(c, "before", S1, b"attrs", b"1.0", r)
+    put_dist(c, "after", S1, b"attrs", b"1.0", mutate_rows(rng, r), gen=1, store="absent")
+    put_dist(c, "before", S0, b"aaa", b"1.0", rand_rows(rng, b"aaa", b"1.0"))
+    put_dist(c, "after", S0, b"aaa", b"2.0", rand_rows(rng, b"aaa", b"2.0"))
+    put_dist(c, "after", S0, b"AAA", b"3.0", rand_rows(rng, b"AAA", b"3.0"))
+    put_dist(c, "after", S0, b"a-b", b"1.0", rand_rows(rng, b"a-b", b"1.0"))
+    put_dist(c, "after", S0, b"zzz", b"1.0", rand_rows(rng, b"zzz", b"1.0"))
+    c.tag("order.pip.no_name_first")
     out.append(c)
     return out
 
@@ -1001,14 +1226,29 @@ def cell_probes():
               status_bytes([stanza(b"q\"uote", b"1.0", arch=b"x\\y")]),
               status_bytes([stanza(b"q\"uote", b"1.0", b"install ok\tunpacked", arch=b"x\\y")]),
               "probe.dpkg.json_escapes")
-    dpkg_pair("probe-dpkg-e6-no-colon",
+    dpkg_pair("probe-dpkg-e10-no-colon",
               status_bytes(base_db()),
               status_bytes(base_db()) + b"garbage line\n",
-              "probe.dpkg.E6_line_not_a_field")
-    dpkg_pair("probe-dpkg-e6-bad-utf8-version",
+              "probe.dpkg.E10_line_not_a_field")
+    dpkg_pair("probe-dpkg-e9-bad-utf8-version",
               status_bytes(base_db()),
               status_bytes(base_db() + [stanza(b"bad", b"1.0\xff")]),
-              "probe.dpkg.E6_value_not_string")
+              "probe.dpkg.E9_value_not_string")
+    dpkg_pair("probe-dpkg-e9-value-over-1024",
+              status_bytes(base_db()),
+              status_bytes(base_db() + [stanza(b"p" * 1025, b"1.0"), stanza(b"q", b"1.0")]),
+              "probe.dpkg.E9_value_over_1024")
+    dpkg_pair("probe-dpkg-e9-version-over-1024",
+              status_bytes(base_db()),
+              status_bytes(base_db() + [stanza(b"p", b"1." + b"0" * 1023), stanza(b"q", b"1.0")]),
+              "probe.dpkg.E9_version_over_1024")
+    # a value over 1,024 bytes in a stanza no event carries: READING, no
+    # event is affected, so nothing breaks (the status parses)
+    dpkg_pair("probe-dpkg-long-value-without-event",
+              status_bytes(base_db() + [stanza(b"p" * 1025, b"1.0", b"purge ok not-installed")]),
+              status_bytes(base_db() + [stanza(b"p" * 1025, b"1.0", b"purge ok not-installed",
+                                               nonce=4), stanza(b"q", b"1.0")]),
+              "probe.dpkg.long_value_without_event")
     dpkg_pair("probe-dpkg-bad-utf8-no-event",
               status_bytes(base_db() + [stanza(b"bad", b"1.0\xff", b"purge ok not-installed")]),
               status_bytes(base_db() + [stanza(b"bad", b"1.0\xff", b"purge ok not-installed",
@@ -1050,13 +1290,28 @@ def cell_probes():
     c.tag("probe.dpkg.info_files_no_findings")
     out.append(c)
 
-    c = Case("probe-dpkg-e6-paths")
+    c = Case("probe-dpkg-e10-names-the-file")
     c.put("after", b"var/lib/dpkg/info/curl.list", reg(b"/usr/bin/curl\n"))
     c.put("before", sp, reg(status_bytes(base_db())))
     c.put("after", sp, reg(status_bytes(base_db()) + b"no colon\n", gen=1))
     c.put("before", b"x/var/lib/dpkg/status", reg(status_bytes(base_db())))
     c.put("after", b"x/var/lib/dpkg/status", reg(status_bytes(base_db()), raced=True, gen=1))
-    c.tag("probe.dpkg.E6_paths_given")
+    c.tag("probe.dpkg.E10_names_the_file")
+    out.append(c)
+
+    # P7 x E9 / E10: an unknown status's broken event or unparseable content
+    c = Case("probe-dpkg-unknown-e9")
+    c.put("before", sp, reg(status_bytes(base_db())))
+    c.put("after", sp, reg(status_bytes(base_db() + [stanza(b"m" * 600, b"1." + b"0" * 500),
+                                                     stanza(b"n", b"1")]), gen=1, raced=True))
+    c.tag("probe.dpkg.unknown_E9_provisional")
+    out.append(c)
+    c = Case("probe-dpkg-unknown-e10")
+    c.put("before", sp, reg(status_bytes(base_db())))
+    c.put("after", sp, reg(status_bytes(base_db()) + b"no colon\n", gen=1, raced=True))
+    c.put("before", b"x/" + sp, reg(status_bytes([stanza(b"y", b"1.0")])))
+    c.put("after", b"x/" + sp, reg(status_bytes([stanza(b"y", b"2.0")]), gen=1))
+    c.tag("probe.dpkg.unknown_E10_provisional")
     out.append(c)
 
     # pip
@@ -1085,18 +1340,63 @@ def cell_probes():
     c.tag("probe.pip.csv_quoting")
     out.append(c)
 
-    c = Case("probe-pip-e6-short-row")
+    c = Case("probe-pip-e10-short-row")
     r = rand_rows(rng, b"six", b"1.16.0")
     put_dist(c, "before", S, b"six", b"1.16.0", r)
     rec = dist(S, b"six", b"1.16.0")[0]
     c.put("after", rec, reg(record_bytes(r) + b"six/short.py,sha256=X\n", gen=1))
-    c.tag("probe.pip.E6_row_of_two_fields")
+    c.tag("probe.pip.E10_row_of_two_fields")
     out.append(c)
 
-    c = Case("probe-pip-e6-not-utf8")
+    c = Case("probe-pip-e10-long-row")
+    put_dist(c, "before", S, b"six", b"1.16.0", r)
+    c.put("after", rec, reg(record_bytes(r) + b"six/long.py,sha256=X,1,extra\n", gen=1))
+    c.tag("probe.pip.E10_row_of_four_fields")
+    out.append(c)
+
+    c = Case("probe-pip-e10-not-utf8")
     put_dist(c, "before", S, b"six", b"1.16.0", r)
     c.put("after", rec, reg(record_bytes(r) + b"six/\xff.py,sha256=X,1\n", gen=1))
-    c.tag("probe.pip.E6_record_not_utf8")
+    c.tag("probe.pip.E10_record_not_utf8")
+    out.append(c)
+
+    # P7 x E10: an unknown RECORD whose dist-info cannot be named, on one
+    # side (named, so one provisional could_not_interpret) and on both
+    # (READING: not named -- nothing derives from it -- so nothing).
+    c = Case("probe-pip-unknown-unnameable-one-side", modes=BOTH)
+    c.put("after", S + b"/nodash.dist-info/RECORD", reg(b"x,,\n", raced=True))
+    put_dist(c, "after", S, b"six", b"1.16.0", rand_rows(rng, b"six", b"1.16.0"))
+    c.tag("probe.pip.unknown_unnameable_one_side")
+    out.append(c)
+    c = Case("probe-pip-unknown-unnameable-both-sides", modes=BOTH)
+    c.put("before", S + b"/nodash.dist-info/RECORD", reg(b"x,,\n"))
+    c.put("after", S + b"/nodash.dist-info/RECORD", reg(b"x,,\ny,,\n", raced=True, gen=1))
+    put_dist(c, "after", S, b"six", b"1.16.0", rand_rows(rng, b"six", b"1.16.0"))
+    c.tag("probe.pip.unknown_unnameable_both_sides")
+    out.append(c)
+    # P7 x E10: an ambiguous name one of whose RECORDs is unknown
+    c = Case("probe-pip-ambiguous-with-unknown", modes=BOTH)
+    put_dist(c, "before", S, b"six", b"1.15.0", rand_rows(rng, b"six", b"1.15.0"))
+    put_dist(c, "after", S, b"six", b"1.16.0", rand_rows(rng, b"six", b"1.16.0"))
+    put_dist(c, "after", S, b"Six", b"1.17.0", rand_rows(rng, b"Six", b"1.17.0"), raced=True)
+    c.tag("probe.pip.ambiguous_with_unknown")
+    out.append(c)
+    # E9 for pip: names and versions within 1,024 bytes, the text over it
+    c = Case("probe-pip-e9-text-over-1024", modes=BOTH)
+    long_name, v1, v2 = b"p" * 500, b"1." + b"0" * 300, b"2." + b"0" * 300
+    put_dist(c, "before", S, long_name, v1, rand_rows(rng, b"p", v1))
+    put_dist(c, "after", S, long_name, v2, rand_rows(rng, b"p", v2), gen=1)
+    put_dist(c, "after", S, b"aaa", b"1.0", rand_rows(rng, b"aaa", b"1.0"))
+    put_dist(c, "after", S, b"zzz", b"1.0", rand_rows(rng, b"zzz", b"1.0"))
+    c.tag("probe.pip.E9_text_over_1024")
+    out.append(c)
+    # A dist-info that cannot be named, modified in place, a copy unavailable.
+    # READING: the record's findings are could_not_interpret; the
+    # content_unavailable event still names it.
+    c = Case("probe-pip-unnameable-unavailable")
+    c.put("before", S + b"/nodash.dist-info/RECORD", reg(b"x,,\n"))
+    c.put("after", S + b"/nodash.dist-info/RECORD", reg(b"x,,\ny,,\n", store="absent", gen=1))
+    c.tag("probe.pip.unnameable_content_unavailable")
     out.append(c)
 
     c = Case("probe-pip-blank-line")
@@ -1173,7 +1473,7 @@ def cell_probes():
     dpkg_pair("probe-dpkg-text-over-1024",
               status_bytes(base_db()),
               status_bytes(base_db() + [stanza(b"p" * 600, b"1." + b"0" * 500)]),
-              "probe.dpkg.E6_event_text_over_1024")
+              "probe.dpkg.E9_event_text_over_1024")
     dpkg_pair("probe-dpkg-template-in-value",
               status_bytes(base_db() + [stanza(b"p{arch}q", b"1.0", arch=b"{version}")]),
               status_bytes(base_db() + [stanza(b"p{arch}q", b"2.0", arch=b"{version}")]),
@@ -1190,8 +1490,9 @@ def cell_probes():
 
 
 def required_cases():
-    return (cell_dpkg_simple() + cell_pip_simple() + cell_pip_e6() + cell_content_unavailable()
-            + cell_paths_b64() + cell_probes())
+    return (cell_dpkg_simple() + cell_pip_simple() + cell_pip_e10() + cell_dpkg_e9_e10()
+            + cell_p7() + cell_order() + cell_content_unavailable() + cell_paths_b64()
+            + cell_probes())
 
 
 def all_cases(n, seed):
