@@ -44,11 +44,14 @@ The corpus has three parts:
     interpreters with no store (interpreters()): text paths modified, added,
     removed, metadata_only and unknown, a file stored on one side only, dpkg
     status files (one or two per diff, a side with no stored copy, a type
-    change) and info files, pip RECORDs installed, removed, upgraded,
-    downgraded, version-changed, reinstalled, and the end hook's failures,
-    git hooks, the index, HEAD, loose refs, packed-refs, reflogs, a claimed
-    directory, symlinks and directories under hooks/ and logs/refs/, a hook
-    that becomes a symlink, and an unclaimed file below .git/;
+    change, an unknown status: provisional) and info files, pip RECORDs
+    installed, removed, upgraded, downgraded, version-changed, reinstalled,
+    unknown (provisional), could_not_interpret events (E10) and
+    invalid_finding events (E9), git hooks, the index, HEAD, loose refs,
+    packed-refs, reflogs, a claimed directory, symlinked hooks (added,
+    removed, retargeted, a target that is no string field's value),
+    directories under hooks/, symlinks and directories under logs/refs/, a
+    hook that becomes a symlink or back, and an unclaimed file below .git/;
   - random pairs: n-bases random trees, each with four mutated variants
     (several changes at once), compared in both directions and with
     themselves;
@@ -2207,6 +2210,15 @@ def rewritten(e, t, rng):
     return e2
 
 
+def lnk_at(rng, t, path, target=None):
+    """A symlink at `path`, no flag; its target `target` when given."""
+    e = clear_flags(new_entry(rng, t, path, 'lnk', extras=False), t, rng)
+    if target is not None:
+        e['link_target'], e['size'] = target, len(target)
+        set_outside(e, t)
+    return e
+
+
 def build_items(rng, items):
     """A pair from items (path, how, options): how is `added` / `removed`
     (the file on one side only; with own_dir, its directory too),
@@ -2215,7 +2227,9 @@ def build_items(rng, items):
     (rewritten), `mode` (to `to_mode`), `mode+uid`, `modified+mode`, `uid`,
     `iflags` (on the after side only: unknown), `unstored` (after side
     rewritten and not stored), `to_dir` / `to_lnk` (a directory or a
-    symlink after)."""
+    symlink after). A symlink's target is `target` when given. `lnk_*` start
+    from a symlink on both sides: `lnk_retarget` (to `to_target`), `lnk_uid`
+    (chown-ed), `lnk_to_dir` (a directory after)."""
     t = interp_tree(rng)
     for path, how, kw in items:
         ensure_dirs(t, rng, parent_of(path) if kw.get('own_dir') else path)
@@ -2225,13 +2239,29 @@ def build_items(rng, items):
                 'lnk_added': a}.get(how)
         if side is not None:
             ensure_dirs(side, rng, path)
-            if how in ('dir_added', 'lnk_added'):
-                side.e[path] = clear_flags(new_entry(rng, side, path, how[:3], extras=False),
+            if how == 'lnk_added':
+                side.e[path] = lnk_at(rng, side, path, kw.get('target'))
+            elif how == 'dir_added':
+                side.e[path] = clear_flags(new_entry(rng, side, path, 'dir', extras=False),
                                            side, rng)
             else:
                 side.e[path] = file_at(rng, side, path, kw.get('stored', True), kw.get('mode'))
                 if how == 'raced_added':        # unknown, reason raced
                     side.e[path]['raced'] = True
+            continue
+        if how.startswith('lnk_'):
+            e = lnk_at(rng, t, path, kw.get('target'))
+            if how == 'lnk_retarget':
+                e2 = dict(e, link_target=kw['to_target'], size=len(kw['to_target']),
+                          ctime_ns=e['ctime_ns'] + 1)
+                set_outside(e2, a)
+            elif how == 'lnk_uid':
+                e2 = dict(e, uid=other(rng, IDS, e['uid']), ctime_ns=e['ctime_ns'] + 1)
+            elif how == 'lnk_to_dir':
+                e2 = clear_flags(new_entry(rng, a, path, 'dir', extras=False), a, rng)
+            else:
+                die('generator bug: %r' % how)
+            t.e[path], a.e[path] = e, e2
             continue
         e = file_at(rng, t, path, kw.get('stored', True), kw.get('mode'))
         if how == 'modified':
@@ -2249,8 +2279,10 @@ def build_items(rng, items):
             e2 = dict(e, uid=other(rng, IDS, e['uid']))
         elif how == 'iflags':
             e2 = dict(e, iflags=rng.choice(IFLAGS))
-        elif how in ('to_dir', 'to_lnk'):
-            e2 = clear_flags(new_entry(rng, a, path, how[3:], extras=False), a, rng)
+        elif how == 'to_lnk':
+            e2 = lnk_at(rng, a, path, kw.get('target'))
+        elif how == 'to_dir':
+            e2 = clear_flags(new_entry(rng, a, path, 'dir', extras=False), a, rng)
         else:
             die('generator bug: %r' % how)
         t.e[path], a.e[path] = e, e2
@@ -2360,22 +2392,89 @@ def interpreters(w, rng):
         ['pip events: content_unavailable first, then several names',
          'pip RECORD: modified'])
     # A dist-info that cannot be named: its RECORD's record carries
-    # could_not_interpret (R11) and the end hook fails (E6), naming every
-    # path given to pip -- a named distribution's RECORD and METADATA too.
-    one('pip: a dist-info with no version (E6)',
+    # could_not_interpret (R11) and pip emits one could_not_interpret event
+    # naming it, before the named events; the others stand (E10).
+    one('pip: a dist-info with no version (E10)',
         lambda rng: dist(rng.choice(SITE), b'nodash', 'added', with_metadata=False),
-        ['pip events: a dist-info that cannot be named (E6)',
+        ['pip events: a dist-info that cannot be named (E10)',
          'pip RECORD: added, a dist-info that cannot be named',
          'pip RECORD: removed, a dist-info that cannot be named'])
-    one('pip: a dist-info with an empty version beside a named one (E6)',
+    one('pip: a dist-info with an empty version beside a named one (E10)',
         lambda rng: (lambda s: dist(s, b'empty-', 'removed', with_metadata=False)
                      + dist(s, b'named-0.1', 'added'))(rng.choice(SITE)),
-        ['pip events: E6 names every path given to pip, METADATA included'])
-    one('pip: one name removed once and added twice (E6)',
+        ['pip events: a dist-info that cannot be named beside a named install (E10)'])
+    one('pip: two dist-infos that cannot be named, a reinstall and a named install (E10)',
+        lambda rng: (lambda s: dist(s, b'zz', 'added', with_metadata=False)
+                     + dist(s, b'aa-', 'removed', with_metadata=False)
+                     + [(s + b'mid-1.0.dist-info/RECORD', 'modified', O)]
+                     + dist(s, b'named-0.1', 'added'))(rng.choice(SITE)),
+        ['pip events: a dist-info that cannot be named beside a named install (E10)'])
+    # One name with RECORDs added and removed other than one of each: one
+    # could_not_interpret event naming them, in that name's place (E10).
+    one('pip: one name removed once and added twice (E10)',
         lambda rng: (lambda s: dist(s, b'dup-1.0', 'removed', with_metadata=False)
                      + dist(s, b'dup-2.0', 'added', with_metadata=False)
                      + dist(s, b'Dup-3.0', 'added', with_metadata=False))(rng.choice(SITE)),
-        ['pip events: a pair key with more than one RECORD added and removed (E6)'])
+        ['pip events: a pair key with more than one RECORD added and removed (E10)'])
+    one('pip: an ambiguous name between two others (E10)',
+        lambda rng: (lambda s: dist(s, b'alpha-1.0', 'added', with_metadata=False)
+                     + dist(s, b'dup-1.0', 'removed', with_metadata=False)
+                     + dist(s, b'dup-2.0', 'added', with_metadata=False)
+                     + dist(s, b'DUP-3.0', 'added', with_metadata=False)
+                     + dist(s, b'zeta-1.0', 'removed', with_metadata=False)
+                     + dist(s, b'zeta-2.0', 'added', with_metadata=False))(rng.choice(SITE)),
+        ['pip events: a pair key with more than one RECORD added and removed beside '
+         'another name (E10)'])
+    # An unknown RECORD pairs like any other, its events provisional (E2):
+    # with a removed one of its name (an upgrade), alone (an install); on
+    # both sides, no reinstall and nothing at all.
+    one('pip: one RECORD of a name removed, the other added but raced',
+        lambda rng: (lambda s: dist(s, b'lazy-1.0', 'removed', with_metadata=False)
+                     + [(s + b'lazy-2.0.dist-info/RECORD', 'raced_added', S(own_dir=True))])(
+                         rng.choice(SITE)),
+        ['pip RECORD: unknown, a regular file on one side only',
+         'pip events: an unknown RECORD paired with one of the other side (E2)'])
+    one('pip: a RECORD added but raced, beside a named install',
+        lambda rng: (lambda s: [(s + b'quick-0.9.dist-info/RECORD', 'raced_added',
+                                 S(own_dir=True))]
+                     + dist(s, b'steady-1.0', 'added', with_metadata=False))(rng.choice(SITE)),
+        ['pip events: an unknown RECORD with none of the other side (E2)'])
+    one('pip: a RECORD in place, iflags on one side only',
+        lambda rng: [(rng.choice(SITE) + b'idle-1.0.dist-info/RECORD', 'iflags', O)],
+        ['pip RECORD: unknown, a regular file on both sides'])
+    one('pip: a RECORD added but raced, its dist-info not named, beside a reinstall',
+        lambda rng: (lambda s: [(s + b'x-.dist-info/RECORD', 'raced_added', S(own_dir=True)),
+                                (s + b'mid-1.0.dist-info/RECORD', 'modified', O)])(
+                                    rng.choice(SITE)),
+        ['pip RECORD: unknown, a regular file on one side only, a dist-info that cannot be '
+         'named'])
+    one('pip: one name removed once and added twice, one of them raced',
+        lambda rng: (lambda s: dist(s, b'dup-1.0', 'removed', with_metadata=False)
+                     + dist(s, b'dup-2.0', 'added', with_metadata=False)
+                     + [(s + b'dup-3.0.dist-info/RECORD', 'raced_added', S(own_dir=True))])(
+                         rng.choice(SITE)),
+        ['pip events: a pair key with more than one RECORD added and removed, one unknown '
+         '(E10, E2)'])
+    # A name and version each a string field's value whose event's text
+    # would exceed 1,024 bytes: one invalid_finding event in its place, the
+    # others stand (E9). A name over 1,024 bytes, or not UTF-8, cannot be
+    # named (E10).
+    one('pip: an upgrade whose text would exceed 1,024 bytes (E9)',
+        lambda rng: (lambda s: dist(s, b'n' * 340 + b'-' + b'1' * 340, 'removed',
+                                    with_metadata=False)
+                     + dist(s, b'n' * 340 + b'-' + b'2' * 340, 'added', with_metadata=False)
+                     + dist(s, b'other-1.0', 'added', with_metadata=False))(rng.choice(SITE)),
+        ['pip events: an event whose text would exceed 1,024 bytes (E9)'])
+    one('pip: an install whose text would exceed 1,024 bytes (E9)',
+        lambda rng: dist(rng.choice(SITE), b'm' * 600 + b'-' + b'1' * 600, 'added',
+                         with_metadata=False),
+        ['pip events: an event whose text would exceed 1,024 bytes (E9)'])
+    one('pip: a dist-info whose name is over 1,024 bytes',
+        lambda rng: dist(rng.choice(SITE), b'm' * 1100 + b'-1.0', 'added', with_metadata=False),
+        ["pip RECORD: added, a dist-info whose name or version is not a string field's value"])
+    one('pip: a dist-info whose name is not UTF-8',
+        lambda rng: dist(rng.choice(SITE), b'b\xffad-1.0', 'added', with_metadata=False),
+        ["pip RECORD: added, a dist-info whose name or version is not a string field's value"])
 
     # git: hooks and the index from the manifest alone; HEAD, refs,
     # packed-refs and reflogs need content.
@@ -2425,14 +2524,43 @@ def interpreters(w, rng):
     one('git: a directory below refs/ added',
         lambda rng: [(g(rng, b'refs/remotes'), 'dir_added', O)],
         ['git ref: added, not a regular file on either side (dir)'])
-    # "A symlink or a directory under `hooks/` is no hook (not a regular
-    # file)", and a side on which a claimed path is not a regular file
-    # counts as absent: nothing from a symlink or directory under hooks/ or
-    # logs/refs/; a hook that becomes a symlink is removed.
+    # "A hook, from the manifest alone, is a regular file or a symlink";
+    # "a directory is none", and a side on which another claimed path is not
+    # a regular file counts as absent: nothing from a directory under hooks/
+    # or a symlink or directory under logs/refs/. A symlinked hook is added,
+    # removed, changed (retargeted, or a file becoming a link or back), its
+    # `target` the link's (empty for a file), `executable` true. A target
+    # that is not a string field's value (not UTF-8, over 1,024 bytes) breaks
+    # the row: invalid_finding (ambiguity I9 in reference.py).
     one('git: a symlink under hooks/ added',
-        lambda rng: [(g(rng, b'hooks/pre-commit'), 'lnk_added', O)],
-        ['git hook: added, not a regular file on either side (lnk)',
-         'git hook: removed, not a regular file on either side (lnk)'])
+        lambda rng: [(g(rng, b'hooks/pre-commit'), 'lnk_added',
+                      S(target=b'tools/pre-commit.sh'))],
+        ['git hook: added, a symlink', 'git hook: removed, a symlink'])
+    one('git: a symlink under hooks/ with a non-ASCII target added',
+        lambda rng: [(g(rng, b'hooks/post-checkout'), 'lnk_added',
+                      S(target=b'caf\xc3\xa9/post-checkout'))],
+        ['git hook: added, a symlink', 'git hook: removed, a symlink'])
+    one('git: a symlink under hooks/ added, its target not UTF-8',
+        lambda rng: [(g(rng, b'hooks/pre-commit'), 'lnk_added', S(target=b'bad\xfftarget'))],
+        ['git hook: added, a symlink, its target not UTF-8'])
+    one('git: a symlink under hooks/ added, its target 1,101 bytes',
+        lambda rng: [(g(rng, b'hooks/pre-commit'), 'lnk_added',
+                      S(target=b'd/' * 549 + b'end'))],
+        ['git hook: added, a symlink, its target over 1,024 bytes'])
+    one('git: a symlink under hooks/ added, its target 1,024 bytes',
+        lambda rng: [(g(rng, b'hooks/pre-commit'), 'lnk_added',
+                      S(target=b'd/' * 511 + b'xx'))],
+        ['git hook: added, a symlink, its target of exactly 1,024 bytes'])
+    one('git: a symlinked hook retargeted',
+        lambda rng: [(g(rng, b'hooks/pre-push'), 'lnk_retarget',
+                      S(target=b'hooks.d/pre-push-v1', to_target=b'hooks.d/pre-push-v2'))],
+        ['git hook: modified, a symlink'])
+    one('git: a symlinked hook chown-ed',
+        lambda rng: [(g(rng, b'hooks/pre-push'), 'lnk_uid', S(target=b'shared/pre-push'))],
+        ['git hook: metadata_only, a symlink'])
+    one('git: a symlinked hook becomes a directory',
+        lambda rng: [(g(rng, b'hooks/update'), 'lnk_to_dir', S(target=b'update.real'))],
+        ['git hook: type_changed, lnk -> dir'])
     one('git: a directory under hooks/ added',
         lambda rng: [(g(rng, b'hooks/pre-commit.d'), 'dir_added', O)],
         ['git hook: added, not a regular file on either side (dir)'])
@@ -2443,7 +2571,12 @@ def interpreters(w, rng):
         lambda rng: [(g(rng, b'logs/refs/heads/alias'), 'lnk_added', O)],
         ['git reflog: added, not a regular file on either side (lnk)'])
     one('git: a hook becomes a symlink',
-        lambda rng: [(g(rng, b'hooks/pre-push'), 'to_lnk', S(mode=0o755))],
+        lambda rng: [(g(rng, b'hooks/pre-push'), 'to_lnk',
+                      S(mode=0o755, target=b'pre-push.d/run'))],
+        ['git hook: type_changed, reg -> lnk', 'git hook: type_changed, lnk -> reg'])
+    one('git: a hook not executable becomes a symlink',
+        lambda rng: [(g(rng, b'hooks/prepare-commit-msg'), 'to_lnk',
+                      S(mode=0o644, target=b'shared/prepare-commit-msg'))],
         ['git hook: type_changed, reg -> lnk', 'git hook: type_changed, lnk -> reg'])
     one('text: a stored *.md5sums outside var/lib/dpkg/info/',
         lambda rng: [(rng.choice([b'dist/sums.md5sums', b'var/lib/dpkg/sums.md5sums']),
@@ -2455,23 +2588,30 @@ def interpreters(w, rng):
 
     # A hook whose executable bit changed beside another field ("its
     # content unchanged -- its executable bit ..., whatever else changed"),
-    # or beside its content (changed); a RECORD or status file whose outcome
-    # is unknown (nothing from it, so the other RECORD of a name stands
-    # alone: ambiguity I8 in reference.py); two reasons in one interpreter
-    # (one event per reason, `no_store` first).
+    # or beside its content (changed); a status file whose outcome is
+    # unknown ("read too, and every event from it is provisional": with no
+    # store, a provisional content_unavailable event and no finding on its
+    # record), alone and beside a status that is not; two reasons in one
+    # interpreter (one event per reason, `no_store` first).
     one('git: a hook made executable and chown-ed',
         lambda rng: [(g(rng, b'hooks/pre-rebase'), 'mode+uid', S(mode=0o644, to_mode=0o755))],
         ['git hook: metadata_only, the executable bit changed'])
     one('git: a hook rewritten and made executable',
         lambda rng: [(g(rng, b'hooks/update'), 'modified+mode', S(mode=0o644, to_mode=0o755))],
         ['git hook: modified'])
-    one('pip: one RECORD of a name removed, the other added but raced',
-        lambda rng: (lambda s: dist(s, b'lazy-1.0', 'removed', with_metadata=False)
-                     + [(s + b'lazy-2.0.dist-info/RECORD', 'raced_added', S(own_dir=True))])(
-                         rng.choice(SITE)),
-        ['pip RECORD: unknown', 'pip events: pip_removed', 'pip events: pip_installed'])
     one('dpkg: status, iflags on one side only',
-        lambda rng: [(status(rng), 'iflags', O)], ['dpkg status: unknown'])
+        lambda rng: [(status(rng), 'iflags', O)],
+        ['dpkg status: unknown, a regular file on both sides'])
+    one('dpkg: status added but raced',
+        lambda rng: [(status(rng), 'raced_added', O)],
+        ['dpkg status: unknown, a regular file on one side only'])
+    one('dpkg: status added but raced, no stored copy',
+        lambda rng: [(status(rng), 'raced_added', S(stored=False))],
+        ['dpkg status: unknown, a side with no stored copy, a regular file on one side only'])
+    one('dpkg: status added but raced, beside a status rewritten',
+        lambda rng: [(b'var/lib/dpkg/status', 'modified', O),
+                     (b'chroot/var/lib/dpkg/status', 'raced_added', O)],
+        ['dpkg status: unknown, a regular file on one side only'])
     one('dpkg: two status files, one with no stored copy',
         lambda rng: [(b'var/lib/dpkg/status', 'modified', O),
                      (b'chroot/var/lib/dpkg/status', 'added', S(stored=False))],
