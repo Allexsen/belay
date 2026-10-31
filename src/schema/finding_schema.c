@@ -17,8 +17,8 @@ const struct finding_kind_def FINDING_KINDS[FK_COUNT] = {
     [FK_INVALID_FINDING] = { "invalid_finding", IN_ANY, LV_PATH, { { 0 } }, "invalid finding",
         "A finding that broke the rules, replaced." },
     [FK_AND_MORE] = { "and_more", IN_ANY, LV_PATH, { N("n") }, "and {n} more",
-        "The findings past the 4,096th of a record, or the events past the 65,536th of an "
-        "interpreter, counted." },
+        "In the last place of a record past 4,096 findings, or of an interpreter's events past "
+        "65,536: the findings or events from that place on, counted." },
     [FK_CONTENT_UNAVAILABLE] = { "content_unavailable", I_TEXT | I_PIP | I_DPKG | I_GIT,
         LV_PATH | LV_EVENT, { S("reason"), S("side") }, "content unavailable ({side}): {reason}",
         "The stored copy of a claimed path, on a side where it exists, cannot be read: reason "
