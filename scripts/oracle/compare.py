@@ -844,7 +844,7 @@ INTERP_SCENARIOS = (
     + ['text: an unclaimed stored file below .git/, modified',
        'binary: a regular file stored on one of its two sides only, modified']
     + ['dpkg status: %s' % o for o in ('modified', 'added', 'removed', 'metadata_only',
-                                       'type_changed')]
+                                       'type_changed, reg -> dir', 'type_changed, dir -> reg')]
     + ['dpkg status: added, a side with no stored copy',
        'dpkg status: removed, a side with no stored copy',
        'dpkg info: modified', 'dpkg info: added',
@@ -857,9 +857,12 @@ INTERP_SCENARIOS = (
                                     'a pair whose names are spelled differently',
                                     'a dist-info that cannot be named (E6)',
                                     'a pair key with more than one RECORD added and removed (E6)',
-                                    'content_unavailable first, then several names')]
+                                    'content_unavailable first, then several names',
+                                    'E6 names every path given to pip, METADATA included')]
     + ['pip RECORD: modified', 'pip RECORD: unknown', 'pip METADATA: modified',
-       'pip METADATA: added']
+       'pip METADATA: added',
+       'pip RECORD: added, a dist-info that cannot be named',
+       'pip RECORD: removed, a dist-info that cannot be named']
     + ['git hook: added, executable', 'git hook: added, not executable', 'git hook: removed',
        'git hook: modified', 'git hook: metadata_only, the executable bit changed',
        'git hook: metadata_only, the executable bit unchanged',
@@ -868,7 +871,14 @@ INTERP_SCENARIOS = (
        for o in ('modified', 'added', 'removed')]
     + ['git packed-refs: modified', 'git HEAD: modified, a side with no stored copy',
        'git ref: added, a side with no stored copy',
-       'git ref: added, not a regular file on either side']
+       'git ref: added, not a regular file on either side (dir)',
+       'git hook: added, not a regular file on either side (lnk)',
+       'git hook: removed, not a regular file on either side (lnk)',
+       'git hook: added, not a regular file on either side (dir)',
+       'git reflog: added, not a regular file on either side (dir)',
+       'git reflog: added, not a regular file on either side (lnk)',
+       'git hook: type_changed, reg -> lnk', 'git hook: type_changed, lnk -> reg',
+       'text: a stored *.md5sums file outside var/lib/dpkg/info/, modified']
     + ['events: from pip and dpkg in one diff', 'events: none, though records carry findings'])
 NEED_CONTENT = ('status', 'RECORD', 'HEAD', 'ref', 'packed-refs', 'reflog')
 
@@ -890,6 +900,8 @@ def interp_coverage(stem, tags):
             tags.add('text: %s, stored on every side it exists on' % o)
             if b'.git/' in p:
                 tags.add('text: an unclaimed stored file below .git/, %s' % o)
+            if p.endswith(b'.md5sums') and b'var/lib/dpkg/info/' not in p:
+                tags.add('text: a stored *.md5sums file outside var/lib/dpkg/info/, %s' % o)
         elif it == ['binary']:
             if b is not None and a is not None and b['type'] == a['type'] == 'reg' and \
                     ('stored' in b) != ('stored' in a):
@@ -904,8 +916,13 @@ def interp_coverage(stem, tags):
                                                     else 'unchanged')
             if what in NEED_CONTENT and any('stored' not in e for e in regs):
                 tag += ', a side with no stored copy'
+            if o == 'type_changed':
+                tag += ', %s -> %s' % (b['type'], a['type'])
             if not regs:
-                tag += ', not a regular file on either side'
+                tag += ', not a regular file on either side (%s)' % '/'.join(
+                    sorted({e['type'] for e in (b, a) if e is not None}))
+            if 'pip-unnamed' in traces[p]:
+                tag += ', a dist-info that cannot be named'
             tags.add(tag)
             if what == 'status' and o in ('added', 'removed', 'modified') and \
                     all('stored' in e for e in regs):
@@ -929,6 +946,10 @@ def interp_coverage(stem, tags):
     for t in traces[b'']:
         if t in pip_tags:
             tags.add('pip events: ' + pip_tags[t])
+    if 'pip-unnamed' in traces[b''] and \
+            any('interp:pip:METADATA' in traces[r['path']] for r in records) and \
+            sum('interp:pip:RECORD' in traces[r['path']] for r in records) >= 2:
+        tags.add('pip events: E6 names every path given to pip, METADATA included')
     pip_ev = [dict(e) for e in events if dict(e)['interp'] == 'pip']
     if pip_ev and pip_ev[0]['event'] == 'content_unavailable' and \
             len({e.get('name') for e in pip_ev[1:]} - {None}) >= 2:

@@ -47,7 +47,8 @@ The corpus has three parts:
     change) and info files, pip RECORDs installed, removed, upgraded,
     downgraded, version-changed, reinstalled, and the end hook's failures,
     git hooks, the index, HEAD, loose refs, packed-refs, reflogs, a claimed
-    directory and an unclaimed file below .git/;
+    directory, symlinks and directories under hooks/ and logs/refs/, a hook
+    that becomes a symlink, and an unclaimed file below .git/;
   - random pairs: n-bases random trees, each with four mutated variants
     (several changes at once), compared in both directions and with
     themselves;
@@ -2208,21 +2209,24 @@ def rewritten(e, t, rng):
 
 def build_items(rng, items):
     """A pair from items (path, how, options): how is `added` / `removed`
-    (the file on one side only; with own_dir, its directory too), or the
-    file on both sides, then `modified` (rewritten), `mode` (to `to_mode`),
-    `uid`, `iflags` (on the after side only: unknown), `unstored` (after
-    side rewritten and not stored), `to_dir` (a directory after), or
-    `dir_added` (a directory, after only)."""
+    (the file on one side only; with own_dir, its directory too),
+    `raced_added` (added, raced), `dir_added` / `lnk_added` (a directory or a
+    symlink, after only), or the file on both sides, then `modified`
+    (rewritten), `mode` (to `to_mode`), `mode+uid`, `modified+mode`, `uid`,
+    `iflags` (on the after side only: unknown), `unstored` (after side
+    rewritten and not stored), `to_dir` / `to_lnk` (a directory or a
+    symlink after)."""
     t = interp_tree(rng)
     for path, how, kw in items:
         ensure_dirs(t, rng, parent_of(path) if kw.get('own_dir') else path)
     a = t.copy()
     for path, how, kw in items:
-        side = {'added': a, 'removed': t, 'dir_added': a, 'raced_added': a}.get(how)
+        side = {'added': a, 'removed': t, 'dir_added': a, 'raced_added': a,
+                'lnk_added': a}.get(how)
         if side is not None:
             ensure_dirs(side, rng, path)
-            if how == 'dir_added':
-                side.e[path] = clear_flags(new_entry(rng, side, path, 'dir', extras=False),
+            if how in ('dir_added', 'lnk_added'):
+                side.e[path] = clear_flags(new_entry(rng, side, path, how[:3], extras=False),
                                            side, rng)
             else:
                 side.e[path] = file_at(rng, side, path, kw.get('stored', True), kw.get('mode'))
@@ -2245,8 +2249,8 @@ def build_items(rng, items):
             e2 = dict(e, uid=other(rng, IDS, e['uid']))
         elif how == 'iflags':
             e2 = dict(e, iflags=rng.choice(IFLAGS))
-        elif how == 'to_dir':
-            e2 = clear_flags(new_entry(rng, a, path, 'dir', extras=False), a, rng)
+        elif how in ('to_dir', 'to_lnk'):
+            e2 = clear_flags(new_entry(rng, a, path, how[3:], extras=False), a, rng)
         else:
             die('generator bug: %r' % how)
         t.e[path], a.e[path] = e, e2
@@ -2299,7 +2303,7 @@ def interpreters(w, rng):
                                               S(mode=0o644, to_mode=0o640))],
         ['dpkg status: metadata_only'])
     one('dpkg: status becomes a directory', lambda rng: [(status(rng), 'to_dir', O)],
-        ['dpkg status: type_changed'])
+        ['dpkg status: type_changed, reg -> dir', 'dpkg status: type_changed, dir -> reg'])
     one('dpkg: two status files, one added and one removed',
         lambda rng: [(b'chroot/var/lib/dpkg/status', 'added', O),
                      (b'srv/ct1/rootfs/var/lib/dpkg/status', 'removed', O)],
@@ -2355,9 +2359,18 @@ def interpreters(w, rng):
         + dist(SITE[0], b'alpha-2.0', 'removed', with_metadata=False),
         ['pip events: content_unavailable first, then several names',
          'pip RECORD: modified'])
+    # A dist-info that cannot be named: its RECORD's record carries
+    # could_not_interpret (R11) and the end hook fails (E6), naming every
+    # path given to pip -- a named distribution's RECORD and METADATA too.
     one('pip: a dist-info with no version (E6)',
         lambda rng: dist(rng.choice(SITE), b'nodash', 'added', with_metadata=False),
-        ['pip events: a dist-info that cannot be named (E6)'])
+        ['pip events: a dist-info that cannot be named (E6)',
+         'pip RECORD: added, a dist-info that cannot be named',
+         'pip RECORD: removed, a dist-info that cannot be named'])
+    one('pip: a dist-info with an empty version beside a named one (E6)',
+        lambda rng: (lambda s: dist(s, b'empty-', 'removed', with_metadata=False)
+                     + dist(s, b'named-0.1', 'added'))(rng.choice(SITE)),
+        ['pip events: E6 names every path given to pip, METADATA included'])
     one('pip: one name removed once and added twice (E6)',
         lambda rng: (lambda s: dist(s, b'dup-1.0', 'removed', with_metadata=False)
                      + dist(s, b'dup-2.0', 'added', with_metadata=False)
@@ -2411,16 +2424,41 @@ def interpreters(w, rng):
         ['git reflog: added', 'git reflog: removed'])
     one('git: a directory below refs/ added',
         lambda rng: [(g(rng, b'refs/remotes'), 'dir_added', O)],
-        ['git ref: added, not a regular file on either side'])
+        ['git ref: added, not a regular file on either side (dir)'])
+    # "A symlink or a directory under `hooks/` is no hook (not a regular
+    # file)", and a side on which a claimed path is not a regular file
+    # counts as absent: nothing from a symlink or directory under hooks/ or
+    # logs/refs/; a hook that becomes a symlink is removed.
+    one('git: a symlink under hooks/ added',
+        lambda rng: [(g(rng, b'hooks/pre-commit'), 'lnk_added', O)],
+        ['git hook: added, not a regular file on either side (lnk)',
+         'git hook: removed, not a regular file on either side (lnk)'])
+    one('git: a directory under hooks/ added',
+        lambda rng: [(g(rng, b'hooks/pre-commit.d'), 'dir_added', O)],
+        ['git hook: added, not a regular file on either side (dir)'])
+    one('git: a directory under logs/refs/ added',
+        lambda rng: [(g(rng, b'logs/refs/remotes'), 'dir_added', O)],
+        ['git reflog: added, not a regular file on either side (dir)'])
+    one('git: a symlink under logs/refs/ added',
+        lambda rng: [(g(rng, b'logs/refs/heads/alias'), 'lnk_added', O)],
+        ['git reflog: added, not a regular file on either side (lnk)'])
+    one('git: a hook becomes a symlink',
+        lambda rng: [(g(rng, b'hooks/pre-push'), 'to_lnk', S(mode=0o755))],
+        ['git hook: type_changed, reg -> lnk', 'git hook: type_changed, lnk -> reg'])
+    one('text: a stored *.md5sums outside var/lib/dpkg/info/',
+        lambda rng: [(rng.choice([b'dist/sums.md5sums', b'var/lib/dpkg/sums.md5sums']),
+                      'modified', O)],
+        ['text: a stored *.md5sums file outside var/lib/dpkg/info/, modified'])
     one('git: an unclaimed file below .git/, stored',
         lambda rng: [(g(rng, b'config'), 'modified', O)],
         ['text: an unclaimed stored file below .git/, modified'])
 
-    # Readings of the prose where it is not explicit (reference.py names
-    # each: ambiguities I4-I8): a hook whose executable bit changed beside
-    # another field, or beside its content; a RECORD or status file whose
-    # outcome is unknown (nothing from it, so the other RECORD of a name
-    # stands alone); two reasons in one interpreter.
+    # A hook whose executable bit changed beside another field ("its
+    # content unchanged -- its executable bit ..., whatever else changed"),
+    # or beside its content (changed); a RECORD or status file whose outcome
+    # is unknown (nothing from it, so the other RECORD of a name stands
+    # alone: ambiguity I8 in reference.py); two reasons in one interpreter
+    # (one event per reason, `no_store` first).
     one('git: a hook made executable and chown-ed',
         lambda rng: [(g(rng, b'hooks/pre-rebase'), 'mode+uid', S(mode=0o644, to_mode=0o755))],
         ['git hook: metadata_only, the executable bit changed'])

@@ -682,12 +682,14 @@ INTERP_ORDER = ['text', 'pip', 'dpkg', 'git']           # E4
 TEXT, BINARY = 'text', 'binary'
 
 # "Which interpreter": "A path is claimed by its absolute path (scope + path):
-# dpkg claims `*/var/lib/dpkg/status` and the per-package `info/*.list` and
-# `info/*.md5sums`; pip claims `*.dist-info/RECORD` and `*.dist-info/METADATA`;
+# dpkg claims `*/var/lib/dpkg/status` and the per-package
+# `*/var/lib/dpkg/info/*.list` and `*.md5sums`; pip claims `*.dist-info/RECORD` and `*.dist-info/METADATA`;
 # git claims `*/.git/HEAD`, `*/.git/packed-refs`, `*/.git/refs/*`,
 # `*/.git/hooks/*`, `*/.git/index` and the reflogs `*/.git/logs/HEAD` and
-# `*/.git/logs/refs/*`." The dpkg `info/` files are read as below
-# `*/var/lib/dpkg/` (ambiguity I1). A `*` spans `/`: `*.dist-info/RECORD`
+# `*/.git/logs/refs/*`." The prose now spells the dpkg `info/` files
+# "`*/var/lib/dpkg/info/*.list` and `*.md5sums`"; the second is read as
+# `*/var/lib/dpkg/info/*.md5sums` (the per-package files, ambiguity I1),
+# not any `*.md5sums` anywhere. A `*` spans `/`: `*.dist-info/RECORD`
 # could not match an absolute path otherwise. The absolute path is scope +
 # "/" + path.
 CLAIMS = [('dpkg', 'status', '*/var/lib/dpkg/status'),
@@ -707,7 +709,8 @@ CLAIMS = [('dpkg', 'status', '*/var/lib/dpkg/status'),
 def _check_claims():
     text = ' '.join(open(SPEC, encoding='utf-8').read().split())
     for _, _, pat in CLAIMS:
-        tail = pat[len('*/var/lib/dpkg/'):] if pat.startswith('*/var/lib/dpkg/info/') else pat
+        # "the per-package `*/var/lib/dpkg/info/*.list` and `*.md5sums`"
+        tail = '*.md5sums' if pat == '*/var/lib/dpkg/info/*.md5sums' else pat
         if '`%s`' % tail not in text:
             raise SystemExit('spec: "Which interpreter" no longer names %r' % tail)
     for w in ['An unclaimed path is **text** when its entry is `stored` on every side it exists '
@@ -715,12 +718,31 @@ def _check_claims():
               'for a path whose outcome is `unknown` or `metadata_only` it adds nothing (a git '
               "hook's executable bit excepted, which is metadata)",
               'A side on which the path is not a regular file counts as absent.',
-              '`missing` covers a path whose entry records no `stored` copy',
+              '`missing` covers a path whose entry records no `stored` copy as well as a copy '
+              'the store lacks, and is given before `no_store` when both apply.',
+              "A record's `content_unavailable` findings come before side, then after",
+              "an interpreter's `content_unavailable` events come one per reason, in the order "
+              '`no_store`, `missing`, `too_large`, `corrupt`',
+              'A `bool` field renders in `text` as `true` or `false`.',
+              'Where an interpreter fails on a path (a file it claims cannot be parsed, a '
+              "dist-info cannot be named), that path's record carries `could_not_interpret` "
+              '(R11).',
+              "its events are one `could_not_interpret` naming every path given to it, that is "
+              'every path it claims whose outcome is not `unchanged`',
               'Only a reinstall reads content (both RECORDs); the others come from the paths '
               'alone.',
               'a `content_unavailable` event has no name and comes first',
+              "that RECORD's record also carries `could_not_interpret`",
+              'when one pair key has RECORDs both added and removed other than exactly one of '
+              'each',
+              'Several added with none removed are each `pip_installed`',
               'A hook, from the manifest alone',
-              'or when the reflog was removed, `git_reflog_rewritten`']:
+              '-- its content unchanged -- its executable bit (the owner\'s), whatever else '
+              'changed',
+              'A symlink or a directory under `hooks/` is no hook (not a regular file).',
+              'The index: `git_index_changed` when it is added, removed or its content changed',
+              '(an absent before is empty)',
+              'or when the reflog was removed (no copy needed), `git_reflog_rewritten`']:
         if w not in text:
             raise SystemExit('spec: "Interpreters" no longer says what reference.py assumes: %r'
                              % w)
@@ -767,8 +789,8 @@ def string_ok(s):
 
 def render(kind, values):
     """[(key, value)] of a finding: kind, its fields in the pin's order, text
-    ("the template, filled"; a bool is filled as `true` / `false`:
-    ambiguity I9)."""
+    ("the template, filled"; "A `bool` field renders in `text` as `true`
+    or `false`")."""
     k = KINDS[kind]
     if [n for n, _ in k.fields] != list(values):
         raise AssertionError('reference bug: %s with %r' % (kind, list(values)))
@@ -810,8 +832,8 @@ REASONS = ['no_store', 'missing', 'too_large', 'corrupt']   # the pin's order
 def unavailable(e):
     """Why the stored copy of e cannot be read in a diff with no store:
     `missing` when the entry records no `stored` copy ("`missing` covers a
-    path whose entry records no `stored` copy"), else `no_store` (which wins
-    is not said: ambiguity I3)."""
+    path whose entry records no `stored` copy ..., and is given before
+    `no_store` when both apply"), else `no_store`."""
     return 'missing' if 'stored' not in e else 'no_store'
 
 
@@ -836,8 +858,8 @@ def reflog_ref(p):
 def explain(interp, what, p, b, a, outcome, state, trace):
     """The findings of one record of a claimed or text path; events go to
     `state`. Each needed side whose copy cannot be read is one
-    content_unavailable finding, before then after (the order is not said:
-    ambiguity I4)."""
+    content_unavailable finding: "A record's `content_unavailable` findings
+    come before side, then after"."""
     bs, as_ = is_reg(b), is_reg(a)
     state['claimed'].append(p)
     executable = lambda e: bool(e['mode'] & 0o100)          # "the owner's"
@@ -861,6 +883,16 @@ def explain(interp, what, p, b, a, outcome, state, trace):
                                             ('git', 'ref'), ('git', 'packed-refs')):
         need = present
     elif (interp, what) == ('pip', 'RECORD'):
+        if (bs or as_) and dist_info(p) is None:
+            # "Where an interpreter fails on a path (..., a dist-info cannot
+            # be named), that path's record carries `could_not_interpret`
+            # (R11)" -- its findings there replaced ("Findings"), a
+            # reinstall's content_unavailable included -- and the end hook
+            # fails (E6). Only a RECORD pip must name: one added, removed or
+            # modified in place (ambiguity I7).
+            trace.append('pip-unnamed')
+            state['failed'] = True
+            return [render('could_not_interpret', {})]
         if bs and as_:
             need = present                      # a reinstall reads both RECORDs
         elif bs or as_:
@@ -883,9 +915,8 @@ def explain(interp, what, p, b, a, outcome, state, trace):
             trace.append('hook-changed')
             return [render('git_hook_changed', {'hook': h, 'executable': executable(a)})]
     elif (interp, what) == ('git', 'index'):
-        # "The index: changed when its content changed (hashed, never
-        # stored)" -- present on one side only is read as a change too
-        # (ambiguity I6).
+        # "The index: `git_index_changed` when it is added, removed or its
+        # content changed (hashed, never stored)."
         if bs or as_:
             trace.append('index-changed')
             return [render('git_index_changed', {})]
@@ -901,7 +932,8 @@ def explain(interp, what, p, b, a, outcome, state, trace):
 def unavailable_events(interp, state):
     """One content_unavailable event per reason (pin, content_unavailable):
     side `before` or `after` when all its paths share it, else `both`. Two
-    reasons in one diff: ordered as the pin lists the reasons (ambiguity I5)."""
+    reasons: "one per reason, in the order `no_store`, `missing`,
+    `too_large`, `corrupt`"."""
     out = []
     for r in REASONS:
         hits = [(s, p) for rr, s, p in state['unavailable'] if rr == r]
@@ -978,13 +1010,12 @@ def pip_end(state, trace):
     """pip's events ("What each interpreter reports", pip): the
     content_unavailable events first, then by normalized name, kind (the
     pin's order), directory. None when the end hook fails (E6)."""
+    if state.get('failed'):                     # a dist-info that cannot be named
+        trace.append('pip-unnamed')
+        return None
     keys = collections.OrderedDict()
     for p, how in state['moved']:
-        di = dist_info(p)
-        if di is None:
-            trace.append('pip-unnamed')
-            return None
-        holder, name, ver = di
+        holder, name, ver = dist_info(p)
         keys.setdefault((holder, pep503(name)), {'added': [], 'removed': []})[how].append(
             (p, name, ver))
     named, kind_ix = [], list(KINDS).index
@@ -1021,7 +1052,8 @@ def pip_end(state, trace):
 
 def end(interp, state, trace):
     """An interpreter's events; one could_not_interpret event naming the
-    paths it had claimed -- every path it was given (ambiguity I7) -- when
+    paths it had claimed -- "every path given to it, that is every path it
+    claims whose outcome is not `unchanged`" -- when
     its end hook fails (E6)."""
     if interp == 'pip':
         ev = pip_end(state, trace)
