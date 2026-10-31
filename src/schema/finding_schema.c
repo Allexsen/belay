@@ -148,8 +148,11 @@ const struct event_rule EVENT_RULES[EVENT_RULE_COUNT] = {
     { "E10 a file not interpreted",
         "A file an interpreter claims and cannot interpret gives one `{\"event\": "
         "\"could_not_interpret\", \"interp\": ..., \"text\": \"could not interpret\", \"paths\": [<the "
-        "files>]}` (and its path record `could_not_interpret`); the interpreter's other events "
-        "stand: pip, a dist-info that cannot be named, a RECORD it must read that cannot be "
-        "parsed, a name with RECORDs added and removed other than one of each; dpkg, a status "
-        "that cannot be parsed (the class of decision P1)." },
+        "files>]}`; the interpreter's other events stand (the class of decision P1). pip: a "
+        "dist-info that cannot be named, or a RECORD it must read that cannot be parsed -- that "
+        "RECORD's path record carries `could_not_interpret` too, unless its outcome is `unknown`, "
+        "and nothing more is read from it; a name with RECORDs added and removed other than one "
+        "of each -- one event naming them, their path records carrying nothing (the pairing is "
+        "known only once every path record is written). dpkg: a status that cannot be parsed -- "
+        "its path record carries `could_not_interpret` too, unless its outcome is `unknown`." },
 };

@@ -81,13 +81,9 @@ int stanza_each(const char *buf, size_t len, stanza_fn fn, void *ctx) {
         else if (name_is(l, nlen, "version")) { slot = &p.version; slen = &p.version_len; }
         else if (name_is(l, nlen, "status")) { slot = &p.status; slen = &p.status_len; }
         if (slot != NULL && *slot == NULL) {
-            /* Bounded where read: other fields (Depends, Static-Built-Using)
-             * run to several KiB in real status files. */
-            if (ve - vs > STANZA_VALUE_MAX) {
-                belay_err_set(BELAY_ERR_CORRUPT, 0, "dpkg status: line %zu: value over %u bytes",
-                              lineno, STANZA_VALUE_MAX);
-                return -1;
-            }
+            /* Any length: a value is a pointer into the buffer, and one too
+             * long for an event breaks only the event that carries it (E9),
+             * not the file (decision P1's class). */
             *slot = l + vs;
             *slen = ve - vs;
         }

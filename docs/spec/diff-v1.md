@@ -325,7 +325,7 @@ itself included.
 | E7 trailer | The trailer gains `events`: the number of event records. `belay_diff_end` still counts path records only. |
 | E8 forward | A consumer ignores an event kind it does not know, as it ignores an unknown finding kind or field. |
 | E9 invalid | An event an interpreter adds that breaks its kind's row -- a kind not its own, not event-level, or the core's; a field missing, extra, or not a string field's value; text over 1,024 bytes -- is replaced, in its place, by `{"event": "invalid_finding", "interp": ..., "text": "invalid finding", "paths": [<its paths>]}`; the interpreter's other events stand (decisions P1, P5). |
-| E10 a file not interpreted | A file an interpreter claims and cannot interpret gives one `{"event": "could_not_interpret", "interp": ..., "text": "could not interpret", "paths": [<the files>]}` (and its path record `could_not_interpret`); the interpreter's other events stand: pip, a dist-info that cannot be named, a RECORD it must read that cannot be parsed, a name with RECORDs added and removed other than one of each; dpkg, a status that cannot be parsed (the class of decision P1). |
+| E10 a file not interpreted | A file an interpreter claims and cannot interpret gives one `{"event": "could_not_interpret", "interp": ..., "text": "could not interpret", "paths": [<the files>]}`; the interpreter's other events stand (the class of decision P1). pip: a dist-info that cannot be named, or a RECORD it must read that cannot be parsed -- that RECORD's path record carries `could_not_interpret` too, unless its outcome is `unknown`, and nothing more is read from it; a name with RECORDs added and removed other than one of each -- one event naming them, their path records carrying nothing (the pairing is known only once every path record is written). dpkg: a status that cannot be parsed -- its path record carries `could_not_interpret` too, unless its outcome is `unknown`. |
 <!-- END GENERATED: diff-events -->
 
 **Reading findings.** A consumer ignores a finding kind, an event kind or a field it does not
@@ -400,15 +400,15 @@ side, then after; an interpreter's `content_unavailable` events come one per rea
 `false`.
 
 Where an interpreter fails on a path (a file it claims cannot be parsed, a dist-info cannot be
-named), that path's record carries `could_not_interpret` (R11), and pip and dpkg emit one
-`could_not_interpret` event naming it (E10); their other events stand. An event a value of which is
-not a string field's value, or whose text would exceed 1,024 bytes, is one `invalid_finding` event
-naming its paths (E9). Events with no name -- `could_not_interpret` for a file,
-`content_unavailable` -- come before every named event, in the Kinds table's order, then by path
-(`content_unavailable`, one per reason, in the reasons' order). The end hook fails (E6) only when
-the interpreter's per-diff state would exceed 64 MiB or memory runs out: its events are then one
-`could_not_interpret` naming the first 1,024 paths given to it (every path it claims whose outcome
-is not `unchanged`) and counting the rest.
+named), that path's record carries `could_not_interpret` (R11) unless its outcome is `unknown`,
+nothing more is read from it, and pip and dpkg emit one `could_not_interpret` event naming it (E10);
+their other events stand. An event a value of which is not a string field's value, or whose text
+would exceed 1,024 bytes, is one `invalid_finding` event naming its paths (E9). Events with no name
+-- `could_not_interpret` for a file, `content_unavailable` -- come before every named event, in the
+Kinds table's order, then by path (`content_unavailable`, one per reason, in the reasons' order).
+The end hook fails (E6) only when the interpreter's per-diff state would exceed 64 MiB or memory
+runs out: its events are then one `could_not_interpret` naming the first 1,024 paths given to it
+(every path it claims whose outcome is not `unchanged`) and counting the rest.
 
 **text.** Stored on both sides: `text_changed`, counted from the longest common subsequence of
 lines; when the two differ in more than 2,000 lines, `text_rewritten` gives the line counts only.
@@ -432,12 +432,14 @@ hash or size differs. Only a reinstall reads content (both RECORDs); the others 
 alone. A RECORD whose outcome is `unknown` pairs like any other, by its directory's name, and every
 event it takes part in is provisional; one present on both sides is no proven reinstall and gives
 none (its rows are not counted). An event lists the RECORD paths it was derived from. Event order:
-by normalized name (none first), then kind (in the Kinds table's order), then directory. A dist-info
-that cannot be named (no `-`, an empty name or version, or one that is not a string field's value),
-or a RECORD it must read that cannot be parsed, is one `could_not_interpret` event naming that
-RECORD; one pair key with RECORDs both added and removed other than exactly one of each (no kind
-says that) is one `could_not_interpret` event naming them, in that name's place. Several added with
-none removed are each `pip_installed`; several removed with none added, each `pip_removed`.
+by normalized name (none first), then kind (in the Kinds table's order), then directory, then the
+paths it lists. A dist-info that cannot be named (no `-`, an empty name or version, or one that is
+not a string field's value), or a RECORD it must read that cannot be parsed, is one
+`could_not_interpret` event naming that RECORD; one pair key with RECORDs both added and removed
+other than exactly one of each (no kind says that) is one `could_not_interpret` event naming them,
+in that name's place; their records carry nothing, as the pairing is known only once every path
+record is written. Several added with none removed are each `pip_installed`; several removed with
+none added, each `pip_removed`.
 
 **dpkg.** From the `status` file before and after (an absent side lists no packages): a package is
 keyed by `Package` and `Architecture` (empty when absent), the first stanza of a key kept, and is
@@ -452,8 +454,10 @@ changed has both). A status whose outcome is `unknown` is read too, and every ev
 provisional. An event lists the status path. Event order: by Package, then Architecture, then kind
 (in the Kinds table's order), then path; the events with no name first. A status that cannot be
 parsed is one `could_not_interpret` event naming it; an event a value of which is not a string
-field's value (a NUL in a field) is one `invalid_finding` event in its place. The `info/` files are
-claimed so captures keep them (the baseline M2's integrity check needs); they add no findings.
+field's value (a NUL in a field, or one over 1,024 bytes: a field read may be any length) is one
+`invalid_finding` event in its place, and a value no event carries changes nothing. The `info/`
+files are claimed so captures keep them (the baseline M2's integrity check needs); they add no
+findings.
 
 **git.** No objects are read: refs, hooks, the index and the reflog only. A path is placed by the
 part after its `.git/` (the last one that fits). `HEAD`: `git_head_changed`, from and to being the

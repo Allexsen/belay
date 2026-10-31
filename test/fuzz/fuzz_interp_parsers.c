@@ -27,10 +27,10 @@ static void inside(const char *p, size_t n, size_t max) {
 
 static int on_pkg(const struct stanza_pkg *p, void *c) {
     (void)c;
-    inside(p->package, p->package_len, STANZA_VALUE_MAX);
-    inside(p->arch, p->arch_len, STANZA_VALUE_MAX);
-    inside(p->version, p->version_len, STANZA_VALUE_MAX);
-    inside(p->status, p->status_len, STANZA_VALUE_MAX);
+    inside(p->package, p->package_len, g_len);
+    inside(p->arch, p->arch_len, g_len);
+    inside(p->version, p->version_len, g_len);
+    inside(p->status, p->status_len, g_len);
     if (p->package == NULL) abort();
     g_count++;
     return 0;
