@@ -36,7 +36,9 @@ The corpus has three parts:
     its digest (the same set and another), O1 with and without a size
     change, hash limits, sealing and unsealing directories, unstable
     listings, one-sided paths below raced and plain non-directories,
-    one-sided raced entries, the trailer's walk counts, the root itself,
+    one-sided raced entries, a regular file mounted on one side or both,
+    `unverified` on the other side or not (pin O8), the trailer's walk
+    counts, the root itself,
     names sorting before ".", non-UTF-8 and escaped names;
   - random pairs: n-bases random trees, each with four mutated variants
     (several changes at once), compared in both directions and with
@@ -1943,6 +1945,49 @@ def mount_root_attributes(w, rng):
                    build, scenarios=scen)
 
 
+def mount_unverified(w, rng):
+    """Pin O8: "`unverified` on a side that also carries `mount` adds no
+    reason: a mounted regular file carries it because it is never read
+    (manifest-v1 rules 5 and 21), and `mount` is that reason. `unverified` on
+    the other side still gives its own." (diff-v1.md, the `unknown` sentence,
+    says the same.) A regular file that becomes a mount root (written both
+    ways round: or stops being one), with no flag but `mount` and its
+    `unverified` on the mount side: on the other side hashed (reasons:
+    `mount` alone), or too large for that manifest's hash limit, a bare
+    `unverified` (reasons: `unverified` and `mount`); and a regular file that
+    is a mount root on both sides, its mode changed (reasons: `mount`). The
+    size is the same on both sides -- a mount root's size is not tied to the
+    hash limit (header rule 1 asks a bare `unverified` only) -- so no content
+    field proves a change and the outcome is `unknown`."""
+    def plain_reg(rng, t):
+        return clear_flags(subject(rng, t, 'reg'), t, rng)    # hashed, no flag
+    def build_hashed(rng):
+        t = base_tree(rng)
+        e = plain_reg(rng, t)
+        return with_subject(t, e, in_context('mount', e, t, rng))
+    def build_bare(rng):
+        t = base_tree(rng)
+        e = in_context('unverified', plain_reg(rng, t), t, rng)
+        return with_subject(t, e, in_context('mount', e, t, rng))
+    def build_both(rng):
+        t = base_tree(rng)
+        e = in_context('mount', plain_reg(rng, t), t, rng)
+        e2 = copy.deepcopy(e)
+        e2['mode'] = (e['mode'] & S_IFMT) | other(rng, PERMS, e['mode'] & 0o7777)
+        return with_subject(t, e, e2)
+    tag = 'a regular file %s a mount root, unverified %s, no other flag'
+    for _ in range(2):
+        w.targeted(rng, 'a hashed regular file becomes a mount root (O8)', build_hashed,
+                   scenarios=[tag % (v, 'only on the mount side')
+                              for v in ('becomes', 'stops being')])
+        w.targeted(rng, 'a regular file too large to hash becomes a mount root (O8)', build_bare,
+                   scenarios=[tag % (v, 'also on the other side (bare)')
+                              for v in ('becomes', 'stops being')])
+        w.targeted(rng, 'a regular file mounted on both sides, its mode changed (O8)', build_both,
+                   scenarios=['a regular file is a mount root on both sides, unverified on each, '
+                              'no other flag'])
+
+
 def digest_of(items):
     """A set's xattrs_sha256, as manifest-v1.md defines it ("Field rules a
     reader MUST enforce"): "the sha256 of the bytes `xattrs` would hold
@@ -2069,6 +2114,7 @@ def targeted(w, rng):
     dir_timestamps(w, rng)
     below_a_non_directory(w, rng)
     mount_root_attributes(w, rng)
+    mount_unverified(w, rng)
     xattrs_spellings(w, rng)
     trailer_counts(w, rng)
 

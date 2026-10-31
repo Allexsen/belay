@@ -45,7 +45,10 @@ the generator's labels (coverage(), required(), gate()):
     or a flag, iflags on one side, caps/xattrs under xattrs_unknown and
     beside a mount root, O1, one-sided paths below sealed, unstable and
     non-directory ancestors (raced or not, one and two levels down), raced
-    type changes (raced on one side or both), the trailer's walk counts, ...
+    type changes (raced on one side or both), a regular file that becomes
+    or stops being a mount root, or is one on both sides, with `unverified`
+    on the mount side and on the other or not (O8), the trailer's walk
+    counts, ...
 gen_corpus.py builds every required item deterministically and checks each
 targeted pair, and then the targeted pairs alone, with these same functions;
 here the gate runs again over the whole corpus.
@@ -106,6 +109,7 @@ G_DIR_TS = "a directory's own timestamps: unchanged, counted in dir_timestamps_o
 G_RACED_ANC = 'one side only, below a raced non-directory: unknown, raced'
 G_TYPE_BEFORE = 'type_before on every path whose types differ, raced or not'
 G_DIGEST = 'xattrs: an inline set against a digest, by the formula (manifest-v1)'
+G_O8 = 'unverified on a side that also carries mount: no reason; on the other side its own (O8)'
 
 
 def group_changed(f, trace, typ):
@@ -220,6 +224,8 @@ def compare_record(path, exp, got, trace, orders):
         for r in sorted(set(ue) ^ set(ug)):
             if r == 'iflags_unknown':
                 groups.append(G_IFLAGS_MOUNT if 'not-on-mount-root:iflags' in trace else G_IFLAGS)
+            elif r == 'unverified' and any(x.startswith('O8') for x in trace):
+                groups.append(G_O8)
             else:
                 unexplained.append('reason ' + r)
     elif ug:
@@ -429,6 +435,15 @@ SCENARIOS = (['dev relation: an entry leaves the root device',
                 'a directory is a mount root on one side only, unstable or unreadable on the '
                 'other',
                 'a regular file is a mount root on one side only, caps on the other']
+             # Pin O8: "`unverified` on a side that also carries `mount` adds no
+             # reason ... `unverified` on the other side still gives its own".
+             # The same size on both sides, so that no content field proves a
+             # change and the reasons are listed.
+             + ['a regular file %s a mount root, unverified %s, no other flag' % (v, w)
+                for v in ('becomes', 'stops being')
+                for w in ('only on the mount side', 'also on the other side (bare)')]
+             + ['a regular file is a mount root on both sides, unverified on each, no other '
+                'flag']
              # Rule 1 before rule 2, `raced` on one side only or on both; each
              # record keeps its `type_before` ("whatever the outcome").
              + ['a raced type change, raced %s only%s' % (s, i) for s in ('before', 'after')
@@ -582,6 +597,23 @@ def pair_coverage(stem, cells, optional, scen, fpairs):
                          'on the other')
             if t == 'reg' and 'caps' in other:
                 tags.add('a regular file is a mount root on one side only, caps on the other')
+        # O8, with nothing else flagged on either side: a mounted regular file
+        # always carries `unverified` (manifest-v1 rules 5 and 21).
+        if t == 'reg' and b['size'] == a['size'] and (b.get('mount') or a.get('mount')):
+            mu = {'mount', 'unverified'}
+            fb, fa = ({f for f in ref.FLAGS if e.get(f)} for e in (b, a))
+            if fb == fa == mu:
+                tags.add('a regular file is a mount root on both sides, unverified on each, no '
+                         'other flag')
+            elif bool(b.get('mount')) != bool(a.get('mount')):
+                fm, fo, verb = (fb, fa, 'stops being') if b.get('mount') else \
+                    (fa, fb, 'becomes')
+                if fm == mu and not fo:
+                    tags.add('a regular file %s a mount root, unverified only on the mount side, '
+                             'no other flag' % verb)
+                if fm == mu and fo == {'unverified'}:
+                    tags.add('a regular file %s a mount root, unverified also on the other side '
+                             '(bare), no other flag' % verb)
         xb, xa = ref.value(b, 'xattrs'), ref.value(a, 'xattrs')
         if xb and xa and (xb[0] != xa[0] or xb[0] != 'xattrs'):
             alone = D <= SPELLED and quiet(b, a)
