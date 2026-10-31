@@ -157,7 +157,7 @@ static bool pep_parse(const char *s, size_t n, struct pepv *v) {
             v->pre_kind = kind;
             size_t m = k;
             sep(s, n, &m);
-            if (!take_num(s, n, &m, &v->pre)) { v->pre = 0; m = k; }
+            if (!take_num(s, n, &m, &v->pre)) v->pre = 0;     /* "2a." is 2a0 (Appendix B) */
             i = m;
         }
     }
@@ -174,7 +174,7 @@ static bool pep_parse(const char *s, size_t n, struct pepv *v) {
             if (take_word(s, n, &k, "post") || take_word(s, n, &k, "rev") || take_word(s, n, &k, "r")) {
                 size_t m = k;
                 sep(s, n, &m);
-                if (!take_num(s, n, &m, &v->post)) { v->post = 0; m = k; }
+                if (!take_num(s, n, &m, &v->post)) v->post = 0;
                 v->has_post = true;
                 i = m;
             }
@@ -187,7 +187,7 @@ static bool pep_parse(const char *s, size_t n, struct pepv *v) {
         if (take_word(s, n, &k, "dev")) {
             size_t m = k;
             sep(s, n, &m);
-            if (!take_num(s, n, &m, &v->dev)) { v->dev = 0; m = k; }
+            if (!take_num(s, n, &m, &v->dev)) v->dev = 0;
             v->has_dev = true;
             i = m;
         }

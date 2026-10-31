@@ -59,6 +59,10 @@ TEST(pep440_versions_sort_as_the_pep_shows) {
         { "1.0", "1.0.0" }, { "1.0a1", "1.0alpha1" }, { "1.0b1", "1.0-beta.1" },
         { "1.0rc1", "1.0c1" }, { "1.0.post1", "1.0-1" }, { "1.0.post0", "1.0.post" },
         { "1.0.dev0", "1.0dev" }, { "v1.0", "1.0" }, { "1.0RC1", "1.0rc1" }, { "0!1.0", "1.0" },
+        /* PEP 440 Appendix B: a separator may follow a pre, post or dev
+         * signifier with no number (the reference author's case C). */
+        { "2a.", "2a0" }, { "1.0.post.", "1.0.post0" }, { "1.0rc--1", "1.0rc0.post1" },
+        { "1.0.dev-", "1.0.dev0" },
     };
     for (size_t i = 0; i < sizeof same / sizeof same[0]; i++)
         if (pep(same[i][0], same[i][1], &ok) != 0 || !ok)

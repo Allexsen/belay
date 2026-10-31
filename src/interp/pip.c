@@ -19,6 +19,7 @@
 #include "versions.h"
 
 #include "belay/error.h"
+#include "belay/json.h"
 #include "belay/manifest.h"
 #include "schema/finding_schema.h"
 
@@ -147,6 +148,10 @@ static int row_cmp(const void *a, const void *b) {
  * row with no line end -- so len + 1 in all (review 2026-10-31, 4). */
 static int rows_of(const unsigned char *buf, size_t len, struct rows *r) {
     memset(r, 0, sizeof *r);
+    if (!belay_utf8_valid((const char *)buf, len)) {       /* RECORD is UTF-8 text (PEP 376) */
+        belay_err_set(BELAY_ERR_CORRUPT, 0, "pip: RECORD is not UTF-8");
+        return -1;
+    }
     r->arena_cap = len + 4;
     if ((r->arena = malloc(r->arena_cap)) == NULL) {
         belay_err_set(BELAY_ERR_NOMEM, 0, "pip: out of memory");

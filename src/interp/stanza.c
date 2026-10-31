@@ -36,6 +36,7 @@ int stanza_each(const char *buf, size_t len, stanza_fn fn, void *ctx) {
     struct stanza_pkg p;
     memset(&p, 0, sizeof p);
     size_t count = 0, lineno = 0, i = 0;
+    bool simple = false;            /* the last field line was one of the four read */
     while (i < len) {
         const char *nl = memchr(buf + i, '\n', len - i);
         const size_t end = nl != NULL ? (size_t)(nl - buf) : len;
@@ -55,6 +56,10 @@ int stanza_each(const char *buf, size_t len, stanza_fn fn, void *ctx) {
                 belay_err_set(BELAY_ERR_CORRUPT, 0, "dpkg status: line %zu continues nothing", lineno);
                 return -1;
             }
+            if (simple) {       /* Debian Policy 5.1: Package, Version, ... are never folded */
+                belay_err_set(BELAY_ERR_CORRUPT, 0, "dpkg status: line %zu folds a simple field", lineno);
+                return -1;
+            }
             continue;
         }
         const char *colon = memchr(l, ':', ll);
@@ -64,6 +69,8 @@ int stanza_each(const char *buf, size_t len, stanza_fn fn, void *ctx) {
         }
         if (p.line == 0) p.line = lineno;
         const size_t nlen = (size_t)(colon - l);
+        simple = name_is(l, nlen, "package") || name_is(l, nlen, "architecture") ||
+                 name_is(l, nlen, "version") || name_is(l, nlen, "status");
         size_t vs = nlen + 1, ve = ll;
         while (vs < ve && blank(l[vs])) vs++;
         while (ve > vs && blank(l[ve - 1])) ve--;

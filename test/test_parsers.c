@@ -81,6 +81,8 @@ TEST(a_malformed_dpkg_status_is_an_error) {
         " continuation first\n",
         "Status: install ok installed\n",           /* no Package */
         ": no name\n",
+        "Package: a\nVersion: 1.1\n .5\n",        /* a simple field folded (Policy 5.1) */
+        "Package: a\nStatus: install ok\n installed\n",
     };
     for (size_t i = 0; i < sizeof bad / sizeof bad[0]; i++) {
         g_n = 0;
