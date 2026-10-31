@@ -465,22 +465,45 @@ TEST(git_a_symlinked_hook_is_a_hook_and_names_its_target) {
     struct run r;
     r_begin(&r, BELAY_INTERP_GIT, false);
     const struct belay_entry l = link_to("/tmp/evil.sh"), l2 = link_to("../../tools/hook.sh"), x = file(NULL, 0755);
-    ASSERT_EQ_STR(F1("{\"kind\":\"git_hook_added\",\"hook\":\"pre-commit\",\"executable\":true,"
+    ASSERT_EQ_STR(F1("{\"kind\":\"git_hook_added\",\"hook\":\"pre-commit\","
                      "\"target\":\"/tmp/evil.sh\",\"text\":\"hook pre-commit added\"}"),
                   r_path(&r, "/s/r/.git/hooks/pre-commit", NULL, &l, "added"));
     ASSERT_EQ_STR(F1("{\"kind\":\"git_hook_removed\",\"hook\":\"pre-commit\",\"target\":\"/tmp/evil.sh\","
                      "\"text\":\"hook pre-commit removed\"}"),
                   r_path(&r, "/s/r/.git/hooks/pre-commit", &l, NULL, "removed"));
-    ASSERT_EQ_STR(F1("{\"kind\":\"git_hook_changed\",\"hook\":\"pre-commit\",\"executable\":true,"
+    ASSERT_EQ_STR(F1("{\"kind\":\"git_hook_changed\",\"hook\":\"pre-commit\","
                      "\"target\":\"../../tools/hook.sh\",\"text\":\"hook pre-commit changed\"}"),
                   r_path(&r, "/s/r/.git/hooks/pre-commit", &l, &l2, "modified"));
-    ASSERT_EQ_STR(F1("{\"kind\":\"git_hook_changed\",\"hook\":\"post-merge\",\"executable\":true,"
+    ASSERT_EQ_STR(F1("{\"kind\":\"git_hook_changed\",\"hook\":\"post-merge\","
                      "\"target\":\"/tmp/evil.sh\",\"text\":\"hook post-merge changed\"}"),
                   r_path(&r, "/s/r/.git/hooks/post-merge", &x, &l, "type_changed"));
     ASSERT_EQ_STR(F1("{\"kind\":\"git_hook_changed\",\"hook\":\"post-merge\",\"executable\":true,"
                      "\"target\":\"\",\"text\":\"hook post-merge changed\"}"),
                   r_path(&r, "/s/r/.git/hooks/post-merge", &l, &x, "type_changed"));
     ASSERT_EQ_STR("", r_path(&r, "/s/r/.git/hooks/pre-commit", &l, &l, "metadata_only"));
+    r_free(&r);
+}
+
+/* Decision 2026-10-31 (b): a hook's target is bytes -- target_b64 when not
+ * UTF-8, up to 4,095 bytes (addendum A4) -- never a degraded finding. */
+TEST(git_a_hook_target_is_reported_whatever_its_bytes) {
+    struct run r;
+    r_begin(&r, BELAY_INTERP_GIT, false);
+    const struct belay_entry odd = link_to("/tmp/\xff\xfe.sh");
+    ASSERT_EQ_STR(F1("{\"kind\":\"git_hook_added\",\"hook\":\"pre-commit\",\"target_b64\":\"L3RtcC///i5zaA==\","
+                     "\"text\":\"hook pre-commit added\"}"),
+                  r_path(&r, "/s/r/.git/hooks/pre-commit", NULL, &odd, "added"));
+    static char t[4096];
+    t[0] = '/';
+    memset(t + 1, 'a', 4094);                               /* 4,095 bytes: the limit */
+    struct belay_entry big = link_to("x");
+    memcpy(big.link_target, t, 4095);
+    big.link_target_len = 4095;
+    const char *got = r_path(&r, "/s/r/.git/hooks/pre-push", NULL, &big, "added");
+    ASSERT_TRUE(strstr(got, "\"kind\":\"git_hook_added\"") != NULL && strlen(got) > 4095);
+    big.link_target_len = 4096;                             /* one past: refused, as the manifest would */
+    big.link_target[4095] = 'a';
+    ASSERT_TRUE(strstr(r_path(&r, "/s/r/.git/hooks/pre-push", NULL, &big, "added"), "invalid_finding") != NULL);
     r_free(&r);
 }
 
@@ -590,8 +613,16 @@ TEST(pip_metadata_and_unproven_changes_add_nothing) {
     const struct belay_entry e = file(NULL, 0);
     ASSERT_EQ_STR("", r_path(&r, SP "six-1.16.0.dist-info/METADATA", &e, &e, "modified"));
     ASSERT_EQ_STR("", r_path(&r, REC("six-1.16.0"), &e, &e, "metadata_only"));
-    ASSERT_EQ_STR("", r_path(&r, REC("six-1.16.0"), &e, &e, "unknown"));     /* no proven reinstall */
     ASSERT_EQ_STR("", r_end(&r));
+    r_free(&r);
+
+    /* Decision 2026-10-31 (c): unknown on both sides, a provisional
+     * reinstall with its counts absent (before, nothing at all). */
+    r_begin(&r, BELAY_INTERP_PIP, false);
+    ASSERT_EQ_STR("", r_path(&r, REC("six-1.16.0"), &e, &e, "unknown"));
+    ASSERT_EQ_STR("{\"event\":\"pip_reinstalled\",\"interp\":\"pip\",\"name\":\"six\",\"version\":\"1.16.0\","
+                  "\"text\":\"reinstalled six 1.16.0 (files not counted)\",\"provisional\":true,"
+                  "\"paths\":[\"" REL("six-1.16.0") "\"]}\n", r_end(&r));
     r_free(&r);
 }
 
@@ -1066,6 +1097,7 @@ int main(void) {
     RUN(git_ref_that_cannot_be_parsed_could_not_be_interpreted);
     RUN(git_paths_that_are_not_files_are_absent);
     RUN(git_a_symlinked_hook_is_a_hook_and_names_its_target);
+    RUN(git_a_hook_target_is_reported_whatever_its_bytes);
     RUN(git_a_ref_rewritten_to_the_same_value_says_nothing);
     RUN(pip_installs_removals_and_version_changes_are_events);
     RUN(pip_pairs_within_one_directory_by_normalized_name);

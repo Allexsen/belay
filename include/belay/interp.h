@@ -75,9 +75,10 @@ enum belay_interp_id belay_interp_dispatch(const struct belay_claim *claim,
  *  output (R11): an error is the finding could_not_interpret.
  */
 
-/* One field value, in the kind's field order: `s`/`len` for a string,
- * `i` for an int, `b` for a bool. */
-struct belay_fv { const char *s; size_t len; uint64_t i; bool b; };
+/* One field value, in the kind's field order: `s`/`len` for a string or
+ * bytes, `i` for an int, `b` for a bool; `absent` for an optional field
+ * the kind's meaning leaves out. */
+struct belay_fv { const char *s; size_t len; uint64_t i; bool b; bool absent; };
 
 struct belay_findings;          /* one path's findings, kept by the core */
 struct belay_events;            /* one interpreter's events over one diff */

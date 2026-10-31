@@ -220,13 +220,15 @@ static bool is_hook(const struct belay_entry *e) {
     return e != NULL && (e->type == BELAY_T_REG || e->type == BELAY_T_LNK);
 }
 
-/* The owner's bit for a file; true for a symlink, whose target's mode is not
- * recorded. */
-static bool executable(const struct belay_entry *e) {
-    return e->type == BELAY_T_LNK || (e->mode & 0100) != 0;
+/* The owner's bit, for a file; absent for a symlink, whose own mode says
+ * nothing about its target (decision 2026-10-31, a). */
+static struct belay_fv executable(const struct belay_entry *e) {
+    if (e->type == BELAY_T_LNK) return (struct belay_fv){ .absent = true };
+    return (struct belay_fv){ .b = (e->mode & 0100) != 0 };
 }
 
-/* A link's target, empty for a file. */
+/* A link's target, empty for a file: bytes, written target_b64 when not
+ * UTF-8 (decision 2026-10-31, b). */
 static struct belay_fv target(const struct belay_entry *e) {
     if (e->type != BELAY_T_LNK || !e->has_link_target) return (struct belay_fv){ .s = "", .len = 0 };
     return (struct belay_fv){ .s = e->link_target, .len = e->link_target_len };
@@ -238,17 +240,17 @@ static enum belay_interp_result hook(const struct belay_interp_input *in, const 
     const bool b = is_hook(in->before), a = is_hook(in->after);
     if (!b && !a) return BELAY_INTERP_DECLINE;          /* a directory: no hook */
     if (!b) {
-        const struct belay_fv v[] = { FV(name, nl), { .b = executable(in->after) }, target(in->after) };
+        const struct belay_fv v[] = { FV(name, nl), executable(in->after), target(in->after) };
         rc = belay_finding(out, FK_GIT_HOOK_ADDED, v, 3);
     } else if (!a) {
         const struct belay_fv v[] = { FV(name, nl), target(in->before) };
         rc = belay_finding(out, FK_GIT_HOOK_REMOVED, v, 2);
     } else if (is(in, "modified") || is(in, "type_changed")) {   /* content, target, file <-> link */
-        const struct belay_fv v[] = { FV(name, nl), { .b = executable(in->after) }, target(in->after) };
+        const struct belay_fv v[] = { FV(name, nl), executable(in->after), target(in->after) };
         rc = belay_finding(out, FK_GIT_HOOK_CHANGED, v, 3);
     } else if (in->before->type == BELAY_T_REG && in->after->type == BELAY_T_REG &&
-               executable(in->before) != executable(in->after)) {      /* metadata_only */
-        const struct belay_fv v[] = { FV(name, nl), { .b = executable(in->after) } };
+               executable(in->before).b != executable(in->after).b) {      /* metadata_only */
+        const struct belay_fv v[] = { FV(name, nl), executable(in->after) };
         rc = belay_finding(out, FK_GIT_HOOK_EXECUTABLE_CHANGED, v, 2);
     } else {
         return BELAY_INTERP_DECLINE;
