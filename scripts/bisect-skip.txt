@@ -81,3 +81,22 @@
 2026-10-31T17:34:23+04:00	oracle: the trailer's events, a record's findings and the event records
 2026-10-31T17:39:14+04:00	oracle: the interpreters in the coverage gate, with no store
 2026-10-31T17:39:35+04:00	oracle: gen_corpus.py says what the interpreter pairs hold
+
+# Phase 4 follow-ups (pin PR #22 and code PR #23, merged together by rebase,
+# decision 2026-10-31 row 54). The pins come first and the code that
+# follows them after, so every commit before the last fails at its own
+# position: `make check` (test_pins: the pins ahead of the schema), and
+# `make oracle` / `make reference` until their separate authors updated them
+# (verified by running all three at each commit).
+2026-10-31T19:02:02+04:00	pins: Phase 4 follow-ups P1, P3, P4, P5, P7 (needs the author's OK)
+2026-10-31T19:30:21+04:00	pins: E10 says which records carry could_not_interpret
+2026-10-31T19:57:01+04:00	pins: #22 amended -- symlinked hooks omit executable, hook targets as bytes, an unknown reinstall
+2026-10-31T19:11:47+04:00	interp: Phase 4 follow-ups P1, P3, P4, P5, P7 (on pins #22)
+2026-10-31T19:26:17+04:00	oracle: the Phase 4 follow-ups -- provisional events, E9, E10, symlinked hooks
+2026-10-31T19:31:48+04:00	interp: a dpkg value of any length breaks only its event; E10's wording
+2026-10-31T19:25:58+04:00	reference: diff.v1's new event rules -- provisional, E9 in place, E10 per file
+2026-10-31T19:26:05+04:00	reference: cells for P1, P5, P7 and the event order; E6 probes now E9/E10
+2026-10-31T19:35:03+04:00	reference: E10's settled wording -- ambiguous RECORDs carry nothing, no read of an unnameable dist-info, the paths tie-break
+2026-10-31T19:35:20+04:00	oracle: E10's records, nothing more read, pip's last key the paths
+2026-10-31T20:00:41+04:00	interp: #22's amendments -- optional fields, bytes targets, an unknown reinstall
+2026-10-31T20:09:45+04:00	oracle: #22's amendments -- optional fields, bytes targets, an unknown reinstall
