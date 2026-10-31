@@ -1,0 +1,8 @@
+six.py,sha256=AAAA,100
+"a,b.py",sha256=BB,3
+six-1.16.0.dist-info/RECORD,,
+
+--
+six.py,sha256=ZZZZ,100
+c.py,sha256=CC,4
+six-1.16.0.dist-info/RECORD,,
