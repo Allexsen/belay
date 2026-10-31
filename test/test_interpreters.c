@@ -391,6 +391,16 @@ TEST(git_reflog_that_is_not_appended_to_is_rewritten) {
     edited[strlen(edited) - 2] = 'X';
     const struct belay_entry e = file(put(edited), 0);
     ASSERT_EQ_STR(want, r_path(&r, "/s/r/.git/logs/refs/heads/main", &b, &e, "modified"));
+    /* S3 G8: before a prefix of after, but ending inside a line that after
+     * goes on with: that line was altered. */
+    char cut[512], longer[1024];
+    snprintf(cut, sizeof cut, "%.*s", (int)strlen(one) - 1, one);
+    snprintf(longer, sizeof longer, "%s more\n" OB " " OC WHO "commit: two\n", cut);
+    const struct belay_entry c1 = file(put(cut), 0), c2 = file(put(longer), 0);
+    ASSERT_EQ_STR(want, r_path(&r, "/s/r/.git/logs/refs/heads/main", &c1, &c2, "modified"));
+    /* S3 G10: a removed reflog needs no copy to say so. */
+    const struct belay_entry none = file(NULL, 0);
+    ASSERT_EQ_STR(want, r_path(&r, "/s/r/.git/logs/refs/heads/main", &none, NULL, "removed"));
     r_free(&r);
 }
 
@@ -463,11 +473,15 @@ TEST(pip_pairs_within_one_directory_by_normalized_name) {
     r_path(&r, "/s/a/foo.bar-2.0.dist-info/RECORD", NULL, &e, "added");
     r_path(&r, "/s/b/foo-1.0.dist-info/RECORD", &e, NULL, "removed");
     r_path(&r, "/s/c/foo-2.0.dist-info/RECORD", NULL, &e, "added");
+    r_path(&r, "/s/c/foo-0.9.dist-info/RECORD", &e, NULL, "removed");      /* S3 P7 */
+    r_path(&r, "/s/d/foo-3.0.dist-info/RECORD", NULL, &e, "added");
     ASSERT_EQ_STR(
-        "{\"event\":\"pip_installed\",\"interp\":\"pip\",\"name\":\"foo\",\"version\":\"2.0\","
-        "\"text\":\"installed foo 2.0\",\"paths\":[\"c/foo-2.0.dist-info/RECORD\"]}\n"
+        "{\"event\":\"pip_installed\",\"interp\":\"pip\",\"name\":\"foo\",\"version\":\"3.0\","
+        "\"text\":\"installed foo 3.0\",\"paths\":[\"d/foo-3.0.dist-info/RECORD\"]}\n"
         "{\"event\":\"pip_removed\",\"interp\":\"pip\",\"name\":\"foo\",\"version\":\"1.0\","
         "\"text\":\"removed foo 1.0\",\"paths\":[\"b/foo-1.0.dist-info/RECORD\"]}\n"
+        "{\"event\":\"pip_upgraded\",\"interp\":\"pip\",\"name\":\"foo\",\"from\":\"0.9\",\"to\":\"2.0\","
+        "\"text\":\"upgraded foo 0.9 -> 2.0\",\"paths\":[\"c/foo-0.9.dist-info/RECORD\",\"c/foo-2.0.dist-info/RECORD\"]}\n"
         "{\"event\":\"pip_upgraded\",\"interp\":\"pip\",\"name\":\"foo.bar\",\"from\":\"1.0\",\"to\":\"2.0\","
         "\"text\":\"upgraded foo.bar 1.0 -> 2.0\",\"paths\":[\"a/Foo_Bar-1.0.dist-info/RECORD\","
         "\"a/foo.bar-2.0.dist-info/RECORD\"]}\n",
@@ -484,17 +498,19 @@ TEST(pip_reinstall_counts_files_by_record_row) {
         "six.py,sha256=AAAA,34549\n"
         "six-1.16.0.dist-info/METADATA,sha256=BBBB,1795\n"
         "six-1.16.0.dist-info/RECORD,,\n"
-        "\"odd,name.py\",sha256=CCCC,10\n"), 0);
+        "\"odd,name.py\",sha256=CCCC,10\n"
+        "grow.py,sha256=EEEE,10\n"), 0);
     const struct belay_entry a = file(put(
         "six.py,sha256=ZZZZ,34549\r\n"
         "six-1.16.0.dist-info/METADATA,sha256=BBBB,1796\r\n"
         "six-1.16.0.dist-info/RECORD,,\r\n"
-        "six-1.16.0.dist-info/INSTALLER,sha256=DDDD,4\r\n"), 0);
+        "six-1.16.0.dist-info/INSTALLER,sha256=DDDD,4\r\n"
+        "grow.py,sha256=EEEE,100\r\n"), 0);
     ASSERT_EQ_STR("", r_path(&r, REC("six-1.16.0"), &b, &a, "modified"));
     ASSERT_EQ_STR(
         "{\"event\":\"pip_reinstalled\",\"interp\":\"pip\",\"name\":\"six\",\"version\":\"1.16.0\","
-        "\"files_added\":1,\"files_removed\":1,\"files_changed\":2,"
-        "\"text\":\"reinstalled six 1.16.0: +1 -1 ~2 files\",\"paths\":[\"" REL("six-1.16.0") "\"]}\n",
+        "\"files_added\":1,\"files_removed\":1,\"files_changed\":3,"
+        "\"text\":\"reinstalled six 1.16.0: +1 -1 ~3 files\",\"paths\":[\"" REL("six-1.16.0") "\"]}\n",
         r_end(&r));
     r_free(&r);
 }
@@ -700,6 +716,15 @@ TEST(dpkg_status_that_cannot_be_read_is_never_no_change) {
                   r_path(&r, STATUS, &b, &a, "modified"));
     ASSERT_EQ_STR("{\"event\":\"content_unavailable\",\"interp\":\"dpkg\",\"reason\":\"no_store\","
                   "\"side\":\"both\",\"text\":\"content unavailable (both): no_store\","
+                  "\"paths\":[\"" STATUS_REL "\"]}\n",
+                  r_end(&r));
+    r_free(&r);
+
+    /* S3 U7: a status removed, with no store: side before. */
+    r_begin(&r, BELAY_INTERP_DPKG, false);
+    r_path(&r, STATUS, &b, NULL, "removed");
+    ASSERT_EQ_STR("{\"event\":\"content_unavailable\",\"interp\":\"dpkg\",\"reason\":\"no_store\","
+                  "\"side\":\"before\",\"text\":\"content unavailable (before): no_store\","
                   "\"paths\":[\"" STATUS_REL "\"]}\n",
                   r_end(&r));
     r_free(&r);

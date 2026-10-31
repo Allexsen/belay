@@ -428,6 +428,22 @@ TEST(one_paths_findings_never_reach_the_next) {
     ASSERT_FALSE(has(PIP_B, "findings"));
 }
 
+/* What an interpreter added before declining is dropped (S3 K16). */
+static enum belay_interp_result t_adds_then_declines(void *state, const struct belay_interp_input *in,
+                                                     struct belay_findings *out) {
+    (void)state; (void)in;
+    belay_finding(out, FK_CONTENT_UNAVAILABLE, CU_MISSING, 2);
+    return BELAY_INTERP_DECLINE;
+}
+
+TEST(a_declining_interpreter_adds_nothing) {
+    two_records();
+    const struct belay_interp t = { BELAY_INTERP_PIP, NULL, t_adds_then_declines, NULL };
+    REQUIRE(run_in(BELAY_INTERP_PIP, &t) == 0);
+    ASSERT_TRUE(record(PIP_A) != NULL);
+    ASSERT_FALSE(has(PIP_A, "findings"));
+}
+
 /* diff-events E1, E2, E7: an end hook's events come after the last path
  * record and before the trailer, which counts them; belay_diff_end and
  * stats.records count path records only. */
@@ -1212,6 +1228,7 @@ int main(void) {
     RUN(an_interpreter_sees_the_verdict_and_keeps_its_state_over_one_diff);
     RUN(every_manifest_fact_is_checked_carried_or_ignored_for_a_reason);
     RUN(one_paths_findings_never_reach_the_next);
+    RUN(a_declining_interpreter_adds_nothing);
     RUN(events_come_after_the_path_records_and_the_trailer_counts_them);
     RUN(a_diff_with_no_events_says_zero);
     RUN(a_failed_end_hook_is_one_event_naming_its_paths);
