@@ -11,6 +11,7 @@
 #include "interp/record_csv.h"
 #include "interp/stanza.h"
 
+#include <stdbool.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -148,6 +149,12 @@ TEST(git_ref_files_packed_refs_and_reflogs_parse) {
     ASSERT_TRUE(!sym && vl == 40);
     ASSERT_EQ_INT(-1, git_ref_value("not a ref\n", 10, &sym, &v, &vl));
     belay_err_clear();
+    /* an object id is 40 or 64 lowercase hex digits, nothing else */
+    ASSERT_TRUE(git_oid(O1, 40) && git_oid(O1 O1 "012345678901234567890123", 64));
+    ASSERT_FALSE(git_oid(O1, 39) || git_oid(O1 "0", 41) || git_oid(O1 O1, 80));
+    ASSERT_FALSE(git_oid("0123456789ABCDEF0123456789abcdef01234567", 40));
+    ASSERT_EQ_INT(-1, git_ref_value("0123456789abcdef0123456789abcdef0123456\n", 40, &sym, &v, &vl));
+    belay_err_clear();
     const char *packed = "# pack-refs with: peeled fully-peeled sorted \n"
                          O1 " refs/heads/main\n" O2 " refs/tags/v1\n^" O1 "\n";
     g_n = 0;
@@ -197,13 +204,14 @@ static size_t lcs_dp(const char *a, size_t al, const char *b, size_t bl) {
 }
 
 TEST(line_counts_match_the_longest_common_subsequence) {
+    ASSERT_EQ_INT(3, (int)line_count("a\nb\nc", 5));          /* a final line without '\n' */
+    ASSERT_EQ_INT(3, (int)line_count("a\nb\nc\n", 6));
+    ASSERT_EQ_INT(0, (int)line_count("", 0));
     struct line_delta d;
     ASSERT_EQ_INT(0, line_delta("a\nb\nc\n", 6, "a\nx\nc\nd\n", 8, &d));
     ASSERT_TRUE(d.counted && d.deleted == 1 && d.added == 2 && d.first_changed == 2);
     ASSERT_EQ_INT(0, line_delta("a", 1, "a\n", 2, &d));          /* the newline is the change */
     ASSERT_TRUE(d.counted && d.deleted == 1 && d.added == 1 && d.first_changed == 1);
-    ASSERT_EQ_INT(3, (int)line_count("a\nb\nc", 5));
-    ASSERT_EQ_INT(0, (int)line_count("", 0));
     srand(20261031);
     char a[64], b[64];
     for (int round = 0; round < 2000; round++) {          /* random line soups over 3 words */
@@ -220,17 +228,24 @@ TEST(line_counts_match_the_longest_common_subsequence) {
     }
 }
 
-TEST(a_rewrite_past_the_bound_is_not_counted) {
-    const size_t n = LINEDIFF_D_MAX + 2;                   /* every line differs */
-    char *a = malloc(n * 2), *b = malloc(n * 2);
-    REQUIRE(a != NULL && b != NULL);
+/* The pinned bound (finding kinds, text_rewritten): counted up to 2,000
+ * edits, not past them. n lines that all differ are 2n edits. */
+static bool counted_with(size_t n, struct line_delta *d) {
+    char *a = malloc(n * 2 + 1), *b = malloc(n * 2 + 1);
+    if (a == NULL || b == NULL) abort();
     for (size_t i = 0; i < n; i++) { a[2 * i] = 'a'; a[2 * i + 1] = '\n'; b[2 * i] = 'b'; b[2 * i + 1] = '\n'; }
-    struct line_delta d;
-    REQUIRE(line_delta(a, n * 2, b, n * 2, &d) == 0);
-    ASSERT_FALSE(d.counted);
-    ASSERT_TRUE(d.lines_a == n && d.lines_b == n && d.first_changed == 1);
+    if (line_delta(a, n * 2, b, n * 2, d) != 0) abort();
     free(a);
     free(b);
+    return d->counted;
+}
+
+TEST(a_rewrite_past_the_bound_is_not_counted) {
+    struct line_delta d;
+    ASSERT_TRUE(counted_with(1000, &d));                       /* 2,000 edits */
+    ASSERT_TRUE(d.deleted == 1000 && d.added == 1000);
+    ASSERT_FALSE(counted_with(1001, &d));                      /* 2,002 edits */
+    ASSERT_TRUE(d.lines_a == 1001 && d.lines_b == 1001 && d.first_changed == 1);
 }
 
 int main(void) {

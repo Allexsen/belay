@@ -224,9 +224,8 @@ static int cmp_u(uint64_t a, uint64_t b) { return a < b ? -1 : a > b; }
 static int pep_order(const struct pepv *a, const struct pepv *b) {
     int r = cmp_u(a->epoch, b->epoch);
     if (r) return r;
-    int na = a->nrel, nb = b->nrel;
-    while (na > 1 && a->rel[na - 1] == 0) na--;
-    while (nb > 1 && b->rel[nb - 1] == 0) nb--;
+    /* A missing release part is 0: 1.0 and 1.0.0 are one version. */
+    const int na = a->nrel, nb = b->nrel;
     for (int k = 0; k < (na > nb ? na : nb); k++) {
         r = cmp_u(k < na ? a->rel[k] : 0, k < nb ? b->rel[k] : 0);
         if (r) return r;

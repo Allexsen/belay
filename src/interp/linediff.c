@@ -18,7 +18,7 @@ static struct line *split(const char *s, size_t n, size_t count) {
     struct line *v = malloc((count ? count : 1) * sizeof *v);
     if (v == NULL) return NULL;
     size_t k = 0, st = 0;
-    for (size_t i = 0; i < n; i++)
+    for (size_t i = 0; i < n && k < count; i++)
         if (s[i] == '\n' || i + 1 == n) {
             uint64_t h = 1469598103934665603ULL;           /* FNV-1a */
             for (size_t j = st; j <= i; j++) h = (h ^ (unsigned char)s[j]) * 1099511628211ULL;
