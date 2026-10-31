@@ -28,7 +28,8 @@ const struct diff_name_def DIFF_REASONS[DR_COUNT] = {
     [DR_UNSTABLE]    = { "unstable",
         "A file changed while read (no hash), or a directory's listing is incomplete." },
     [DR_UNVERIFIED]  = { "unverified",
-        "No hash on one side (larger than its `hash_max_bytes`, or not readable)." },
+        "No hash on one side (larger than its `hash_max_bytes`, or not readable). Not given "
+        "for a side that is a mount root, which is never read: `mount` is its reason." },
     [DR_UNREADABLE]  = { "unreadable", "The entry's contents could not be captured." },
     [DR_MOUNT]       = { "mount", "A mount root: contents not captured, by design." },
     [DR_XATTRS_UNKNOWN] = { "xattrs_unknown", "Extended attributes could not be read." },

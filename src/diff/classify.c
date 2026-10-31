@@ -80,6 +80,11 @@ int classify_both(const struct diff_ctx *ctx, const struct belay_entry *b,
         content_unknown |= c->unknown == US_CONTENT;
         meta_unknown |= c->unknown == US_METADATA;
     }
+    /* A mounted regular file is unverified because it is never read: on that
+     * side `mount` is the reason (pin O8). On a side without `mount` it is a
+     * reason of its own. */
+    if (!(b->unverified && !b->is_mount) && !(a->unverified && !a->is_mount))
+        reasons &= ~DRBIT(DR_UNVERIFIED);
 
     if (b->type != a->type) {                               /* rule 2, after rule 1 */
         v->changed = FBIT(F_TYPE);
