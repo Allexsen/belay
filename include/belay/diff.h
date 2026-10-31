@@ -21,6 +21,12 @@ struct belay_diff_stats {
     bool provisional;           /* either tree changed while it was walked (trailer) */
 };
 
+/* How a diff is run. All optional: NULL options mean the defaults. */
+struct belay_diff_opts {
+    const char *store_dir;      /* the content store captures kept copies in; NULL: none,
+                                   and interpreters that need content decline */
+};
+
 /*
  *  Compares the manifests at `before` and `after` and writes diff.v1 to
  *  `out_path` (through a temporary name, renamed into place on success, then
@@ -30,6 +36,6 @@ struct belay_diff_stats {
  *  0, or -1 with belay_err set and no output file; `stats` may be NULL.
  */
 int belay_diff(const char *before, const char *after, const char *out_path,
-               struct belay_diff_stats *stats);
+               const struct belay_diff_opts *opts, struct belay_diff_stats *stats);
 
 #endif

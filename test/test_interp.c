@@ -59,6 +59,16 @@ TEST(git_claims_refs_hooks_and_hashes_the_index) {
     EXPECT("/repo/.git/index", BELAY_INTERP_GIT, BELAY_KEEP_HASH);
 }
 
+/* Decided 2026-10-31 (Q3): the reflog is claimed, stored within the store
+ * limit only (it grows without bound); other logs are not reflogs. */
+TEST(git_claims_the_reflog_within_the_store_limit) {
+    EXPECT("/repo/.git/logs/HEAD", BELAY_INTERP_GIT, BELAY_KEEP_STORE_BOUNDED);
+    EXPECT("/repo/.git/logs/refs/heads/main", BELAY_INTERP_GIT, BELAY_KEEP_STORE_BOUNDED);
+    EXPECT("/repo/.git/logs/refs/remotes/origin/x", BELAY_INTERP_GIT, BELAY_KEEP_STORE_BOUNDED);
+    EXPECT("/repo/.git/logs/HEAD.lock", BELAY_INTERP_BINARY, BELAY_KEEP_DEFAULT);
+    EXPECT("/repo/logs/HEAD", BELAY_INTERP_BINARY, BELAY_KEEP_DEFAULT);
+}
+
 /* Objects and packs are explicitly out of M1's git scope (no zlib), so they
  * must not be claimed -- claiming them would store every pack. */
 TEST(git_objects_and_packs_are_not_claimed) {
@@ -136,6 +146,7 @@ int main(void) {
     RUN(dpkg_near_misses_are_not_claimed);
     RUN(pip_claims_dist_info_records);
     RUN(git_claims_refs_hooks_and_hashes_the_index);
+    RUN(git_claims_the_reflog_within_the_store_limit);
     RUN(git_objects_and_packs_are_not_claimed);
     RUN(unclaimed_and_hostile_inputs_fall_back_to_binary);
     RUN(names_are_stable);

@@ -1,0 +1,3 @@
+an_object_is_read_whole_and_checked
+every_wrong_object_is_an_error_never_content
+the_store_is_opened_read_only

@@ -16,6 +16,7 @@
  *    pip   RECORD: installed files and their hashes; METADATA: name/version.
  *    git   HEAD, packed-refs and everything under refs: ref moves. Hooks:
  *          executable code, so the content is kept. index: changed or not.
+ *          logs: the reflog, which operation moved a ref.
  */
 struct rule {
     const char *pattern;
@@ -36,6 +37,11 @@ static const struct rule rules[] = {
     { "*/.git/packed-refs",               BELAY_INTERP_GIT,  BELAY_KEEP_STORE },
     { "*/.git/refs/*",                    BELAY_INTERP_GIT,  BELAY_KEEP_STORE },
     { "*/.git/hooks/*",                   BELAY_INTERP_GIT,  BELAY_KEEP_STORE },
+    /* The reflog: which operation moved each ref (decision 2026-10-31, Q3).
+     * Written by the watched process, so evidence, not proof. Stored within
+     * the store limit only: a long-lived reflog grows without bound. */
+    { "*/.git/logs/HEAD",                 BELAY_INTERP_GIT,  BELAY_KEEP_STORE_BOUNDED },
+    { "*/.git/logs/refs/*",               BELAY_INTERP_GIT,  BELAY_KEEP_STORE_BOUNDED },
 };
 
 void belay_interp_classify(const char *abs_path, size_t len, struct belay_claim *out) {

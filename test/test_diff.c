@@ -112,7 +112,7 @@ static int run(void) {
     snprintf(a, sizeof a, "%s/after", g_dir);
     memset(&g_st, 0, sizeof g_st);
     g_text[0] = '\0';
-    const int rc = belay_diff(b, a, g_out, &g_st);
+    const int rc = belay_diff(b, a, g_out, NULL, &g_st);
     if (rc != 0) return rc;
     FILE *f = fopen(g_out, "rb");
     const size_t n = fread(g_text, 1, sizeof g_text - 1, f);
@@ -308,7 +308,7 @@ TEST(the_output_is_never_an_input_however_spelled) {
     for (size_t i = 0; i < 3; i++) {
         char a[400];
         snprintf(a, sizeof a, "%s/after", g_dir);
-        ASSERT_EQ_INT(-1, belay_diff(b, a, outs[i], NULL));
+        ASSERT_EQ_INT(-1, belay_diff(b, a, outs[i], NULL, NULL));
         ASSERT_EQ_INT(BELAY_ERR_INVALID, belay_err_code());
         belay_err_clear();
     }
@@ -367,6 +367,7 @@ static enum belay_interp_result t_verdict(void *state, const struct belay_interp
     (void)out;
     return BELAY_INTERP_DECLINE;
 }
+static const struct belay_diff_opts *g_opts;    /* run_with's options; NULL: none */
 static int run_with(const struct belay_interp *t) {
     const struct belay_interp *table[BELAY_INTERP_COUNT];
     for (int i = 0; i < BELAY_INTERP_COUNT; i++) table[i] = belay_interp_builtin((enum belay_interp_id)i);
@@ -375,7 +376,7 @@ static int run_with(const struct belay_interp *t) {
     snprintf(b, sizeof b, "%s/before", g_dir);
     snprintf(a, sizeof a, "%s/after", g_dir);
     g_text[0] = '\0';
-    if (diff_run(b, a, g_out, &g_st, table) != 0) return -1;
+    if (diff_run(b, a, g_out, g_opts, &g_st, table) != 0) return -1;
     FILE *f = fopen(g_out, "rb");
     const size_t n = fread(g_text, 1, sizeof g_text - 1, f);
     g_text[n] = '\0';
@@ -424,7 +425,7 @@ TEST(different_scopes_are_refused_before_any_entry_is_read) {
     fclose(f);
     m_begin("after", "/other", 1000); ROOT(); m_end();
     unlink(g_out);
-    ASSERT_EQ_INT(-1, belay_diff(b, a, g_out, NULL));
+    ASSERT_EQ_INT(-1, belay_diff(b, a, g_out, NULL, NULL));
     ASSERT_EQ_INT(BELAY_ERR_INVALID, belay_err_code());
     ASSERT_TRUE(strstr(belay_err_msg(), "different scopes") != NULL);
     belay_err_clear();
@@ -443,7 +444,7 @@ TEST(a_published_output_is_success_even_where_its_directory_cannot_be_synced) {
     snprintf(a, sizeof a, "%s/after", g_dir);
     mkdir(d, 0700);
     REQUIRE(chmod(d, 0300) == 0);
-    const int rc = belay_diff(b, a, out, NULL);
+    const int rc = belay_diff(b, a, out, NULL, NULL);
     const char *why = rc == 0 ? "" : belay_err_msg();
     chmod(d, 0700);
     ASSERT_TRUE(rc == 0);
@@ -483,6 +484,66 @@ TEST(an_interpreter_sees_the_verdict_and_keeps_its_state_over_one_diff) {
     ASSERT_EQ_INT(1, g_begun);
     ASSERT_EQ_INT(1, g_ended);
     ASSERT_EQ_INT(2, g_saw_modified);
+}
+
+/* Decided 2026-10-31 (Q1): the store reaches an interpreter through
+ * belay_diff's options -- content to read, checked against its name -- and
+ * without a store an interpreter gets none. */
+static int g_content_ok, g_content_none;
+static char g_content_hex[65];
+static enum belay_interp_result t_content(void *state, const struct belay_interp_input *in,
+                                          struct belay_findings *out) {
+    (void)state;
+    (void)out;
+    if (in->content == NULL) {
+        g_content_none++;
+        return BELAY_INTERP_DECLINE;
+    }
+    unsigned char *b = NULL;
+    size_t n = 0;
+    if (belay_content_get(in->content, g_content_hex, 4096, &b, &n) == 0 && n == 6 &&
+        memcmp(b, "after\n", 6) == 0)
+        g_content_ok++;
+    free(b);
+    return BELAY_INTERP_DECLINE;
+}
+
+TEST(the_store_reaches_an_interpreter_through_the_options) {
+    char store[400], obj[600];
+    snprintf(store, sizeof store, "%s/store", g_dir);
+    {   /* store "after\n" under its real name */
+        struct belay_sha256 h;
+        uint8_t d[32];
+        belay_sha256_init(&h);
+        belay_sha256_update(&h, "after\n", 6);
+        belay_sha256_final(&h, d);
+        belay_hex_encode(g_content_hex, d, sizeof d);
+        snprintf(obj, sizeof obj, "%s/%.2s", store, g_content_hex);
+        mkdir(store, 0700);
+        mkdir(obj, 0700);
+        snprintf(obj, sizeof obj, "%s/%.2s/%s", store, g_content_hex, g_content_hex + 2);
+        FILE *f = fopen(obj, "wb");
+        REQUIRE(f != NULL);
+        fputs("after\n", f);
+        fclose(f);
+    }
+    m_begin("before", "/s", 1000); ROOT(); E(.path = "f", .type = "reg", .size = 6, .sha = HA); m_end();
+    m_begin("after", "/s", 1000); ROOT(); E(.path = "f", .type = "reg", .size = 6, .sha = HB); m_end();
+    const struct belay_interp t = { BELAY_INTERP_BINARY, NULL, t_content, NULL };
+    const struct belay_diff_opts o = { .store_dir = store };
+    g_content_ok = g_content_none = 0;
+    g_opts = &o;
+    REQUIRE(run_with(&t) == 0);
+    g_opts = NULL;
+    ASSERT_EQ_INT(1, g_content_ok);
+    ASSERT_EQ_INT(0, g_content_none);
+    REQUIRE(run_with(&t) == 0);
+    ASSERT_EQ_INT(1, g_content_none);
+    const struct belay_diff_opts bad = { .store_dir = "/nonexistent/belay-store" };
+    g_opts = &bad;
+    ASSERT_EQ_INT(-1, run_with(&t));                    /* a store named but absent: refused */
+    g_opts = NULL;
+    belay_err_clear();
 }
 
 /* R6 (audit 2026-10): every fact a manifest's header and trailer carry is
@@ -982,6 +1043,7 @@ int main(void) {
     RUN(an_interpreter_sees_the_verdict_and_keeps_its_state_over_one_diff);
     RUN(every_manifest_fact_is_checked_carried_or_ignored_for_a_reason);
     RUN(one_paths_findings_never_reach_the_next);
+    RUN(the_store_reaches_an_interpreter_through_the_options);
     RUN(different_scopes_are_refused_before_any_entry_is_read);
     RUN(a_published_output_is_success_even_where_its_directory_cannot_be_synced);
     RUN(names_sorting_before_the_root_see_its_flags);
