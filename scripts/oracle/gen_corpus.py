@@ -2475,6 +2475,24 @@ def interpreters(w, rng):
     one('pip: a dist-info whose name is not UTF-8',
         lambda rng: dist(rng.choice(SITE), b'b\xffad-1.0', 'added', with_metadata=False),
         ["pip RECORD: added, a dist-info whose name or version is not a string field's value"])
+    # A dist-info that cannot be named, rewritten in place: could_not_interpret
+    # on its record and one event, "nothing more is read from it" (no
+    # content_unavailable); unknown on both sides, nothing (ambiguity I7).
+    one('pip: a RECORD rewritten in place, its dist-info not named',
+        lambda rng: [(rng.choice(SITE) + b'nover.dist-info/RECORD', 'modified', O)],
+        ['pip RECORD: modified, a dist-info that cannot be named'])
+    one('pip: a RECORD in place, iflags on one side only, its dist-info not named',
+        lambda rng: [(rng.choice(SITE) + b'idle-.dist-info/RECORD', 'iflags', O)],
+        ['pip RECORD: unknown, a regular file on both sides, a dist-info that cannot be named'])
+    # Two events of one name, kind and directory: "then the paths it lists"
+    # -- here against the versions' order and the order they are written in
+    # (`Twin-2.0` before `twin-1.0` bytewise); `twin_` is another name
+    # (`twin-`), sorting after.
+    one('pip: one name installed twice in one directory',
+        lambda rng: (lambda s: dist(s, b'twin-1.0', 'added', with_metadata=False)
+                     + dist(s, b'Twin-2.0', 'added', with_metadata=False)
+                     + dist(s, b'twin_-0.1', 'removed', with_metadata=False))(rng.choice(SITE)),
+        ['pip events: one name, several RECORDs on one side in one directory (then by paths)'])
 
     # git: hooks and the index from the manifest alone; HEAD, refs,
     # packed-refs and reflogs need content.
