@@ -1,0 +1,33 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "belay/checkpoint.v1",
+  "title": "A checkpoint, as `belay check --json`, `belay mark --json` and `belay log --json` print it",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["id", "kind", "created_ns", "scope", "manifest", "entries", "raced", "unstable",
+               "vanished", "provisional", "excluded", "prefilter"],
+  "properties": {
+    "id": { "type": "integer", "minimum": 1 },
+    "kind": { "enum": ["check", "mark", "diff"] },
+    "created_ns": { "type": "integer" },
+    "scope": { "type": "string" },
+    "manifest": { "type": "string" },
+    "entries": { "type": "integer", "minimum": 1 },
+    "raced": { "type": "integer", "minimum": 0 },
+    "unstable": { "type": "integer", "minimum": 0 },
+    "vanished": { "type": "integer", "minimum": 0 },
+    "provisional": { "type": "boolean" },
+    "excluded": { "type": "integer", "minimum": 0 },
+    "prefilter": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["used", "trusted", "racy", "full_reason"],
+      "properties": {
+        "used": { "type": "boolean" },
+        "trusted": { "type": "integer", "minimum": 0 },
+        "racy": { "type": "integer", "minimum": 0 },
+        "full_reason": { "type": "string" }
+      }
+    }
+  }
+}

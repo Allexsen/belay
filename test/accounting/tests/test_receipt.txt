@@ -1,0 +1,4 @@
+a_receipt_puts_events_then_privilege_then_changes
+long_sections_fold_but_privilege_never_does
+no_changes_says_so
+a_truncated_or_malformed_diff_renders_nothing

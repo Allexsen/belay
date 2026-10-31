@@ -3,27 +3,27 @@
 **Intent:** record what changed on a system, explain it in semantic terms rather than as a path
 list, and make it reversible.
 
-**Status: pre-alpha, work in progress. Nothing here is usable yet.** `HEAD` does not run: the
-session engine fails on directories that contain nested mounts, and the parts the project is being
-rebuilt around — the checkpoint engine, the diff core, the interpreters — are not written.
-
-This repository is published early because the design is settled enough to work in the open, not
-because there is anything to install.
+**Status: pre-alpha.** The checkpoint and diff engine runs (below); the formats it writes are drafts
+that may still change, and there are no releases. Nothing that changes your files exists yet.
 
 ## What exists today
 
-- A Linux session engine that creates a user and mount namespace, overlays each top-level directory
-  of `/` separately, and `pivot_root`s into the result. Verified by `strace` on one machine
-  (WSL2, kernel 6.18); it fails on directories containing nested mounts.
-- A child-to-parent failure protocol that reports which setup stage failed, and why.
-- Session directory layout and path resolution under `$XDG_STATE_HOME`.
-- Build and test plumbing: `make check`, a dependency-free test harness, CI on Linux x86_64 and
-  arm64 plus macOS, DCO enforcement.
+- `belay check`, `mark`, `diff` and `log` (see [docs/cli.md](docs/cli.md)): record a directory as a
+  checkpoint, record what changed since the last one, show the difference, list checkpoints. They
+  need no privileges and only read the directory they are given; belay writes only under its own
+  state directory.
+- Interpreters that explain changes to pip installs, dpkg's package database, git refs, hooks and
+  reflogs, and small text files ([docs/spec/diff-v1.md](docs/spec/diff-v1.md)).
+- The manifest format ([docs/spec/manifest-v1.md](docs/spec/manifest-v1.md)) and the diff format
+  (diff.v1, a draft).
+- Tests on Linux (x86_64, arm64), on macOS, and inside a Docker container as an unprivileged user,
+  in CI on every change.
 
 ## What does not exist
 
-No CLI beyond "fork a shell". No `commit`, `discard`, `diff`, `check`, or `doctor`. No diff engine,
-no interpreters, no integrity verification, no policy layer, no Python package, no releases.
+No `commit`, `discard`, restore or undo: belay records and explains, and changes nothing. The
+session engine under `src/session/` (namespaces and overlays) is not part of the `belay` binary.
+No integrity checking against a baseline, no policy layer, no Python package, no releases.
 
 ## Deliberate limits
 
@@ -41,8 +41,7 @@ passed through. These will be listed explicitly rather than glossed over.
 make check
 ```
 
-Requires a C11 compiler and GNU make. Linux for the session engine; the portable parts are intended
-to build on macOS as they land.
+Requires a C11 compiler and GNU make, on Linux or macOS. The binary is `bin/belay`.
 
 ## Contributing
 
