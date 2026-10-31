@@ -4,7 +4,7 @@ belay is pre-alpha and changing shape quickly. Open an issue before starting any
 
 ## Sign-off is required
 
-Every commit needs a Developer Certificate of Origin sign-off:
+Every commit other than a merge needs a Developer Certificate of Origin sign-off:
 
 ```sh
 git commit -s
@@ -12,7 +12,7 @@ git commit -s
 
 That adds a `Signed-off-by:` line certifying you wrote the change or have the right to submit it
 (see [developercertificate.org](https://developercertificate.org/)). The name and email must match
-the commit author. CI rejects commits without it.
+the commit author. CI rejects commits without it (commits before 2026-10-20 are exempt).
 
 To add sign-off to commits you already made:
 
@@ -27,16 +27,18 @@ There is no CLA. The project is Apache-2.0 and stays Apache-2.0.
 ```sh
 make            # build bin/belay
 make test       # build and run the test binaries
-make check      # both — this is what CI gates on
+make check      # build, lint, CI and generated-doc checks, tests, end to end
 make clean
 ```
 
 Tests live in `test/`, one binary per `test/test_*.c`, using the header-only harness in
-`test/belay_test.h`. No external dependencies: the portable parts must build on macOS too.
+`test/belay_test.h`. No external libraries; the tests also need python3. The portable parts must
+build on macOS too. CI runs `make check` on every platform, and also sanitizers, fuzzing, the diff
+oracle, the package reference, the DCO check and the filesystem jobs.
 
 ## Bisecting
 
-A few commits on main fail `make check` at their own position: a pin change (`test/expect/`)
+Some commits on main (58 so far) fail `make check` at their own position: a pin change (`test/expect/`)
 merged ahead of the branch that follows it, and that branch kept every commit. They are listed,
 with the reason, in [`scripts/bisect-skip.txt`](scripts/bisect-skip.txt). Skip them, listing them
 on main first, since bisect checks out older trees:

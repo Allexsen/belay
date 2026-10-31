@@ -6,7 +6,7 @@
  *  relative to a held directory fd, O_NOFOLLOW, O_EXCL for anything created.
  *
  *  Layout: <dir>/<first 2 hex>/<remaining 62 hex>, named by the content's
- *  sha256 (git's fan-out, so no directory holds more than 1/256th of the
+ *  sha256 (git's fan-out, so each directory holds about 1/256th of the
  *  objects). Objects are 0600: a stored copy of a private file must not become
  *  readable by others. Staging files live in <dir> as ".tmp-*" and are renamed
  *  into place.
@@ -20,8 +20,8 @@
  *  planted or truncated by a crash (manifest-v1, "What survives a power
  *  loss"; on macOS fsync does not reach the disk, and the last sync is a
  *  barrier that orders the names before the manifest). belay_store_verify() hashes an object and checks
- *  it against its own name; every consumer must call it before trusting
- *  content.
+ *  it against its own name; every consumer must verify what it reads
+ *  (belay_content_get hashes the bytes as it reads them).
  */
 #ifndef BELAY_STORE_H
 #define BELAY_STORE_H

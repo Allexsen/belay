@@ -2,7 +2,8 @@
 
 ## belay is not a security sandbox
 
-belay is a **safety** boundary, not a **security** boundary. It is built to catch accidents — a bad
+Today belay records and reports; it contains nothing. Its session engine, when it ships, is meant
+as a **safety** boundary, not a **security** boundary. It is built to catch accidents — a bad
 `rm`, an unexpected package install, an agent editing files you didn't expect — and to report what
 changed.
 

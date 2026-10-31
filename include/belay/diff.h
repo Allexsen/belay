@@ -3,8 +3,8 @@
  *
  *  belay_diff merges the two sorted manifests one path at a time, in bounded
  *  memory however many entries they hold, and writes a diff.v1 stream: a
- *  header, one record per path whose outcome is not "unchanged", and a
- *  trailer of counts. Every path gets one outcome; a path that cannot be
+ *  header, one record per path whose outcome is not "unchanged", then the
+ *  event records, and a trailer of counts. Every path gets one outcome; a path that cannot be
  *  shown unchanged is never reported unchanged.
  */
 #ifndef BELAY_DIFF_H

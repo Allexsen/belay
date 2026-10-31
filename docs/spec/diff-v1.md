@@ -1,7 +1,7 @@
 # diff.v1
 
-Status: draft (Phase 3). Defined in `src/schema/diff_schema.c`; the tables below are generated from
-it (`make gen`, checked in CI by `make gen-check`).
+Status: draft. Defined in `src/schema/diff_schema.c` and `src/schema/finding_schema.c`; the tables
+below are generated from them (`make gen`, checked in CI by `make gen-check`).
 
 A diff compares two manifests of the **same scope** (`manifest-v1.md`) and gives every path one
 outcome. It is produced as a stream, in bounded memory however many entries the manifests hold:
@@ -392,7 +392,7 @@ names at most 1,024 paths:
 | pip | RECORD | 16 MiB, and 262,144 rows |
 | dpkg | `status` | 256 MiB |
 | git | `HEAD`, a loose ref | 64 KiB |
-| git | `packed-refs`, a reflog | 64 MiB |
+| git | `packed-refs`, a reflog | 64 MiB (a reflog is copied only within `store_max_bytes`, 64 KiB by default: a longer one has no copy, `content_unavailable`, reason `missing`) |
 | pip, dpkg | per-diff state | 64 MiB (past it, the end hook fails) |
 
 `missing` covers a path whose entry records no `stored` copy as well as a copy the store lacks, and
@@ -480,4 +480,4 @@ the entries after it, and each of those that is not a plain commit (operation `c
 operation being the message before its first `:`; otherwise, or when the reflog was removed (no copy
 needed), `git_reflog_rewritten`. **The reflog is written by the process being watched: it is
 evidence, not proof.** A process can write any reflog it likes; a capture taken from outside the
-process (host-reader mode) is the answer when that matters.
+process (a host-reader mode, not built yet) would be the answer when that matters.
