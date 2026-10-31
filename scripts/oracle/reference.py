@@ -14,7 +14,8 @@ Its only sources:
     and, under "Field rules a reader MUST enforce", what `xattrs_sha256` is;
   - test/expect/diff-fields.md, READ AT RUN TIME: for each field its
     `compared as`, `for types`, `on mount roots` and `absent means`, and the
-    outcome rules O1-O5;
+    outcome rules O1-O8 (the text of O2, O5, O6, O7 and O8 checked at
+    start-up where this file relies on it);
   - test/expect/manifest-v1.md, read at run time for the entry types.
 Never the generated blocks of the spec, never src/ or include/.
 
@@ -192,15 +193,48 @@ def load_fields():
     for name, ok in need.items():
         if name not in fields or not ok(fields[name]):
             raise SystemExit('pin: row %r no longer says what reference.py assumes' % name)
-    for r in ('O1', 'O2', 'O3', 'O4', 'O5'):
+    for r in ('O1', 'O2', 'O3', 'O4', 'O5', 'O6', 'O7', 'O8'):
         if r not in rules:
             raise SystemExit('pin: outcome rule %s missing' % r)
-    # O2: "With `xattrs_unknown` on either side, or on a mount root (never
-    # read), they are not compared" -- whatever the `on mount roots` column
-    # says for caps and xattrs (in one version of the pin it said `compared`).
-    if 'on a mount root' not in rules['O2']:
-        raise SystemExit('pin: O2 no longer says what reference.py assumes (mount roots)')
+    # The words of each rule that both_sides() relies on.
+    said = {
+        # O2: "With `xattrs_unknown` on either side, or on a mount root (never
+        # read), they are not compared" -- whatever the `on mount roots`
+        # column says for caps and xattrs (one version of the pin said
+        # `compared`).
+        'O2': ['on a mount root'],
+        # O6: one-sided `iflags` is `unknown`, but across a type change it is
+        # `type_changed` (the type-change branch comes before any field).
+        'O6': ['present on one side only', '`unknown` (reason `iflags_unknown`)',
+               'unless the type differs, which gives `type_changed`'],
+        # O7: across a type change, the reasons of a raced `unknown` are the
+        # flags' alone (that branch returns flag_reasons(), no field's).
+        'O7': ['Across a type change no field is compared', '`changed` is `["type"]`',
+               "its reasons are those of the flags on either side, never a field's"],
+        # O8, in flag_reasons(): `unverified` on a mount side gives no reason,
+        # on the other side it gives its own.
+        'O8': ['`unverified` on a side that also carries `mount` adds no reason',
+               '`unverified` on the other side still gives its own'],
+    }
+    for r, words in said.items():
+        for w in words:
+            if w not in rules[r]:
+                raise SystemExit('pin: %s no longer says what reference.py assumes: %r'
+                                 % (r, w))
     return fields, rules
+
+
+def prose_unknown_carveout():
+    """docs/spec/diff-v1.md, the `unknown` sentence after "`changed`, for a
+    path present on both sides": "the reasons of every flag on either side --
+    except `unverified` on a side that also carries `mount` ...". Pin O8 says
+    the same; the prose is checked too, so that neither can drop it alone."""
+    text = ' '.join(open(SPEC, encoding='utf-8').read().split())
+    want = ('`unknown`, for an `unknown` outcome: the reasons of every flag on either side -- '
+            'except `unverified` on a side that also carries `mount`')
+    if want not in text:
+        raise SystemExit('spec: the `unknown` sentence no longer carves out `unverified` beside '
+                         '`mount` (pin O8), which reference.py assumes')
 
 
 def o5_timestamps(fields, rules):
@@ -215,6 +249,7 @@ def o5_timestamps(fields, rules):
 
 
 FIELDS, RULES = load_fields()
+prose_unknown_carveout()
 DIR_TIMESTAMPS = o5_timestamps(FIELDS, RULES)
 FIELD_ORDER = list(FIELDS)          # `changed` lists fields in this order (the
                                     # manifest's key order; the prose example's
@@ -358,11 +393,33 @@ def values_differ(f, vb, va):
     return vb != va
 
 
+UNVERIFIED, MOUNT = 'unverified', 'mount'
+
+
+def flag_reasons(b, a, trace):
+    """The reasons of the flags on either side, in the pin's field order
+    (compare.py compares them as a set, the order apart): "the reasons of every flag on either side --
+    except `unverified` on a side that also carries `mount`, since a mounted
+    regular file is never read and `mount` is that reason" (diff-v1.md, the
+    `unknown` sentence); pin O8: "`unverified` on a side that also carries
+    `mount` adds no reason ... `unverified` on the other side still gives its
+    own". Across a type change too: O7's "those of the flags on either side"
+    are these."""
+    def gives(side, f):
+        return bool(side.get(f)) and not (f == UNVERIFIED and side.get(MOUNT))
+    for side, other in ((b, a), (a, b)):
+        if side.get(UNVERIFIED) and side.get(MOUNT):
+            trace.append('O8' if not other.get(UNVERIFIED) or other.get(MOUNT)
+                         else 'O8-other-side-gives-unverified')
+    return [f for f in FLAGS if gives(b, f) or gives(a, f)]
+
+
 def both_sides(b, a, ctx):
     """(outcome, changed, unknown reasons, trace)."""
     trace = []
     flags = [f for f in FLAGS if b.get(f) or a.get(f)]
-    scopes = {FIELDS[f].scope for f in flags}
+    scopes = {FIELDS[f].scope for f in flags}       # what the flags make unknown
+    flag_why = flag_reasons(b, a, trace)            # the reasons they give (O8)
     # Either side ("on an entry that is a mount root on either side",
     # "Timestamps that move on use"; for timestamps, ambiguity A2).
     mount_root = bool(b.get('mount') or a.get('mount'))
@@ -392,8 +449,12 @@ def both_sides(b, a, ctx):
         trace.append('type')
         if 'everything' in scopes:                               # rule 1
             # "...and, when the types are the same, of every field unknown
-            # under rule 4": across a type change no field is compared
-            return 'unknown', ['type'], flags, trace + ['rule1']
+            # under rule 4": across a type change no field is compared --
+            # O7: "its reasons are those of the flags on either side, never a
+            # field's (no `iflags_unknown`)"; which flags give one: O8.
+            return 'unknown', ['type'], flag_why, trace + ['rule1']
+        # O6: one-sided `iflags` "unless the type differs, which gives
+        # `type_changed`" -- no field is looked at here.
         return 'type_changed', ['type'], [], trace + ['rule2']
 
     t = a['type']
@@ -462,7 +523,7 @@ def both_sides(b, a, ctx):
             else:
                 meta = True
     unk_scopes = {FIELDS[f].cls for f in unk_fields}
-    reasons = flags + [f + '_unknown' for f in unk_fields]
+    reasons = flag_why + [f + '_unknown' for f in unk_fields]
     content_unknown = 'content' in scopes or CONTENT in unk_scopes
     meta_unknown = 'metadata' in scopes or (unk_scopes - {CONTENT})
     if 'everything' in scopes:                                   # rule 1
