@@ -49,6 +49,7 @@ KIND_INDEX = {k: i for i, k in enumerate(KINDS)}
 # fields, template
 KIND_ROWS = {
     "could_not_interpret": ([], "could not interpret"),
+    "invalid_finding": ([], "invalid finding"),
     "and_more": (["n"], "and {n} more"),
     "content_unavailable": (["reason", "side"], "content unavailable ({side}): {reason}"),
     "pip_installed": (["name", "version"], "installed {name} {version}"),
@@ -82,7 +83,7 @@ PIP_PATTERNS = [PIP_RECORD, b"*.dist-info/METADATA"]
 
 
 class InterpFailure(Exception):
-    """The end hook fails (E6)."""
+    """A file the interpreter claims cannot be interpreted (E10)."""
 
 
 # ---------------------------------------------------------------- JSON
@@ -148,10 +149,14 @@ def finding_json(kind, values):
     return b"{" + b",".join(parts) + b"}"
 
 
-def event_json(kind, interp, values, paths):
+def event_json(kind, interp, values, paths, provisional=False):
+    """E2: provisional (after text, before paths) when a path the event was
+    derived from has the outcome unknown."""
     parts = [b'"event":' + jstr(kind), b'"interp":' + jstr(interp)]
     parts += fields_json(kind, values)
     parts.append(b'"text":' + jstr(render(kind, values)))
+    if provisional:
+        parts.append(b'"provisional":true')
     ps = sorted(set(paths))
     if all(utf8_ok(p) for p in ps):
         parts.append(b'"paths":[' + b",".join(jstr(p) for p in ps) + b"]")
@@ -326,9 +331,10 @@ def needed_copies(store, b, a, bound, need_before, need_after, rows_max=None):
     return findings, unavailable, contents
 
 
-def unavailable_events(interp, unav):
+def unavailable_events(interp, unav, unknown):
     """One content_unavailable event per reason: side before/after when every
-    (path, side) of that reason shares it, else both."""
+    (path, side) of that reason shares it, else both. They have no name: key
+    (-1, its kind, the reason's place)."""
     out = []
     for reason in REASONS:
         items = [(p, s) for (p, s, r) in unav if r == reason]
@@ -339,7 +345,8 @@ def unavailable_events(interp, unav):
         out.append(((-1, KIND_INDEX["content_unavailable"], REASONS.index(reason)),
                     event_json("content_unavailable", interp,
                                {"reason": reason.encode(), "side": side.encode()},
-                               [p for p, _ in items])))
+                               [p for p, _ in items],
+                               any(p in unknown for p, _ in items))))
     return out
 
 
@@ -518,10 +525,7 @@ def dpkg_events_for(path, before, after):
         if sb != sa and not covered:
             evs.append(("dpkg_state_changed", {"package": pkg, "arch": arch, "from": sb, "to": sa}))
         for kind, vals in evs:
-            for v in vals.values():
-                if not string_ok(v):
-                    raise InterpFailure("value not a string field's value")
-            out.append(((pkg, arch, KIND_INDEX[kind], path), kind, vals))
+            out.append(((0, pkg, arch, KIND_INDEX[kind], path), kind, vals, [path]))
     return out
 
 
@@ -596,9 +600,8 @@ def dist_info(path):
 
 def record_rows(data):
     """RECORD's rows by path, the first row of a path kept: {path: (hash, size)}.
-    READING: content that is not UTF-8, a csv error, or a row of fewer than
-    three fields is a RECORD that cannot be parsed; never generated except
-    by the probes that say so."""
+    spec: content that is not UTF-8, or a row of other than three fields,
+    cannot be parsed. READING: a csv error is one too."""
     try:
         text = data.decode("utf-8")
     except UnicodeDecodeError:
@@ -608,7 +611,7 @@ def record_rows(data):
         for row in csv.reader(io.StringIO(text, newline="")):
             if not row:
                 continue
-            if len(row) < 3:
+            if len(row) != 3:
                 raise InterpFailure("RECORD row of %d fields" % len(row))
             if row[0] not in rows:
                 rows[row[0]] = (row[1], row[2])
@@ -625,7 +628,36 @@ class Result:
         self.claims = {}        # path -> "pip" | "dpkg" for those
         self.findings = {}      # path -> bytes of the findings array, or None
         self.events = []        # event lines (bytes), pip's then dpkg's
-        self.failed = {}        # interp -> reason of an E6 failure
+
+
+def row_ok(kind, vals):
+    """E9: every string value a string field's value, the text at most 1,024
+    bytes (an int is never out of its row here)."""
+    for v in vals.values():
+        if isinstance(v, bytes) and not string_ok(v):
+            return False
+    return len(render(kind, vals)) <= STRING_MAX
+
+
+def end_events(interp, named, cni_files, unav, unknown):
+    """One interpreter's events in order. named: (key, kind, values, paths),
+    key starting with 0; an event that breaks its row becomes invalid_finding
+    in its place (E9). cni_files: the files not interpreted, one
+    could_not_interpret each (E10). The events with no name first, in the
+    Kinds table's order -- could_not_interpret by path, then
+    content_unavailable by reason."""
+    lines = []
+    for key, kind, vals, paths in named:
+        prov = any(p in unknown for p in paths)
+        if kind != "could_not_interpret" and not row_ok(kind, vals):
+            kind, vals = "invalid_finding", {}
+        lines.append((key, event_json(kind, interp, vals, paths, prov)))
+    for p in cni_files:
+        lines.append(((-1, KIND_INDEX["could_not_interpret"], p),
+                      event_json("could_not_interpret", interp, {}, [p], p in unknown)))
+    lines += unavailable_events(interp, unav, unknown)
+    return [e for _, e in sorted(lines, key=lambda x: x[0])]
+
 
 
 def interpret(before_fn, after_fn, store):
@@ -637,10 +669,10 @@ def interpret(before_fn, after_fn, store):
     root_dev_a = aents[b"."]["dev"]
     res = Result()
 
-    given = {"pip": [], "dpkg": []}
+    unknown = set()                     # claimed paths whose outcome is unknown
     unav = {"pip": [], "dpkg": []}      # (path, side, reason)
     dpkg_jobs = []                      # (path, before bytes|None, after bytes|None)
-    pip_pairs = {}                      # (holder, normalized) -> {"A": [...], "R": [...]}
+    pip_pairs = {}                      # RECORD path -> "A" (added) | "R" (removed)
     pip_reinst = []                     # (path, before bytes, after bytes)
     pip_names = []                      # RECORD paths to name
 
@@ -655,15 +687,17 @@ def interpret(before_fn, after_fn, store):
         if who is None:
             continue
         res.claims[path] = who
-        given[who].append(path)
+        if oc == "unknown":
+            unknown.add(path)
         findings = []
         absp = scope + b"/" + path
-        # "A side on which the path is not a regular file counts as absent";
-        # only a proven change of content is described.
+        # "A side on which the path is not a regular file counts as absent".
+        # Findings only on a proven change of content; pip and dpkg still
+        # derive (provisional) events from an unknown path (P7).
         breg = is_reg(b)
         areg = is_reg(a)
-        if oc in PROVEN and who == "dpkg" and fnmatch.fnmatchcase(absp, DPKG_STATUS) \
-                and (breg or areg):
+        read = oc in PROVEN or oc == "unknown"
+        if read and who == "dpkg" and fnmatch.fnmatchcase(absp, DPKG_STATUS) and (breg or areg):
             findings, u, contents = needed_copies(store, b, a, DPKG_BOUND, breg, areg)
             unav["dpkg"] += [(path, s, r) for s, r in u]
             if not u:
@@ -671,34 +705,36 @@ def interpret(before_fn, after_fn, store):
             # READING: a status one of whose needed sides cannot be read gives
             # no package events (only content_unavailable); its readable side
             # is not parsed.
-        elif oc in PROVEN and who == "pip" and fnmatch.fnmatchcase(absp, PIP_RECORD) \
-                and (breg or areg):
-            pip_names.append(path)
+        elif read and who == "pip" and fnmatch.fnmatchcase(absp, PIP_RECORD) and (breg or areg):
             if breg and areg:
-                findings, u, contents = needed_copies(store, b, a, PIP_BOUND, True, True,
-                                                     PIP_ROWS)
-                unav["pip"] += [(path, s, r) for s, r in u]
-                if not u:
-                    pip_reinst.append((path, contents["before"], contents["after"]))
+                # spec: an unknown RECORD present on both sides "is no proven
+                # reinstall and gives none (its rows are not counted)".
+                # READING: nor is its dist-info named (nothing derives from it).
+                if oc != "unknown":
+                    pip_names.append(path)
+                    findings, u, contents = needed_copies(store, b, a, PIP_BOUND, True, True,
+                                                         PIP_ROWS)
+                    unav["pip"] += [(path, s, r) for s, r in u]
+                    if not u:
+                        pip_reinst.append((path, contents["before"], contents["after"]))
             else:
-                pip_pairs.setdefault(path, "A" if areg else "R")
+                pip_names.append(path)
+                pip_pairs[path] = "A" if areg else "R"
+        if oc == "unknown":
+            findings = []           # no path finding on an unknown path
         res.findings[path] = (b"[" + b",".join(findings) + b"]") if findings else None
 
+    not_interpreted = set()             # paths whose record carries could_not_interpret
+
     # ---- pip end hook
-    # spec: where an interpreter fails on a path (a RECORD it must read cannot
-    # be parsed, a dist-info cannot be named) that path's record carries
-    # could_not_interpret, and the end hook fails (E6). READING: every such
-    # path is marked, not only the first found.
-    fail_paths = {"pip": set(), "dpkg": set()}
-    pip_events = []
-    pip_failed = []
+    cni_pip = set()                     # files not interpreted, no name (E10)
+    pip_events = []                     # (key, kind, values, paths)
     named = {}
     for path in pip_names:
         try:
             named[path] = dist_info(path)
-        except InterpFailure as e:
-            fail_paths["pip"].add(path)
-            pip_failed.append(str(e))
+        except InterpFailure:
+            cni_pip.add(path)
     keys = {}
     for path, side in pip_pairs.items():
         if path not in named:
@@ -709,7 +745,14 @@ def interpret(before_fn, after_fn, store):
     for (holder, norm), k in keys.items():
         A, R = sorted(k["A"]), sorted(k["R"])
         if A and R and len(A) + len(R) > 2:
-            pip_failed.append("RECORDs added and removed for one key, not one of each")
+            # E10: one could_not_interpret event naming them, "in that name's
+            # place"; each one's record could_not_interpret (E10's
+            # parenthesis). READING: placed as the kind could_not_interpret
+            # of that name, then by directory.
+            ps = A + R
+            pip_events.append(((0, norm, KIND_INDEX["could_not_interpret"], holder, min(ps)),
+                               "could_not_interpret", {}, ps))
+            not_interpreted.update(ps)
             continue
         if len(A) == 1 and len(R) == 1:
             _, name, to = named[A[0]]
@@ -737,9 +780,8 @@ def interpret(before_fn, after_fn, store):
         try:
             rb = record_rows(before)
             ra = record_rows(after)
-        except InterpFailure as e:
-            fail_paths["pip"].add(path)
-            pip_failed.append(str(e))
+        except InterpFailure:
+            cni_pip.add(path)
             continue
         if path not in named:
             continue
@@ -751,49 +793,31 @@ def interpret(before_fn, after_fn, store):
                            "pip_reinstalled",
                            {"name": name, "version": version, "files_added": added,
                             "files_removed": removed, "files_changed": changed}, [path]))
-    for _, kind, vals, _ in pip_events:
-        if len(render(kind, vals)) > STRING_MAX:
-            # spec: an end hook fails when an event's text would exceed 1,024
-            # bytes. READING: no path record is marked for it.
-            pip_failed.append("event text over 1,024 bytes")
-    if pip_failed:
-        res.failed["pip"] = "; ".join(pip_failed)
-        pip_events = [event_json("could_not_interpret", "pip", {}, given["pip"])]
-    else:
-        # READING: past name, kind and directory, events are ordered by the
-        # first path they list (the RECORD added, for a pair).
-        lines = [(k, event_json(kind, "pip", vals, paths)) for k, kind, vals, paths in pip_events]
-        lines += unavailable_events("pip", unav["pip"])
-        pip_events = [e for _, e in sorted(lines, key=lambda x: x[0])]
+    # READING: past name, kind and directory, events are ordered by the
+    # first path they list (the RECORD added, for a pair).
+    pip_lines = end_events("pip", pip_events, cni_pip, unav["pip"], unknown)
+    not_interpreted |= cni_pip
 
     # ---- dpkg end hook
-    dpkg_failed = []
+    cni_dpkg = set()
     evs = []
     for path, before, after in dpkg_jobs:
         try:
-            got = dpkg_events_for(path, before, after)
-        except InterpFailure as e:
-            fail_paths["dpkg"].add(path)
-            dpkg_failed.append(str(e))
-            continue
-        for k, kind, vals in got:
-            if len(render(kind, vals)) > STRING_MAX:
-                dpkg_failed.append("event text over 1,024 bytes")
-        evs += got
-    if dpkg_failed:
-        res.failed["dpkg"] = "; ".join(dpkg_failed)
-        dpkg_events = [event_json("could_not_interpret", "dpkg", {}, given["dpkg"])]
-    else:
-        evs.sort(key=lambda x: x[0])
-        dpkg_events = [e for _, e in sorted(unavailable_events("dpkg", unav["dpkg"]))]
-        dpkg_events += [event_json(kind, "dpkg", vals, [k[3]]) for k, kind, vals in evs]
+            evs += dpkg_events_for(path, before, after)
+        except InterpFailure:
+            cni_dpkg.add(path)
+    dpkg_lines = end_events("dpkg", evs, cni_dpkg, unav["dpkg"], unknown)
+    not_interpreted |= cni_dpkg
 
-    for who in ("pip", "dpkg"):
-        for p in fail_paths[who]:
-            # "has its findings there replaced by could_not_interpret"
+    for p in not_interpreted:
+        # "has its findings there replaced by could_not_interpret" -- unless
+        # the path is unknown, which carries no path finding.
+        if p not in unknown:
             res.findings[p] = b"[" + finding_json("could_not_interpret", {}) + b"]"
 
-    res.events = bound_events("pip", pip_events) + bound_events("dpkg", dpkg_events)
+    # E6 (per-diff state over 64 MiB, memory, an event naming no path) is not
+    # modelled: the corpus never builds it (see the report's questions).
+    res.events = bound_events("pip", pip_lines) + bound_events("dpkg", dpkg_lines)
     return res
 
 
