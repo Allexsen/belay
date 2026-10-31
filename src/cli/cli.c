@@ -56,9 +56,19 @@ static const struct { const char *cmd, *text; } HELP[] = {
                "  --json  one checkpoint a line (schema/checkpoint.v1.json)\n" },
 };
 
+/* belay_err's message as one line: it may name a path, escaped as the
+ * receipt escapes paths (second review 2026-10-31, D5). */
+static void err_line(FILE *err) {
+    fputs("belay: ", err);
+    receipt_fputs(err, belay_err_msg());
+    fputc('\n', err);
+}
+
 /* A usage error: one line (review 2026-10-31, Phase 5, 15). */
 static int usage(FILE *err, const char *why) {
-    fprintf(err, "belay: %s (belay help lists the commands and options)\n", why);
+    fputs("belay: ", err);
+    receipt_fputs(err, why);          /* it may quote an argument */
+    fputs(" (belay help lists the commands and options)\n", err);
     return EXIT_USAGE;
 }
 
@@ -66,7 +76,7 @@ static int usage(FILE *err, const char *why) {
  * 3, anything else -- I/O, corrupt state, memory -- is 4. */
 static int failed(FILE *err) {
     const int code = belay_err_code();
-    fprintf(err, "belay: %s\n", belay_err_msg());
+    err_line(err);
     belay_err_clear();
     return code == BELAY_ERR_INVALID ? EXIT_REFUSED : EXIT_FAILED;
 }
@@ -147,11 +157,12 @@ static void json_checkpoint(FILE *out, const struct state *st, const struct chec
     }
     fprintf(out, "{\"id\":%ld,\"kind\":\"%s\",\"created_ns\":%lld,%s,%s,"
                  "\"entries\":%llu,\"raced\":%llu,\"unstable\":%llu,\"vanished\":%llu,\"provisional\":%s,"
-                 "\"excluded\":%llu,\"prefilter\":{\"used\":%s,\"trusted\":%llu,\"racy\":%llu,\"full_reason\":\"%s\"}}\n",
+                 "\"excluded\":%llu,\"prefilter\":{\"used\":%s,\"reference\":\"%s\",\"trusted\":%llu,"
+                 "\"racy\":%llu,\"full_reason\":\"%s\"}}\n",
             c->id, c->kind, (long long)c->created_ns, esc, mesc, (unsigned long long)c->entries,
             (unsigned long long)c->raced, (unsigned long long)c->unstable, (unsigned long long)c->vanished,
             c->provisional ? "true" : "false", (unsigned long long)c->excluded, c->full ? "false" : "true",
-            (unsigned long long)c->trusted, (unsigned long long)c->racy, why);
+            state_reference(c), (unsigned long long)c->trusted, (unsigned long long)c->racy, why);
 }
 
 /* What a capture must say on every capture (Q6, never silent): it raced,
@@ -161,15 +172,28 @@ static void capture_notes(FILE *out, const struct state *st, const struct checkp
         fprintf(out, "  changing while captured: %llu raced, %llu unstable, %llu vanished\n",
                 (unsigned long long)c->raced, (unsigned long long)c->unstable, (unsigned long long)c->vanished);
     /* Q6: never silent -- the walk skipped belay's own state directory. */
-    if (c->excluded) fprintf(out, "  not recorded: belay's own state directory %s (inside the scope)\n", st->root);
+    if (c->excluded) {
+        fputs("  not recorded: belay's own state directory ", out);
+        receipt_fputs(out, st->root);
+        fputs(" (inside the scope)\n", out);
+    }
 }
 
 static void text_checkpoint(FILE *out, const struct state *st, const struct checkpoint *c) {
     char t[32];
     iso(c->created_ns, t, sizeof t);
     fprintf(out, "%s %ld  %s  %llu entries", c->kind, c->id, t, (unsigned long long)c->entries);
-    if (!c->full) fprintf(out, ", %llu files not read again (unchanged)", (unsigned long long)c->trusted);
-    else if (c->full_reason[0]) fprintf(out, ", every file read (%s)", c->full_reason);
+    if (!c->full) {
+        fprintf(out, ", %llu files not read again (unchanged)", (unsigned long long)c->trusted);
+        /* Said, never silent: the weaker reference point (docs/cli.md;
+         * second review 2026-10-31, D3). */
+        if (!c->walk_start_reference)
+            fputs("; reference point: the newest ctime recorded (belay's state is on another filesystem)", out);
+    } else if (c->full_reason[0]) {
+        fputs(", every file read (", out);
+        receipt_fputs(out, c->full_reason);
+        fputc(')', out);
+    }
     fputc('\n', out);
     capture_notes(out, st, c);
 }
@@ -183,7 +207,7 @@ static int open_scope(const struct opts *o, bool create, struct state *st, FILE 
     st->dir_fd = st->cp_fd = st->lock_fd = -1;
     if (scope_resolve(o->scope, &sc) == -1) {
         if (belay_err_code() == BELAY_ERR_NOMEM) return failed(err);
-        fprintf(err, "belay: %s\n", belay_err_msg());
+        err_line(err);
         belay_err_clear();
         return EXIT_REFUSED;
     }
@@ -254,7 +278,9 @@ static int cmd_diff(const struct opts *o, FILE *out, FILE *err) {
     if (!parse_id(o->since, &from)) return usage(err, "diff needs --since ID, a checkpoint id");
     if (o->to != NULL && !parse_id(o->to, &to)) return usage(err, "--to needs a checkpoint id");
     struct state st;
-    int rc = open_scope(o, true, &st, err);
+    /* Opened without creating anything until the ids are known to exist:
+     * a diff of a scope never captured leaves no state behind (D8). */
+    int rc = open_scope(o, false, &st, err);
     if (rc) return rc;
     struct checkpoint *list = NULL, now = { 0 };
     size_t n = 0;
@@ -268,9 +294,16 @@ static int cmd_diff(const struct opts *o, FILE *out, FILE *err) {
         if (list[i].id == to) have_to = true;
     }
     if (!have_from || !have_to) {
-        fprintf(err, "belay: no checkpoint %ld of %s (belay log --scope lists them)\n",
-                have_from ? to : from, st.scope.path);
+        fprintf(err, "belay: no checkpoint %ld of ", have_from ? to : from);
+        receipt_fputs(err, st.scope.path);
+        fputs(" (belay log --scope lists them)\n", err);
         rc = EXIT_USAGE;
+        goto done;
+    }
+    state_close(&st);                            /* a capture, and diff-from-N written: under the lock */
+    if ((rc = open_scope(o, true, &st, err)) != 0) goto done;
+    if (state_check_manifest(&st, from) == -1 || (to != 0 && state_check_manifest(&st, to) == -1)) {
+        rc = failed(err);
         goto done;
     }
     if (to == 0) {
@@ -299,6 +332,11 @@ static int cmd_diff(const struct opts *o, FILE *out, FILE *err) {
         char buf[65536];
         size_t k;
         while ((k = fread(buf, 1, sizeof buf, in)) > 0) fwrite(buf, 1, k, out);
+        if (ferror(in)) {
+            belay_err_set(BELAY_ERR_IO, errno, "cannot read %s", d);
+            rc = failed(err);
+            goto done;
+        }
         if (now.id != 0) capture_notes(err, &st, &now);     /* never in the JSON */
     } else {
         if (belay_manifest_open(a, &m.side[0].r) == -1 || belay_manifest_open(b, &m.side[1].r) == -1) {
@@ -366,8 +404,10 @@ static int run(int argc, char **argv, FILE *out, FILE *err) {
  * Phase 5, 14): a full disk under `belay diff --json > f` must not exit 0. */
 int cli_main(int argc, char **argv, FILE *out, FILE *err) {
     const int rc = run(argc, argv, out, err);
-    if ((fflush(out) != 0 || ferror(out)) && rc != EXIT_FAILED) {
-        fprintf(err, "belay: cannot write the output: %s\n", strerror(errno));
+    errno = 0;
+    const int e = fflush(out) != 0 ? errno : 0;
+    if ((e != 0 || ferror(out)) && rc != EXIT_FAILED) {
+        fprintf(err, "belay: cannot write the output%s%s\n", e ? ": " : "", e ? strerror(e) : "");
         return EXIT_FAILED;
     }
     return rc;

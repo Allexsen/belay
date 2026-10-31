@@ -48,9 +48,17 @@ static void sbf(struct sb *b, const char *fmt, ...) {
     }
 }
 
+/* A code point that changes how text around it is shown without being
+ * seen: bidi controls and invisible format characters (second review
+ * 2026-10-31, D6: "rlo\u202Eexe.txt" showed as "rlotxt.exe"). */
+static bool invisible(uint32_t cp) {
+    return cp == 0x00AD || cp == 0x061C || (cp >= 0x200B && cp <= 0x200F) || (cp >= 0x2028 && cp <= 0x202E) ||
+           (cp >= 0x2060 && cp <= 0x2064) || (cp >= 0x2066 && cp <= 0x206F) || cp == 0xFEFF;
+}
+
 /* `len` bytes, printable on one line: valid UTF-8 as is, except C0 and C1
- * controls and DEL; those and every byte that is not UTF-8 as \xNN; a
- * backslash doubled, so \xNN is never ambiguous. */
+ * controls, DEL and invisible format characters; those and every byte that
+ * is not UTF-8 as \xNN; a backslash doubled, so \xNN is never ambiguous. */
 static void esc(struct sb *b, const char *s, size_t len) {
     for (size_t i = 0; i < len;) {
         const unsigned char c = (unsigned char)s[i];
@@ -58,9 +66,15 @@ static void esc(struct sb *b, const char *s, size_t len) {
                  : c >= 0xF0 && c <= 0xF4 ? 4 : 0;
         if (k > 1 && (i + k > len || !belay_utf8_valid(s + i, k))) k = 0;
         const bool c1 = k == 2 && c == 0xC2 && (unsigned char)s[i + 1] < 0xA0;
-        if (k == 0 || c1 || c < 0x20 || c == 0x7F) {
-            if (c1) { sbf(b, "\\x%02x\\x%02x", c, (unsigned char)s[i + 1]); i += 2; }
-            else { sbf(b, "\\x%02x", c); i++; }
+        uint32_t cp = 0;
+        if (k == 2) cp = (uint32_t)(c & 0x1F) << 6 | ((unsigned char)s[i + 1] & 0x3F);
+        if (k == 3)
+            cp = (uint32_t)(c & 0x0F) << 12 | (uint32_t)((unsigned char)s[i + 1] & 0x3F) << 6 |
+                 ((unsigned char)s[i + 2] & 0x3F);
+        if (k == 0 || c1 || c < 0x20 || c == 0x7F || invisible(cp)) {
+            const size_t n = k == 0 ? 1 : k;
+            for (size_t j = 0; j < n; j++) sbf(b, "\\x%02x", (unsigned char)s[i + j]);
+            i += n;
         } else if (c == '\\') {
             sbf(b, "\\\\");
             i++;
@@ -161,7 +175,14 @@ static int record(const struct jval *r, struct lines *priv, struct lines *other,
     if (have_path) esc(&b, path, plen);
     else sbf(&b, "(no path)");
     if (why.n) {
-        sbf(&b, "   %s", why.p);
+        sbf(&b, "   ");
+        if (strcmp(outcome, "type_changed") == 0) {     /* the type change is said too (D8) */
+            escs(&b, jget(r, "type_before"));
+            sbf(&b, " -> ");
+            escs(&b, jget(r, "type"));
+            sbf(&b, ", ");
+        }
+        sbf(&b, "%s", why.p);
     } else if (strcmp(outcome, "unknown") == 0) {
         sbf(&b, "   unknown: ");
         list(&b, jget(r, "unknown"));
@@ -313,4 +334,12 @@ out:
     drop(&priv);
     drop(&other);
     return rc;
+}
+
+void receipt_fputs(FILE *f, const char *s) {
+    struct sb b = { 0 };
+    esc(&b, s, strlen(s));
+    if (b.p != NULL && !b.bad) fputs(b.p, f);
+    else if (b.bad) fputs("?", f);
+    free(b.p);
 }

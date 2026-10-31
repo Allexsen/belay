@@ -17,10 +17,11 @@ belay help [command]  |  belay <command> --help  |  belay --version
   it prints a receipt; with `--json`, the diff in [diff.v1](spec/diff-v1.md).
 - **log** lists the scope's checkpoints: id, kind, time, number of entries.
 
-belay only reads `DIR`. It writes only under its state directory: `$BELAY_STATE_DIR`, else
-`$XDG_STATE_HOME/belay`, else `$HOME/.local/state/belay`.
+belay only reads `DIR`. It writes only under its state directory: `$BELAY_STATE_DIR` (an absolute
+path), else `$XDG_STATE_HOME/belay`, else `$HOME/.local/state/belay`.
 
-A checkpoint id is a decimal number without a leading zero, at most 9 digits.
+A checkpoint id is a decimal number without a leading zero, at most 9 digits. Ids end at
+999,999,999: past it every capture fails (exit 4).
 
 ## Exit codes
 
@@ -29,7 +30,7 @@ A checkpoint id is a decimal number without a leading zero, at most 9 digits.
 | 0 | done -- for `diff`, whatever it found, unless `--exit-code` |
 | 1 | `diff --exit-code`: some path is not unchanged (`unknown` counts) |
 | 2 | usage: an unknown option or command, a missing or malformed argument, a checkpoint that does not exist |
-| 3 | refused: the scope cannot be resolved, is not a directory, changed while it was resolved, or is the state directory or inside it; no state directory can be named; the state directory belongs to another user or others can write it |
+| 3 | refused: the scope cannot be resolved, is not a directory, changed while it was resolved, or is the state directory or inside it; no state directory can be named; the state directory, or a directory above it, belongs to another user or others can write it |
 | 4 | failed: an I/O error (writing the output included), corrupt state, out of memory |
 
 An error is one line on standard error; `--json` output never carries one.
@@ -59,10 +60,15 @@ standard error with `--json`. A scope that is the state directory, or inside it,
     lock                        one writer at a time
 ```
 
-The state directory must belong to the user belay runs as, and no one else may write it (exit 3
-otherwise). Everything below it is opened without following symlinks; a symlink, FIFO or anything
-else belay did not write there is corrupt state (exit 4), never followed or waited on. A capture
-that finds another belay working on the same scope says so on standard error and waits for it.
+The state directory must belong to the user belay runs as and be writable by no one else; every
+directory above it must belong to that user or to root and be writable by no one else, unless it
+is sticky (as `/tmp` is) or only the user's own group may write it. Otherwise belay refuses (exit
+3). Every directory and file belay keeps there is opened from the state directory without
+following symlinks: a symlink, FIFO or anything else belay did not write is corrupt state (exit
+4), never followed or waited on. A manifest is checked that way before it is read or compared;
+the capture and the comparison then reach it by its path, which is why no one else may be able to
+write the state directory or anything above it. A capture that finds another belay working on
+the same scope says so on standard error and waits for it.
 
 Nothing in it is deleted by belay.
 
@@ -73,10 +79,14 @@ size, modification time and change time (ctime) are all what the previous checkp
 and its ctime is before a reference point: the time the previous checkpoint's walk began, on the
 scope filesystem's clock (the ctime of a file belay creates in the state directory as the walk
 starts). A file written after that point -- during that walk included -- gets a ctime at or past
-it and is read. Whether a copy is kept is decided anew for every file, as a full capture would.
+it and is read. Whether a copy is kept is decided anew, as a full capture would decide it -- in
+the store, no writer holding the file open, a binary file without one -- with one difference: a
+file stored under an interpreter's claim keeps its copy after losing the claim (its content is
+the same).
 
 When the state directory is on another filesystem than the scope, that clock cannot be read; the
-reference point is then the newest ctime the previous checkpoint recorded. On a filesystem with
+reference point is then the newest ctime the previous checkpoint recorded, and the output says so
+(`"reference":"newest_ctime"` under `prefilter` in `--json`, `walk_start` otherwise). On a filesystem with
 coarse timestamps (1 or 2 seconds, or a kernel tick), a same-size rewrite made during the previous
 walk, after the file was read and within the tick of its previous write, can then be missed if
 another file changed later in that walk; keep the state directory on the scope's filesystem, or
@@ -87,7 +97,8 @@ no checkpoint before; with `--full`; every `N` prefiltered captures -- marks, an
 to now -- since the last full one (`--full-every N`, default 50; 0: never); when the newest ctime it
 sees is older than the newest the previous checkpoint recorded (the clock went backwards: the walk
 is done again in full); or when the previous checkpoint cannot be used -- unreadable, of another
-scope, taken with other limits, or too large to index (64 MiB, about 85 bytes a file).
+scope, taken with other limits, or too large to index (64 MiB, about 76 bytes a file). A
+previous manifest that is a symlink or a FIFO is corrupt state (exit 4).
 
 ## The receipt
 
@@ -98,8 +109,10 @@ not capture reliably is named on its own line with the reason (`raced`, `unstabl
 ...); entries that vanished while a walk ran are counted. Sections of more than 50 entries fold to
 "and N more" (`--all` shows everything); privilege changes and unknown entries never fold.
 
-Every path and text is printed escaped: control characters, bytes that are not UTF-8 and C1
-controls as `\xNN`, a backslash as `\\`.
+Every path and text is printed escaped -- in the receipt, in error lines, and whatever belay
+reads back from its state: control characters, C1 controls, DEL, invisible format and bidi
+characters (U+200B-U+200F, U+2028-U+202E, U+2060-U+206F, U+FEFF, ...) and bytes that are not UTF-8
+as `\xNN`, a backslash as `\\`. A type change that is also a privilege change says both.
 
 ## --json
 

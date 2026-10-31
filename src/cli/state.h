@@ -83,7 +83,18 @@ struct checkpoint {
     char full_reason[160];      /* why a mark read every file */
     uint64_t trusted, racy;
     int64_t walk_start_ns;      /* when its walk began, on the scope's clock; 0: unknown (previous.h) */
+    bool walk_start_reference;  /* prefiltered against the previous walk's start, not its newest ctime */
 };
+
+/* How a checkpoint's prefilter was referenced: "none" (every file read),
+ * "walk_start" or "newest_ctime" (the previous walk's start was not known:
+ * belay's state is on another filesystem than the scope). */
+const char *state_reference(const struct checkpoint *c);
+
+/* Checkpoint `id`'s manifest, opened from the directory fds without
+ * following a link or waiting on a FIFO: 0 when it is a regular file; -1
+ * with belay_err (CORRUPT) otherwise. Before its path is handed on. */
+int state_check_manifest(const struct state *st, long id);
 
 /* The checkpoints that exist (meta.json written), ascending by id; *n of
  * them in a malloc'd array the caller frees. A directory without meta.json

@@ -6,7 +6,8 @@
  *  records by path; each record at most RECEIPT_FINDINGS findings, then
  *  "and N more"; flagged entries named on their own lines, no global
  *  "provisional" banner. Every string from the diff is printed escaped:
- *  control bytes, C1 controls and bytes that are not UTF-8 as \xNN, a
+ *  control bytes, C1 controls, invisible format and bidi characters and
+ *  bytes that are not UTF-8 as \xNN, a
  *  backslash as \\ -- a path cannot forge a line, a heading or a terminal
  *  sequence (review 2026-10-31, Phase 5, 7).
  */
@@ -43,5 +44,10 @@ struct receipt_opts {
 /* Reads diff.v1 from `diff`, writes the receipt to `out`. 0; -1 with
  * belay_err (a line that is not diff.v1, memory, write). */
 int receipt_render(FILE *diff, FILE *out, const struct receipt_opts *o);
+
+/* `s` written to `f` escaped as the receipt escapes paths: for any text
+ * belay prints that came from the filesystem or its own state (a scope, a
+ * reason read back, an error naming a path). */
+void receipt_fputs(FILE *f, const char *s);
 
 #endif
