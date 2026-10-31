@@ -598,6 +598,14 @@ def dist_info(path):
     return holder, name, version
 
 
+def nameable(path):
+    try:
+        dist_info(path)
+    except InterpFailure:
+        return False
+    return True
+
+
 def record_rows(data):
     """RECORD's rows by path, the first row of a path kept: {path: (hash, size)}.
     spec: content that is not UTF-8, or a row of other than three fields,
@@ -710,13 +718,17 @@ def interpret(before_fn, after_fn, store):
                 # spec: an unknown RECORD present on both sides "is no proven
                 # reinstall and gives none (its rows are not counted)".
                 # READING: nor is its dist-info named (nothing derives from it).
-                if oc != "unknown":
+                # spec (E10): a dist-info that cannot be named -- "nothing
+                # more is read from it", so no content_unavailable either.
+                if oc != "unknown" and nameable(path):
                     pip_names.append(path)
                     findings, u, contents = needed_copies(store, b, a, PIP_BOUND, True, True,
                                                          PIP_ROWS)
                     unav["pip"] += [(path, s, r) for s, r in u]
                     if not u:
                         pip_reinst.append((path, contents["before"], contents["after"]))
+                elif oc != "unknown":
+                    pip_names.append(path)      # fails to be named below: E10
             else:
                 pip_names.append(path)
                 pip_pairs[path] = "A" if areg else "R"
@@ -746,13 +758,12 @@ def interpret(before_fn, after_fn, store):
         A, R = sorted(k["A"]), sorted(k["R"])
         if A and R and len(A) + len(R) > 2:
             # E10: one could_not_interpret event naming them, "in that name's
-            # place"; each one's record could_not_interpret (E10's
-            # parenthesis). READING: placed as the kind could_not_interpret
-            # of that name, then by directory.
+            # place"; "their records carry nothing, as the pairing is known
+            # only once every path record is written". READING: placed as the
+            # kind could_not_interpret of that name, then by directory.
             ps = A + R
-            pip_events.append(((0, norm, KIND_INDEX["could_not_interpret"], holder, min(ps)),
-                               "could_not_interpret", {}, ps))
-            not_interpreted.update(ps)
+            pip_events.append(((0, norm, KIND_INDEX["could_not_interpret"], holder,
+                                tuple(sorted(ps))), "could_not_interpret", {}, ps))
             continue
         if len(A) == 1 and len(R) == 1:
             _, name, to = named[A[0]]
@@ -765,16 +776,16 @@ def interpret(before_fn, after_fn, store):
                 kind = "pip_upgraded"
             else:
                 kind = "pip_downgraded"
-            pip_events.append(((0, norm, KIND_INDEX[kind], holder, A[0]), kind,
-                               {"name": name, "from": frm, "to": to}, [A[0], R[0]]))
+            pip_events.append(((0, norm, KIND_INDEX[kind], holder, tuple(sorted((A[0], R[0])))),
+                               kind, {"name": name, "from": frm, "to": to}, [A[0], R[0]]))
             continue
         for p in A:
             _, name, version = named[p]
-            pip_events.append(((0, norm, KIND_INDEX["pip_installed"], holder, p), "pip_installed",
+            pip_events.append(((0, norm, KIND_INDEX["pip_installed"], holder, (p,)), "pip_installed",
                                {"name": name, "version": version}, [p]))
         for p in R:
             _, name, version = named[p]
-            pip_events.append(((0, norm, KIND_INDEX["pip_removed"], holder, p), "pip_removed",
+            pip_events.append(((0, norm, KIND_INDEX["pip_removed"], holder, (p,)), "pip_removed",
                                {"name": name, "version": version}, [p]))
     for path, before, after in pip_reinst:
         try:
@@ -789,12 +800,12 @@ def interpret(before_fn, after_fn, store):
         added = sum(1 for p in ra if p not in rb)
         removed = sum(1 for p in rb if p not in ra)
         changed = sum(1 for p in ra if p in rb and ra[p] != rb[p])
-        pip_events.append(((0, pep503(name), KIND_INDEX["pip_reinstalled"], holder, path),
+        pip_events.append(((0, pep503(name), KIND_INDEX["pip_reinstalled"], holder, (path,)),
                            "pip_reinstalled",
                            {"name": name, "version": version, "files_added": added,
                             "files_removed": removed, "files_changed": changed}, [path]))
-    # READING: past name, kind and directory, events are ordered by the
-    # first path they list (the RECORD added, for a pair).
+    # spec: past name, kind and directory, "then the paths it lists"
+    # (sorted bytewise, compared in order).
     pip_lines = end_events("pip", pip_events, cni_pip, unav["pip"], unknown)
     not_interpreted |= cni_pip
 

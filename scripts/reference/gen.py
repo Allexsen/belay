@@ -817,6 +817,17 @@ def cell_pip_simple():
     c.tag("pip.name_split_first_dash")
     out.append(c)
 
+    # Several added (or removed) of one name in one directory: name, kind and
+    # directory tie, so "then the paths it lists" orders them. Path order
+    # (SIX < Six < six, bytewise) differs from version order here.
+    c = Case("pip-events-tie-by-paths", modes=("store", "nostore"))
+    for n, v in [(b"six", b"1.0"), (b"Six", b"3.0"), (b"SIX", b"2.0")]:
+        put_dist(c, "after", S, n, v, rows(n, v))
+    for n, v in [(b"attrs", b"2.0"), (b"Attrs", b"1.0")]:
+        put_dist(c, "before", S, n, v, rows(n, v))
+    c.tag("pip.events_tie_by_paths")
+    out.append(c)
+
     c = Case("pip-metadata-only")
     rec, meta = dist(S, b"six", b"1.16.0")
     c.both(rec, reg(record_bytes(rows(b"six", b"1.16.0"))))
@@ -1391,8 +1402,8 @@ def cell_probes():
     c.tag("probe.pip.E9_text_over_1024")
     out.append(c)
     # A dist-info that cannot be named, modified in place, a copy unavailable.
-    # READING: the record's findings are could_not_interpret; the
-    # content_unavailable event still names it.
+    # spec (E10): "nothing more is read from it" -- could_not_interpret on
+    # its record and one event, no content_unavailable.
     c = Case("probe-pip-unnameable-unavailable")
     c.put("before", S + b"/nodash.dist-info/RECORD", reg(b"x,,\n"))
     c.put("after", S + b"/nodash.dist-info/RECORD", reg(b"x,,\ny,,\n", store="absent", gen=1))

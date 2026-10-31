@@ -175,10 +175,15 @@ def check_cell(cell, mine, belay=None):
         "pip.E10.unnameable": lambda: K == ["could_not_interpret", "pip_upgraded", "pip_installed"]
         and len(E[0]["paths" if "paths" in E[0] else "paths_b64"]) == 1
         and cni_records(mine) == 1,
-        # in that name's place, naming the RECORDs, each record could_not_interpret
+        # in that name's place, naming the RECORDs; their records carry nothing
         "pip.E10.ambiguous": lambda: ("pip_installed" in K or "pip_removed" in K)
-        and any(e["event"] == "could_not_interpret" and len(e["paths"]) >= 3
-                and cni_records(mine) == len(e["paths"]) for e in E),
+        and any(e["event"] == "could_not_interpret" and len(e["paths"]) >= 3 for e in E)
+        and cni_records(mine) == 0,
+        # name, kind and directory equal: then the paths it lists
+        "pip.events_tie_by_paths": lambda: K == ["pip_removed"] * 2 + ["pip_installed"] * 3
+        and [e["paths"] for e in E[:2]] == sorted(e["paths"] for e in E[:2])
+        and [e["paths"] for e in E[2:]] == sorted(e["paths"] for e in E[2:])
+        and [e["version"] for e in E[2:]] == ["2.0", "3.0", "1.0"],
         "pip.E10.unparseable_record": lambda: K == ["could_not_interpret", "pip_reinstalled",
                                                     "pip_installed"]
         and cni_records(mine) == 1,
@@ -248,11 +253,10 @@ def check_cell(cell, mine, belay=None):
         and E[0].get("provisional") is True and cni_records(mine) == 0,
         "probe.pip.unknown_unnameable_both_sides": lambda: K == ["pip_installed"],
         "probe.pip.ambiguous_with_unknown": lambda: K == ["could_not_interpret"]
-        and E[0].get("provisional") is True and cni_records(mine) == 2,
+        and E[0].get("provisional") is True and cni_records(mine) == 0,
         "probe.pip.E9_text_over_1024": lambda: K == ["pip_installed", "invalid_finding",
                                                      "pip_installed"],
-        "probe.pip.unnameable_content_unavailable": lambda: K == ["could_not_interpret",
-                                                                 "content_unavailable"]
+        "probe.pip.unnameable_content_unavailable": lambda: K == ["could_not_interpret"]
         and cni_records(mine) == 1,
         # The claim's edge, seen in belay's records: an .md5sums outside
         # var/lib/dpkg/info/ is text (text_added), the one inside is dpkg's.
