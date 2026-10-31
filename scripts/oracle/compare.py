@@ -47,8 +47,9 @@ the generator's labels (coverage(), required(), gate()):
     non-directory ancestors (raced or not, one and two levels down), raced
     type changes (raced on one side or both), a regular file that becomes
     or stops being a mount root, or is one on both sides, with `unverified`
-    on the mount side and on the other or not (O8), the trailer's walk
-    counts, ...
+    on the mount side and on the other or not (O8), a mounted regular file
+    whose type changes while raced on either side or both (O8 across a type
+    change), the trailer's walk counts, ...
 gen_corpus.py builds every required item deterministically and checks each
 targeted pair, and then the targeted pairs alone, with these same functions;
 here the gate runs again over the whole corpus.
@@ -449,6 +450,12 @@ SCENARIOS = (['dev relation: an entry leaves the root device',
              + ['a raced type change, raced %s only%s' % (s, i) for s in ('before', 'after')
                 for i in ('', ', iflags on the raced side only', ', iflags on the other side only')]
              + ['a raced type change, raced on both sides']
+             # O8 across a type change (O7: "its reasons are those of the flags
+             # on either side"): a mounted regular file on one side, another
+             # type on the other, `raced` on either side or both, no other flag.
+             + ['a raced type change %s a mounted regular file, raced %s, no other flag' % (d, s)
+                for d in ('from', 'to')
+                for s in ('on the mount side only', 'on the other side only', 'on both sides')]
              # xattrs_sha256: "the sha256 of the bytes `xattrs` would hold between
              # its brackets", so an inline set and its digest compare equal.
              + ['xattrs: a set inline on one side and %s by digest on the other, nothing else '
@@ -538,6 +545,19 @@ def pair_coverage(stem, cells, optional, scen, fpairs):
                              % (side, 'raced' if 'iflags' in rc else 'other'))
             elif b.get('raced'):
                 tags.add('a raced type change, raced on both sides')
+            # O8 across a type change: the mounted regular file's flags are
+            # `mount` and `unverified` (manifest-v1 rules 5 and 21), plus
+            # `raced` or not; the other side carries `raced` or nothing.
+            for m, o, d in ((b, a, 'from'), (a, b, 'to')):
+                if m['type'] != 'reg' or not m.get('mount'):
+                    continue
+                fm, fo = ({f for f in ref.FLAGS if e.get(f)} for e in (m, o))
+                where = {(True, False): 'on the mount side only',
+                         (False, True): 'on the other side only',
+                         (True, True): 'on both sides'}.get(('raced' in fm, 'raced' in fo))
+                if where and fm - {'raced'} == {'mount', 'unverified'} and fo <= {'raced'}:
+                    tags.add('a raced type change %s a mounted regular file, raced %s, no other '
+                             'flag' % (d, where))
             continue
         t = b['type']
         rel_b, rel_a = b['dev'] == rb, a['dev'] == ra
