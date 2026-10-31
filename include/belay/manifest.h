@@ -171,6 +171,32 @@ struct belay_manifest_opts {
      *  cursors, independent of how many entries the scope holds.
      */
     size_t   run_bytes;
+
+    /*
+     *  mark's prefilter (decision Q2): the previous manifest of this scope.
+     *  A regular file it shows unchanged -- same (dev, ino, mode, size,
+     *  mtime_ns, ctime_ns), ctime_ns before the reference point -- is not
+     *  read: its hash and stored copy are the previous entry's. NULL: every
+     *  file is read. Unusable (another scope, other limits, too large to
+     *  index): a full walk, said in stats->prefilter_skipped.
+     */
+    const char *previous;
+
+    /*
+     *  A directory not walked: belay's own state directory inside the scope
+     *  (decision Q6), by identity. Its name stays in its parent's listing;
+     *  it and its subtree are not recorded. Counted in stats->excluded.
+     */
+    bool     exclude;
+    uint64_t exclude_dev, exclude_ino;
+
+    /*
+     *  The scope root the caller resolved (§5.1.1): the walk refuses
+     *  (BELAY_ERR_INVALID, "changed during resolution") a root that is
+     *  another directory by the time it is opened.
+     */
+    bool     expect_root;
+    uint64_t root_dev, root_ino;
 };
 
 /* What one write observed. Also recorded in the manifest's trailer line. */
@@ -187,6 +213,16 @@ struct belay_manifest_stats {
     size_t store_failed;  /* capture only, 0 from a trailer: copies the content
                              store failed to keep; those entries are recorded
                              without `stored` */
+
+    /* Capture only, not in the trailer (the format is frozen): */
+    size_t excluded;      /* directories not walked (opts->exclude) */
+    bool   prefilter;     /* the previous manifest was used (opts->previous) */
+    const char *prefilter_skipped;  /* why it was not, when one was given */
+    size_t trusted;       /* files not read: unchanged by the prefilter rule */
+    size_t racy;          /* files unchanged but at or past the reference point: read */
+    int64_t newest_ctime_ns;        /* the newest ctime_ns this walk saw */
+    int64_t previous_newest_ns;     /* the previous manifest's newest validated ctime */
+    int64_t reference_ns;           /* R */
 };
 
 /*

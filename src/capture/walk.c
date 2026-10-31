@@ -5,6 +5,7 @@
  */
 #define _GNU_SOURCE
 #include "capture_internal.h"
+#include "ident.h"
 #include "util/check.h"
 
 #include "belay/error.h"
@@ -36,7 +37,8 @@ int cap_emit_scratch(struct walk_ctx *wc) { return cap_emit(wc, &wc->e, NULL); }
  * directory's listing (`seen`), which the end-of-walk re-list must match: a
  * name that vanished and came back before the walk ended is then a listing
  * change, never a file missing from a directory recorded as complete. */
-enum visited { VISIT_RECORDED = 1, VISIT_GONE, VISIT_INCOMPLETE };
+enum visited { VISIT_RECORDED = 1, VISIT_GONE, VISIT_INCOMPLETE,
+               VISIT_EXCLUDED  /* belay's own state directory (opts->exclude): listed, not walked */ };
 
 /* Records one entry and, for directories, recurses. Takes the parent dirfd and
  * the entry name; never a path string. Returns an enum visited, or -1. */
@@ -63,6 +65,15 @@ static int visit(int parent_fd, const char *name, char *rel, size_t relsz,
             return VISIT_INCOMPLETE;
         }
 
+        if (wc->opts->exclude && S_ISDIR(st.st_mode) && (uint64_t)st.st_dev == wc->opts->exclude_dev &&
+            (uint64_t)st.st_ino == wc->opts->exclude_ino) {
+            wc->excluded++;
+            return VISIT_EXCLUDED;
+        }
+        {
+            const int64_t ct = ident_of_stat(&st).ctime_ns;
+            if (ct > wc->newest_ctime_ns) wc->newest_ctime_ns = ct;
+        }
         memset(e, 0, sizeof *e);
         wc->extras_done = false;
         if (rel_len >= sizeof e->path) {
@@ -190,7 +201,8 @@ int cap_walk(int dfd, char *rel, size_t relsz, size_t rel_len,
         const int v = visit(dfd, dname, rel, relsz, (size_t)nlen, depth, wc);
         rel[rel_len] = '\0';
         if (v == -1) { rc = -1; break; }
-        if (v == VISIT_RECORDED) cons_listing_add(seen, dname);   /* what the re-list must match */
+        if (v == VISIT_RECORDED || v == VISIT_EXCLUDED)
+            cons_listing_add(seen, dname);                     /* what the re-list must match */
         else if (v == VISIT_INCOMPLETE) incomplete = true;
         else BELAY_CHECK(v == VISIT_GONE, (ops->dir_close(ops->ctx, d), -1));
     }

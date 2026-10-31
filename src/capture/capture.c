@@ -370,6 +370,27 @@ int cap_read_file(int pfd, const char *name, const struct stat *st, const char *
         return V_OK;
     }
 
+    /* mark's prefilter: unchanged since the previous manifest, by the rule
+     * (previous.h), so not read -- its hash and copy are the previous
+     * entry's. It is still opened, checked against its stat and its extras
+     * read (inode flags need an fd): only the hashing is skipped. The
+     * end-of-walk re-check applies to it as to any other. */
+    if (wc->prev != NULL) {
+        const struct prev_rec *p = prev_find(wc->prev, (uint64_t)st->st_dev, (uint64_t)st->st_ino);
+        if (prev_trusted(p, st, wc->reference_ns)) {
+            e->has_hash = true;
+            prev_hex(p, e->sha256_hex);
+            if (p->has_stored && wc->store != NULL) {
+                e->has_stored = true;
+                memcpy(e->stored_hex, e->sha256_hex, sizeof e->stored_hex);
+            }
+            wc->trusted++;
+            close(fd);
+            return V_OK;
+        }
+        if (p != NULL && prev_trusted(p, st, INT64_MAX)) wc->racy++;   /* unchanged, but racy */
+    }
+
     /* What must be kept: an interpreter's claim overrides the size threshold
      * (stored whatever its size) or forbids storing (hash only); unclaimed
      * files are kept if small and text. */

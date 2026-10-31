@@ -95,6 +95,12 @@ int capture_write(const struct fsops *ops, const char *out_path, const char *sco
         free(real);
         return -1;
     }
+    if (opts->expect_root && ((uint64_t)rst.st_dev != opts->root_dev || (uint64_t)rst.st_ino != opts->root_ino)) {
+        belay_err_set(BELAY_ERR_INVALID, 0, "manifest: the scope %s changed during resolution", real);
+        close(root_fd);
+        free(real);
+        return -1;
+    }
 
     int rc = -1;
     struct tmpdir td = { .ops = ops };
@@ -139,6 +145,15 @@ int capture_write(const struct fsops *ops, const char *out_path, const char *sco
     wc->root_dev = (uint64_t)rst.st_dev;
     wc->scope = real;
     wc->scope_len = strlen(real);
+    wc->newest_ctime_ns = INT64_MIN;
+
+    struct prev_info pinfo = { 0 };
+    const char *prev_why = NULL;
+    if (opts->previous != NULL) {
+        const int pr = prev_load(ops, opts->previous, real, wc->root_dev, opts, &wc->prev, &pinfo, &prev_why);
+        if (pr == -1) goto cleanup;
+        wc->reference_ns = pinfo.reference_ns;
+    }
 
     /* Once per walk: can statx be used here, and is the scope on overlayfs?
      * (See stat_entry and the crossing rule in visit.) */
@@ -308,6 +323,14 @@ int capture_write(const struct fsops *ops, const char *out_path, const char *sco
         *stats = tally;
         stats->vanished = wc->tally.vanished;
         stats->store_failed = wc->store_failed;
+        stats->excluded = wc->excluded;
+        stats->prefilter = wc->prev != NULL;
+        stats->prefilter_skipped = prev_why;
+        stats->trusted = wc->trusted;
+        stats->racy = wc->racy;
+        stats->newest_ctime_ns = wc->newest_ctime_ns;
+        stats->previous_newest_ns = wc->prev != NULL ? pinfo.newest_validated_ns : INT64_MIN;
+        stats->reference_ns = wc->reference_ns;
     }
     rc = 0;
 
@@ -325,6 +348,7 @@ cleanup:
         free(wc->xlist);
         free(wc->xnames);
         free(wc->abs);
+        prev_free(wc->prev);
         belay_store_close(wc->store);
     }
     free(wc);

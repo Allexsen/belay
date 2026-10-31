@@ -14,6 +14,7 @@
 #define BELAY_CAPTURE_INTERNAL_H
 
 #include "belay/manifest.h"
+#include "previous.h"
 #include "belay/store.h"
 
 #include "schema/entry.h"
@@ -65,6 +66,12 @@ struct walk_ctx {
      * mount detection off for every later walk. */
     bool statx_ok;
     bool scope_overlay;
+
+    /* mark's prefilter (previous.h): NULL without one */
+    struct prev_index *prev;
+    int64_t reference_ns;
+    size_t trusted, racy, excluded;
+    int64_t newest_ctime_ns;
 
     struct belay_store *store;  /* NULL when content storage is off */
     size_t store_failed;        /* copies the store failed to keep (R11) */
