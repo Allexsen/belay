@@ -671,14 +671,16 @@ class Writer:
     def both_ways(self, b, a, label):
         return [self.pair(b, a, label), self.pair(a, b, label + ' (reversed)')]
 
-    def targeted(self, rng, label, build, cells=(), pairs=(), optional=(), scenarios=()):
+    def targeted(self, rng, label, build, cells=(), pairs=(), optional=(), scenarios=(),
+                 interp=()):
         """One targeted pair: built ONCE -- no retries; build(rng) is written
         so that it cannot fail -- written both ways round, and checked to show
         what it was built for, as compare.py's coverage gate sees it: its
         (field, type) cells, (type, field, field) pairs, optional fields
-        present on one side only, and named scenarios. Anything else stops
-        the generator, naming the pair."""
-        unknown = [s for s in scenarios if s not in compare.SCENARIOS]
+        present on one side only, named scenarios, and interpreter items.
+        Anything else stops the generator, naming the pair."""
+        unknown = [s for s in scenarios if s not in compare.SCENARIOS] + \
+            [s for s in interp if s not in compare.INTERP_SCENARIOS]
         if unknown:
             die('%r names scenarios the gate does not have: %s' % (label, unknown))
         r = build(rng)
@@ -688,7 +690,8 @@ class Writer:
         self.targeted_stems += stems
         cov = compare.coverage(stems)
         want = ([('cell', c) for c in cells] + [('field pair', p) for p in pairs]
-                + [('optional', f) for f in optional] + [('scenario', s) for s in scenarios])
+                + [('optional', f) for f in optional] + [('scenario', s) for s in scenarios]
+                + [('interpreter', s) for s in interp])
         lacking = [x for x in want if not cov[x[0]][x[1]]]
         if lacking:
             die('the pair built for %r (%s) does not show %s' % (label, stems[0], lacking))
@@ -2142,6 +2145,300 @@ def trailer_counts(w, rng):
                           'the first manifest was created after the second'])
 
 
+# ---------------------------------------------------------------------------
+# Interpreters, with no store (diff-v1 "Interpreters"; the driver passes NULL
+# options). Paths an interpreter claims are built at the names the prose
+# gives (`*/var/lib/dpkg/status`, `*.dist-info/RECORD`, `*/.git/hooks/*`,
+# ...), below top-level directories no random name can take (`chroot`,
+# `venv`, `repo`, ...; NAMES has none of them), so no claim depends on the
+# seed. Every file is a hashed regular file with no flag, `stored` or not as
+# the item needs; every directory a plain one with no flag. Each pair is
+# built once, and written both ways round: an `added` item is `removed` in
+# the reversed pair, an upgrade a downgrade.
+
+def interp_tree(rng):
+    """A tree for an interpreter pair: a few bystanders (unchanged on both
+    sides), and a hash limit within which a file can change size."""
+    return base_tree(rng, rng.randrange(0, 4), limit=size_limit(rng))
+
+
+def ensure_dirs(t, rng, path):
+    """Plain directories, on the root's device and with no flag, for every
+    ancestor of `path` that t lacks."""
+    comps = path.split(b'/')
+    for i in range(1, len(comps)):
+        q = b'/'.join(comps[:i])
+        e = t.e.get(q)
+        if e is None:
+            t.e[q] = clear_flags(new_entry(rng, t, q, 'dir', extras=False), t, rng)
+        elif e['type'] != 'dir' or e.get('unreadable') or e.get('mount'):
+            die('generator bug: %r is not an open directory' % q)
+
+
+def file_at(rng, t, path, stored=True, mode=None):
+    """A hashed regular file at `path`, at least 1 byte, no flag; `stored`
+    when asked; its permission bits `mode` when given."""
+    e = clear_flags(new_entry(rng, t, path, 'reg', extras=False), t, rng)
+    hashed(e, t, rng, least=1)
+    if stored:
+        e['stored'] = e['sha256']
+    if mode is not None:
+        e['mode'] = TYPES['reg'] | mode
+    return e
+
+
+def rewritten(e, t, rng):
+    """e with other content: another hash and another size within the limit."""
+    e2 = dict(e)
+    e2['sha256'] = unlike(hexs(rng), e['sha256'])
+    e2['size'] = e['size'] + 1 if e['size'] < t.limit else e['size'] - 1
+    if 'stored' in e:
+        e2['stored'] = e2['sha256']
+    e2['mtime_ns'] = e['mtime_ns'] + rng.randrange(1, 10 ** 9)
+    e2['ctime_ns'] = e['ctime_ns'] + rng.randrange(1, 10 ** 9)
+    return e2
+
+
+def build_items(rng, items):
+    """A pair from items (path, how, options): how is `added` / `removed`
+    (the file on one side only; with own_dir, its directory too), or the
+    file on both sides, then `modified` (rewritten), `mode` (to `to_mode`),
+    `uid`, `iflags` (on the after side only: unknown), `unstored` (after
+    side rewritten and not stored), `to_dir` (a directory after), or
+    `dir_added` (a directory, after only)."""
+    t = interp_tree(rng)
+    for path, how, kw in items:
+        ensure_dirs(t, rng, parent_of(path) if kw.get('own_dir') else path)
+    a = t.copy()
+    for path, how, kw in items:
+        side = {'added': a, 'removed': t, 'dir_added': a, 'raced_added': a}.get(how)
+        if side is not None:
+            ensure_dirs(side, rng, path)
+            if how == 'dir_added':
+                side.e[path] = clear_flags(new_entry(rng, side, path, 'dir', extras=False),
+                                           side, rng)
+            else:
+                side.e[path] = file_at(rng, side, path, kw.get('stored', True), kw.get('mode'))
+                if how == 'raced_added':        # unknown, reason raced
+                    side.e[path]['raced'] = True
+            continue
+        e = file_at(rng, t, path, kw.get('stored', True), kw.get('mode'))
+        if how == 'modified':
+            e2 = rewritten(e, t, rng)
+        elif how == 'unstored':
+            e2 = rewritten(e, t, rng)
+            e2.pop('stored', None)
+        elif how == 'mode':
+            e2 = dict(e, mode=TYPES['reg'] | kw['to_mode'])
+        elif how == 'mode+uid':
+            e2 = dict(e, mode=TYPES['reg'] | kw['to_mode'], uid=other(rng, IDS, e['uid']))
+        elif how == 'modified+mode':
+            e2 = dict(rewritten(e, t, rng), mode=TYPES['reg'] | kw['to_mode'])
+        elif how == 'uid':
+            e2 = dict(e, uid=other(rng, IDS, e['uid']))
+        elif how == 'iflags':
+            e2 = dict(e, iflags=rng.choice(IFLAGS))
+        elif how == 'to_dir':
+            e2 = clear_flags(new_entry(rng, a, path, 'dir', extras=False), a, rng)
+        else:
+            die('generator bug: %r' % how)
+        t.e[path], a.e[path] = e, e2
+    return t, a
+
+
+DPKG_ROOTS = [b'', b'chroot/', b'srv/ct1/rootfs/']
+SITE = [b'venv/lib/python3.12/site-packages/', b'usr/lib/python3/dist-packages/', b'']
+REPOS = [b'repo/', b'work/src/proj/']
+
+
+def interpreters(w, rng):
+    O = {}
+    S = lambda **kw: kw
+    status = lambda rng: rng.choice(DPKG_ROOTS) + b'var/lib/dpkg/status'
+
+    def one(label, items, interp):
+        w.targeted(rng, label, lambda rng: build_items(rng, items(rng)), interp=interp)
+
+    # text: unclaimed, stored on every side it exists on.
+    def text_path(rng):
+        return rng.choice([b'notes.txt', b'etc/app.conf', b'src/main.c', b'caf\xc3\xa9.md',
+                           b'raw\xff.txt'])
+    one('text: a stored file rewritten', lambda rng: [(text_path(rng), 'modified', O)],
+        ['text: modified, stored on every side it exists on',
+         'events: none, though records carry findings'])
+    one('text: a stored file added', lambda rng: [(text_path(rng), 'added', O)],
+        ['text: added, stored on every side it exists on',
+         'text: removed, stored on every side it exists on'])
+    one('text: a stored file chmod-ed', lambda rng: [(text_path(rng), 'mode',
+                                                      S(to_mode=0o600, mode=0o644))],
+        ['text: metadata_only, stored on every side it exists on'])
+    one('text: a stored file, iflags on one side only', lambda rng: [(text_path(rng), 'iflags',
+                                                                      O)],
+        ['text: unknown, stored on every side it exists on'])
+    one('binary: stored on one side only, rewritten',
+        lambda rng: [(text_path(rng), 'unstored', O)],
+        ['binary: a regular file stored on one of its two sides only, modified'])
+
+    # dpkg: the status file, with no store.
+    one('dpkg: status rewritten', lambda rng: [(status(rng), 'modified', O)],
+        ['dpkg status: modified'])
+    one('dpkg: status added', lambda rng: [(status(rng), 'added', O)],
+        ['dpkg status: added', 'dpkg status: removed'])
+    one('dpkg: status added, no stored copy', lambda rng: [(status(rng), 'added',
+                                                            S(stored=False))],
+        ['dpkg status: added, a side with no stored copy',
+         'dpkg status: removed, a side with no stored copy'])
+    one('dpkg: status chmod-ed', lambda rng: [(status(rng), 'mode',
+                                              S(mode=0o644, to_mode=0o640))],
+        ['dpkg status: metadata_only'])
+    one('dpkg: status becomes a directory', lambda rng: [(status(rng), 'to_dir', O)],
+        ['dpkg status: type_changed'])
+    one('dpkg: two status files, one added and one removed',
+        lambda rng: [(b'chroot/var/lib/dpkg/status', 'added', O),
+                     (b'srv/ct1/rootfs/var/lib/dpkg/status', 'removed', O)],
+        ['dpkg events: two status files with different sides'])
+    one('dpkg: two status files, one rewritten and one added',
+        lambda rng: [(b'var/lib/dpkg/status', 'modified', O),
+                     (b'chroot/var/lib/dpkg/status', 'added', O)],
+        ['dpkg events: two status files with different sides'])
+    one('dpkg: two status files added',
+        lambda rng: [(b'chroot/var/lib/dpkg/status', 'added', O),
+                     (b'srv/ct1/rootfs/var/lib/dpkg/status', 'added', O)],
+        ['dpkg events: two status files with the same side'])
+    one('dpkg: info files, stored',
+        lambda rng: [(b'var/lib/dpkg/info/libc6:amd64.list', 'modified', O),
+                     (b'var/lib/dpkg/info/libc6:amd64.md5sums', 'added', O)],
+        ['dpkg info: modified', 'dpkg info: added'])
+
+    # pip: RECORDs added and removed (from the paths alone), and in place.
+    def dist(site, base, how, own=True, with_metadata=True):
+        out = [(site + base + b'.dist-info/RECORD', how, S(own_dir=own))]
+        if with_metadata:
+            out.append((site + base + b'.dist-info/METADATA', how, O))
+        return out
+    one('pip: a distribution installed',
+        lambda rng: dist(rng.choice(SITE), b'requests-2.32.3', 'added'),
+        ['pip events: pip_installed', 'pip events: pip_removed', 'pip METADATA: added'])
+    one('pip: a distribution upgraded, spelled differently',
+        lambda rng: (lambda s: dist(s, b'Foo_Bar-1.0', 'removed')
+                     + dist(s, b'foo.bar-2.0', 'added'))(rng.choice(SITE)),
+        ['pip events: pip_upgraded', 'pip events: pip_downgraded',
+         'pip events: a pair whose names are spelled differently'])
+    one('pip: pre-release to release',
+        lambda rng: (lambda s: dist(s, b'pkg-1.0a1', 'removed')
+                     + dist(s, b'pkg-1.0', 'added'))(rng.choice(SITE)),
+        ['pip events: pip_upgraded', 'pip events: pip_downgraded'])
+    one('pip: versions equal by PEP 440',
+        lambda rng: (lambda s: dist(s, b'six-1.0', 'removed')
+                     + dist(s, b'six-1.0.0', 'added'))(rng.choice(SITE)),
+        ['pip events: pip_version_changed, equal by PEP 440'])
+    one('pip: a version that is not PEP 440',
+        lambda rng: (lambda s: dist(s, b'tool-1.0', 'removed')
+                     + dist(s, b'tool-nightly', 'added'))(rng.choice(SITE)),
+        ['pip events: pip_version_changed, not a PEP 440 version'])
+    one('pip: RECORD and METADATA rewritten in place',
+        lambda rng: (lambda s: [(s + b'idna-3.7.dist-info/RECORD', 'modified', O),
+                                (s + b'idna-3.7.dist-info/METADATA', 'modified', O)])(
+                                    rng.choice(SITE)),
+        ['pip RECORD: modified', 'pip METADATA: modified'])
+    one('pip: several events, one reinstall',
+        lambda rng: [(SITE[0] + b'mid-1.0.dist-info/RECORD', 'modified', O)]
+        + dist(SITE[0], b'zed-1.0', 'added', with_metadata=False)
+        + dist(SITE[1], b'zed-1.0', 'added', with_metadata=False)
+        + dist(SITE[0], b'alpha-2.0', 'removed', with_metadata=False),
+        ['pip events: content_unavailable first, then several names',
+         'pip RECORD: modified'])
+    one('pip: a dist-info with no version (E6)',
+        lambda rng: dist(rng.choice(SITE), b'nodash', 'added', with_metadata=False),
+        ['pip events: a dist-info that cannot be named (E6)'])
+    one('pip: one name removed once and added twice (E6)',
+        lambda rng: (lambda s: dist(s, b'dup-1.0', 'removed', with_metadata=False)
+                     + dist(s, b'dup-2.0', 'added', with_metadata=False)
+                     + dist(s, b'Dup-3.0', 'added', with_metadata=False))(rng.choice(SITE)),
+        ['pip events: a pair key with more than one RECORD added and removed (E6)'])
+
+    # git: hooks and the index from the manifest alone; HEAD, refs,
+    # packed-refs and reflogs need content.
+    g = lambda rng, rest: rng.choice(REPOS) + b'.git/' + rest
+    one('git: an executable hook added',
+        lambda rng: [(g(rng, b'hooks/pre-commit'), 'added', S(mode=0o755))],
+        ['git hook: added, executable', 'git hook: removed'])
+    one('git: a hook added, not executable',
+        lambda rng: [(g(rng, b'hooks/post-merge.sample'), 'added', S(mode=0o644,
+                                                                     stored=False))],
+        ['git hook: added, not executable', 'git hook: removed'])
+    one('git: a hook rewritten',
+        lambda rng: [(g(rng, b'hooks/pre-push'), 'modified', S(mode=0o755))],
+        ['git hook: modified'])
+    one('git: a hook made executable',
+        lambda rng: [(g(rng, b'hooks/commit-msg'), 'mode', S(mode=0o644, to_mode=0o755))],
+        ['git hook: metadata_only, the executable bit changed'])
+    one('git: a hook chown-ed',
+        lambda rng: [(g(rng, b'hooks/commit-msg'), 'uid', S(mode=0o755))],
+        ['git hook: metadata_only, the executable bit unchanged'])
+    one('git: the index rewritten',
+        lambda rng: [(g(rng, b'index'), 'modified', S(stored=False))],
+        ['git index: modified'])
+    one('git: the index added',
+        lambda rng: [(g(rng, b'index'), 'added', S(stored=False))],
+        ['git index: added', 'git index: removed'])
+    one('git: HEAD rewritten', lambda rng: [(g(rng, b'HEAD'), 'modified', O)],
+        ['git HEAD: modified'])
+    one('git: HEAD added', lambda rng: [(g(rng, b'HEAD'), 'added', O)],
+        ['git HEAD: added', 'git HEAD: removed'])
+    one('git: HEAD rewritten, no stored copy',
+        lambda rng: [(g(rng, b'HEAD'), 'modified', S(stored=False))],
+        ['git HEAD: modified, a side with no stored copy'])
+    one('git: a loose ref added', lambda rng: [(g(rng, b'refs/heads/main'), 'added', O)],
+        ['git ref: added', 'git ref: removed'])
+    one('git: a loose ref moved', lambda rng: [(g(rng, b'refs/tags/v1'), 'modified', O)],
+        ['git ref: modified'])
+    one('git: a loose ref added, no stored copy',
+        lambda rng: [(g(rng, b'refs/heads/topic'), 'added', S(stored=False))],
+        ['git ref: added, a side with no stored copy'])
+    one('git: packed-refs rewritten', lambda rng: [(g(rng, b'packed-refs'), 'modified', O)],
+        ['git packed-refs: modified'])
+    one('git: a reflog appended', lambda rng: [(g(rng, b'logs/HEAD'), 'modified', O)],
+        ['git reflog: modified'])
+    one('git: a reflog added', lambda rng: [(g(rng, b'logs/refs/heads/main'), 'added', O)],
+        ['git reflog: added', 'git reflog: removed'])
+    one('git: a directory below refs/ added',
+        lambda rng: [(g(rng, b'refs/remotes'), 'dir_added', O)],
+        ['git ref: added, not a regular file on either side'])
+    one('git: an unclaimed file below .git/, stored',
+        lambda rng: [(g(rng, b'config'), 'modified', O)],
+        ['text: an unclaimed stored file below .git/, modified'])
+
+    # Readings of the prose where it is not explicit (reference.py names
+    # each: ambiguities I4-I8): a hook whose executable bit changed beside
+    # another field, or beside its content; a RECORD or status file whose
+    # outcome is unknown (nothing from it, so the other RECORD of a name
+    # stands alone); two reasons in one interpreter.
+    one('git: a hook made executable and chown-ed',
+        lambda rng: [(g(rng, b'hooks/pre-rebase'), 'mode+uid', S(mode=0o644, to_mode=0o755))],
+        ['git hook: metadata_only, the executable bit changed'])
+    one('git: a hook rewritten and made executable',
+        lambda rng: [(g(rng, b'hooks/update'), 'modified+mode', S(mode=0o644, to_mode=0o755))],
+        ['git hook: modified'])
+    one('pip: one RECORD of a name removed, the other added but raced',
+        lambda rng: (lambda s: dist(s, b'lazy-1.0', 'removed', with_metadata=False)
+                     + [(s + b'lazy-2.0.dist-info/RECORD', 'raced_added', S(own_dir=True))])(
+                         rng.choice(SITE)),
+        ['pip RECORD: unknown', 'pip events: pip_removed', 'pip events: pip_installed'])
+    one('dpkg: status, iflags on one side only',
+        lambda rng: [(status(rng), 'iflags', O)], ['dpkg status: unknown'])
+    one('dpkg: two status files, one with no stored copy',
+        lambda rng: [(b'var/lib/dpkg/status', 'modified', O),
+                     (b'chroot/var/lib/dpkg/status', 'added', S(stored=False))],
+        ['dpkg events: two reasons in one diff'])
+
+    # Events of two interpreters in one diff, in E4's order.
+    one('pip and dpkg in one diff',
+        lambda rng: [(b'var/lib/dpkg/status', 'modified', O)]
+        + dist(SITE[1], b'attrs-23.2.0', 'added'),
+        ['events: from pip and dpkg in one diff'])
+
+
 def targeted(w, rng):
     cells(w, rng)
     field_pairs(w, rng)
@@ -2156,6 +2453,7 @@ def targeted(w, rng):
     mount_raced_type_changes(w, rng)
     xattrs_spellings(w, rng)
     trailer_counts(w, rng)
+    interpreters(w, rng)
 
 
 # ---------------------------------------------------------------------------

@@ -995,13 +995,17 @@ def pip_end(state, trace):
             trace.append('pip-ambiguous-key')
             return None
         if A and R:
-            (pa, name, to), (pr, _, frm) = A[0], R[0]
+            (pa, name, to), (pr, rname, frm) = A[0], R[0]
             ka, kb = pep440_key(to), pep440_key(frm)
             if ka is None or kb is None or ka == kb:
                 kind = 'pip_version_changed'
+                trace.append(kind + (':equal' if ka is not None and kb is not None
+                                     else ':not-pep440'))
             else:
                 kind = 'pip_upgraded' if ka > kb else 'pip_downgraded'
-            trace.append(kind)
+                trace.append(kind)
+            if name != rname:
+                trace.append('pip-pair-spelled-differently')
             named.append(((norm, kind_ix(kind), holder),
                           render_event('pip', kind, {'name': name, 'from': frm, 'to': to},
                                        [pa, pr])))

@@ -11,13 +11,17 @@ must agree on
   - every record: path and its spelling (path / path_b64), outcome, type,
     type_before, `changed` exactly (order included), `unknown` as a set, the
     records' order;
+  - every record's `findings`, exactly: each finding's keys in order, values
+    and JSON types, and the bytes `"findings":[...]` in the record's line;
+  - the event records (E1: after the path records, before the trailer),
+    byte for byte against the reference's rendering;
   - the trailer: every key, its value and their order (belay_diff_end, the
-    outcome counts, dir_timestamps_only, each manifest's vanished, unstable
-    and raced, provisional, the two sha256); and, whatever the reference
-    says, the driver's trailer against the "### Trailer" paragraph: the
-    outcome counts add up to the paths, dir_timestamps_only is among
-    unchanged, provisional is exactly "one of the six is not 0",
-    belay_diff_end is the records emitted.
+    outcome counts, dir_timestamps_only, events, each manifest's vanished,
+    unstable and raced, provisional, the two sha256); and, whatever the
+    reference says, the driver's trailer against the "### Trailer"
+    paragraph: the outcome counts add up to the paths, dir_timestamps_only
+    is among unchanged, provisional is exactly "one of the six is not 0",
+    belay_diff_end is the records emitted, events the event records (E7).
   The order inside `unknown` is "the order of the reasons table", a
   GENERATED table this oracle may not read; instead every record of the run
   must respect one single order of the reasons (printed at the end).
@@ -49,7 +53,11 @@ the generator's labels (coverage(), required(), gate()):
     or stops being a mount root, or is one on both sides, with `unverified`
     on the mount side and on the other or not (O8), a mounted regular file
     whose type changes while raced on either side or both (O8 across a type
-    change), the trailer's walk counts, ...
+    change), the trailer's walk counts, ...;
+  - every interpreter item (INTERP_SCENARIOS): which interpreter claims a
+    path, what its entries hold and the outcome, with no store -- text,
+    binary, dpkg, pip and git paths, the pip and dpkg end hooks' inputs,
+    events of two interpreters, and a diff with findings but no event.
 gen_corpus.py builds every required item deterministically and checks each
 targeted pair, and then the targeted pairs alone, with these same functions;
 here the gate runs again over the whole corpus.
@@ -822,16 +830,130 @@ def pair_coverage(stem, cells, optional, scen, fpairs):
             scen['three or more compared fields differ on one entry'] += 1
 
 
-KINDS = ('cell', 'field pair', 'optional', 'scenario')
+# The interpreters in the oracle's setting, a diff given no store (diff-v1
+# "Interpreters", "What each interpreter reports"; pins finding-kinds.md and
+# diff-events.md). Each item names a situation of the INPUT -- which
+# interpreter claims a path (reference.claim, from the scope and the path),
+# what its entries hold (`stored`, type, mode) and the outcome the core
+# decides -- never the findings expected, which compare_record() and
+# run_pair() check. The pip and dpkg items are the kinds the end hook's
+# input gives rise to (reference.pip_end's tags), for the same reason.
+INTERP_SCENARIOS = (
+    ['text: %s, stored on every side it exists on' % o
+     for o in ('modified', 'added', 'removed', 'metadata_only', 'unknown')]
+    + ['text: an unclaimed stored file below .git/, modified',
+       'binary: a regular file stored on one of its two sides only, modified']
+    + ['dpkg status: %s' % o for o in ('modified', 'added', 'removed', 'metadata_only',
+                                       'type_changed')]
+    + ['dpkg status: added, a side with no stored copy',
+       'dpkg status: removed, a side with no stored copy',
+       'dpkg info: modified', 'dpkg info: added',
+       'dpkg events: two status files with different sides',
+       'dpkg events: two status files with the same side',
+       'dpkg status: unknown', 'dpkg events: two reasons in one diff']
+    + ['pip events: ' + k for k in ('pip_installed', 'pip_removed', 'pip_upgraded',
+                                    'pip_downgraded', 'pip_version_changed, equal by PEP 440',
+                                    'pip_version_changed, not a PEP 440 version',
+                                    'a pair whose names are spelled differently',
+                                    'a dist-info that cannot be named (E6)',
+                                    'a pair key with more than one RECORD added and removed (E6)',
+                                    'content_unavailable first, then several names')]
+    + ['pip RECORD: modified', 'pip RECORD: unknown', 'pip METADATA: modified',
+       'pip METADATA: added']
+    + ['git hook: added, executable', 'git hook: added, not executable', 'git hook: removed',
+       'git hook: modified', 'git hook: metadata_only, the executable bit changed',
+       'git hook: metadata_only, the executable bit unchanged',
+       'git index: modified', 'git index: added', 'git index: removed']
+    + ['git %s: %s' % (w, o) for w in ('HEAD', 'ref', 'reflog')
+       for o in ('modified', 'added', 'removed')]
+    + ['git packed-refs: modified', 'git HEAD: modified, a side with no stored copy',
+       'git ref: added, a side with no stored copy',
+       'git ref: added, not a regular file on either side']
+    + ['events: from pip and dpkg in one diff', 'events: none, though records carry findings'])
+NEED_CONTENT = ('status', 'RECORD', 'HEAD', 'ref', 'packed-refs', 'reflog')
+
+
+def interp_coverage(stem, tags):
+    res = ref_diff(stem)
+    if res is None:
+        return
+    _, eb = ref.load(stem + '.before')[1:]
+    _, ea = ref.load(stem + '.after')[1:]
+    _, records, events, _, traces = res
+    status_sides = []
+    for rec in records:
+        p, o = rec['path'], rec['outcome']
+        b, a = eb.get(p), ea.get(p)
+        it = [t for t in traces[p] if t.startswith('interp:')][0].split(':')[1:]
+        regs = [e for e in (b, a) if ref.is_reg(e)]
+        if it == ['text']:
+            tags.add('text: %s, stored on every side it exists on' % o)
+            if b'.git/' in p:
+                tags.add('text: an unclaimed stored file below .git/, %s' % o)
+        elif it == ['binary']:
+            if b is not None and a is not None and b['type'] == a['type'] == 'reg' and \
+                    ('stored' in b) != ('stored' in a):
+                tags.add('binary: a regular file stored on one of its two sides only, %s' % o)
+        else:
+            interp, what = it
+            tag = '%s %s: %s' % (interp, what, o)
+            if what == 'hook' and o == 'added' and a['type'] == 'reg':
+                tag += ', executable' if a['mode'] & 0o100 else ', not executable'
+            if what == 'hook' and o == 'metadata_only':
+                tag += ', the executable bit %s' % ('changed' if (b['mode'] ^ a['mode']) & 0o100
+                                                    else 'unchanged')
+            if what in NEED_CONTENT and any('stored' not in e for e in regs):
+                tag += ', a side with no stored copy'
+            if not regs:
+                tag += ', not a regular file on either side'
+            tags.add(tag)
+            if what == 'status' and o in ('added', 'removed', 'modified') and \
+                    all('stored' in e for e in regs):
+                status_sides.append(frozenset('before' if e is b else 'after' for e in regs))
+    reasons = {t.split('-', 2)[2] for rec in records
+               if 'interp:dpkg:status' in traces[rec['path']]
+               for t in traces[rec['path']] if t.startswith('unavailable-')}
+    if len(reasons) >= 2:
+        tags.add('dpkg events: two reasons in one diff')
+    if len(status_sides) >= 2:
+        tags.add('dpkg events: two status files with %s'
+                 % ('the same side' if len(set(status_sides)) == 1 else 'different sides'))
+    pip_tags = {'pip_installed': 'pip_installed', 'pip_removed': 'pip_removed',
+                'pip_upgraded': 'pip_upgraded', 'pip_downgraded': 'pip_downgraded',
+                'pip_version_changed:equal': 'pip_version_changed, equal by PEP 440',
+                'pip_version_changed:not-pep440': 'pip_version_changed, not a PEP 440 version',
+                'pip-pair-spelled-differently': 'a pair whose names are spelled differently',
+                'pip-unnamed': 'a dist-info that cannot be named (E6)',
+                'pip-ambiguous-key': 'a pair key with more than one RECORD added and removed '
+                                     '(E6)'}
+    for t in traces[b'']:
+        if t in pip_tags:
+            tags.add('pip events: ' + pip_tags[t])
+    pip_ev = [dict(e) for e in events if dict(e)['interp'] == 'pip']
+    if pip_ev and pip_ev[0]['event'] == 'content_unavailable' and \
+            len({e.get('name') for e in pip_ev[1:]} - {None}) >= 2:
+        tags.add('pip events: content_unavailable first, then several names')
+    if {'pip', 'dpkg'} <= {dict(e)['interp'] for e in events}:
+        tags.add('events: from pip and dpkg in one diff')
+    if not events and any('findings' in r for r in records):
+        tags.add('events: none, though records carry findings')
+
+
+KINDS = ('cell', 'field pair', 'optional', 'scenario', 'interpreter')
 
 
 def coverage(stems):
-    """What the pairs at these stems show, from their manifests alone:
+    """What the pairs at these stems show, from their manifests alone (and,
+    for the interpreters, the outcome the reference decides from them):
     {kind: Counter of items}. gen_corpus.py checks every targeted pair with
     this, and the targeted pairs together with gate()."""
     cov = {k: collections.Counter() for k in KINDS}
     for stem in stems:
         pair_coverage(stem, cov['cell'], cov['optional'], cov['scenario'], cov['field pair'])
+        tags = set()
+        interp_coverage(stem, tags)
+        for t in tags:
+            cov['interpreter'][t] += 1
     return cov
 
 
@@ -842,7 +964,8 @@ def required():
     need = ([('cell', c) for c in required_cells() if c not in infeasible]
             + [('field pair', fp) for fp in required_field_pairs(infeasible)]
             + [('optional', f) for f in OPTIONAL]
-            + [('scenario', s) for s in SCENARIOS])
+            + [('scenario', s) for s in SCENARIOS]
+            + [('interpreter', s) for s in INTERP_SCENARIOS])
     return need, infeasible
 
 
@@ -862,7 +985,8 @@ def print_gate(cov):
                         ('field pair', 'two compared fields of one entry differing together '
                                        '(the order of `changed`)'),
                         ('optional', 'optional fields on one side only'),
-                        ('scenario', 'scenarios')):
+                        ('scenario', 'scenarios'),
+                        ('interpreter', 'interpreters, with no store')):
         items = [i for k, i in need if k == kind]
         lack = [i for k, i in missing if k == kind]
         print('   %s: %d/%d, fewest pairs %d' % (title, len(items) - len(lack), len(items),
