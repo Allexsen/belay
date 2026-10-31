@@ -87,6 +87,11 @@ struct belay_events;            /* one interpreter's events over one diff */
  * checks with this, the core's own rule. */
 bool belay_finding_string_ok(const char *s, size_t len);
 
+/* Would an event of `kind` with these values, from the interpreter whose end
+ * hook is running, meet its kind's row -- every value a string field's
+ * value, and the text the template renders at most 1,024 bytes? */
+bool belay_event_fits(const struct belay_events *ev, int kind, const struct belay_fv *v, size_t n);
+
 /* Adds a finding of `kind` (enum finding_kind, src/schema/finding_schema.h)
  * to the path being explained. Past 4,096 on one record they are counted
  * into one final and_more. 0, or -1 (out of memory: the diff fails). */

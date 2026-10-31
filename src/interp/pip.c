@@ -22,10 +22,12 @@
 #include "belay/manifest.h"
 #include "schema/finding_schema.h"
 
+#include <stdint.h>
 #include <stdlib.h>
 #include <string.h>
 
-#define PIP_RECORD_MAX (64u * 1024u * 1024u)    /* bytes of one RECORD read */
+#define PIP_RECORD_MAX  (16u * 1024u * 1024u)   /* bytes of one RECORD read */
+#define PIP_RECORD_ROWS 262144u                 /* rows of one RECORD: past it, too_large */
 #define PIP_STATE_MAX  (64u * 1024u * 1024u)    /* bytes of per-diff state (E5) */
 
 enum change { C_ADDED, C_REMOVED, C_REINSTALLED };
@@ -89,7 +91,7 @@ static size_t normalize(const char *s, size_t n, char *out) {
 
 /* ---- RECORD rows, compared by path ---- */
 
-struct row { const char *path, *hash, *size; size_t pl, hl, sl, at; };
+struct row { const char *path, *hash, *size; uint32_t pl, hl, sl, at; };   /* fields <= 4096 */
 struct rows { struct row *v; size_t n, cap; char *arena; size_t used, arena_cap; };
 
 static const char *arena_put(struct rows *r, const char *s, size_t n) {
@@ -102,6 +104,7 @@ static const char *arena_put(struct rows *r, const char *s, size_t n) {
 
 static int row_add(const struct record_row *x, void *ctx) {
     struct rows *r = ctx;
+    if (r->n == PIP_RECORD_ROWS) return 2;                  /* over the bound: stop */
     if (r->n == r->cap) {
         const size_t c = r->cap ? 2 * r->cap : 256;
         struct row *q = realloc(r->v, c * sizeof *q);
@@ -120,10 +123,10 @@ static int row_add(const struct record_row *x, void *ctx) {
     w->path = arena_put(r, x->path, x->path_len);
     w->hash = arena_put(r, x->hash, x->hash_len);
     w->size = arena_put(r, x->size, x->size_len);
-    w->pl = x->path_len;
-    w->hl = x->hash_len;
-    w->sl = x->size_len;
-    w->at = r->n++;
+    w->pl = (uint32_t)x->path_len;
+    w->hl = (uint32_t)x->hash_len;
+    w->sl = (uint32_t)x->size_len;
+    w->at = (uint32_t)r->n++;
     return 0;
 }
 
@@ -137,15 +140,21 @@ static int row_cmp(const void *a, const void *b) {
     return c ? c : (x->at > y->at) - (x->at < y->at);
 }
 
-/* A RECORD's rows, sorted by path; a path given twice keeps its first row. */
+/* A RECORD's rows, sorted by path; a path given twice keeps its first row.
+ * 0; -1 (could not parse, memory); -2 over PIP_RECORD_ROWS. The arena holds
+ * every field unquoted and NUL-ended: a row's three fields and three NULs
+ * fit in its own bytes (two commas and its line end), plus one for a last
+ * row with no line end -- so len + 1 in all (review 2026-10-31, 4). */
 static int rows_of(const unsigned char *buf, size_t len, struct rows *r) {
     memset(r, 0, sizeof *r);
-    r->arena_cap = len + 3 * (len + 1) + 3;
+    r->arena_cap = len + 4;
     if ((r->arena = malloc(r->arena_cap)) == NULL) {
         belay_err_set(BELAY_ERR_NOMEM, 0, "pip: out of memory");
         return -1;
     }
-    if (record_each((const char *)buf, len, row_add, r) != 0) return -1;
+    const int rc = record_each((const char *)buf, len, row_add, r);
+    if (rc == 2) return -2;
+    if (rc != 0) return -1;
     if (r->n > 1) qsort(r->v, r->n, sizeof *r->v, row_cmp);
     size_t w = 0;
     for (size_t i = 0; i < r->n; i++)
@@ -249,12 +258,16 @@ static enum belay_interp_result explain(void *state, const struct belay_interp_i
             ok = false;
             if (w == SW_ERROR || unavailable(p, out, in, w, (enum side)k) == -1) r = BELAY_INTERP_ERROR;
         }
-        struct rows ra = { 0 }, rb = { 0 };
-        if (ok && (rows_of(buf[0], len[0], &ra) == -1 || rows_of(buf[1], len[1], &rb) == -1)) {
-            belay_err_clear();
-            r = BELAY_INTERP_ERROR;
+        struct rows rs[2] = { { 0 }, { 0 } };
+        for (int k = SIDE_BEFORE; k <= SIDE_AFTER && ok; k++) {
+            const int rc = rows_of(buf[k], len[k], &rs[k]);
+            if (rc == 0) continue;
             ok = false;
+            belay_err_clear();
+            if (rc == -1 || unavailable(p, out, in, SW_TOO_LARGE, (enum side)k) == -1)
+                r = BELAY_INTERP_ERROR;
         }
+        struct rows ra = rs[0], rb = rs[1];
         if (ok) count_files(&ra, &rb, &d);
         rows_free(&ra);
         rows_free(&rb);
@@ -310,29 +323,33 @@ static int pev_cmp(const void *a, const void *b) {
 
 #define FV(p, n) { .s = (p), .len = (n) }
 
+/* As dpkg's: an event its kind's row refuses fails the end hook (E6). */
 static int emit(struct belay_events *ev, const struct pev *e) {
     const struct dist *x = e->x, *y = e->y;
     const char *paths[2] = { x->path, y ? y->path : NULL };
     const size_t lens[2] = { x->path_len, y ? y->path_len : 0 };
     const size_t np = y ? 2 : 1;
-    switch (e->kind) {
-    case FK_PIP_INSTALLED:
-    case FK_PIP_REMOVED: {
-        const struct belay_fv v[] = { FV(x->name, x->name_len), FV(x->version, x->version_len) };
-        return belay_event(ev, e->kind, v, 2, paths, lens, np);
+    struct belay_fv v[5];
+    size_t n;
+    if (e->kind == FK_PIP_INSTALLED || e->kind == FK_PIP_REMOVED) {
+        v[0] = (struct belay_fv)FV(x->name, x->name_len);
+        v[1] = (struct belay_fv)FV(x->version, x->version_len);
+        n = 2;
+    } else if (e->kind == FK_PIP_REINSTALLED) {
+        v[0] = (struct belay_fv)FV(x->name, x->name_len);
+        v[1] = (struct belay_fv)FV(x->version, x->version_len);
+        v[2] = (struct belay_fv){ .i = x->files_added };
+        v[3] = (struct belay_fv){ .i = x->files_removed };
+        v[4] = (struct belay_fv){ .i = x->files_changed };
+        n = 5;
+    } else {
+        v[0] = (struct belay_fv)FV(y->name, y->name_len);
+        v[1] = (struct belay_fv)FV(x->version, x->version_len);
+        v[2] = (struct belay_fv)FV(y->version, y->version_len);
+        n = 3;
     }
-    case FK_PIP_REINSTALLED: {
-        const struct belay_fv v[] = { FV(x->name, x->name_len), FV(x->version, x->version_len),
-                                      { .i = x->files_added }, { .i = x->files_removed },
-                                      { .i = x->files_changed } };
-        return belay_event(ev, e->kind, v, 5, paths, lens, np);
-    }
-    default: {
-        const struct belay_fv v[] = { FV(y->name, y->name_len), FV(x->version, x->version_len),
-                                      FV(y->version, y->version_len) };
-        return belay_event(ev, e->kind, v, 3, paths, lens, np);
-    }
-    }
+    if (!belay_event_fits(ev, e->kind, v, n)) return -1;
+    return belay_event(ev, e->kind, v, n, paths, lens, np);
 }
 
 /* One content_unavailable event per reason, naming its paths; the side is

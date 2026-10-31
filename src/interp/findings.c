@@ -246,6 +246,12 @@ int belay_event(struct belay_events *ev, int kind, const struct belay_fv *v, siz
     return r;
 }
 
+bool belay_event_fits(const struct belay_events *ev, int kind, const struct belay_fv *v, size_t n) {
+    char text[FINDING_STRING_MAX + 1];
+    size_t tl;
+    return valid(kind, ev->interp, LV_EVENT, v, n, text, &tl);
+}
+
 bool events_oom(const struct belay_events *ev, int interp) { return ev->per[interp].oom; }
 bool events_broken(const struct belay_events *ev, int interp) { return ev->per[interp].broken; }
 

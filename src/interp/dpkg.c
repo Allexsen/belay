@@ -255,15 +255,17 @@ static int dev_cmp(const void *a, const void *b) {
     return c;
 }
 
+/* 0, or -1 when it cannot be added -- memory, or an event its kind's row
+ * refuses (its text over 1,024 bytes: each value is checked already), which
+ * fails the end hook (E6) rather than being added and dropped. */
 static int emit(struct belay_events *ev, const struct dev *e) {
     const char *path = e->path.s;
     const size_t pl = e->path.n;
-    if (e->kind == FK_DPKG_INSTALLED || e->kind == FK_DPKG_REMOVED) {
-        const struct belay_fv v[] = { FV(e->package), FV(e->arch), FV(e->a) };
-        return belay_event(ev, e->kind, v, 3, &path, &pl, 1);
-    }
+    const bool two = e->kind == FK_DPKG_INSTALLED || e->kind == FK_DPKG_REMOVED;
     const struct belay_fv v[] = { FV(e->package), FV(e->arch), FV(e->a), FV(e->b) };
-    return belay_event(ev, e->kind, v, 4, &path, &pl, 1);
+    const size_t n = two ? 3 : 4;
+    if (!belay_event_fits(ev, e->kind, v, n)) return -1;
+    return belay_event(ev, e->kind, v, n, &path, &pl, 1);
 }
 
 /* As pip's: one per reason, before every package event (it has no Package). */
