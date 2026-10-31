@@ -609,6 +609,15 @@ TEST(pip_what_cannot_be_named_or_paired_fails_the_end_hook) {
                   r_end(&r));
     r_free(&r);
 
+    /* The reference author's case B: RECORD is UTF-8 text; one that is not
+     * cannot be parsed. */
+    r_begin(&r, BELAY_INTERP_PIP, true);
+    const struct belay_entry rb = file(put("six.py,sha256=A,1\n"), 0), ra = file(put("six.py,sha256=A,1\nsix/\xff.py,sha256=X,1\n"), 0);
+    ASSERT_EQ_STR(F1("{\"kind\":\"could_not_interpret\",\"text\":\"could not interpret\"}"),
+                  r_path(&r, REC("six-1.16.0"), &rb, &ra, "modified"));
+    ASSERT_TRUE(strncmp(r_end(&r), "{\"event\":\"could_not_interpret\"", 30) == 0);
+    r_free(&r);
+
     r_begin(&r, BELAY_INTERP_PIP, false);
     r_path(&r, REC("numpy-1.26.4"), &e, NULL, "removed");
     r_path(&r, REC("numpy-1.26.3"), &e, NULL, "removed");

@@ -401,24 +401,28 @@ distributions are paired by the directory holding the dist-info and by their nam
 503 does (ASCII lowercase, each run of `-`, `_`, `.` one `-`). For one such pair key: a RECORD added
 with none removed is `pip_installed`; removed with none added, `pip_removed`; exactly one removed
 and one added, `pip_upgraded` or `pip_downgraded` by PEP 440 ordering, or `pip_version_changed` when
-the two are equal by it or either is not a PEP 440 version. `name` is as the dist-info directory
-spells it; for a pair, the added one's. A RECORD modified in place is `pip_reinstalled`: its rows
-(path, hash, size; Python's csv dialect) compared by path, a path listed twice keeping its first
-row; `files_changed` counts the paths whose hash or size differs. Only a reinstall reads content
-(both RECORDs); the others come from the paths alone. An event lists the RECORD paths it was derived
-from. Event order: by normalized name, then kind (in the Kinds table's order), then directory; a
-`content_unavailable` event has no name and comes first. The end hook fails (E6) when a dist-info
-cannot be named (no `-`, an empty name or version, or one that is not a string field's value) or a
-RECORD it must read cannot be parsed -- that RECORD's record also carries `could_not_interpret` --
-and when one pair key has RECORDs both added and removed other than exactly one of each (no kind
-says that). Several added with none removed are each `pip_installed`; several removed with none
-added, each `pip_removed`.
+the two are equal by it or either is not a PEP 440 version (as PEP 440's Appendix B expression
+parses one: a separator may follow `a`, `post`, `dev` and the like with no number, `2a.` being
+`2a0`). `name` is as the dist-info directory spells it; for a pair, the added one's. A RECORD
+modified in place is `pip_reinstalled`: its rows (path, hash, size; UTF-8 text in Python's csv
+dialect, so a RECORD that is not UTF-8, or a row of other than three fields, cannot be parsed)
+compared by path, a path listed twice keeping its first row; `files_changed` counts the paths whose
+hash or size differs. Only a reinstall reads content (both RECORDs); the others come from the paths
+alone. An event lists the RECORD paths it was derived from. Event order: by normalized name, then
+kind (in the Kinds table's order), then directory; a `content_unavailable` event has no name and
+comes first. The end hook fails (E6) when a dist-info cannot be named (no `-`, an empty name or
+version, or one that is not a string field's value) or a RECORD it must read cannot be parsed --
+that RECORD's record also carries `could_not_interpret` -- and when one pair key has RECORDs both
+added and removed other than exactly one of each (no kind says that). Several added with none
+removed are each `pip_installed`; several removed with none added, each `pip_removed`.
 
 **dpkg.** From the `status` file before and after (an absent side lists no packages): a package is
 keyed by `Package` and `Architecture` (empty when absent), the first stanza of a key kept, and is
-installed when its `Status` field's third blank-separated word is `installed`. Installed after and
-not before: `dpkg_installed`, with the version after; the reverse, `dpkg_removed`, with the version
-before; installed on both sides at versions that differ by Debian ordering (as `dpkg
+installed when its `Status` field's third blank-separated word is `installed` (a stanza with no
+`Version` has the empty version). A status in which `Package`, `Architecture`, `Version` or `Status`
+is folded onto a continuation line cannot be parsed: Debian Policy 5.1 never folds those. Installed
+after and not before: `dpkg_installed`, with the version after; the reverse, `dpkg_removed`, with
+the version before; installed on both sides at versions that differ by Debian ordering (as `dpkg
 --compare-versions`), `dpkg_upgraded` or `dpkg_downgraded`; and whenever `Status` differs and no
 installed or removed event covers the package, `dpkg_state_changed` (an upgrade whose `Status` also
 changed has both). An event lists the status path. Event order: by Package, then Architecture, then
