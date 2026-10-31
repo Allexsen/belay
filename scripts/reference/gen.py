@@ -580,11 +580,14 @@ def random_case(rng, i):
                 c.both(rec, reg(record_bytes(rows, term)))
                 c.put("before", meta, reg(b"Name: " + name + b"\n"))
                 c.put("after", meta, reg(b"Name: " + name + b"\nSummary: x\n", gen=1))
-            elif op == 5:                      # a RECORD that raced: unknown, nothing
-                rec, meta = dist(site, name, v1)
-                c.put("before", rec, reg(record_bytes(rows, term)))
+            elif op == 5:                      # a RECORD that raced: unknown on both
+                rec, meta = dist(site, name, v1)   # sides, an uncounted reinstall
+                if rng.random() < 0.2:         # ... or, unnamable, could_not_interpret
+                    rec = join(site, rng.choice([name, name + b"-", b"-" + v1]) + b".dist-info",
+                               b"RECORD")
+                c.put("before", rec, reg(record_bytes(rows, term), store=st))
                 c.put("after", rec, reg(record_bytes(mutate_rows(rng, rows), term), gen=1,
-                                        raced=True))
+                                        raced=True, store=rng.choice(store_choices)))
             elif op == 6 and rng.random() < 0.3:   # RECORD replaced by a symlink
                 rec, meta = dist(site, name, v1)
                 c.put("before", rec, reg(record_bytes(rows, term), store=st))
@@ -994,6 +997,15 @@ def cell_p7():
     c.tag("pip.P7.unknown_both_sides")
     out.append(c)
 
+    # the same, its dist-info unnamable: one provisional could_not_interpret
+    # (E10), no record finding (its outcome is unknown), nothing read
+    c = Case("pip-p7-unknown-unnameable-both-sides", modes=BOTH)
+    c.put("before", S + b"/nodash.dist-info/RECORD", reg(b"x,,\n"))
+    c.put("after", S + b"/nodash.dist-info/RECORD", reg(b"x,,\ny,,\n", raced=True, gen=1))
+    put_dist(c, "after", S, b"six", b"1.16.0", rand_rows(rng, b"six", b"1.16.0"))
+    c.tag("pip.P7.unknown_unnameable_both_sides")
+    out.append(c)
+
     c = Case("dpkg-p7-unknown-status", modes=BOTH)
     c.put("before", sp, reg(status_bytes(base_db() + [stanza(b"curl", b"1.0-1")])))
     c.put("after", sp, reg(status_bytes(base_db() + [stanza(b"curl", b"2.0-1"),
@@ -1372,18 +1384,12 @@ def cell_probes():
     out.append(c)
 
     # P7 x E10: an unknown RECORD whose dist-info cannot be named, on one
-    # side (named, so one provisional could_not_interpret) and on both
-    # (READING: not named -- nothing derives from it -- so nothing).
+    # side: named, so one provisional could_not_interpret. (On both sides it
+    # is now the required cell pip.P7.unknown_unnameable_both_sides.)
     c = Case("probe-pip-unknown-unnameable-one-side", modes=BOTH)
     c.put("after", S + b"/nodash.dist-info/RECORD", reg(b"x,,\n", raced=True))
     put_dist(c, "after", S, b"six", b"1.16.0", rand_rows(rng, b"six", b"1.16.0"))
     c.tag("probe.pip.unknown_unnameable_one_side")
-    out.append(c)
-    c = Case("probe-pip-unknown-unnameable-both-sides", modes=BOTH)
-    c.put("before", S + b"/nodash.dist-info/RECORD", reg(b"x,,\n"))
-    c.put("after", S + b"/nodash.dist-info/RECORD", reg(b"x,,\ny,,\n", raced=True, gen=1))
-    put_dist(c, "after", S, b"six", b"1.16.0", rand_rows(rng, b"six", b"1.16.0"))
-    c.tag("probe.pip.unknown_unnameable_both_sides")
     out.append(c)
     # P7 x E10: an ambiguous name one of whose RECORDs is unknown
     c = Case("probe-pip-ambiguous-with-unknown", modes=BOTH)

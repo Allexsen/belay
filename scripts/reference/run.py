@@ -205,8 +205,20 @@ def check_cell(cell, mine, belay=None):
         and sum(1 for e in E if e["event"] == "pip_removed" and e.get("provisional")) == 2
         and any(e["event"] == "pip_removed" and "provisional" not in e for e in E)
         and no_unknown_findings(mine),
-        "pip.P7.unknown_both_sides": lambda: K == ["pip_installed"]
+        # a provisional reinstall, its counts absent, under the second
+        # template; its copies not read (no content_unavailable without a store)
+        "pip.P7.unknown_both_sides": lambda: K == ["pip_installed", "pip_reinstalled"]
+        and "provisional" not in E[0] and E[1].get("provisional") is True
+        and not any(f in E[1] for f in ("files_added", "files_removed", "files_changed"))
+        and E[1]["text"] == "reinstalled six 1.16.0 (files not counted)"
+        and list(E[1]) == ["event", "interp", "name", "version", "text", "provisional", "paths"]
         and "unknown" in mine.outcomes.values() and no_unknown_findings(mine),
+        # unnamable: one provisional could_not_interpret, no record finding
+        "pip.P7.unknown_unnameable_both_sides": lambda: K == ["could_not_interpret",
+                                                             "pip_installed"]
+        and E[0].get("provisional") is True and "provisional" not in E[1]
+        and E[0]["paths"] == ["usr/lib/python3/dist-packages/nodash.dist-info/RECORD"]
+        and cni_records(mine) == 0 and no_unknown_findings(mine),
         "dpkg.P7.unknown_status_readable": lambda: any(e.get("provisional") for e in E)
         and "content_unavailable" not in K and no_unknown_findings(mine),
         "dpkg.P7.unknown_status_no_store": lambda: K == ["content_unavailable"]
@@ -251,7 +263,6 @@ def check_cell(cell, mine, belay=None):
         "probe.pip.unknown_unnameable_one_side": lambda: K == ["could_not_interpret",
                                                               "pip_installed"]
         and E[0].get("provisional") is True and cni_records(mine) == 0,
-        "probe.pip.unknown_unnameable_both_sides": lambda: K == ["pip_installed"],
         "probe.pip.ambiguous_with_unknown": lambda: K == ["could_not_interpret"]
         and E[0].get("provisional") is True and cni_records(mine) == 0,
         "probe.pip.E9_text_over_1024": lambda: K == ["pip_installed", "invalid_finding",
