@@ -4,30 +4,125 @@
   "title": "A checkpoint, as `belay check --json`, `belay mark --json` and `belay log --json` print it",
   "type": "object",
   "additionalProperties": false,
-  "required": ["id", "kind", "created_ns", "scope", "manifest", "entries", "raced", "unstable",
-               "vanished", "provisional", "excluded", "prefilter"],
+  "required": [
+    "id",
+    "kind",
+    "created_ns",
+    "entries",
+    "raced",
+    "unstable",
+    "vanished",
+    "provisional",
+    "excluded",
+    "prefilter"
+  ],
   "properties": {
-    "id": { "type": "integer", "minimum": 1 },
-    "kind": { "enum": ["check", "mark", "diff"] },
-    "created_ns": { "type": "integer" },
-    "scope": { "type": "string" },
-    "manifest": { "type": "string" },
-    "entries": { "type": "integer", "minimum": 1 },
-    "raced": { "type": "integer", "minimum": 0 },
-    "unstable": { "type": "integer", "minimum": 0 },
-    "vanished": { "type": "integer", "minimum": 0 },
-    "provisional": { "type": "boolean" },
-    "excluded": { "type": "integer", "minimum": 0 },
+    "id": {
+      "type": "integer",
+      "minimum": 1
+    },
+    "kind": {
+      "enum": [
+        "check",
+        "mark",
+        "diff"
+      ]
+    },
+    "created_ns": {
+      "type": "integer"
+    },
+    "scope": {
+      "type": "string"
+    },
+    "scope_b64": {
+      "type": "string",
+      "description": "the scope's path in base64, when it is not UTF-8"
+    },
+    "manifest": {
+      "type": "string"
+    },
+    "manifest_b64": {
+      "type": "string",
+      "description": "the manifest's path in base64, when it is not UTF-8"
+    },
+    "entries": {
+      "type": "integer",
+      "minimum": 1
+    },
+    "raced": {
+      "type": "integer",
+      "minimum": 0
+    },
+    "unstable": {
+      "type": "integer",
+      "minimum": 0
+    },
+    "vanished": {
+      "type": "integer",
+      "minimum": 0
+    },
+    "provisional": {
+      "type": "boolean"
+    },
+    "excluded": {
+      "type": "integer",
+      "minimum": 0
+    },
     "prefilter": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["used", "trusted", "racy", "full_reason"],
+      "required": [
+        "used",
+        "trusted",
+        "racy",
+        "full_reason"
+      ],
       "properties": {
-        "used": { "type": "boolean" },
-        "trusted": { "type": "integer", "minimum": 0 },
-        "racy": { "type": "integer", "minimum": 0 },
-        "full_reason": { "type": "string" }
+        "used": {
+          "type": "boolean"
+        },
+        "trusted": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "racy": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "full_reason": {
+          "type": "string"
+        }
       }
     }
-  }
+  },
+  "allOf": [
+    {
+      "oneOf": [
+        {
+          "required": [
+            "scope"
+          ]
+        },
+        {
+          "required": [
+            "scope_b64"
+          ]
+        }
+      ]
+    },
+    {
+      "oneOf": [
+        {
+          "required": [
+            "manifest"
+          ]
+        },
+        {
+          "required": [
+            "manifest_b64"
+          ]
+        }
+      ]
+    }
+  ]
 }

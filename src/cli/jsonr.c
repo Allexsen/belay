@@ -26,7 +26,12 @@ static void put_utf8(char *o, size_t *w, unsigned cp) {
 static int str(struct cur *c, char **out, size_t *len) {
     if (c->p >= c->e || *c->p != '"') return -1;
     c->p++;
-    char *o = malloc((size_t)(c->e - c->p) + 1);
+    /* Sized by this string's own raw length, which bounds its decoded length
+     * (\uXXXX: 6 bytes in, at most 3 out) -- not the rest of the line
+     * (review 2026-10-31, Phase 5, 16: memory was quadratic in the line). */
+    const char *q = c->p;
+    while (q < c->e && *q != '"') q += *q == '\\' && q + 1 < c->e ? 2 : 1;
+    char *o = malloc((size_t)(q - c->p) + 1);
     if (o == NULL) return -1;
     size_t w = 0;
     while (c->p < c->e && *c->p != '"') {

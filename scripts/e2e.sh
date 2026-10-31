@@ -22,10 +22,11 @@ fail() { echo "e2e: FAIL: $*" >&2; exit 1; }
 want() {   # want <file> <fixed string>: the output holds it
     grep -F -- "$2" "$1" >/dev/null || { echo "--- $1:" >&2; cat "$1" >&2; fail "expected: $2"; }
 }
-code() {   # code <expected exit> <command...>
+code() {   # code <expected exit> <command...>; an error (2, 3, 4) writes nothing to stdout
     exp=$1; shift
     set +e; "$@" >"$T/out" 2>"$T/err"; got=$?; set -e
     [ "$got" = "$exp" ] || { cat "$T/err" >&2; fail "exit $got, expected $exp: $*"; }
+    case $got in 2|3|4) [ ! -s "$T/out" ] || fail "an error wrote to stdout: $*" ;; esac
 }
 
 # ---- the scope, before ----
@@ -82,6 +83,16 @@ code 3 "$BELAY" check --scope "$T/missing"
 code 3 "$BELAY" check --scope "$S/notes.txt"
 code 2 "$BELAY" check --scope "$S" --bogus
 code 2 "$BELAY" diff --scope "$S" --since 99
-[ ! -s "$T/out" ] || fail "an error wrote to stdout"
+code 3 "$BELAY" check --scope "$BELAY_STATE_DIR"                # the state directory itself
+
+# ---- a scope whose path is not UTF-8: still JSON ----
+B=$(printf '%s/bad\377' "$T")
+if mkdir "$B" 2>/dev/null; then      # APFS and HFS+ refuse a name that is not UTF-8
+    code 0 "$BELAY" check --scope "$B" --json
+    $VALIDATE < "$T/out" || fail "check --json for a non-UTF-8 scope does not match its schema"
+    want "$T/out" '"scope_b64":'
+else
+    echo "e2e: this filesystem refuses names that are not UTF-8; that case not run"
+fi
 
 echo "e2e: check, mark, diff and log, unprivileged in a plain directory: ok"
