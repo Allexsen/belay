@@ -63,7 +63,7 @@ int belay_content_get(const struct belay_content *c, const char *hex, size_t max
     if (pfd != -1) close(pfd);
     if (fd == -1) {
         if (e == ENOENT || e == ELOOP || e == ENOTDIR)
-            belay_err_set(BELAY_ERR_CORRUPT, 0, "content: object %s is missing", hex);
+            belay_err_set(BELAY_ERR_CORRUPT, e == ENOENT ? ENOENT : 0, "content: object %s is missing", hex);
         else
             belay_err_set(BELAY_ERR_IO, e, "content: cannot open object %s", hex);
         return -1;

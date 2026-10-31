@@ -18,10 +18,14 @@
 #include "belay/hash.h"
 #include "schema/entry.h"
 #include "schema/diff_schema.h"
+#include "schema/finding_schema.h"
+#include "belay/interp.h"
 #include "diff/classify.h"
 
 #define DIFF_PIN   "test/expect/diff-fields.md"
 #define FORMAT_PIN "test/expect/manifest-v1.md"
+#define KINDS_PIN  "test/expect/finding-kinds.md"
+#define EVENTS_PIN "test/expect/diff-events.md"
 
 /* sha256 of test/expect/manifest-v1.md as approved (PR #10, 2026-10-30). The
  * file is immutable: a new format version gets a new file. */
@@ -31,7 +35,7 @@
 
 #define MAX_ROWS 96
 #define MAX_COLS 8
-struct table { int n; char cell[MAX_ROWS][MAX_COLS][256]; int cols[MAX_ROWS]; };
+struct table { int n; char cell[MAX_ROWS][MAX_COLS][1024]; int cols[MAX_ROWS]; };
 
 static void trim(char *s) {
     char *p = s;
@@ -45,7 +49,7 @@ static void trim(char *s) {
 static int read_table(const char *path, const char *first, struct table *t) {
     FILE *f = fopen(path, "r");
     if (f == NULL) return -1;
-    char line[2048], head[64];
+    char line[8192], head[64];
     snprintf(head, sizeof head, "| %s |", first);
     int in = 0;
     t->n = 0;
@@ -63,7 +67,7 @@ static int read_table(const char *path, const char *first, struct table *t) {
         for (; *p && c < MAX_COLS; p++) {
             if (*p == '|' && p[-1] != '\\') {
                 *p = '\0';
-                snprintf(t->cell[t->n][c], sizeof t->cell[t->n][c], "%.255s", start);
+                snprintf(t->cell[t->n][c], sizeof t->cell[t->n][c], "%.1023s", start);
                 trim(t->cell[t->n][c]);
                 c++;
                 start = p + 1;
@@ -428,8 +432,92 @@ TEST(frozen_format_keys_types_and_rules_match_the_schema) {
     ASSERT_EQ_INT((int)ENTRY_HEADER_RULE_COUNT, header_rules);
 }
 
+/* ---- finding-kinds.md against FINDING_KINDS ------------------------------ */
+
+/* "`text`" -> "text" in place. */
+static void unquote(char *s) {
+    size_t l = strlen(s);
+    if (l >= 2 && s[0] == '`' && s[l - 1] == '`') { memmove(s, s + 1, l - 2); s[l - 2] = '\0'; }
+}
+
+/* "text, pip" or "any" -> an interpreter mask; 0 when a name is unknown. */
+static unsigned interps_of(const char *s) {
+    if (strcmp(s, "any") == 0) return IN_ANY;
+    char buf[256];
+    unsigned m = 0;
+    snprintf(buf, sizeof buf, "%s", s);
+    for (char *tok = strtok(buf, ","); tok; tok = strtok(NULL, ",")) {
+        trim(tok);
+        int id = 0;
+        while (id < BELAY_INTERP_COUNT && strcmp(belay_interp_name((enum belay_interp_id)id), tok)) id++;
+        if (id == BELAY_INTERP_COUNT) return 0;
+        m |= 1u << id;
+    }
+    return m;
+}
+
+/* "name: int, other: string" -> the schema's field list, written back the
+ * same way, so the two compare as strings. */
+static void fields_of(const struct finding_kind_def *d, char *out, size_t cap) {
+    static const char *const T[] = { [FT_INT] = "int", [FT_STRING] = "string", [FT_BOOL] = "bool" };
+    size_t w = 0;
+    out[0] = '\0';
+    for (int k = 0; k < FINDING_FIELDS_MAX && d->field[k].name; k++)
+        w += (size_t)snprintf(out + w, cap - w, "%s%s: %s", k ? ", " : "", d->field[k].name,
+                              d->field[k].type < FT_UNSET || d->field[k].type > FT_BOOL ||
+                              d->field[k].type == FT_UNSET ? "?" : T[d->field[k].type]);
+    if (w == 0) snprintf(out, cap, "--");
+}
+
+/* Pin 2026-10-31 (#18): every kind the pin lists is the schema's, with the
+ * same interpreters, levels, fields in order and template; and the schema
+ * has no kind the pin does not list. */
+TEST(finding_kinds_pin_and_schema_agree_both_ways) {
+    static struct table t;
+    REQUIRE(read_table(KINDS_PIN, "kind", &t) > 0);
+    int seen[FK_COUNT] = { 0 };
+    for (int i = 0; i < t.n; i++) {
+        if (t.cols[i] < 5) { BELAY_FAIL("row %d: %d cells", i, t.cols[i]); continue; }
+        int k = FK_UNSET + 1;
+        while (k < FK_COUNT && strcmp(FINDING_KINDS[k].name, t.cell[i][0]) != 0) k++;
+        if (k == FK_COUNT) { BELAY_FAIL("the pin lists %s; the schema has no such kind", t.cell[i][0]); continue; }
+        seen[k]++;
+        const struct finding_kind_def *d = &FINDING_KINDS[k];
+        if (interps_of(t.cell[i][1]) != d->interps)
+            BELAY_FAIL("%s: interpreters %s, schema mask %#x", d->name, t.cell[i][1], d->interps);
+        const unsigned lv = strcmp(t.cell[i][2], "path") == 0 ? LV_PATH
+                          : strcmp(t.cell[i][2], "event") == 0 ? LV_EVENT
+                          : strcmp(t.cell[i][2], "path, event") == 0 ? (LV_PATH | LV_EVENT) : 0;
+        if (lv != d->levels) BELAY_FAIL("%s: level %s, schema %u", d->name, t.cell[i][2], d->levels);
+        char f[256];
+        fields_of(d, f, sizeof f);
+        if (strcmp(f, t.cell[i][3]) != 0) BELAY_FAIL("%s: fields \"%s\", schema \"%s\"", d->name, t.cell[i][3], f);
+        unquote(t.cell[i][4]);
+        if (strcmp(d->text, t.cell[i][4]) != 0)
+            BELAY_FAIL("%s: text \"%s\", schema \"%s\"", d->name, t.cell[i][4], d->text);
+    }
+    for (int k = FK_UNSET + 1; k < FK_COUNT; k++)
+        if (seen[k] != 1) BELAY_FAIL("%s: listed %d times by the pin", FINDING_KINDS[k].name, seen[k]);
+}
+
+/* Pin 2026-10-31 (#19): the event rules the spec is generated from are the
+ * pin's, word for word, and no more. */
+TEST(event_rules_pin_and_schema_agree_both_ways) {
+    static struct table t;
+    REQUIRE(read_table(EVENTS_PIN, "rule", &t) > 0);
+    ASSERT_EQ_INT(EVENT_RULE_COUNT, t.n);
+    for (int i = 0; i < t.n && i < EVENT_RULE_COUNT; i++) {
+        if (strcmp(EVENT_RULES[i].id, t.cell[i][0]) != 0)
+            BELAY_FAIL("row %d: pin %s, schema %s", i, t.cell[i][0], EVENT_RULES[i].id);
+        if (strcmp(EVENT_RULES[i].statement, t.cell[i][1]) != 0)
+            BELAY_FAIL("%s: the statement differs", t.cell[i][0]);
+    }
+}
+
 int main(void) {
     RUN(diff_fields_pin_and_table_agree_both_ways);
+    RUN(finding_kinds_pin_and_schema_agree_both_ways);
+    RUN(event_rules_pin_and_schema_agree_both_ways);
     RUN(every_field_type_cell_classifies_as_its_pin_says);
     RUN(mount_root_cells_follow_the_pin);
     RUN(one_sided_fields_follow_the_pin);

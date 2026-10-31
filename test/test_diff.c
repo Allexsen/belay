@@ -12,6 +12,7 @@
 #include "belay/hash.h"
 #include "diff/classify.h"
 #include "diff/diff_run.h"
+#include "schema/finding_schema.h"
 #include "schema/entry.h"
 
 #include <stdarg.h>
@@ -36,6 +37,7 @@ struct me {
     unsigned mode;                       /* permission bits; type bits added */
     const char *sha;                     /* reg: NULL means unverified */
     const char *target;                  /* lnk */
+    const char *stored;                  /* reg: the stored copy's hash */
     bool unstable, unreadable, mount, raced, xattrs_unknown;
     unsigned long long dev;              /* 0: 1 */
     bool has_iflags;
@@ -80,6 +82,7 @@ static void m_entry(struct me e) {
     if (e.unstable) fprintf(g_f, ",\"unstable\":true");
     if (chr || blk) fprintf(g_f, ",\"rdev\":%llu", e.rdev ? e.rdev : 3);
     if (lnk) fprintf(g_f, ",\"link_target\":\"%s\"", e.target ? e.target : "");
+    if (e.stored) fprintf(g_f, ",\"stored\":\"%s\"", e.stored);
     if (e.mount) fprintf(g_f, ",\"mount\":true");
     if (e.unreadable) fprintf(g_f, ",\"unreadable\":true");
     if (e.raced) fprintf(g_f, ",\"raced\":true");
@@ -343,22 +346,31 @@ TEST(the_trailer_names_both_inputs_by_their_digest) {
 }
 
 /* F3 / R11: an interpreter can only add to a record, and its failures stay
- * in its own output. Run through diff_run with a test interpreter in the
- * binary slot, which every unclaimed path reaches. */
+ * in its own output. Run through diff_run with a test interpreter in one
+ * slot: the binary one, which every unclaimed path reaches, or pip's, which
+ * claims "*.dist-info/RECORD". */
+#define PIP_A "a-1.dist-info/RECORD"
+#define PIP_B "b-1.dist-info/RECORD"
 static int g_begun, g_ended, g_saw_modified;
 static void *t_begin(void) { g_begun++; return &g_saw_modified; }
-static void t_end(void *state) { g_ended += state == &g_saw_modified; }
+static enum belay_interp_result t_end(void *state, struct belay_events *ev) {
+    (void)ev;
+    g_ended += state == &g_saw_modified;
+    return BELAY_INTERP_DECLINE;
+}
+static const struct belay_fv CU_MISSING[] = { { .s = "missing", .len = 7 }, { .s = "after", .len = 5 } };
 static enum belay_interp_result t_error(void *state, const struct belay_interp_input *in,
                                         struct belay_findings *out) {
     (void)state; (void)in;
-    belay_findings_add(out, "half-written");
+    belay_finding(out, FK_CONTENT_UNAVAILABLE, CU_MISSING, 2);       /* half-written */
     return BELAY_INTERP_ERROR;
 }
 static enum belay_interp_result t_invalid(void *state, const struct belay_interp_input *in,
                                           struct belay_findings *out) {
     (void)state; (void)in;
-    belay_findings_add(out, "ok \xff\xfe");
-    belay_findings_add(out, "fine");
+    const struct belay_fv bad[] = { { .s = "ok \xff\xfe", .len = 5 }, { .s = "after", .len = 5 } };
+    belay_finding(out, FK_CONTENT_UNAVAILABLE, bad, 2);
+    belay_finding(out, FK_CONTENT_UNAVAILABLE, CU_MISSING, 2);
     return BELAY_INTERP_FINDINGS;
 }
 static enum belay_interp_result t_verdict(void *state, const struct belay_interp_input *in,
@@ -368,10 +380,10 @@ static enum belay_interp_result t_verdict(void *state, const struct belay_interp
     return BELAY_INTERP_DECLINE;
 }
 static const struct belay_diff_opts *g_opts;    /* run_with's options; NULL: none */
-static int run_with(const struct belay_interp *t) {
+static int run_in(enum belay_interp_id slot, const struct belay_interp *t) {
     const struct belay_interp *table[BELAY_INTERP_COUNT];
     for (int i = 0; i < BELAY_INTERP_COUNT; i++) table[i] = belay_interp_builtin((enum belay_interp_id)i);
-    table[BELAY_INTERP_BINARY] = t;
+    table[slot] = t;
     char b[400], a[400];
     snprintf(b, sizeof b, "%s/before", g_dir);
     snprintf(a, sizeof a, "%s/after", g_dir);
@@ -383,31 +395,122 @@ static int run_with(const struct belay_interp *t) {
     fclose(f);
     return 0;
 }
+static int run_with(const struct belay_interp *t) { return run_in(BELAY_INTERP_BINARY, t); }
 
-/* Review F8: `out` is cleared before each path, so an interpreter that sets a
- * count without writing cannot pass one path's findings to the next. */
+/* Two dist-info RECORDs, both modified. */
+static void two_records(void) {
+    for (int k = 0; k < 2; k++) {
+        m_begin(k ? "after" : "before", "/s", 1000); ROOT();
+        E(.path = "a-1.dist-info", .type = "dir", .mode = 0755, .ino = 8);
+        E(.path = PIP_A, .type = "reg", .size = 3, .sha = k ? HB : HA);
+        E(.path = "b-1.dist-info", .type = "dir", .mode = 0755, .ino = 9);
+        E(.path = PIP_B, .type = "reg", .size = 3, .sha = k ? HB : HA); m_end();
+    }
+}
+
+/* Review F8: findings are cleared before each path, so nothing an
+ * interpreter added for one path reaches the next. */
 static int g_calls;
 static enum belay_interp_result t_stale(void *state, const struct belay_interp_input *in,
                                         struct belay_findings *out) {
     (void)state; (void)in;
-    if (g_calls++ == 0) {
-        belay_findings_add(out, "only for f");
-        return BELAY_INTERP_FINDINGS;
-    }
-    out->n = 1;                                   /* claims one, writes nothing */
+    if (g_calls++ == 0) belay_finding(out, FK_CONTENT_UNAVAILABLE, CU_MISSING, 2);
     return BELAY_INTERP_FINDINGS;
 }
 
 TEST(one_paths_findings_never_reach_the_next) {
-    m_begin("before", "/s", 1000); ROOT(); E(.path = "f", .type = "reg", .size = 3, .sha = HA);
-    E(.path = "g", .type = "reg", .size = 3, .sha = HA); m_end();
-    m_begin("after", "/s", 1000); ROOT(); E(.path = "f", .type = "reg", .size = 3, .sha = HB);
-    E(.path = "g", .type = "reg", .size = 3, .sha = HB); m_end();
+    two_records();
     g_calls = 0;
-    const struct belay_interp t = { BELAY_INTERP_BINARY, NULL, t_stale, NULL };
-    REQUIRE(run_with(&t) == 0);
-    ASSERT_TRUE(has("f", "\"findings\":[\"only for f\"]"));
-    ASSERT_FALSE(has("g", "only for f"));
+    const struct belay_interp t = { BELAY_INTERP_PIP, NULL, t_stale, NULL };
+    REQUIRE(run_in(BELAY_INTERP_PIP, &t) == 0);
+    ASSERT_TRUE(has(PIP_A, "\"findings\":[{\"kind\":\"content_unavailable\",\"reason\":\"missing\","
+                           "\"side\":\"after\",\"text\":\"content unavailable (after): missing\"}]"));
+    ASSERT_FALSE(has(PIP_B, "findings"));
+}
+
+/* diff-events E1, E2, E7: an end hook's events come after the last path
+ * record and before the trailer, which counts them; belay_diff_end and
+ * stats.records count path records only. */
+static enum belay_interp_result t_claims(void *state, const struct belay_interp_input *in,
+                                         struct belay_findings *out) {
+    (void)state; (void)in; (void)out;
+    return BELAY_INTERP_DECLINE;
+}
+static enum belay_interp_result t_end_event(void *state, struct belay_events *ev) {
+    (void)state;
+    if (ev == NULL) return BELAY_INTERP_DECLINE;
+    const char *p[] = { PIP_B, PIP_A };
+    const size_t l[] = { strlen(PIP_B), strlen(PIP_A) };
+    const struct belay_fv v[] = { { .s = "a", .len = 1 }, { .s = "1", .len = 1 } };
+    belay_event(ev, FK_PIP_INSTALLED, v, 2, p, l, 2);
+    belay_event(ev, FK_PIP_REMOVED, v, 2, p, l, 1);
+    return BELAY_INTERP_FINDINGS;
+}
+
+TEST(events_come_after_the_path_records_and_the_trailer_counts_them) {
+    two_records();
+    const struct belay_interp t = { BELAY_INTERP_PIP, NULL, t_claims, t_end_event };
+    const int rc = run_in(BELAY_INTERP_PIP, &t);
+    if (rc != 0) BELAY_FAIL("%s", belay_err_msg());
+    REQUIRE(rc == 0);
+    const char *last_path = strstr(g_text, "{\"path\":\"" PIP_B "\"");
+    const char *e1 = strstr(g_text, "{\"event\":\"pip_installed\",\"interp\":\"pip\",\"name\":\"a\","
+                                    "\"version\":\"1\",\"text\":\"installed a 1\",\"paths\":[\"" PIP_A "\",\""
+                                    PIP_B "\"]}\n");
+    const char *e2 = strstr(g_text, "{\"event\":\"pip_removed\"");
+    const char *trailer = strstr(g_text, "{\"belay_diff_end\":2,");
+    if (!(last_path != NULL && e1 != NULL && e2 != NULL && trailer != NULL)) BELAY_FAIL("%s", g_text);
+    REQUIRE(last_path != NULL && e1 != NULL && e2 != NULL && trailer != NULL);
+    ASSERT_TRUE(last_path < e1 && e1 < e2 && e2 < trailer);
+    ASSERT_TRUE(strstr(trailer, ",\"events\":2,") != NULL);
+    ASSERT_EQ_INT(2, (int)g_st.records);
+    ASSERT_EQ_INT(2, (int)g_st.events);
+}
+
+TEST(a_diff_with_no_events_says_zero) {
+    m_begin("before", "/s", 1000); ROOT(); E(.path = "f", .type = "reg", .size = 3, .sha = HA); m_end();
+    m_begin("after", "/s", 1000); ROOT(); E(.path = "f", .type = "reg", .size = 3, .sha = HB); m_end();
+    REQUIRE(run() == 0);
+    ASSERT_TRUE(strstr(g_text, ",\"events\":0,") != NULL);
+    ASSERT_TRUE(strstr(g_text, "{\"event\"") == NULL);
+    ASSERT_EQ_INT(0, (int)g_st.events);
+}
+
+/* E6: an end hook that fails has its events replaced by one
+ * could_not_interpret naming every path it was given; the diff succeeds. */
+static enum belay_interp_result t_end_fails(void *state, struct belay_events *ev) {
+    t_end_event(state, ev);
+    return BELAY_INTERP_ERROR;
+}
+
+TEST(a_failed_end_hook_is_one_event_naming_its_paths) {
+    two_records();
+    const struct belay_interp t = { BELAY_INTERP_PIP, NULL, t_claims, t_end_fails };
+    REQUIRE(run_in(BELAY_INTERP_PIP, &t) == 0);
+    ASSERT_TRUE(strstr(g_text, "{\"event\":\"could_not_interpret\",\"interp\":\"pip\",\"text\":"
+                               "\"could not interpret\",\"paths\":[\"" PIP_A "\",\"" PIP_B "\"]}\n") != NULL);
+    ASSERT_TRUE(strstr(g_text, "pip_installed") == NULL);
+    ASSERT_EQ_INT(1, (int)g_st.events);
+}
+
+/* A diff that fails after begin still ends each interpreter, with no sink:
+ * its state is freed, and nothing it adds can reach an output. */
+static int g_null_ends;
+static enum belay_interp_result t_end_null(void *state, struct belay_events *ev) {
+    (void)state;
+    g_null_ends += ev == NULL;
+    return BELAY_INTERP_DECLINE;
+}
+
+TEST(a_failed_diff_ends_its_interpreters_without_a_sink) {
+    m_begin("before", "/s", 1000); ROOT(.mode = 0755); m_end();
+    m_begin("after", "/s", 1000); ROOT(.mode = 0755);
+    E(.path = "o/y", .type = "reg", .size = 1, .sha = HA); m_end();       /* an orphan: refused */
+    g_null_ends = 0;
+    const struct belay_interp t = { BELAY_INTERP_PIP, NULL, t_claims, t_end_null };
+    ASSERT_EQ_INT(-1, run_in(BELAY_INTERP_PIP, &t));
+    ASSERT_EQ_INT(1, g_null_ends);
+    belay_err_clear();
 }
 
 /* Review F4: different scopes are refused before any entry is read -- not
@@ -461,15 +564,16 @@ TEST(an_interpreter_error_is_a_finding_never_a_failed_diff) {
     const struct belay_interp t = { BELAY_INTERP_BINARY, NULL, t_error, NULL };
     REQUIRE(run_with(&t) == 0);
     ASSERT_TRUE(has("f", "\"outcome\":\"modified\""));
-    ASSERT_TRUE(has("f", "\"findings\":[\"could not interpret\"]"));
+    ASSERT_TRUE(has("f", "\"findings\":[{\"kind\":\"could_not_interpret\",\"text\":\"could not interpret\"}]}"));
 }
 
 TEST(a_finding_that_is_not_utf8_is_replaced) {
-    m_begin("before", "/s", 1000); ROOT(); E(.path = "f", .type = "reg", .size = 3, .sha = HA); m_end();
-    m_begin("after", "/s", 1000); ROOT(); E(.path = "f", .type = "reg", .size = 3, .sha = HB); m_end();
-    const struct belay_interp t = { BELAY_INTERP_BINARY, NULL, t_invalid, NULL };
-    REQUIRE(run_with(&t) == 0);
-    ASSERT_TRUE(has("f", "\"findings\":[\"invalid finding\",\"fine\"]"));
+    two_records();
+    const struct belay_interp t = { BELAY_INTERP_PIP, NULL, t_invalid, NULL };
+    REQUIRE(run_in(BELAY_INTERP_PIP, &t) == 0);
+    ASSERT_TRUE(has(PIP_A, "\"findings\":[{\"kind\":\"invalid_finding\",\"text\":\"invalid finding\"},"
+                           "{\"kind\":\"content_unavailable\",\"reason\":\"missing\",\"side\":\"after\","
+                           "\"text\":\"content unavailable (after): missing\"}]}"));
     ASSERT_TRUE(strchr(g_text, '\xff') == NULL);
 }
 
@@ -1043,6 +1147,10 @@ int main(void) {
     RUN(an_interpreter_sees_the_verdict_and_keeps_its_state_over_one_diff);
     RUN(every_manifest_fact_is_checked_carried_or_ignored_for_a_reason);
     RUN(one_paths_findings_never_reach_the_next);
+    RUN(events_come_after_the_path_records_and_the_trailer_counts_them);
+    RUN(a_diff_with_no_events_says_zero);
+    RUN(a_failed_end_hook_is_one_event_naming_its_paths);
+    RUN(a_failed_diff_ends_its_interpreters_without_a_sink);
     RUN(the_store_reaches_an_interpreter_through_the_options);
     RUN(different_scopes_are_refused_before_any_entry_is_read);
     RUN(a_published_output_is_success_even_where_its_directory_cannot_be_synced);

@@ -153,8 +153,8 @@ const struct line_field_def DIFF_RECORD_FIELDS[DF_COUNT] = {
     [DF_UNKNOWN] = { "unknown", NULL, "array",
         "For `unknown` only: the reasons, in the order of the reasons table." },
     [DF_FINDINGS] = { "findings", NULL, "array",
-        "What an interpreter explained about the change, one string each; absent when none. "
-        "Annotations only: an interpreter never sets or changes the outcome." },
+        "What an interpreter explained about the change, one object each (Findings, below); "
+        "absent when none. Annotations only: an interpreter never sets or changes the outcome." },
 };
 
 const struct line_field_def DIFF_TRAILER_END = { "belay_diff_end", NULL, "int",
@@ -166,6 +166,9 @@ const struct line_field_def DIFF_TRAILER_FIELDS[DT_COUNT] = {
         "Directories counted in `unchanged` whose `mtime_ns` or `ctime_ns` differs: a "
         "directory's own timestamps move with every name added, removed or renamed in it, which "
         "the records of its children report." },
+    [DT_EVENTS] = { "events", NULL, "int",
+        "The number of event records (diff-events E7); `belay_diff_end` counts path records "
+        "only." },
     [DT_BEFORE_VANISHED] = { "before_vanished", NULL, "int",
         "The first manifest's `vanished`: entries gone while its tree was walked." },
     [DT_BEFORE_UNSTABLE] = { "before_unstable", NULL, "int", "The first manifest's `unstable`." },

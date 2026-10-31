@@ -11,14 +11,15 @@ is decided.
 ## Shape
 
 NDJSON, like the manifest: one header line, one record per path whose outcome is not `unchanged`,
-in the manifests' path order (bytewise), and a trailer line. Readers MUST reject a version they do
-not know, and treat a missing trailer as a truncated diff.
+in the manifests' path order (bytewise), then the event records (see "Interpreters"), and a
+trailer line. Readers MUST reject a version they do not know, and treat a missing trailer as a
+truncated diff.
 
 ```json
 {"belay_diff":1,"scopes":["/home/u/proj"],"before_created_ns":1761000000000000000,"after_created_ns":1761000600000000000,"before_hash_max_bytes":67108864,"after_hash_max_bytes":67108864,"scope_remounted":false,"identity_compared":true}
 {"path":"src/main.c","outcome":"modified","type":"reg","changed":["size","mtime_ns","sha256"]}
 {"path":"build","outcome":"unknown","type":"dir","unknown":["unstable"]}
-{"belay_diff_end":2,"unchanged":1840,"added":0,"removed":0,"modified":1,"type_changed":0,"metadata_only":0,"unknown":1,"dir_timestamps_only":0,"before_vanished":0,"before_unstable":0,"before_raced":0,"after_vanished":0,"after_unstable":1,"after_raced":0,"provisional":true,"before_sha256":"9f2c...","after_sha256":"41ab..."}
+{"belay_diff_end":2,"unchanged":1840,"added":0,"removed":0,"modified":1,"type_changed":0,"metadata_only":0,"unknown":1,"dir_timestamps_only":0,"events":0,"before_vanished":0,"before_unstable":0,"before_raced":0,"after_vanished":0,"after_unstable":1,"after_raced":0,"provisional":true,"before_sha256":"9f2c...","after_sha256":"41ab..."}
 ```
 
 `before` is the first manifest given and `after` the second, whatever their `created_ns` say.
@@ -53,7 +54,7 @@ not know, and treat a missing trailer as a truncated diff.
 | `type_before` | string | When the path is on both sides and its types differ: the type before. That is every `type_changed`, and an `unknown` whose type also changed (`raced`). |
 | `changed` | array | The compared fields that differ, in the manifest's field order; absent when none. |
 | `unknown` | array | For `unknown` only: the reasons, in the order of the reasons table. |
-| `findings` | array | What an interpreter explained about the change, one string each; absent when none. Annotations only: an interpreter never sets or changes the outcome. |
+| `findings` | array | What an interpreter explained about the change, one object each (Findings, below); absent when none. Annotations only: an interpreter never sets or changes the outcome. |
 <!-- END GENERATED: diff-record -->
 
 ### Trailer
@@ -62,7 +63,8 @@ The trailer is written once both manifests have been read to their ends. `belay_
 number of records written. Then come one count per outcome, named as the outcome, in the order of
 the outcomes table, `unchanged` included: every path present in either manifest is counted once,
 so the counts add up to the number of distinct paths. `dir_timestamps_only` counts the directories
-among `unchanged` whose own timestamps differ (see "A directory's own timestamps"). Then what each
+among `unchanged` whose own timestamps differ (see "A directory's own timestamps"), and `events`
+the event records (`belay_diff_end` counts path records only). Then what each
 manifest's own trailer said about its walk: `before_vanished`, `before_unstable` and `before_raced`
 are the first manifest's `vanished`, `unstable` and `raced` counts, and `after_vanished`,
 `after_unstable` and `after_raced` the second's. `provisional` is `true` exactly when any of those
@@ -86,6 +88,7 @@ file.
 | `metadata_only` | int | Paths whose outcome is `metadata_only`. |
 | `unknown` | int | Paths whose outcome is `unknown`. |
 | `dir_timestamps_only` | int | Directories counted in `unchanged` whose `mtime_ns` or `ctime_ns` differs: a directory's own timestamps move with every name added, removed or renamed in it, which the records of its children report. |
+| `events` | int | The number of event records (diff-events E7); `belay_diff_end` counts path records only. |
 | `before_vanished` | int | The first manifest's `vanished`: entries gone while its tree was walked. |
 | `before_unstable` | int | The first manifest's `unstable`. |
 | `before_raced` | int | The first manifest's `raced`. |
@@ -258,6 +261,98 @@ one side only.
 
 ## Interpreters
 
-An interpreter receives `{path, before, after}` for a path that is not `unchanged`, and returns
-findings (strings, emitted in `findings`) or declines. It cannot set or change the outcome. In
-this version every interpreter declines; Phase 4 adds pip, dpkg, git and text.
+For a path that is not `unchanged`, the interpreter that claims it adds **findings** to its record:
+what the change means (a package upgraded, a ref moved, lines changed). Findings are annotations
+only. An interpreter receives the core's verdict read-only and has no way to set or change an
+outcome, so whatever an interpreter says or fails to say, every record's outcome is the one the
+rules above decide.
+
+**Which interpreter.** A path is claimed by its absolute path (scope + path): dpkg claims
+`*/var/lib/dpkg/status` and the per-package `info/*.list` and `info/*.md5sums`; pip claims
+`*.dist-info/RECORD` and `*.dist-info/METADATA`; git claims `*/.git/HEAD`, `*/.git/packed-refs`,
+`*/.git/refs/*`, `*/.git/hooks/*`, `*/.git/index` and the reflogs `*/.git/logs/HEAD` and
+`*/.git/logs/refs/*`. An unclaimed path is **text** when its entry is `stored` on every side it
+exists on (a capture stores small text files by default); any other is **binary**, which adds
+nothing: its size and hash are already in the record.
+
+**Content.** Interpreters read the stored copies through the store given to the diff (`belay_diff`'s
+options). Every copy read is hashed and must match its name, so a stale, planted or truncated copy
+is never read as content. When an interpreter needs a copy it cannot read, on a side where the path
+exists, it says so: the finding `content_unavailable`, with `reason` `no_store` (the diff was given
+no store), `missing`, `too_large` (over the interpreter's bound) or `corrupt` (does not hash to its
+name), and `side`. It never declines silently there: pip and dpkg, whose package facts come from
+that content, also emit a `content_unavailable` event naming the paths, so a consumer never reads
+"no packages changed" where the change could not be read.
+
+**Findings.** Each finding is an object: `{"kind": ..., <its fields, in order>, "text": ...}`.
+`int` fields are non-negative integers, `string` fields UTF-8 of at most 1,024 bytes, `bool` fields
+`true` or `false`; `text` is the kind's template with each `{field}` replaced by its value, at most
+1,024 bytes. The core checks every finding against its kind's row below and renders its text, so
+an interpreter supplies values, never text: a finding that breaks the row (an unknown kind, a kind
+of another interpreter or level, a field missing, extra or over its bound) is replaced by
+`invalid_finding`. An interpreter that fails on a path has its findings there replaced by
+`could_not_interpret`; the diff does not fail. A record carries at most 4,096 findings: past that,
+the last place is one `and_more` counting the rest.
+
+**Event records.** A fact about a package rather than a path -- installed, removed, upgraded,
+reinstalled -- is an event record, emitted once every path has been seen, listing the paths it was
+derived from. Every path an event lists has its own record, or is unchanged. At most 65,536 event
+records per interpreter: past that, the last place is one `and_more` counting the rest.
+
+<!-- BEGIN GENERATED: diff-events -->
+<!-- From src/schema/finding_schema.c by tools/gen_schema.c. Edit there, then `make gen`. -->
+
+| rule | statement |
+|---|---|
+| E1 placement | Event records come after the last path record and before the trailer. A diff with none has none. |
+| E2 shape | `{"event": "<kind>", "interp": "<interpreter>", <the kind's fields, in finding-kinds.md's order>, "text": "<its template>", "paths": [...]}`. The kind is an `event`-level kind of finding-kinds.md, or `and_more`. |
+| E3 paths | The paths it was derived from, relative to the scope as in path records, sorted bytewise, each once, at least one (except `and_more`). `paths_b64` instead -- every element base64 -- when any is not valid UTF-8. |
+| E4 order | By interpreter, in the order text, pip, dpkg, git; within one, as the interpreter defines it in finding-kinds.md's terms: pip by normalized name, then kind; dpkg by Package, then Architecture, then kind. The same inputs give the same bytes. |
+| E5 bound | At most 65,536 event records per interpreter per diff; past that, one final `{"event": "and_more", "interp": ..., "n": <the rest>, "text": "and {n} more", "paths": []}`. An interpreter's per-diff state is bounded to match. |
+| E6 failure | An interpreter that fails in its end hook emits `{"event": "could_not_interpret", "interp": ..., "text": "could not interpret", "paths": [...]}` with the paths it had claimed, and no other event. The diff does not fail. |
+| E7 trailer | The trailer gains `events`: the number of event records. `belay_diff_end` still counts path records only. |
+| E8 forward | A consumer ignores an event kind it does not know, as it ignores an unknown finding kind or field. |
+<!-- END GENERATED: diff-events -->
+
+**Reading findings.** A consumer ignores a finding kind, an event kind or a field it does not
+know. Removing a kind or changing a field's meaning is a new diff version.
+
+### Kinds
+
+<!-- BEGIN GENERATED: diff-findings -->
+<!-- From src/schema/finding_schema.c by tools/gen_schema.c. Edit there, then `make gen`. -->
+
+| kind | interpreter | level | fields | text | meaning |
+|---|---|---|---|---|---|
+| `could_not_interpret` | any | path | -- | `could not interpret` | The interpreter failed on this path (R11); nothing else from it here. |
+| `invalid_finding` | any | path | -- | `invalid finding` | A finding that broke the rules, replaced. |
+| `and_more` | any | path | n: int | `and {n} more` | The findings past the 4,096th of a record, or the events past the 65,536th of an interpreter, counted. |
+| `content_unavailable` | text, pip, dpkg, git | path, event | reason: string, side: string | `content unavailable ({side}): {reason}` | The stored copy of a claimed path, on a side where it exists, cannot be read: reason `no_store`, `missing`, `too_large` or `corrupt`; side `before`, `after` (or, for an event, `both`). Never a silent decline. |
+| `text_changed` | text | path | lines_added: int, lines_deleted: int, first_changed_line: int | `+{lines_added} -{lines_deleted} lines, first change at line {first_changed_line}` | Stored on both sides: lines by the longest common subsequence of lines; the first line past the common prefix, 1-based, in before. |
+| `text_rewritten` | text | path | lines_before: int, lines_after: int, first_changed_line: int | `rewritten: {lines_before} lines before, {lines_after} after, first change at line {first_changed_line}` | As text_changed, past 2,000 lines of edit distance: not counted. |
+| `text_added` | text | path | lines: int | `{lines} lines` | Added, stored. |
+| `text_removed` | text | path | lines: int | `{lines} lines` | Removed, stored before. |
+| `pip_installed` | pip | event | name: string, version: string | `installed {name} {version}` | A dist-info whose RECORD is added, none removed of that name. |
+| `pip_removed` | pip | event | name: string, version: string | `removed {name} {version}` | A dist-info whose RECORD is removed, none added of that name. |
+| `pip_upgraded` | pip | event | name: string, from: string, to: string | `upgraded {name} {from} -> {to}` | One removed and one added of a name; to higher (PEP 440). |
+| `pip_downgraded` | pip | event | name: string, from: string, to: string | `downgraded {name} {from} -> {to}` | The same; to lower. |
+| `pip_version_changed` | pip | event | name: string, from: string, to: string | `{name} {from} -> {to}` | The same; equal by PEP 440, or not a PEP 440 version. |
+| `pip_reinstalled` | pip | event | name: string, version: string, files_added: int, files_removed: int, files_changed: int | `reinstalled {name} {version}: +{files_added} -{files_removed} ~{files_changed} files` | The same dist-info on both sides, its RECORD changed. |
+| `dpkg_installed` | dpkg | event | package: string, arch: string, version: string | `installed {package}:{arch} {version}` | `installed` after and not before. |
+| `dpkg_removed` | dpkg | event | package: string, arch: string, version: string | `removed {package}:{arch} {version}` | `installed` before and not after. |
+| `dpkg_upgraded` | dpkg | event | package: string, arch: string, from: string, to: string | `upgraded {package}:{arch} {from} -> {to}` | `installed` on both sides; to higher (Debian version comparison). |
+| `dpkg_downgraded` | dpkg | event | package: string, arch: string, from: string, to: string | `downgraded {package}:{arch} {from} -> {to}` | The same; to lower. |
+| `dpkg_state_changed` | dpkg | event | package: string, arch: string, from: string, to: string | `{package}:{arch} {from} -> {to}` | The Status field differs, no installed or removed event covering it. |
+| `git_head_changed` | git | path | from: string, to: string | `HEAD {from} -> {to}` | `.git/HEAD`: the symbolic ref, or the commit it names. |
+| `git_ref_created` | git | path | ref: string, to: string | `created {ref} at {to}` | A ref appeared. |
+| `git_ref_deleted` | git | path | ref: string, from: string | `deleted {ref} (was {from})` | A ref went away. |
+| `git_ref_moved` | git | path | ref: string, from: string, to: string | `{ref} {from} -> {to}` | A ref names another commit. |
+| `git_hook_added` | git | path | hook: string, executable: bool | `hook {hook} added` |  |
+| `git_hook_removed` | git | path | hook: string | `hook {hook} removed` |  |
+| `git_hook_changed` | git | path | hook: string, executable: bool | `hook {hook} changed` | Its content changed. |
+| `git_hook_executable_changed` | git | path | hook: string, executable: bool | `hook {hook} executable: {executable}` | Only its executable bit changed. |
+| `git_index_changed` | git | path | -- | `index changed` | `.git/index` (hashed, never stored). |
+| `git_reflog_appended` | git | path | ref: string, entries: int | `{ref}: {entries} reflog entries` | Entries appended to the ref's reflog. |
+| `git_reflog_move` | git | path | ref: string, from: string, to: string, operation: string | `{ref} {from} -> {to} by {operation}` | An appended entry that is not a plain commit or a fast-forward. The reflog is written by the watched process: evidence, not proof. |
+| `git_reflog_rewritten` | git | path | ref: string | `{ref}: reflog rewritten` | The reflog before is not a prefix of the reflog after. |
+<!-- END GENERATED: diff-findings -->

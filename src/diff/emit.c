@@ -1,5 +1,7 @@
 #include "emit.h"
 
+#include "interp/findings_internal.h"
+
 #include "belay/error.h"
 #include "belay/json.h"
 #include "util/check.h"
@@ -9,8 +11,9 @@
 #include <stdlib.h>
 #include <string.h>
 
-/* The longest record: a 4095-byte path escaped at six bytes a byte, every
- * field name, and BELAY_FINDINGS_MAX findings escaped likewise. */
+/* The longest record before its findings: a 4095-byte path escaped at six
+ * bytes a byte and every field name. Findings, up to 4,096 structured objects,
+ * are written after it straight to the file. */
 #define EMIT_LINE_CAP (64u * 1024u)
 
 struct buf { char *p; size_t w; };
@@ -139,19 +142,25 @@ int emit_path(struct emitter *em, const struct belay_entry *before,
         }
         if (ap(&b, "]") == -1) return -1;
     }
-    if (findings != NULL && findings->n > 0) {
-        if (ap(&b, ",\"%s\":[", R[DF_FINDINGS].name) == -1) return -1;
-        for (size_t i = 0; i < findings->n; i++) {
-            if (ap(&b, "%s\"", i ? "," : "") == -1 ||
-                ap_escaped(&b, findings->item[i], strlen(findings->item[i])) == -1 ||
-                ap(&b, "\"") == -1)
-                return -1;
+    if (findings != NULL && findings_count(findings) > 0) {
+        if (fwrite(b.p, 1, b.w, em->f) != b.w || findings_write(findings, em->f) == -1) {
+            belay_err_set(BELAY_ERR_IO, errno, "diff: write failed");
+            return -1;
         }
-        if (ap(&b, "]") == -1) return -1;
+        b.w = 0;
     }
     if (ap(&b, "}") == -1) return -1;
     em->records++;
     return put_line(em, &b);
+}
+
+int emit_events(struct emitter *em, const struct belay_events *ev) {
+    if (events_write(ev, em->f) == -1) {
+        belay_err_set(BELAY_ERR_IO, errno, "diff: write failed");
+        return -1;
+    }
+    em->events = events_count(ev);
+    return 0;
 }
 
 int emit_trailer(struct emitter *em, const struct diff_inputs *in) {
@@ -159,8 +168,8 @@ int emit_trailer(struct emitter *em, const struct diff_inputs *in) {
     if (ap(&b, "{\"%s\":%zu", DIFF_TRAILER_END.name, em->records) == -1) return -1;
     for (int o = D_FIRST; o < D_OUTCOME_COUNT; o++)
         if (ap(&b, ",\"%s\":%zu", DIFF_OUTCOMES[o].name, em->count[o]) == -1) return -1;
-    if (ap(&b, ",\"%s\":%zu", DIFF_TRAILER_FIELDS[DT_DIR_TIMESTAMPS_ONLY].name,
-           em->dir_timestamps) == -1)
+    if (ap(&b, ",\"%s\":%zu,\"%s\":%zu", DIFF_TRAILER_FIELDS[DT_DIR_TIMESTAMPS_ONLY].name,
+           em->dir_timestamps, DIFF_TRAILER_FIELDS[DT_EVENTS].name, em->events) == -1)
         return -1;
     const struct { enum diff_trailer_field f; size_t v; } counts[] = {
         { DT_BEFORE_VANISHED, in->before->vanished }, { DT_BEFORE_UNSTABLE, in->before->unstable },
