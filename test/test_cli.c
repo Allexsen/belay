@@ -90,6 +90,7 @@ TEST(help_and_version_exit_0) {
 /* Q7: the binary has no session command. */
 TEST(the_session_engine_is_not_a_command) {
     ASSERT_EQ_INT(2, belay("run", NULL));
+    ASSERT_TRUE(strstr(g_err, "unknown command run") != NULL);
     ASSERT_EQ_INT(2, belay("commit", NULL));
     ASSERT_EQ_INT(2, belay("discard", NULL));
 }
@@ -164,6 +165,24 @@ TEST(a_component_swapped_after_resolution_is_refused) {
     ASSERT_EQ_INT(3, rc);
     ASSERT_TRUE(strstr(g_err, "changed during resolution") != NULL);
     sh("rm -f '%s' && mv '%s.aside' '%s'", g_victim, g_victim, g_victim);
+}
+
+/* The scope swapped for another directory after it was resolved and before
+ * the walk opened it: the walk's (dev, ino) check refuses it, exit 3. */
+static void swap_scope(const char *scope) {
+    char cmd[2000];
+    snprintf(cmd, sizeof cmd, "mv '%s' '%s.aside' && mkdir '%s'", scope, scope, scope);
+    if (system(cmd) != 0) { /* the assertions say */ }
+}
+
+TEST(a_scope_swapped_before_the_walk_is_refused) {
+    fresh();
+    state_capture_hook = swap_scope;
+    const int rc = belay("check", "--scope", g_scope, NULL);
+    state_capture_hook = NULL;
+    ASSERT_EQ_INT(3, rc);
+    ASSERT_TRUE(strstr(g_err, "changed during resolution") != NULL);
+    sh("rm -rf '%s' && mv '%s.aside' '%s'", g_scope, g_scope, g_scope);
 }
 
 /* Q6: belay's own state directory inside a scope is not recorded, and the
@@ -250,6 +269,7 @@ int main(void) {
     RUN(a_scope_that_cannot_be_resolved_is_refused_exit_3);
     RUN(a_scope_is_resolved_once_to_its_real_path);
     RUN(a_component_swapped_after_resolution_is_refused);
+    RUN(a_scope_swapped_before_the_walk_is_refused);
     RUN(the_state_directory_inside_the_scope_is_excluded_and_said);
     RUN(diff_keeps_its_capture_and_exit_code_is_opt_in);
     RUN(mark_says_when_it_reads_every_file);

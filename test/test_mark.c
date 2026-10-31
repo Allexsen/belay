@@ -237,6 +237,35 @@ TEST(an_unchanged_file_is_trusted_and_a_racy_one_read) {
     g_round_ns = 0;
 }
 
+/* S3 (M3): a file rewritten at the same size with its mtime put back -- the
+ * classic case only ctime reveals -- is read, and its new hash recorded. */
+TEST(a_same_size_rewrite_with_its_mtime_restored_is_read) {
+    g_round_ns = 0;
+    fresh_tree();
+    char prev[400], next[400], full[400], p[600];
+    snprintf(prev, sizeof prev, "%s/p.ndjson", g_dir);
+    snprintf(next, sizeof next, "%s/n.ndjson", g_dir);
+    snprintf(full, sizeof full, "%s/f.ndjson", g_dir);
+    struct belay_manifest_stats st;
+    REQUIRE(capture(prev, NULL, &st) == 0);
+    snprintf(p, sizeof p, "%s/d0/f0", g_tree);
+    struct stat before;
+    REQUIRE(stat(p, &before) == 0);
+    writef("d0/f0", "CONTENT 0000000X", 16);                 /* same size, other bytes */
+#ifdef __APPLE__
+    const struct timespec t[2] = { before.st_atimespec, before.st_mtimespec };
+#else
+    const struct timespec t[2] = { before.st_atim, before.st_mtim };
+#endif
+    REQUIRE(utimensat(AT_FDCWD, p, t, 0) == 0);               /* mtime put back; ctime moves */
+    REQUIRE(capture(next, prev, &st) == 0);
+    REQUIRE(capture(full, NULL, &st) == 0);
+    char *a = body(next), *b = body(full);
+    ASSERT_TRUE(a != NULL && b != NULL && strcmp(a, b) == 0);
+    free(a);
+    free(b);
+}
+
 /* A previous manifest with other limits, or another scope's, is not used:
  * a full walk, said. */
 TEST(an_unusable_previous_manifest_means_a_full_walk) {
@@ -324,6 +353,7 @@ int main(void) {
     RUN(mark_agrees_with_check_on_one_second_timestamps);
     RUN(mark_agrees_with_check_on_two_second_timestamps);
     RUN(an_unchanged_file_is_trusted_and_a_racy_one_read);
+    RUN(a_same_size_rewrite_with_its_mtime_restored_is_read);
     RUN(an_unusable_previous_manifest_means_a_full_walk);
     RUN(the_walk_reports_the_newest_ctime_it_saw);
     RUN(an_excluded_directory_is_not_recorded);
