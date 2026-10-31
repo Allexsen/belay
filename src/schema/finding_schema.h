@@ -9,6 +9,7 @@
 #ifndef BELAY_SCHEMA_FINDING_SCHEMA_H
 #define BELAY_SCHEMA_FINDING_SCHEMA_H
 
+#include <stdbool.h>
 #include <stddef.h>
 
 /* 0 is no kind: a finding that was never set fails (audit R1). */
@@ -25,12 +26,15 @@ enum finding_kind {
     FK_COUNT
 };
 
-enum field_type { FT_UNSET, FT_INT, FT_STRING, FT_BOOL };
+/* FT_BYTES: up to FINDING_BYTES_MAX bytes, written "<name>" when UTF-8 and
+ * "<name>_b64" otherwise, as the manifest writes bytes (decision 2026-10-31, b). */
+enum field_type { FT_UNSET, FT_INT, FT_STRING, FT_BOOL, FT_BYTES };
 
 #define LV_PATH  1u
 #define LV_EVENT 2u
 #define FINDING_FIELDS_MAX 5
 #define FINDING_STRING_MAX 1024u        /* bytes of a string field, and of the text */
+#define FINDING_BYTES_MAX 4095u         /* bytes of a bytes field: addendum A4's link target */
 #define FINDINGS_PER_RECORD 4096u       /* then one and_more (decision Q4) */
 #define EVENTS_PER_INTERP 65536u        /* then one and_more (diff-events E5) */
 
@@ -38,7 +42,8 @@ enum field_type { FT_UNSET, FT_INT, FT_STRING, FT_BOOL };
  * IN_CORE is none: the core's own kinds (decision P5). */
 #define IN_CORE 0u
 
-struct finding_field { const char *name; enum field_type type; };
+/* optional: absent exactly when the kind's meaning says (`?` in the pin). */
+struct finding_field { const char *name; enum field_type type; bool optional; };
 
 struct finding_kind_def {
     const char *name;
@@ -47,6 +52,7 @@ struct finding_kind_def {
     struct finding_field field[FINDING_FIELDS_MAX];   /* in order; name NULL ends */
     const char *text;                     /* the template: {field} is replaced */
     const char *meaning;                  /* the spec's table (generated) */
+    const char *text_partial;             /* the template when an optional field is absent */
 };
 
 extern const struct finding_kind_def FINDING_KINDS[FK_COUNT];

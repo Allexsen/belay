@@ -10,6 +10,9 @@
 #define S(n) { n, FT_STRING }
 #define N(n) { n, FT_INT }
 #define B(n) { n, FT_BOOL }
+#define BO(n) { n, FT_BOOL, true }
+#define NO(n) { n, FT_INT, true }
+#define BY(n) { n, FT_BYTES }
 
 const struct finding_kind_def FINDING_KINDS[FK_COUNT] = {
     [FK_COULD_NOT_INTERPRET] = { "could_not_interpret", IN_CORE, LV_PATH | LV_EVENT, { { 0 } },
@@ -51,9 +54,11 @@ const struct finding_kind_def FINDING_KINDS[FK_COUNT] = {
         { S("name"), S("from"), S("to") }, "{name} {from} -> {to}",
         "The same; equal by PEP 440, or not a PEP 440 version." },
     [FK_PIP_REINSTALLED] = { "pip_reinstalled", I_PIP, LV_EVENT,
-        { S("name"), S("version"), N("files_added"), N("files_removed"), N("files_changed") },
+        { S("name"), S("version"), NO("files_added"), NO("files_removed"), NO("files_changed") },
         "reinstalled {name} {version}: +{files_added} -{files_removed} ~{files_changed} files",
-        "The same dist-info on both sides, its RECORD changed." },
+        "The same dist-info on both sides, its RECORD changed; unknown on both sides, provisional and "
+        "not counted.",
+        "reinstalled {name} {version} (files not counted)" },
     [FK_DPKG_INSTALLED] = { "dpkg_installed", I_DPKG, LV_EVENT,
         { S("package"), S("arch"), S("version") }, "installed {package}:{arch} {version}",
         "`installed` after and not before." },
@@ -76,11 +81,11 @@ const struct finding_kind_def FINDING_KINDS[FK_COUNT] = {
         "deleted {ref} (was {from})", "A ref went away." },
     [FK_GIT_REF_MOVED] = { "git_ref_moved", I_GIT, LV_PATH, { S("ref"), S("from"), S("to") },
         "{ref} {from} -> {to}", "A ref names another commit." },
-    [FK_GIT_HOOK_ADDED] = { "git_hook_added", I_GIT, LV_PATH, { S("hook"), B("executable"), S("target") },
+    [FK_GIT_HOOK_ADDED] = { "git_hook_added", I_GIT, LV_PATH, { S("hook"), BO("executable"), BY("target") },
         "hook {hook} added", "" },
-    [FK_GIT_HOOK_REMOVED] = { "git_hook_removed", I_GIT, LV_PATH, { S("hook"), S("target") }, "hook {hook} removed",
+    [FK_GIT_HOOK_REMOVED] = { "git_hook_removed", I_GIT, LV_PATH, { S("hook"), BY("target") }, "hook {hook} removed",
         "" },
-    [FK_GIT_HOOK_CHANGED] = { "git_hook_changed", I_GIT, LV_PATH, { S("hook"), B("executable"), S("target") },
+    [FK_GIT_HOOK_CHANGED] = { "git_hook_changed", I_GIT, LV_PATH, { S("hook"), BO("executable"), BY("target") },
         "hook {hook} changed", "Its content changed." },
     [FK_GIT_HOOK_EXECUTABLE_CHANGED] = { "git_hook_executable_changed", I_GIT, LV_PATH,
         { S("hook"), B("executable") }, "hook {hook} executable: {executable}",

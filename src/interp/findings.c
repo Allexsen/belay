@@ -55,10 +55,23 @@ static bool valid(int kind, int interp, unsigned level, const struct belay_fv *v
     const struct finding_kind_def *d = &FINDING_KINDS[kind];
     if (d->name == NULL || !(d->levels & level) || !(d->interps & (1u << interp))) return false;
     if (n != finding_nfields((enum finding_kind)kind)) return false;
-    for (size_t k = 0; k < n; k++)
+    bool partial = false;
+    for (size_t k = 0; k < n; k++) {
+        if (v[k].absent) {                       /* only where the kind allows it */
+            if (!d->field[k].optional) return false;
+            partial = true;
+            continue;
+        }
         if (d->field[k].type == FT_STRING && !belay_finding_string_ok(v[k].s, v[k].len)) return false;
+        if (d->field[k].type == FT_BYTES &&
+            (v[k].len > FINDING_BYTES_MAX || (v[k].s == NULL && v[k].len) ||
+             (v[k].len && memchr(v[k].s, '\0', v[k].len) != NULL)))
+            return false;
+    }
+    const char *tmpl = partial ? d->text_partial : d->text;
+    if (tmpl == NULL) tmpl = d->text;            /* no second template: absent fields unnamed */
     size_t w = 0;
-    for (const char *t = d->text; *t; ) {
+    for (const char *t = tmpl; *t; ) {
         const char *open = strchr(t, '{');
         const size_t lit = open ? (size_t)(open - t) : strlen(t);
         if (w + lit > FINDING_STRING_MAX) return false;
@@ -70,7 +83,8 @@ static bool valid(int kind, int interp, unsigned level, const struct belay_fv *v
         while (k < n && (strlen(d->field[k].name) != (size_t)(close - open - 1) ||
                          memcmp(d->field[k].name, open + 1, (size_t)(close - open - 1)) != 0))
             k++;
-        if (k == n) return false;                        /* a template naming no field: a bug */
+        if (k == n || v[k].absent || d->field[k].type == FT_BYTES)
+            return false;                                /* naming no field, or one not there: a bug */
         char num[32];
         const char *val = num;
         size_t vl;
@@ -92,6 +106,19 @@ static int put_fields(struct sbuf *b, int kind, const struct belay_fv *v, size_t
     const struct finding_kind_def *d = &FINDING_KINDS[kind];
     for (size_t k = 0; k < n; k++) {
         char num[32];
+        if (v[k].absent) continue;
+        if (d->field[k].type == FT_BYTES) {          /* "<name>" or "<name>_b64" */
+            static char enc[6 * FINDING_BYTES_MAX + 8];
+            const char *p = v[k].s ? v[k].s : "";
+            const bool utf8 = belay_utf8_valid(p, v[k].len);
+            if (sb_str(b, ",\"") || sb_str(b, d->field[k].name) || sb_str(b, utf8 ? "\":\"" : "_b64\":\""))
+                return -1;
+            if ((utf8 ? belay_json_escape(enc, sizeof enc, p, v[k].len)
+                      : belay_base64_encode(enc, sizeof enc, p, v[k].len)) == -1 ||
+                sb_str(b, enc) || sb_str(b, "\""))
+                return -1;
+            continue;
+        }
         if (sb_str(b, ",\"") || sb_str(b, d->field[k].name) || sb_str(b, "\":")) return -1;
         if (d->field[k].type == FT_STRING) {
             if (sb_json(b, v[k].s ? v[k].s : "", v[k].len)) return -1;

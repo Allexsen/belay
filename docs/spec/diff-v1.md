@@ -288,10 +288,12 @@ paths, so a consumer never reads "no packages changed" where the change could no
 
 **Findings.** Each finding is an object: `{"kind": ..., <its fields, in order>, "text": ...}`. `int`
 fields are non-negative integers, `string` fields UTF-8 of at most 1,024 bytes, `bool` fields `true`
-or `false`; `text` is the kind's template with each `{field}` replaced by its value, at most 1,024
-bytes. The core checks every finding against its kind's row below and renders its text, so an
-interpreter supplies values, never text: a finding that breaks the row (an unknown kind, a kind of
-another interpreter or level, a field missing, extra or over its bound) is replaced by
+or `false`, `bytes` fields up to 4,095 bytes written as `<name>` when UTF-8 and `<name>_b64`
+(base64) otherwise; an optional field (`?`) is absent where its kind says, and then the kind's
+second template is used; `text` is the kind's template with each `{field}` replaced by its value, at
+most 1,024 bytes. The core checks every finding against its kind's row below and renders its text,
+so an interpreter supplies values, never text: a finding that breaks the row (an unknown kind, a
+kind of another interpreter or level, a field missing, extra or over its bound) is replaced by
 `invalid_finding`. `could_not_interpret`, `invalid_finding` and `and_more` are the core's alone: one
 an interpreter adds is itself replaced by `invalid_finding`, so no interpreter can write "could not
 interpret" over its own findings. An interpreter that fails on a path has its findings there
@@ -351,7 +353,7 @@ know. Removing a kind or changing a field's meaning is a new diff version.
 | `pip_upgraded` | pip | event | name: string, from: string, to: string | `upgraded {name} {from} -> {to}` | One removed and one added of a name; to higher (PEP 440). |
 | `pip_downgraded` | pip | event | name: string, from: string, to: string | `downgraded {name} {from} -> {to}` | The same; to lower. |
 | `pip_version_changed` | pip | event | name: string, from: string, to: string | `{name} {from} -> {to}` | The same; equal by PEP 440, or not a PEP 440 version. |
-| `pip_reinstalled` | pip | event | name: string, version: string, files_added: int, files_removed: int, files_changed: int | `reinstalled {name} {version}: +{files_added} -{files_removed} ~{files_changed} files` | The same dist-info on both sides, its RECORD changed. |
+| `pip_reinstalled` | pip | event | name: string, version: string, files_added: int?, files_removed: int?, files_changed: int? | `reinstalled {name} {version}: +{files_added} -{files_removed} ~{files_changed} files`; counts absent: `reinstalled {name} {version} (files not counted)` | The same dist-info on both sides, its RECORD changed; unknown on both sides, provisional and not counted. |
 | `dpkg_installed` | dpkg | event | package: string, arch: string, version: string | `installed {package}:{arch} {version}` | `installed` after and not before. |
 | `dpkg_removed` | dpkg | event | package: string, arch: string, version: string | `removed {package}:{arch} {version}` | `installed` before and not after. |
 | `dpkg_upgraded` | dpkg | event | package: string, arch: string, from: string, to: string | `upgraded {package}:{arch} {from} -> {to}` | `installed` on both sides; to higher (Debian version comparison). |
@@ -361,9 +363,9 @@ know. Removing a kind or changing a field's meaning is a new diff version.
 | `git_ref_created` | git | path | ref: string, to: string | `created {ref} at {to}` | A ref appeared. |
 | `git_ref_deleted` | git | path | ref: string, from: string | `deleted {ref} (was {from})` | A ref went away. |
 | `git_ref_moved` | git | path | ref: string, from: string, to: string | `{ref} {from} -> {to}` | A ref names another commit. |
-| `git_hook_added` | git | path | hook: string, executable: bool, target: string | `hook {hook} added` |  |
-| `git_hook_removed` | git | path | hook: string, target: string | `hook {hook} removed` |  |
-| `git_hook_changed` | git | path | hook: string, executable: bool, target: string | `hook {hook} changed` | Its content changed. |
+| `git_hook_added` | git | path | hook: string, executable: bool?, target: bytes | `hook {hook} added` |  |
+| `git_hook_removed` | git | path | hook: string, target: bytes | `hook {hook} removed` |  |
+| `git_hook_changed` | git | path | hook: string, executable: bool?, target: bytes | `hook {hook} changed` | Its content changed. |
 | `git_hook_executable_changed` | git | path | hook: string, executable: bool | `hook {hook} executable: {executable}` | Only its executable bit changed. |
 | `git_index_changed` | git | path | -- | `index changed` | `.git/index` (hashed, never stored). |
 | `git_reflog_appended` | git | path | ref: string, entries: int | `{ref}: {entries} reflog entries` | Entries appended to the ref's reflog. |
@@ -430,16 +432,16 @@ dialect, so a RECORD that is not UTF-8, or a row of other than three fields, can
 compared by path, a path listed twice keeping its first row; `files_changed` counts the paths whose
 hash or size differs. Only a reinstall reads content (both RECORDs); the others come from the paths
 alone. A RECORD whose outcome is `unknown` pairs like any other, by its directory's name, and every
-event it takes part in is provisional; one present on both sides is no proven reinstall and gives
-none (its rows are not counted). An event lists the RECORD paths it was derived from. Event order:
-by normalized name (none first), then kind (in the Kinds table's order), then directory, then the
-paths it lists. A dist-info that cannot be named (no `-`, an empty name or version, or one that is
-not a string field's value), or a RECORD it must read that cannot be parsed, is one
-`could_not_interpret` event naming that RECORD; one pair key with RECORDs both added and removed
-other than exactly one of each (no kind says that) is one `could_not_interpret` event naming them,
-in that name's place; their records carry nothing, as the pairing is known only once every path
-record is written. Several added with none removed are each `pip_installed`; several removed with
-none added, each `pip_removed`.
+event it takes part in is provisional; one present on both sides is a provisional `pip_reinstalled`
+whose rows are not compared: its three counts are absent, under the kind's second template. An event
+lists the RECORD paths it was derived from. Event order: by normalized name (none first), then kind
+(in the Kinds table's order), then directory, then the paths it lists. A dist-info that cannot be
+named (no `-`, an empty name or version, or one that is not a string field's value), or a RECORD it
+must read that cannot be parsed, is one `could_not_interpret` event naming that RECORD; one pair key
+with RECORDs both added and removed other than exactly one of each (no kind says that) is one
+`could_not_interpret` event naming them, in that name's place; their records carry nothing, as the
+pairing is known only once every path record is written. Several added with none removed are each
+`pip_installed`; several removed with none added, each `pip_removed`.
 
 **dpkg.** From the `status` file before and after (an absent side lists no packages): a package is
 keyed by `Package` and `Architecture` (empty when absent), the first stanza of a key kept, and is
@@ -467,14 +469,15 @@ equal. A loose ref or a line of `packed-refs` (in ref order): `git_ref_created`,
 hook, from the manifest alone, is a regular file or a symlink -- git follows a symlinked hook, so it
 is a working hook; a directory is none: added, removed, changed (its content, a link's target, or a
 file becoming a link or back), or -- a file's content unchanged -- its executable bit (the owner's),
-whatever else changed. `executable` is after's (true for a symlink, whose target's mode is not
-recorded); `target` is the link's target, empty for a file. The index: `git_index_changed` when it
-is added, removed or its content changed (hashed, never stored). A reflog (`logs/HEAD` is ref
-`HEAD`, `logs/refs/...` is `refs/...`): when before's bytes are a prefix of after's ending at a
-line's end (an absent before is empty), `git_reflog_appended` counts the entries after it, and each
-of those that is not a plain commit (operation `commit` or `commit (initial)`) or a fast-forward
-(its message contains `Fast-forward`) is a `git_reflog_move`, its operation being the message before
-its first `:`; otherwise, or when the reflog was removed (no copy needed), `git_reflog_rewritten`.
-**The reflog is written by the process being watched: it is evidence, not proof.** A process can
-write any reflog it likes; a capture taken from outside the process (host-reader mode) is the answer
-when that matters.
+whatever else changed. `executable` is after's owner bit, for a file; it is absent for a symlink,
+whose own mode says nothing about its target. `target` is the link's target, empty for a file, up to
+4,095 bytes, and `target_b64` instead when it is not UTF-8: a planted hook is always reported. The
+index: `git_index_changed` when it is added, removed or its content changed (hashed, never stored).
+A reflog (`logs/HEAD` is ref `HEAD`, `logs/refs/...` is `refs/...`): when before's bytes are a
+prefix of after's ending at a line's end (an absent before is empty), `git_reflog_appended` counts
+the entries after it, and each of those that is not a plain commit (operation `commit` or `commit
+(initial)`) or a fast-forward (its message contains `Fast-forward`) is a `git_reflog_move`, its
+operation being the message before its first `:`; otherwise, or when the reflog was removed (no copy
+needed), `git_reflog_rewritten`. **The reflog is written by the process being watched: it is
+evidence, not proof.** A process can write any reflog it likes; a capture taken from outside the
+process (host-reader mode) is the answer when that matters.

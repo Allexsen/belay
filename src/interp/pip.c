@@ -38,6 +38,7 @@ struct dist {
     size_t key_len, norm_len, name_len, version_len, path_len;
     enum change change;
     size_t files_added, files_removed, files_changed;
+    bool uncounted;                 /* a reinstall whose rows were not compared */
     bool prov;                      /* its RECORD's outcome is unknown (P7) */
 };
 
@@ -263,7 +264,6 @@ static enum belay_interp_result explain(void *state, const struct belay_interp_i
     /* An unknown RECORD still pairs, by its directory's name (P7); one on both
      * sides is no proven reinstall, and its rows are not counted. */
     p->prov = strcmp(in->outcome, "unknown") == 0;
-    if (p->prov && b && a) return BELAY_INTERP_DECLINE;
     struct dist d = { 0 };
     d.change = b && a ? C_REINSTALLED : a ? C_ADDED : C_REMOVED;
     d.prov = p->prov;
@@ -281,7 +281,11 @@ static enum belay_interp_result explain(void *state, const struct belay_interp_i
         return not_interpreted(p, in);
     }
     enum belay_interp_result r = BELAY_INTERP_FINDINGS;
-    if (d.change == C_REINSTALLED) {
+    if (d.change == C_REINSTALLED && p->prov) {
+        /* Unknown on both sides: a provisional reinstall, its rows not
+         * counted (decision 2026-10-31, c): graders read events. */
+        d.uncounted = true;
+    } else if (d.change == C_REINSTALLED) {
         unsigned char *buf[2] = { NULL, NULL };
         size_t len[2];
         bool ok = true, error = false;
@@ -387,9 +391,9 @@ static int emit(struct pip *p, struct belay_events *ev, const struct pev *e) {
     } else if (e->kind == FK_PIP_REINSTALLED) {
         v[0] = (struct belay_fv)FV(x->name, x->name_len);
         v[1] = (struct belay_fv)FV(x->version, x->version_len);
-        v[2] = (struct belay_fv){ .i = x->files_added };
-        v[3] = (struct belay_fv){ .i = x->files_removed };
-        v[4] = (struct belay_fv){ .i = x->files_changed };
+        v[2] = (struct belay_fv){ .i = x->files_added, .absent = x->uncounted };
+        v[3] = (struct belay_fv){ .i = x->files_removed, .absent = x->uncounted };
+        v[4] = (struct belay_fv){ .i = x->files_changed, .absent = x->uncounted };
         n = 5;
     } else {
         v[0] = (struct belay_fv)FV(y->name, y->name_len);

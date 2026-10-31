@@ -249,7 +249,7 @@ static void diff_fields_block(void) {
 
 static void diff_findings_block(void) {
     static const char *const T[] = { [FT_UNSET] = NULL, [FT_INT] = "int", [FT_STRING] = "string",
-                                     [FT_BOOL] = "bool" };
+                                     [FT_BOOL] = "bool", [FT_BYTES] = "bytes" };
     printf("| kind | interpreter | level | fields | text | meaning |\n|---|---|---|---|---|---|\n");
     for (int k = FK_UNSET + 1; k < FK_COUNT; k++) {
         const struct finding_kind_def *d = &FINDING_KINDS[k];
@@ -264,13 +264,16 @@ static void diff_findings_block(void) {
         w = 0;
         for (int f = 0; f < FINDING_FIELDS_MAX && d->field[f].name; f++) {
             if (T[d->field[f].type] == NULL) abort();
-            w += (size_t)snprintf(fl + w, sizeof fl - w, "%s%s: %s", w ? ", " : "", d->field[f].name,
-                                  T[d->field[f].type]);
+            w += (size_t)snprintf(fl + w, sizeof fl - w, "%s%s: %s%s", w ? ", " : "", d->field[f].name,
+                                  T[d->field[f].type], d->field[f].optional ? "?" : "");
         }
         if (strchr(d->meaning, '|') != NULL || strchr(d->text, '|') != NULL) abort();
-        printf("| `%s` | %s | %s | %s | `%s` | %s |\n", d->name, in,
+        char tx[512];
+        if (d->text_partial) snprintf(tx, sizeof tx, "`%s`; counts absent: `%s`", d->text, d->text_partial);
+        else snprintf(tx, sizeof tx, "`%s`", d->text);
+        printf("| `%s` | %s | %s | %s | %s | %s |\n", d->name, in,
                d->levels == (LV_PATH | LV_EVENT) ? "path, event" : d->levels == LV_EVENT ? "event" : "path",
-               w ? fl : "--", d->text, d->meaning);
+               w ? fl : "--", tx, d->meaning);
     }
 }
 

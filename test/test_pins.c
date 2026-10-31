@@ -459,13 +459,15 @@ static unsigned interps_of(const char *s) {
 /* "name: int, other: string" -> the schema's field list, written back the
  * same way, so the two compare as strings. */
 static void fields_of(const struct finding_kind_def *d, char *out, size_t cap) {
-    static const char *const T[] = { [FT_INT] = "int", [FT_STRING] = "string", [FT_BOOL] = "bool" };
+    static const char *const T[] = { [FT_INT] = "int", [FT_STRING] = "string", [FT_BOOL] = "bool",
+                                     [FT_BYTES] = "bytes" };
     size_t w = 0;
     out[0] = '\0';
     for (int k = 0; k < FINDING_FIELDS_MAX && d->field[k].name; k++)
-        w += (size_t)snprintf(out + w, cap - w, "%s%s: %s", k ? ", " : "", d->field[k].name,
-                              d->field[k].type < FT_UNSET || d->field[k].type > FT_BOOL ||
-                              d->field[k].type == FT_UNSET ? "?" : T[d->field[k].type]);
+        w += (size_t)snprintf(out + w, cap - w, "%s%s: %s%s", k ? ", " : "", d->field[k].name,
+                              d->field[k].type <= FT_UNSET || d->field[k].type > FT_BYTES
+                                  ? "??" : T[d->field[k].type],
+                              d->field[k].optional ? "?" : "");
     if (w == 0) snprintf(out, cap, "--");
 }
 
@@ -492,9 +494,20 @@ TEST(finding_kinds_pin_and_schema_agree_both_ways) {
         char f[256];
         fields_of(d, f, sizeof f);
         if (strcmp(f, t.cell[i][3]) != 0) BELAY_FAIL("%s: fields \"%s\", schema \"%s\"", d->name, t.cell[i][3], f);
-        unquote(t.cell[i][4]);
-        if (strcmp(d->text, t.cell[i][4]) != 0)
-            BELAY_FAIL("%s: text \"%s\", schema \"%s\"", d->name, t.cell[i][4], d->text);
+        /* "`template`" or "`template`; <when>: `second template`" */
+        char *c = t.cell[i][4], *second = NULL;
+        char *semi = strstr(c, "`; ");
+        if (semi != NULL) {
+            semi[1] = '\0';
+            second = strchr(semi + 2, '`');
+        }
+        unquote(c);
+        if (second != NULL) unquote(second);
+        if (strcmp(d->text, c) != 0) BELAY_FAIL("%s: text \"%s\", schema \"%s\"", d->name, c, d->text);
+        if ((second == NULL) != (d->text_partial == NULL) ||
+            (second != NULL && strcmp(second, d->text_partial) != 0))
+            BELAY_FAIL("%s: second template \"%s\", schema \"%s\"", d->name, second ? second : "(none)",
+                       d->text_partial ? d->text_partial : "(none)");
     }
     for (int k = FK_UNSET + 1; k < FK_COUNT; k++)
         if (seen[k] != 1) BELAY_FAIL("%s: listed %d times by the pin", FINDING_KINDS[k].name, seen[k]);

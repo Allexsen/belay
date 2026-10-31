@@ -134,6 +134,38 @@ TEST(a_finding_that_breaks_its_row_is_invalid_finding) {
     findings_free(&f);
 }
 
+/* Decisions 2026-10-31 (a, b, c): an optional field may be absent, and only
+ * an optional one; a kind with absent fields renders its second template;
+ * a bytes field is up to 4,095 bytes, written <name>_b64 when not UTF-8. */
+TEST(optional_and_bytes_fields_follow_their_rows) {
+    struct belay_findings f = { 0 };
+    findings_reset(&f, BELAY_INTERP_GIT);
+    const struct belay_fv ok[] = { S("pre-commit"), { .absent = true }, S("/x") };
+    ASSERT_EQ_INT(0, belay_finding(&f, FK_GIT_HOOK_ADDED, ok, 3));
+    ASSERT_EQ_STR(",\"findings\":[{\"kind\":\"git_hook_added\",\"hook\":\"pre-commit\",\"target\":\"/x\","
+                  "\"text\":\"hook pre-commit added\"}]", written(&f));
+    findings_reset(&f, BELAY_INTERP_GIT);
+    const struct belay_fv bad[] = { { .absent = true }, { .b = true }, S("") };   /* hook is not optional */
+    ASSERT_EQ_INT(0, belay_finding(&f, FK_GIT_HOOK_ADDED, bad, 3));
+    ASSERT_TRUE(strstr(written(&f), "invalid_finding") != NULL);
+    findings_reset(&f, BELAY_INTERP_GIT);
+    const struct belay_fv nul[] = { S("h"), { .b = true }, { .s = "a\0b", .len = 3 } };   /* no NUL in bytes */
+    ASSERT_EQ_INT(0, belay_finding(&f, FK_GIT_HOOK_ADDED, nul, 3));
+    ASSERT_TRUE(strstr(written(&f), "invalid_finding") != NULL);
+    findings_free(&f);
+    struct belay_events e;
+    events_init(&e);
+    e.interp = BELAY_INTERP_PIP;
+    const char *const p[] = { "x" };
+    const size_t l[] = { 1 };
+    const struct belay_fv some[] = { S("six"), S("1"), { .absent = true }, I(1), I(2) };  /* one absent */
+    ASSERT_EQ_INT(0, belay_event(&e, FK_PIP_REINSTALLED, some, 5, p, l, 1, 0));
+    ASSERT_EQ_STR("{\"event\":\"pip_reinstalled\",\"interp\":\"pip\",\"name\":\"six\",\"version\":\"1\","
+                  "\"files_removed\":1,\"files_changed\":2,\"text\":\"reinstalled six 1 (files not counted)\","
+                  "\"paths\":[\"x\"]}\n", ev_written(&e));
+    events_free(&e);
+}
+
 /* Decision Q4: at most 4,096 findings on a record; past that the last place
  * is one and_more counting the rest. */
 TEST(past_4096_findings_the_last_is_and_more) {
@@ -351,6 +383,7 @@ int main(void) {
     RUN(strings_and_bools_render_and_escape);
     RUN(no_findings_write_nothing);
     RUN(a_finding_that_breaks_its_row_is_invalid_finding);
+    RUN(optional_and_bytes_fields_follow_their_rows);
     RUN(past_4096_findings_the_last_is_and_more);
     RUN(an_event_lists_its_paths_sorted_and_once);
     RUN(an_event_with_a_non_utf8_path_lists_them_all_in_base64);
