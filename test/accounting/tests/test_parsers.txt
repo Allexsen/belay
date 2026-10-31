@@ -1,4 +1,5 @@
 a_dpkg_status_file_gives_each_package
+a_long_field_that_is_not_read_is_fine
 a_malformed_dpkg_status_is_an_error
 a_pip_record_gives_each_row
 a_malformed_pip_record_is_an_error

@@ -58,6 +58,23 @@ TEST(a_dpkg_status_file_gives_each_package) {
     ASSERT_TRUE(strcmp(g_seen[2], "held|all|1.0|hold ok installed") == 0);
 }
 
+/* A field the parser does not read may be any length: real status files
+ * carry Depends and Static-Built-Using lines of several KiB (found running
+ * on a real /var/lib/dpkg/status, 2026-10-31). */
+TEST(a_long_field_that_is_not_read_is_fine) {
+    char *s = malloc(8192);
+    REQUIRE(s != NULL);
+    int w = sprintf(s, "Package: go-tool\nStatus: install ok installed\nStatic-Built-Using: ");
+    memset(s + w, 'x', 5000);
+    w += 5000;
+    w += sprintf(s + w, "\nVersion: 1.0\n");
+    g_n = 0;
+    ASSERT_EQ_INT(0, stanza_each(s, (size_t)w, keep_pkg, NULL));
+    ASSERT_EQ_INT(1, g_n);
+    ASSERT_TRUE(strcmp(g_seen[0], "go-tool||1.0|install ok installed") == 0);
+    free(s);
+}
+
 TEST(a_malformed_dpkg_status_is_an_error) {
     static const char *const bad[] = {
         "Package: a\nnot a field\n",                /* neither field nor continuation */
@@ -250,6 +267,7 @@ TEST(a_rewrite_past_the_bound_is_not_counted) {
 
 int main(void) {
     RUN(a_dpkg_status_file_gives_each_package);
+    RUN(a_long_field_that_is_not_read_is_fine);
     RUN(a_malformed_dpkg_status_is_an_error);
     RUN(a_pip_record_gives_each_row);
     RUN(a_malformed_pip_record_is_an_error);
