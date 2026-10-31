@@ -22,13 +22,14 @@ explicit OK. Removing a kind or changing a field's meaning is a diff.v1 version 
 
 ## Kinds
 
-`level`: `path` -- in a path record's `findings`; `event` -- an event record.
+`level`: `path` -- in a path record's `findings`; `event` -- an event record; `path, event` -- both.
 
 | kind | interpreter | level | fields | text | meaning |
 |---|---|---|---|---|---|
 | could_not_interpret | any | path | -- | `could not interpret` | The interpreter failed on this path (R11); nothing else from it here. |
 | invalid_finding | any | path | -- | `invalid finding` | A finding that broke the rules above, replaced. |
 | and_more | any | path | n: int | `and {n} more` | The findings past the 4,096th of this record, counted. |
+| content_unavailable | text, pip, dpkg, git | path, event | reason: string, side: string | `content unavailable ({side}): {reason}` | The interpreter needs the stored copy of a path it claims, on a side where the path exists, and cannot read it. reason: `no_store` (the diff was given no store), `missing`, `too_large` (over the interpreter's bound), `corrupt` (does not hash to its name). side: `before` or `after`, one finding per side. Never a silent decline (decision 2026-10-31). pip and dpkg, which emit events from that content, also emit one `content_unavailable` event per reason, with side `before` or `after` when all its paths share it, else `both`, naming the paths: a consumer never reads "no packages changed" where the change could not be read. |
 | text_changed | text | path | lines_added: int, lines_deleted: int, first_changed_line: int | `+{lines_added} -{lines_deleted} lines, first change at line {first_changed_line}` | Stored on both sides. lines_deleted = before's lines minus the longest common subsequence of lines, lines_added = after's minus it; first_changed_line: 1-based, in before, the first line past the common prefix. |
 | text_rewritten | text | path | lines_before: int, lines_after: int, first_changed_line: int | `rewritten: {lines_before} lines before, {lines_after} after, first change at line {first_changed_line}` | As text_changed, when the two differ in more than 2,000 lines (edit distance): the counts are not computed. |
 | text_added | text | path | lines: int | `{lines} lines` | Added, stored. |
