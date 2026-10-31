@@ -37,8 +37,9 @@ The corpus has three parts:
     change, hash limits, sealing and unsealing directories, unstable
     listings, one-sided paths below raced and plain non-directories,
     one-sided raced entries, a regular file mounted on one side or both,
-    `unverified` on the other side or not (pin O8), the trailer's walk
-    counts, the root itself,
+    `unverified` on the other side or not (pin O8), a mounted regular file
+    whose type changes while raced on either side or both (O8 across a type
+    change), the trailer's walk counts, the root itself,
     names sorting before ".", non-UTF-8 and escaped names;
   - random pairs: n-bases random trees, each with four mutated variants
     (several changes at once), compared in both directions and with
@@ -1988,6 +1989,43 @@ def mount_unverified(w, rng):
                               'no other flag'])
 
 
+def mount_raced_type_changes(w, rng):
+    """Pin O8 across a type change. A mounted regular file (its `unverified`
+    is the mount's: manifest-v1 rules 5 and 21) on one side and another type
+    on the other, written both ways round (the type changes from it, then to
+    it), `raced` on the mount side only, on the other side only, or on both,
+    and no other flag. Rule 1 before rule 2: `unknown`; `changed` is ["type"]
+    ("when the types differ, `["type"]`"); `type_before` is the type before
+    ("whatever the outcome -- ... or `unknown` when `raced` is on either
+    side"); the reasons are "the reasons of every flag on either side --
+    except `unverified` on a side that also carries `mount`" (diff-v1.md, the
+    `unknown` sentence; pins O7 and O8): `mount` and `raced`, never
+    `unverified`. The other side carries no `mount`. It is a directory only
+    when it does not race: a raced directory carries `unreadable` or `mount`
+    (manifest-v1 rule 10), which would be a reason of its own."""
+    for t2 in ('lnk', 'fifo', 'sock', 'blk', 'chr', 'dir'):
+        for where in ('mount', 'other', 'both'):
+            if t2 == 'dir' and where != 'mount':
+                continue
+            def build(rng, t2=t2, where=where):
+                t = base_tree(rng)
+                e = clear_flags(subject(rng, t, 'reg'), t, rng)     # hashed, no flag
+                m = in_context('mount', e, t, rng)                 # mount, unverified
+                o = change_type(e, t2, t, rng)
+                if o is None:
+                    return None
+                if where in ('mount', 'both'):
+                    m['raced'] = True
+                if where in ('other', 'both'):
+                    o['raced'] = True
+                return with_subject(t, m, o)
+            side = {'mount': 'on the mount side only', 'other': 'on the other side only',
+                    'both': 'on both sides'}[where]
+            w.targeted(rng, 'a mounted reg -> %s, raced %s (O8)' % (t2, side), build,
+                       scenarios=['a raced type change %s a mounted regular file, raced %s, no '
+                                  'other flag' % (d, side) for d in ('from', 'to')])
+
+
 def digest_of(items):
     """A set's xattrs_sha256, as manifest-v1.md defines it ("Field rules a
     reader MUST enforce"): "the sha256 of the bytes `xattrs` would hold
@@ -2115,6 +2153,7 @@ def targeted(w, rng):
     below_a_non_directory(w, rng)
     mount_root_attributes(w, rng)
     mount_unverified(w, rng)
+    mount_raced_type_changes(w, rng)
     xattrs_spellings(w, rng)
     trailer_counts(w, rng)
 
