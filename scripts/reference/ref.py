@@ -69,6 +69,14 @@ KIND_ROWS = {
     "dpkg_state_changed": (["package", "arch", "from", "to"], "{package}:{arch} {from} -> {to}"),
 }
 
+# The optional fields (`?`) and the second template a kind gives, used when
+# any of them is absent (finding-kinds.md, "The object"). An absent field is
+# one missing from the values; it never appears in the object.
+OPTIONAL = {
+    "pip_reinstalled": (["files_added", "files_removed", "files_changed"],
+                        "reinstalled {name} {version} (files not counted)"),
+}
+
 # READING: the order of content_unavailable events of different reasons is not
 # stated; they are ordered as the spec lists the reasons.
 REASONS = ["no_store", "missing", "too_large", "corrupt"]
@@ -126,7 +134,10 @@ def string_ok(b):
 def render(kind, values):
     """The template with each {field} replaced by its value, in one pass: a
     value that itself holds "{...}" is not replaced again."""
-    _, template = KIND_ROWS[kind]
+    fields, template = KIND_ROWS[kind]
+    if any(f not in values for f in fields):
+        optional, template = OPTIONAL[kind]
+        assert all(f in values or f in optional for f in fields)
 
     def one(m):
         v = values[m.group(1)]
@@ -138,6 +149,8 @@ def fields_json(kind, values):
     fields, _ = KIND_ROWS[kind]
     parts = []
     for f in fields:
+        if f not in values:
+            continue                    # an optional field, absent
         v = values[f]
         parts.append(jstr(f) + b":" + (str(v).encode() if isinstance(v, int) else jstr(v)))
     return parts
@@ -682,6 +695,7 @@ def interpret(before_fn, after_fn, store):
     dpkg_jobs = []                      # (path, before bytes|None, after bytes|None)
     pip_pairs = {}                      # RECORD path -> "A" (added) | "R" (removed)
     pip_reinst = []                     # (path, before bytes, after bytes)
+    pip_uncounted = []                  # RECORDs unknown on both sides
     pip_names = []                      # RECORD paths to name
 
     for path in sorted(set(bents) | set(aents)):
@@ -715,19 +729,25 @@ def interpret(before_fn, after_fn, store):
             # is not parsed.
         elif read and who == "pip" and fnmatch.fnmatchcase(absp, PIP_RECORD) and (breg or areg):
             if breg and areg:
-                # spec: an unknown RECORD present on both sides "is no proven
-                # reinstall and gives none (its rows are not counted)".
-                # READING: nor is its dist-info named (nothing derives from it).
+                # spec: an unknown RECORD present on both sides "is a
+                # provisional pip_reinstalled whose rows are not compared:
+                # its three counts are absent" -- so its copies are not read
+                # (no content_unavailable). It is named like any other: one
+                # that cannot be named is E10's could_not_interpret
+                # (provisional; no record finding, its outcome unknown).
                 # spec (E10): a dist-info that cannot be named -- "nothing
                 # more is read from it", so no content_unavailable either.
-                if oc != "unknown" and nameable(path):
+                if oc == "unknown":
+                    pip_names.append(path)
+                    pip_uncounted.append(path)
+                elif nameable(path):
                     pip_names.append(path)
                     findings, u, contents = needed_copies(store, b, a, PIP_BOUND, True, True,
                                                          PIP_ROWS)
                     unav["pip"] += [(path, s, r) for s, r in u]
                     if not u:
                         pip_reinst.append((path, contents["before"], contents["after"]))
-                elif oc != "unknown":
+                else:
                     pip_names.append(path)      # fails to be named below: E10
             else:
                 pip_names.append(path)
@@ -804,6 +824,12 @@ def interpret(before_fn, after_fn, store):
                            "pip_reinstalled",
                            {"name": name, "version": version, "files_added": added,
                             "files_removed": removed, "files_changed": changed}, [path]))
+    for path in pip_uncounted:
+        if path not in named:
+            continue                    # could_not_interpret (E10), above
+        holder, name, version = named[path]
+        pip_events.append(((0, pep503(name), KIND_INDEX["pip_reinstalled"], holder, (path,)),
+                           "pip_reinstalled", {"name": name, "version": version}, [path]))
     # spec: past name, kind and directory, "then the paths it lists"
     # (sorted bytewise, compared in order).
     pip_lines = end_events("pip", pip_events, cni_pip, unav["pip"], unknown)
