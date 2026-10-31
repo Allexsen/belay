@@ -189,10 +189,12 @@ compared field that differs (by its class for that type), whatever the outcome, 
 under rule 5. A field is compared only where both sides know it: the hash when both have one, the
 link target when neither is `unreadable`, `iflags` when both have it, `caps` and `xattrs` where the
 attributes were read on both sides (neither carries `xattrs_unknown` -- an absent `caps` or
-`xattrs` means none only where they were read), and none of the three on a mount root. `unknown`, for an `unknown`
-outcome: the reasons of every flag on either side and, when the types are the same, of every field
-unknown under rule 4 (across a type change no field is compared), in the order of the reasons
-table; for the one-sided case, its one reason.
+`xattrs` means none only where they were read), and none of the three on a mount root.
+`unknown`, for an `unknown` outcome: the reasons of every flag on either side -- except
+`unverified` on a side that also carries `mount`, since a mounted regular file is never read and
+`mount` is that reason -- and, when the types are the same, of every field unknown under rule 4
+(across a type change no field is compared), in the order of the reasons table; for the
+one-sided case, its one reason.
 
 **An absent record means `unchanged`** -- for a directory, possibly with its own timestamps
 changed, which the trailer counts in `dir_timestamps_only`. That holds only because every other
@@ -210,7 +212,7 @@ one side only.
 |---|---|
 | `raced` | An entry changed after it was recorded: its recorded fields may not be the state at the end of its walk, so not even a difference proves a change. For a path on one side only, that entry is the path's own, or its nearest recorded ancestor on the side that lacks it, a non-directory that may have become a directory holding it. |
 | `unstable` | A file changed while read (no hash), or a directory's listing is incomplete. |
-| `unverified` | No hash on one side (larger than its `hash_max_bytes`, or not readable). |
+| `unverified` | No hash on one side (larger than its `hash_max_bytes`, or not readable). Not given for a side that is a mount root, which is never read: `mount` is its reason. |
 | `unreadable` | The entry's contents could not be captured. |
 | `mount` | A mount root: contents not captured, by design. |
 | `xattrs_unknown` | Extended attributes could not be read. |

@@ -252,6 +252,26 @@ TEST(a_mount_roots_unread_attributes_are_not_compared) {
     }
 }
 
+/* Pin O8 (decided 2026-10-31): a mounted regular file carries unverified
+ * because it is never read (manifest rules 5 and 21), so on that side
+ * `mount` is the reason; unverified on the other side keeps its own. */
+TEST(a_mounted_file_is_unknown_for_mount_not_unverified) {
+    for (int way = 0; way < 2; way++) {
+        m_begin(way ? "after" : "before", "/s", 1000); ROOT();
+        E(.path = "f", .type = "reg", .size = 3, .sha = HA, .has_iflags = true, .iflags = 16); m_end();
+        m_begin(way ? "before" : "after", "/s", 1000); ROOT();
+        E(.path = "f", .type = "reg", .size = 3, .mount = true, .dev = 2); m_end();
+        REQUIRE(run() == 0);
+        ASSERT_TRUE(has("f", "\"outcome\":\"unknown\",\"type\":\"reg\",\"changed\":[\"dev\"],"
+                             "\"unknown\":[\"mount\"]}"));
+    }
+    /* the other side unverified for its own reason: larger than its hash limit */
+    m_begin("before", "/s", 1000); ROOT(); E(.path = "f", .type = "reg", .size = 3000); m_end();
+    m_begin("after", "/s", 1000); ROOT(); E(.path = "f", .type = "reg", .size = 3000, .mount = true, .dev = 2); m_end();
+    REQUIRE(run() == 0);
+    ASSERT_TRUE(has("f", "\"unknown\":[\"unverified\",\"mount\"]}"));
+}
+
 /* Decided F2: a tree that changed while it was walked makes the whole result
  * provisional (manifest-v1, obligations on a consumer), and only the trailers
  * say so for `vanished`, which leaves no record. */
@@ -943,6 +963,7 @@ int main(void) {
     RUN(inode_numbers_compare_only_within_one_device);
     RUN(node_and_mount_root_timestamps_are_not_compared);
     RUN(a_mount_roots_unread_attributes_are_not_compared);
+    RUN(a_mounted_file_is_unknown_for_mount_not_unverified);
     RUN(added_removed_and_modified_by_hash);
     RUN(different_hash_limits_are_unknown_unless_size_proves_a_change);
     RUN(new_inode_permissions_and_ctime_alone_are_metadata_only);
