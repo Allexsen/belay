@@ -378,10 +378,11 @@ holds bytes that match no state of the file"; its first correction said that hol
 power loss. **A store commit alone does not make a copy's name durable.** Before the manifest is
 renamed into place, belay syncs every directory holding the name of a copy the manifest names --
 the copy's fan-out directory, the store directory and its parent -- once each, however many copies
-it holds. The manifest itself is synced before its rename, and its directory after. This holds as
-far as those syncs succeed: a sync that fails, or a directory belay cannot open, is not reported
-and does not stop the capture (decided: as for the diff's output), so where syncs fail, a
-published manifest can name a copy whose name a power loss takes.
+it holds. The manifest itself is synced before its rename, and its directory after. **A sync before
+the rename that fails, or a directory belay cannot open for it, stops the capture: nothing is
+published, and the error names the directory.** So the guarantee has no exception. The sync of the
+manifest's own directory after its rename is the one that cannot stop anything -- the manifest is
+complete and in place by then -- and a failure there is not reported (as for the diff's output).
 
 A copy's bytes are not synced: syncing them made a first capture of 2,000 small files take 2.3 s
 instead of 0.055 s (measured on WSL2, Linux 6.18, ext4), and a lost copy is detected. A copy a

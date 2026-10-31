@@ -11,6 +11,7 @@
 #include "capture/store_internal.h"
 
 #include <dirent.h>
+#include <errno.h>
 #include <fcntl.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -299,6 +300,9 @@ static struct fsops g_ops;
 static struct { dev_t dev; ino_t ino; } g_synced[64];
 static size_t g_nsynced;
 
+static struct stat g_fail;           /* the directory whose sync fails, if g_failing */
+static bool g_failing;
+
 static int rec_fsync(void *ctx, int fd) {
     (void)ctx;
     struct stat st;
@@ -306,6 +310,10 @@ static int rec_fsync(void *ctx, int fd) {
         g_synced[g_nsynced].dev = st.st_dev;
         g_synced[g_nsynced].ino = st.st_ino;
         g_nsynced++;
+    }
+    if (g_failing && st.st_dev == g_fail.st_dev && st.st_ino == g_fail.st_ino) {
+        errno = EIO;
+        return -1;
     }
     return g_real->fsync(g_real->ctx, fd);
 }
@@ -413,6 +421,33 @@ TEST(a_second_sync_with_nothing_new_syncs_nothing) {
     belay_store_close(s);
 }
 
+/* Decided 2026-10-31: a sync that fails is an error naming the directory,
+ * at each level a copy's name depends on; the caller then publishes nothing. */
+TEST(a_sync_that_fails_names_the_directory) {
+    char hex[65], prefix[600];
+    sha_hex("named\n", 6, hex);
+    snprintf(prefix, sizeof prefix, "%s/%.2s", g_dir, hex);
+    const struct { const char *path, *msg; } level[] = {
+        { prefix, "cannot sync fan-out directory" },
+        { g_dir, "cannot sync the store directory" },
+        { "/tmp", "cannot sync the store directory's parent" },
+    };
+    for (size_t i = 0; i < sizeof level / sizeof level[0]; i++) {
+        struct belay_store *s = open_recorded(true);
+        REQUIRE(s != NULL);
+        ASSERT_EQ_INT(0, put(s, "named\n", hex));
+        REQUIRE(stat(level[i].path, &g_fail) == 0);
+        g_failing = true;
+        ASSERT_EQ_INT(-1, belay_store_sync(s));
+        g_failing = false;
+        ASSERT_EQ_INT(BELAY_ERR_IO, belay_err_code());
+        if (strstr(belay_err_msg(), level[i].msg) == NULL)
+            BELAY_FAIL("level %zu: %s", i, belay_err_msg());
+        belay_err_clear();
+        belay_store_close(s);
+    }
+}
+
 int main(void) {
     snprintf(g_dir, sizeof g_dir, "/tmp/belay_store_%d", (int)getpid());
 
@@ -432,6 +467,7 @@ int main(void) {
     RUN(a_sync_covers_a_fan_out_directory_a_failed_commit_made);
     RUN(a_sync_covers_the_store_directory_in_its_parent);
     RUN(a_second_sync_with_nothing_new_syncs_nothing);
+    RUN(a_sync_that_fails_names_the_directory);
 
     char cmd[600];
     snprintf(cmd, sizeof cmd, "rm -rf '%s'", g_dir);

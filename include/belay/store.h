@@ -54,8 +54,7 @@ int  belay_store_write(struct belay_store_tx *tx, const void *buf, size_t n);
  *  discarded; one of another size is replaced by the staged copy. If something
  *  other than a regular file sits at the object's name, that is an error.
  *  The transaction is finished either way. The object's name, renamed in or
- *  found there, survives a crash once belay_store_sync has run, as far as its
- *  syncs succeed.
+ *  found there, survives a crash once belay_store_sync has returned 0.
  */
 int  belay_store_commit(struct belay_store_tx *tx, const char *hex);
 
@@ -64,10 +63,11 @@ int  belay_store_commit(struct belay_store_tx *tx, const char *hex);
  *  crash: syncs each fan-out directory holding one (renamed in, or found
  *  there -- an earlier capture may have renamed it and failed before its
  *  sync), once, then the store directory and its parent, which hold the
- *  names above. Not the objects' bytes (see above). A sync that fails is not
- *  an error: the objects are already in place.
+ *  names above. Not the objects' bytes (see above). 0, or -1 with belay_err
+ *  naming the directory whose sync failed or that could not be opened for
+ *  it: a manifest naming these objects must then not be published.
  */
-void belay_store_sync(struct belay_store *s);
+int  belay_store_sync(struct belay_store *s);
 
 /* Discards the staged bytes. Safe on a finished or never-begun transaction. */
 void belay_store_abort(struct belay_store_tx *tx);
