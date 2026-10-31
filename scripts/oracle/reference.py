@@ -16,8 +16,18 @@ Its only sources:
     `compared as`, `for types`, `on mount roots` and `absent means`, and the
     outcome rules O1-O8 (the text of O2, O5, O6, O7 and O8 checked at
     start-up where this file relies on it);
-  - test/expect/manifest-v1.md, read at run time for the entry types.
+  - test/expect/manifest-v1.md, read at run time for the entry types;
+  - docs/spec/diff-v1.md "Interpreters" and "What each interpreter reports",
+    PROSE ONLY, with test/expect/finding-kinds.md (the kinds, read at run
+    time) and test/expect/diff-events.md (E1-E8): the findings a record
+    carries and the event records, in the oracle's setting -- a diff given
+    no store, so every stored copy an interpreter needs is
+    `content_unavailable`. What would need content (text_changed, a RECORD's
+    rows, a status file's stanzas, refs) is not modelled: it cannot occur.
 Never the generated blocks of the spec, never src/ or include/.
+
+Ambiguities this file resolves one way (questions for the author) are
+marked "ambiguity I<n>" where they are decided.
 
 Deliberately naive: both manifests in memory as dictionaries, the union of
 their paths sorted, ancestors found by walking a path's prefixes.
@@ -61,7 +71,10 @@ DIR_TIMESTAMPS_ONLY = 'dir_timestamps_only'
 # exactly when any of those six is not 0 ... Last, `before_sha256` and
 # `after_sha256` are the sha256 of each manifest file's bytes, all of them".
 INPUT_COUNTS = ['vanished', 'unstable', 'raced']
-TRAILER_KEYS = (['belay_diff_end'] + OUTCOMES + [DIR_TIMESTAMPS_ONLY]
+# ... "and `events` the event records (`belay_diff_end` counts path records
+# only)" ...
+EVENTS = 'events'
+TRAILER_KEYS = (['belay_diff_end'] + OUTCOMES + [DIR_TIMESTAMPS_ONLY, EVENTS]
                 + ['before_' + c for c in INPUT_COUNTS] + ['after_' + c for c in INPUT_COUNTS]
                 + ['provisional', 'before_sha256', 'after_sha256'])
 # One-sided reasons, from "Present on one side only".
@@ -567,10 +580,462 @@ def check_o4(out, b, a):
             raise AssertionError('reference bug: unchanged with %s on one side' % f)
 
 
+# ---------------------------------------------------------------------------
+# Interpreters, in the oracle's setting: the driver passes NULL options, so
+# the diff has NO store ("Content": reason `no_store`, "the diff was given no
+# store"). Only what an interpreter can say without content is modelled;
+# whatever needs a stored copy is `content_unavailable`. Sources, PROSE ONLY:
+# docs/spec/diff-v1.md "Interpreters" ("Which interpreter", "Content",
+# "Findings", "Event records") and "What each interpreter reports"; the pins
+# test/expect/finding-kinds.md (the kinds: fields, order, template, read at
+# run time) and test/expect/diff-events.md (E1-E8, the text checked at
+# start-up where this file relies on it). Never the generated "Kinds" or
+# "diff-events" blocks of the spec.
+
+KINDS_PIN = os.path.join(REPO, 'test', 'expect', 'finding-kinds.md')
+EVENTS_PIN = os.path.join(REPO, 'test', 'expect', 'diff-events.md')
+
+
+class Kind:
+    def __init__(self, row):
+        self.name = row['kind']
+        self.interps = [x.strip() for x in row['interpreter'].split(',')]
+        self.levels = [x.strip() for x in row['level'].split(',')]
+        f = row['fields']
+        self.fields = [] if f == '--' else \
+            [tuple(x.strip() for x in part.split(':')) for part in f.split(',')]
+        for _, typ in self.fields:
+            if typ not in ('int', 'string', 'bool'):
+                raise SystemExit('pin: kind %s: unknown field type %r' % (self.name, typ))
+        t = row['text']
+        if not (t.startswith('`') and t.endswith('`')):
+            raise SystemExit('pin: kind %s: text %r is not one code span' % (self.name, t))
+        self.template = t[1:-1]
+        named = re.findall(r'\{([a-z_]+)\}', self.template)
+        if not set(named) <= {n for n, _ in self.fields}:
+            raise SystemExit('pin: kind %s: template names %r' % (self.name, named))
+
+
+def load_kinds():
+    rows = md_table(open(KINDS_PIN, encoding='utf-8').read(), 'kind')
+    kinds = collections.OrderedDict((r['kind'], Kind(r)) for r in rows)
+    text = ' '.join(open(KINDS_PIN, encoding='utf-8').read().split())
+    # The object, as the pin states it; and the content_unavailable row's
+    # rule for the per-reason event's side, which unavailable_events()
+    # implements.
+    for w in ['`{"kind": "<kind>", <fields, in the order listed>, "text": "<the template, '
+              'filled>"}`',
+              '`text` is the row\'s template with each `{field}` replaced by its value',
+              'side: `before` or `after`, one finding per side',
+              'pip and dpkg, which emit events from that content, also emit one '
+              '`content_unavailable` event per reason, with side `before` or `after` when all '
+              'its paths share it, else `both`, naming the paths']:
+        if w not in text:
+            raise SystemExit('pin: finding-kinds.md no longer says what reference.py assumes: '
+                             '%r' % w)
+    need = {'content_unavailable': (['reason', 'side'], ['text', 'pip', 'dpkg', 'git']),
+            'could_not_interpret': ([], ['any']),
+            'pip_installed': (['name', 'version'], ['pip']),
+            'pip_removed': (['name', 'version'], ['pip']),
+            'pip_upgraded': (['name', 'from', 'to'], ['pip']),
+            'pip_downgraded': (['name', 'from', 'to'], ['pip']),
+            'pip_version_changed': (['name', 'from', 'to'], ['pip']),
+            'git_hook_added': (['hook', 'executable'], ['git']),
+            'git_hook_removed': (['hook'], ['git']),
+            'git_hook_changed': (['hook', 'executable'], ['git']),
+            'git_hook_executable_changed': (['hook', 'executable'], ['git']),
+            'git_index_changed': ([], ['git']),
+            'git_reflog_rewritten': (['ref'], ['git'])}
+    for k, (fields, interps) in need.items():
+        if k not in kinds or [n for n, _ in kinds[k].fields] != fields or \
+                kinds[k].interps != interps:
+            raise SystemExit('pin: kind %r no longer has what reference.py assumes' % k)
+    return kinds
+
+
+def load_event_rules():
+    rules = {r['rule'].split()[0]: r['statement'] for r in
+             md_table(open(EVENTS_PIN, encoding='utf-8').read(), 'rule')}
+    said = {
+        'E1': ['Event records come after the last path record and before the trailer. A diff '
+               'with none has none.'],
+        'E2': ['`{"event": "<kind>", "interp": "<interpreter>", <the kind\'s fields, in '
+               'finding-kinds.md\'s order>, "text": "<its template>", "paths": [...]}`'],
+        'E3': ['sorted bytewise, each once', '`paths_b64` instead -- every element base64 -- '
+               'when any is not valid UTF-8'],
+        'E4': ['By interpreter, in the order text, pip, dpkg, git'],
+        'E6': ['`{"event": "could_not_interpret", "interp": ..., "text": "could not interpret", '
+               '"paths": [...]}` with the paths it had claimed, and no other event'],
+        'E7': ['The trailer gains `events`: the number of event records.'],
+    }
+    for r, words in said.items():
+        for w in words:
+            if w not in rules.get(r, ''):
+                raise SystemExit('pin: diff-events %s no longer says what reference.py assumes: '
+                                 '%r' % (r, w))
+    return rules
+
+
+KINDS = load_kinds()
+EVENT_RULES = load_event_rules()
+INTERP_ORDER = ['text', 'pip', 'dpkg', 'git']           # E4
+TEXT, BINARY = 'text', 'binary'
+
+# "Which interpreter": "A path is claimed by its absolute path (scope + path):
+# dpkg claims `*/var/lib/dpkg/status` and the per-package `info/*.list` and
+# `info/*.md5sums`; pip claims `*.dist-info/RECORD` and `*.dist-info/METADATA`;
+# git claims `*/.git/HEAD`, `*/.git/packed-refs`, `*/.git/refs/*`,
+# `*/.git/hooks/*`, `*/.git/index` and the reflogs `*/.git/logs/HEAD` and
+# `*/.git/logs/refs/*`." The dpkg `info/` files are read as below
+# `*/var/lib/dpkg/` (ambiguity I1). A `*` spans `/`: `*.dist-info/RECORD`
+# could not match an absolute path otherwise. The absolute path is scope +
+# "/" + path.
+CLAIMS = [('dpkg', 'status', '*/var/lib/dpkg/status'),
+          ('dpkg', 'info', '*/var/lib/dpkg/info/*.list'),
+          ('dpkg', 'info', '*/var/lib/dpkg/info/*.md5sums'),
+          ('pip', 'RECORD', '*.dist-info/RECORD'),
+          ('pip', 'METADATA', '*.dist-info/METADATA'),
+          ('git', 'HEAD', '*/.git/HEAD'),
+          ('git', 'packed-refs', '*/.git/packed-refs'),
+          ('git', 'ref', '*/.git/refs/*'),
+          ('git', 'hook', '*/.git/hooks/*'),
+          ('git', 'index', '*/.git/index'),
+          ('git', 'reflog', '*/.git/logs/HEAD'),
+          ('git', 'reflog', '*/.git/logs/refs/*')]
+
+
+def _check_claims():
+    text = ' '.join(open(SPEC, encoding='utf-8').read().split())
+    for _, _, pat in CLAIMS:
+        tail = pat[len('*/var/lib/dpkg/'):] if pat.startswith('*/var/lib/dpkg/info/') else pat
+        if '`%s`' % tail not in text:
+            raise SystemExit('spec: "Which interpreter" no longer names %r' % tail)
+    for w in ['An unclaimed path is **text** when its entry is `stored` on every side it exists '
+              'on', 'any other is **binary**, which adds nothing',
+              'for a path whose outcome is `unknown` or `metadata_only` it adds nothing (a git '
+              "hook's executable bit excepted, which is metadata)",
+              'A side on which the path is not a regular file counts as absent.',
+              '`missing` covers a path whose entry records no `stored` copy',
+              'Only a reinstall reads content (both RECORDs); the others come from the paths '
+              'alone.',
+              'a `content_unavailable` event has no name and comes first',
+              'A hook, from the manifest alone',
+              'or when the reflog was removed, `git_reflog_rewritten`']:
+        if w not in text:
+            raise SystemExit('spec: "Interpreters" no longer says what reference.py assumes: %r'
+                             % w)
+
+
+_check_claims()
+_CLAIM_RE = [(i, what, re.compile(b'.*'.join(re.escape(x.encode()) for x in pat.split('*')),
+                                  re.S))
+             for i, what, pat in CLAIMS]
+
+
+def claim(scope, p):
+    """(interpreter, what) of the claim on scope + "/" + p, or None. Two
+    interpreters claiming one path is not resolved by the prose (ambiguity
+    I2): the generator never makes one."""
+    ab = scope + b'/' + p
+    hits = [(i, what) for i, what, rx in _CLAIM_RE if rx.fullmatch(ab)]
+    if len({i for i, _ in hits}) > 1:
+        raise ValueError('%r: claimed by %s (the prose does not say which wins)' % (ab, hits))
+    return hits[0] if hits else None
+
+
+def interpreter_of(scope, p, b, a):
+    """("Which interpreter") the claim's, else text when the entry is
+    `stored` on every side it exists on, else binary."""
+    c = claim(scope, p)
+    if c:
+        return c
+    if all('stored' in e for e in (b, a) if e is not None):
+        return (TEXT, None)
+    return (BINARY, None)
+
+
+def string_ok(s):
+    """A `string` field's value: UTF-8, at most 1,024 bytes (no NUL, which no
+    manifest line holds)."""
+    if isinstance(s, bytes):
+        try:
+            s = s.decode('utf-8')
+        except UnicodeDecodeError:
+            return False
+    return len(s.encode('utf-8')) <= 1024 and '\0' not in s
+
+
+def render(kind, values):
+    """[(key, value)] of a finding: kind, its fields in the pin's order, text
+    ("the template, filled"; a bool is filled as `true` / `false`:
+    ambiguity I9)."""
+    k = KINDS[kind]
+    if [n for n, _ in k.fields] != list(values):
+        raise AssertionError('reference bug: %s with %r' % (kind, list(values)))
+    out = []
+    for n, typ in k.fields:
+        v = values[n]
+        ok = {'int': lambda v: type(v) is int and v >= 0, 'bool': lambda v: type(v) is bool,
+              'string': lambda v: isinstance(v, str) and string_ok(v)}[typ](v)
+        if not ok:
+            raise AssertionError('reference bug: %s.%s = %r' % (kind, n, v))
+        out.append((n, v))
+    show = lambda v: ('true' if v else 'false') if type(v) is bool else str(v)
+    text = re.sub(r'\{([a-z_]+)\}', lambda m: show(values[m.group(1)]), k.template)
+    assert len(text.encode('utf-8')) <= 1024
+    return [('kind', kind)] + out + [('text', text)]
+
+
+def render_event(interp, kind, values, paths):
+    """E2: event, interp, the kind's fields, text, paths (E3: sorted bytewise,
+    each once; `paths_b64` when any is not UTF-8)."""
+    f = render(kind, values)
+    ps = sorted(set(paths))
+    try:
+        pv = ('paths', [x.decode('utf-8') for x in ps])
+    except UnicodeDecodeError:
+        pv = ('paths_b64', [base64.b64encode(x).decode('ascii') for x in ps])
+    return [('event', kind), ('interp', interp)] + f[1:] + [pv]
+
+
+def is_reg(e):
+    """"A side on which the path is not a regular file counts as absent.\""""
+    return e is not None and e['type'] == 'reg'
+
+
+SIDES = ('before', 'after')
+REASONS = ['no_store', 'missing', 'too_large', 'corrupt']   # the pin's order
+
+
+def unavailable(e):
+    """Why the stored copy of e cannot be read in a diff with no store:
+    `missing` when the entry records no `stored` copy ("`missing` covers a
+    path whose entry records no `stored` copy"), else `no_store` (which wins
+    is not said: ambiguity I3)."""
+    return 'missing' if 'stored' not in e else 'no_store'
+
+
+def git_place(p):
+    """"A path is placed by the part after its `.git/` (the last one that
+    fits)": the text after the last `.git/` that starts a component."""
+    i = p.rfind(b'.git/')
+    while i > 0 and p[i - 1:i] != b'/':
+        i = p.rfind(b'.git/', 0, i)
+    return p[i + len(b'.git/'):]
+
+
+def hook_name(p):
+    return git_place(p)[len(b'hooks/'):].decode('utf-8')
+
+
+def reflog_ref(p):
+    """"`logs/HEAD` is ref `HEAD`, `logs/refs/...` is `refs/...`"."""
+    return git_place(p)[len(b'logs/'):].decode('utf-8')
+
+
+def explain(interp, what, p, b, a, outcome, state, trace):
+    """The findings of one record of a claimed or text path; events go to
+    `state`. Each needed side whose copy cannot be read is one
+    content_unavailable finding, before then after (the order is not said:
+    ambiguity I4)."""
+    bs, as_ = is_reg(b), is_reg(a)
+    state['claimed'].append(p)
+    executable = lambda e: bool(e['mode'] & 0o100)          # "the owner's"
+    # "Every interpreter describes only a proven change of content: for a
+    # path whose outcome is `unknown` or `metadata_only` it adds nothing (a
+    # git hook's executable bit excepted, which is metadata)."
+    if outcome == 'unknown':
+        trace.append('interp-unknown')
+        return []
+    if outcome == 'metadata_only':
+        if (interp, what) == ('git', 'hook') and bs and as_ and executable(b) != executable(a):
+            trace.append('hook-executable')
+            return [render('git_hook_executable_changed',
+                           {'hook': hook_name(p), 'executable': executable(a)})]
+        trace.append('interp-metadata-only')
+        return []
+    present = [s for s, ok in zip(SIDES, (bs, as_)) if ok]
+    ent = {'before': b, 'after': a}
+    need = []                                   # the sides whose content is needed
+    if interp == TEXT or (interp, what) in (('dpkg', 'status'), ('git', 'HEAD'),
+                                            ('git', 'ref'), ('git', 'packed-refs')):
+        need = present
+    elif (interp, what) == ('pip', 'RECORD'):
+        if bs and as_:
+            need = present                      # a reinstall reads both RECORDs
+        elif bs or as_:
+            state['moved'].append((p, 'removed' if bs else 'added'))
+    elif (interp, what) == ('git', 'reflog'):
+        if as_:
+            need = present                      # appended or rewritten: read
+        elif bs:                                # "or when the reflog was removed"
+            trace.append('reflog-removed')
+            return [render('git_reflog_rewritten', {'ref': reflog_ref(p)})]
+    elif (interp, what) == ('git', 'hook'):     # "from the manifest alone"
+        h = hook_name(p)
+        if as_ and not bs:
+            trace.append('hook-added')
+            return [render('git_hook_added', {'hook': h, 'executable': executable(a)})]
+        if bs and not as_:
+            trace.append('hook-removed')
+            return [render('git_hook_removed', {'hook': h})]
+        if bs and as_:
+            trace.append('hook-changed')
+            return [render('git_hook_changed', {'hook': h, 'executable': executable(a)})]
+    elif (interp, what) == ('git', 'index'):
+        # "The index: changed when its content changed (hashed, never
+        # stored)" -- present on one side only is read as a change too
+        # (ambiguity I6).
+        if bs or as_:
+            trace.append('index-changed')
+            return [render('git_index_changed', {})]
+    out = []
+    for s in need:
+        r = unavailable(ent[s])
+        trace.append('unavailable-%s-%s' % (s, r))
+        out.append(render('content_unavailable', {'reason': r, 'side': s}))
+        state['unavailable'].append((r, s, p))
+    return out
+
+
+def unavailable_events(interp, state):
+    """One content_unavailable event per reason (pin, content_unavailable):
+    side `before` or `after` when all its paths share it, else `both`. Two
+    reasons in one diff: ordered as the pin lists the reasons (ambiguity I5)."""
+    out = []
+    for r in REASONS:
+        hits = [(s, p) for rr, s, p in state['unavailable'] if rr == r]
+        if not hits:
+            continue
+        sides = {s for s, _ in hits}
+        side = sides.pop() if len(sides) == 1 else 'both'
+        out.append(render_event(interp, 'content_unavailable', {'reason': r, 'side': side},
+                                [p for _, p in hits]))
+    return out
+
+
+# PEP 440: the version scheme's grammar (the PEP's appendix) and its ordering.
+_PEP440 = re.compile(r"""^\s*v?
+    (?:(?P<epoch>[0-9]+)!)?
+    (?P<release>[0-9]+(?:\.[0-9]+)*)
+    (?P<pre>[-_\.]?(?P<pre_l>alpha|a|beta|b|preview|pre|c|rc)[-_\.]?(?P<pre_n>[0-9]+)?)?
+    (?P<post>(?:-(?P<post_n1>[0-9]+))|(?:[-_\.]?(?P<post_l>post|rev|r)[-_\.]?(?P<post_n2>[0-9]+)?))?
+    (?P<dev>[-_\.]?(?P<dev_l>dev)[-_\.]?(?P<dev_n>[0-9]+)?)?
+    (?:\+(?P<local>[a-z0-9]+(?:[-_\.][a-z0-9]+)*))?
+    \s*$""", re.VERBOSE | re.IGNORECASE)
+
+
+def pep440_key(v):
+    """The PEP 440 ordering key of v, or None when v is not a PEP 440 version."""
+    m = _PEP440.match(v)
+    if not m:
+        return None
+    rel = [int(x) for x in m.group('release').split('.')]
+    while rel and rel[-1] == 0:                 # 1.0 == 1.0.0
+        rel.pop()
+    pre = post = dev = None
+    if m.group('pre_l'):
+        l = m.group('pre_l').lower()
+        l = {'alpha': 'a', 'beta': 'b', 'c': 'rc', 'pre': 'rc', 'preview': 'rc'}.get(l, l)
+        pre = (0, l, int(m.group('pre_n') or 0))
+    if m.group('post'):
+        post = (0, int(m.group('post_n1') or m.group('post_n2') or 0))
+    if m.group('dev_l'):
+        dev = (0, int(m.group('dev_n') or 0))
+    NEG, POS = (-1,), (1,)
+    _pre = NEG if (pre is None and post is None and dev is not None) else \
+        (POS if pre is None else pre)
+    local = m.group('local')
+    _local = NEG if local is None else (0, tuple(
+        (1, int(x), '') if x.isdigit() else (0, 0, x.lower()) for x in re.split(r'[-_.]', local)))
+    return (int(m.group('epoch') or 0), tuple(rel), _pre, NEG if post is None else post,
+            POS if dev is None else dev, _local)
+
+
+def pep503(name):
+    """"normalized as PEP 503 does (ASCII lowercase, each run of `-`, `_`,
+    `.` one `-`)"."""
+    return re.sub(r'[-_.]+', '-', name).lower()
+
+
+def dist_info(p):
+    """(holding directory, name, version) of a RECORD's dist-info directory:
+    "`{name}-{version}.dist-info`, split at its first `-`"; None when it
+    cannot be named ("no `-`, an empty name or version, or one that is not a
+    string field's value")."""
+    d = p[:-len(b'/RECORD')]
+    holder, base = (d.rsplit(b'/', 1) if b'/' in d else (b'.', d))
+    stem = base[:-len(b'.dist-info')]
+    if b'-' not in stem:
+        return None
+    name, ver = stem.split(b'-', 1)
+    if not name or not ver or not string_ok(name) or not string_ok(ver):
+        return None
+    return holder, name.decode('utf-8'), ver.decode('utf-8')
+
+
+def pip_end(state, trace):
+    """pip's events ("What each interpreter reports", pip): the
+    content_unavailable events first, then by normalized name, kind (the
+    pin's order), directory. None when the end hook fails (E6)."""
+    keys = collections.OrderedDict()
+    for p, how in state['moved']:
+        di = dist_info(p)
+        if di is None:
+            trace.append('pip-unnamed')
+            return None
+        holder, name, ver = di
+        keys.setdefault((holder, pep503(name)), {'added': [], 'removed': []})[how].append(
+            (p, name, ver))
+    named, kind_ix = [], list(KINDS).index
+    for (holder, norm), d in keys.items():
+        A, R = d['added'], d['removed']
+        if A and R and (len(A), len(R)) != (1, 1):
+            # "when one pair key has more than one RECORD added and removed"
+            trace.append('pip-ambiguous-key')
+            return None
+        if A and R:
+            (pa, name, to), (pr, _, frm) = A[0], R[0]
+            ka, kb = pep440_key(to), pep440_key(frm)
+            if ka is None or kb is None or ka == kb:
+                kind = 'pip_version_changed'
+            else:
+                kind = 'pip_upgraded' if ka > kb else 'pip_downgraded'
+            trace.append(kind)
+            named.append(((norm, kind_ix(kind), holder),
+                          render_event('pip', kind, {'name': name, 'from': frm, 'to': to},
+                                       [pa, pr])))
+            continue
+        for (pp, name, ver) in A + R:
+            kind = 'pip_installed' if A else 'pip_removed'
+            trace.append(kind)
+            named.append(((norm, kind_ix(kind), holder),
+                          render_event('pip', kind, {'name': name, 'version': ver}, [pp])))
+    named.sort(key=lambda x: x[0])
+    return unavailable_events('pip', state) + [e for _, e in named]
+
+
+def end(interp, state, trace):
+    """An interpreter's events; one could_not_interpret event naming the
+    paths it had claimed -- every path it was given (ambiguity I7) -- when
+    its end hook fails (E6)."""
+    if interp == 'pip':
+        ev = pip_end(state, trace)
+    elif interp == 'dpkg':
+        ev = unavailable_events('dpkg', state)
+    else:
+        ev = []
+    if ev is None:
+        return [render_event(interp, 'could_not_interpret', {}, state['claimed'])]
+    return ev
+
+
 def diff(before, after):
     """None when the scopes differ (refused). Otherwise (header, records,
-    trailer, traces): header and trailer as [(key, value)], records as dicts
-    with `path` as bytes, traces {path: [tags]} for messages.
+    events, trailer, traces): header and trailer as [(key, value)], records
+    as dicts with `path` as bytes (`findings` a list of [(key, value)]),
+    events as [(key, value)] each, traces {path: [tags]} for messages and
+    the coverage gate (b'' holds the end hooks' tags).
 
     `before` is the first manifest given and `after` the second, "whatever
     their `created_ns` say" (diff-v1.md, after the "Shape" example)."""
@@ -589,6 +1054,7 @@ def diff(before, after):
               ('scope_remounted', remounted), ('identity_compared', not remounted)]
     assert [('scopes' if k == 'scopes_b64' else k) for k, _ in header] == HEADER_KEYS
     records, counts, traces = [], collections.Counter(), {}
+    states = {i: {'claimed': [], 'unavailable': [], 'moved': []} for i in INTERP_ORDER}
     paths = sorted(set(eb) | set(ea))
     for p in paths:
         b, a = eb.get(p), ea.get(p)
@@ -627,18 +1093,30 @@ def diff(before, after):
             rec['changed'] = changed
         if out == 'unknown':
             rec['unknown'] = why
+        # "For a path that is not `unchanged`, the interpreter that claims it
+        # adds **findings** to its record" -- `findings` "absent when none".
+        interp, what = interpreter_of(sb, p, b, a)
+        traces[p].append('interp:%s%s' % (interp, ':' + what if what else ''))
+        if interp != BINARY:
+            fs = explain(interp, what, p, b, a, out, states[interp], traces[p])
+            if fs:
+                rec['findings'] = fs
         records.append(rec)
     # "every path present in either manifest is counted once, so the counts
     # add up to the number of distinct paths"
     assert sum(counts[o] for o in OUTCOMES) == len(paths)
+    # Event records, "emitted once every path has been seen" (E1), by
+    # interpreter in E4's order.
+    traces[b''] = []
+    events = [ev for i in INTERP_ORDER for ev in end(i, states[i], traces[b''])]
     trailer = ([('belay_diff_end', len(records))] + [(o, counts[o]) for o in OUTCOMES]
-               + [(DIR_TIMESTAMPS_ONLY, counts[DIR_TIMESTAMPS_ONLY])])
+               + [(DIR_TIMESTAMPS_ONLY, counts[DIR_TIMESTAMPS_ONLY]), (EVENTS, len(events))])
     (tb, shab), (ta, shaa) = trailer_of(before), trailer_of(after)
     inputs = [('before_' + c, tb[c]) for c in INPUT_COUNTS] + [('after_' + c, ta[c]) for c in INPUT_COUNTS]
     trailer += inputs + [('provisional', any(v != 0 for _, v in inputs)),
                          ('before_sha256', shab), ('after_sha256', shaa)]
     assert [k for k, _ in trailer] == TRAILER_KEYS
-    return header, records, trailer, traces
+    return header, records, events, trailer, traces
 
 
 def encode_record(rec):
@@ -649,7 +1127,28 @@ def encode_record(rec):
     except UnicodeDecodeError:
         head = {'path_b64': base64.b64encode(p).decode('ascii')}
     head.update(r)
+    if 'findings' in head:
+        head['findings'] = [dict(f) for f in head['findings']]
     return head
+
+
+def canonical(v):
+    """The bytes of a JSON value as a belay writer emits it (manifest-v1
+    "Encoding": no whitespace, strings by canonical_string(), `true` and
+    `false`); an object is a [(key, value)] list or a dict, in its order."""
+    if isinstance(v, bool):
+        return b'true' if v else b'false'
+    if isinstance(v, int):
+        return str(v).encode('ascii')
+    if isinstance(v, str):
+        return canonical_string(v)
+    if isinstance(v, dict):
+        v = list(v.items())
+    if v and all(isinstance(x, tuple) and len(x) == 2 and isinstance(x[0], str) for x in v):
+        return b'{' + b','.join(canonical_string(k) + b':' + canonical(x) for k, x in v) + b'}'
+    if isinstance(v, list):
+        return b'[' + b','.join(canonical(x) for x in v) + b']'
+    raise TypeError(repr(v))
 
 
 if __name__ == '__main__':
@@ -657,9 +1156,11 @@ if __name__ == '__main__':
     if res is None:
         print('refused: the manifests have different scopes', file=sys.stderr)
         sys.exit(1)
-    header, records, trailer, _ = res
+    header, records, events, trailer, _ = res
     dump = lambda o: json.dumps(o, ensure_ascii=False, separators=(',', ':'))
     print(dump(dict(header)))
     for r in records:
         print(dump(encode_record(r)))
+    for ev in events:
+        print(canonical(ev).decode('utf-8'))
     print(dump(dict(trailer)))
