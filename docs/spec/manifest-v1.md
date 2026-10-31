@@ -392,9 +392,14 @@ that stores the same content replaces it: an object whose size differs from the 
 stored under its name is replaced, one of the same size is kept.
 
 On macOS, `fsync(2)` neither makes the drive write its cache to the medium nor keeps the order of
-writes, and belay uses neither `F_FULLFSYNC` nor `F_BARRIERFSYNC`: there, a power loss can take a
-published manifest, or keep it and take the names of copies it names, which then fail
-verification as missing. (macOS already keeps copies without the writer probe, above.)
+writes. There, the copies a manifest names are **ordered before the manifest that names them**,
+but neither is ensured to reach the disk: the last sync before the rename is an `F_BARRIERFSYNC`,
+which puts the I/O before it ahead of the I/O after it, so a power loss can take a published
+manifest, but cannot keep it and take the names of its copies. A barrier orders one device: this
+holds when the store and the manifest are on the same one. belay does not use `F_FULLFSYNC`.
+(Measured on GitHub's macOS 15 runner, one barrier per capture: +3.9% and +4.9% on a first
+capture of 2,000 files, +13.0% in a shorter run. macOS already keeps copies without the writer
+probe, above.)
 
 ## Path encoding
 

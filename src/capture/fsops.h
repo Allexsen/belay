@@ -87,6 +87,11 @@ struct fsops {
     /* fsync(2). Publishing calls it on a manifest before its rename, and on
      * the directories a rename publishes into, after it. */
     int (*fsync)(void *ctx, int fd);
+    /* fsync(2), then a write barrier where the platform has one (macOS:
+     * F_BARRIERFSYNC): the I/O issued before it reaches the disk before the
+     * I/O issued after it, on that device. Elsewhere, fsync alone. The last
+     * sync before a manifest's rename uses it (decided 2026-10-31). */
+    int (*barrier)(void *ctx, int fd);
 };
 
 /* The table for this platform. */

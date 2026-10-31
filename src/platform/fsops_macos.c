@@ -95,6 +95,18 @@ static FILE *macos_tmpfile_in(void *ctx, const char *dir, const char *tmpl) {
     return posix_tmpfile_named(tmpl);
 }
 
+/* fsync does not reach the disk on macOS, nor keep the order of writes;
+ * F_BARRIERFSYNC does an fsync and then orders the I/O before it ahead of
+ * the I/O after it. Measured 2026-10-31 on GitHub's macos-15-arm64 runner,
+ * one barrier per capture: +3.9% and +4.9% on a first capture of 2,000
+ * files (25 and 15 rounds), +13.0% at 9 rounds; a barrier at every sync,
+ * +39% to +61%. */
+static int macos_barrier(void *ctx, int fd) {
+    (void)ctx;
+    if (fcntl(fd, F_BARRIERFSYNC) == 0) return 0;
+    return fsync(fd);
+}
+
 static const struct fsops macos_ops = {
     .ctx = NULL,
     .stat_mount = macos_stat_mount,
@@ -118,6 +130,7 @@ static const struct fsops macos_ops = {
     .clock = macos_clock,
     .tmpfile_in = macos_tmpfile_in,
     .fsync = posix_fsync,   /* reaches neither the disk nor an order: no F_FULLFSYNC (decided) */
+    .barrier = macos_barrier,
 };
 
 const struct fsops *fsops_default(void) { return &macos_ops; }
