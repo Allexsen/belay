@@ -276,15 +276,15 @@ exists on (a capture stores small text files by default); any other is **binary*
 nothing: its size and hash are already in the record.
 
 **Content.** Interpreters read the stored copies through the store given to the diff (`belay_diff`'s
-options): the directory a capture keeps copies in, each at `<store>/<the first two hex digits of
-its sha256>/<the other 62>`, named by the manifest entry's `stored`. Every copy read is hashed and
-must match its name, so a stale, planted or truncated copy is never read as content; one that is
-not a regular file (a symlink included) is `corrupt`. When an interpreter needs a copy it cannot read, on a side where the path
-exists, it says so: the finding `content_unavailable`, with `reason` `no_store` (the diff was given
-no store), `missing`, `too_large` (over the interpreter's bound) or `corrupt` (does not hash to its
-name), and `side`. It never declines silently there: pip and dpkg, whose package facts come from
-that content, also emit a `content_unavailable` event naming the paths, so a consumer never reads
-"no packages changed" where the change could not be read.
+options): the directory a capture keeps copies in, each at `<store>/<the first two hex digits of its
+sha256>/<the other 62>`, named by the manifest entry's `stored`. Every copy read is hashed and must
+match its name, so a stale, planted or truncated copy is never read as content; one that is not a
+regular file (a symlink included) is `corrupt`. When an interpreter needs a copy it cannot read, on
+a side where the path exists, it says so: the finding `content_unavailable`, with `reason`
+`no_store` (the diff was given no store), `missing`, `too_large` (over the interpreter's bound) or
+`corrupt` (does not hash to its name), and `side`. It never declines silently there: pip and dpkg,
+whose package facts come from that content, also emit a `content_unavailable` event naming the
+paths, so a consumer never reads "no packages changed" where the change could not be read.
 
 **Findings.** Each finding is an object: `{"kind": ..., <its fields, in order>, "text": ...}`.
 `int` fields are non-negative integers, `string` fields UTF-8 of at most 1,024 bytes, `bool` fields
@@ -418,11 +418,12 @@ part after its `.git/` (the last one that fits). `HEAD`: `git_head_changed`, fro
 symbolic ref's name or the object id (empty on a side where it is absent). A loose ref or a line of
 `packed-refs` (in ref order): `git_ref_created`, `git_ref_deleted`, `git_ref_moved`, the ref being
 its full name (`refs/heads/main`). A hook, from the manifest alone: added, removed, changed (its
-content), or only its executable bit (the owner's); `executable` is after's. The index: changed when its content changed (hashed, never stored). A reflog (`logs/HEAD`
-is ref `HEAD`, `logs/refs/...` is `refs/...`): when before's bytes are a prefix of after's ending
-at a line's end, `git_reflog_appended` counts the entries after it, and each of those that is not
-a plain commit (operation `commit` or `commit (initial)`) or a fast-forward (its message contains
-`Fast-forward`) is a `git_reflog_move`, its operation being the message before its first `:`;
-otherwise, or when the reflog was removed, `git_reflog_rewritten`. **The reflog is written by the
-process being watched: it is evidence, not proof.** A process can write any reflog it likes; a
-capture taken from outside the process (host-reader mode) is the answer when that matters.
+content), or only its executable bit (the owner's); `executable` is after's. The index: changed when
+its content changed (hashed, never stored). A reflog (`logs/HEAD` is ref `HEAD`, `logs/refs/...` is
+`refs/...`): when before's bytes are a prefix of after's ending at a line's end,
+`git_reflog_appended` counts the entries after it, and each of those that is not a plain commit
+(operation `commit` or `commit (initial)`) or a fast-forward (its message contains `Fast-forward`)
+is a `git_reflog_move`, its operation being the message before its first `:`; otherwise, or when the
+reflog was removed, `git_reflog_rewritten`. **The reflog is written by the process being watched: it
+is evidence, not proof.** A process can write any reflog it likes; a capture taken from outside the
+process (host-reader mode) is the answer when that matters.
