@@ -1,0 +1,22 @@
+Package: bash
+Status: install ok installed
+Architecture: amd64
+Version: 5.1-6
+
+Package: vim
+Status: install ok installed
+Version: 2:9.0-1
+Description: x
+ y
+ .
+ z
+
+--
+Package: bash
+Status: hold ok installed
+Architecture: amd64
+Version: 5.2-1
+
+Package: git
+Status: install ok installed
+Version: 1:2.39-1

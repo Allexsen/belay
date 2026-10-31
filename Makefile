@@ -174,7 +174,7 @@ FUZZ_SECS	?= 30
 
 $(BUILD)/fuzz/%: test/fuzz/%.c $(CORE_SRC)
 	@mkdir -p $(dir $@)
-	$(CC) -fsanitize=fuzzer,address,undefined -g -O1 $(WARN) $(INC) -o $@ $< $(CORE_SRC)
+	$(CC) -fsanitize=fuzzer,address,undefined -fno-sanitize-recover=undefined -g -O1 $(WARN) $(INC) -o $@ $< $(CORE_SRC)
 
 # Baseline timing (§10: measured, never a target). Not part of `check`.
 BENCH_SRC	= $(wildcard bench/*.c)
@@ -210,10 +210,16 @@ oracle: all
 bench: $(BENCH_BIN)
 	@echo "built: $(BENCH_BIN)"
 
+# A target's seeds, written from the formats' documentation, are in
+# test/fuzz/seeds/<target>/ when it has any; the run's own finds go to a
+# scratch corpus, never back into the tree.
 fuzz: $(FUZZ_BIN)
 	@for f in $(FUZZ_BIN); do \
+		n=$$(basename $$f); seeds=test/fuzz/seeds/$$n; corpus=$(BUILD)/fuzz/corpus-$$n; \
+		mkdir -p $$corpus; \
 		echo "== $$f ($(FUZZ_SECS)s)"; \
-		$$f -max_total_time=$(FUZZ_SECS) -print_final_stats=1 || exit 1; \
+		if [ -d $$seeds ]; then set -- $$corpus $$seeds; else set -- $$corpus; fi; \
+		$$f -max_total_time=$(FUZZ_SECS) -print_final_stats=1 "$$@" || exit 1; \
 	done
 
 bin:
