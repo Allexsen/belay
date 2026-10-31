@@ -23,7 +23,9 @@ Its only sources:
     carries and the event records, in the oracle's setting -- a diff given
     no store, so every stored copy an interpreter needs is
     `content_unavailable`. What would need content (text_changed, a RECORD's
-    rows, a status file's stanzas, refs) is not modelled: it cannot occur.
+    rows, a status file's stanzas, refs) is not modelled: it cannot occur;
+  - test/expect/manifest-v1-addendum.md A4 (a link target is at most 4,095
+    bytes), which finding-kinds.md cites as a `bytes` field's bound.
 Never the generated blocks of the spec, never src/ or include/.
 
 Ambiguities this file resolves one way (questions for the author) are
@@ -604,16 +606,38 @@ class Kind:
         f = row['fields']
         self.fields = [] if f == '--' else \
             [tuple(x.strip() for x in part.split(':')) for part in f.split(',')]
+        # "A type ending in `?` is optional"; a `bytes` field is a byte
+        # string written `<name>` or `<name>_b64` (the pin's "The object").
         for _, typ in self.fields:
-            if typ not in ('int', 'string', 'bool'):
+            if typ.rstrip('?') not in ('int', 'string', 'bool', 'bytes') or \
+                    typ.count('?') > 1:
                 raise SystemExit('pin: kind %s: unknown field type %r' % (self.name, typ))
+        self.optional = {n for n, typ in self.fields if typ.endswith('?')}
+        # The text cell: one code span, or -- "A kind whose optional fields may
+        # be absent gives a second template, used when any of them is" -- the
+        # template, `; `, a few words, `: ` and the second template.
         t = row['text']
-        if not (t.startswith('`') and t.endswith('`')):
-            raise SystemExit('pin: kind %s: text %r is not one code span' % (self.name, t))
-        self.template = t[1:-1]
+        m = re.fullmatch(r'`([^`]*)`(?:; [^`:]+: `([^`]*)`)?', t)
+        if not m:
+            raise SystemExit('pin: kind %s: text %r is not one code span, or two' % (self.name, t))
+        self.template, self.template_absent = m.group(1), m.group(2)
         named = re.findall(r'\{([a-z_]+)\}', self.template)
+        # The hooks' `executable?` is in no template, and their rows give no
+        # second one: read as "a second template exactly when the first
+        # names an optional field" (ambiguity I10); else the one template
+        # serves whether the field is present or not.
+        if (self.template_absent is None) == bool(set(named) & self.optional):
+            raise SystemExit('pin: kind %s: a second template exactly when the first names an '
+                             'optional field' % self.name)
         if not set(named) <= {n for n, _ in self.fields}:
             raise SystemExit('pin: kind %s: template names %r' % (self.name, named))
+        # "no template names a field that may be absent from it"; and no
+        # rule says how a `bytes` field renders in text: none may name one.
+        named2 = re.findall(r'\{([a-z_]+)\}', self.template_absent or '')
+        if set(named2) & self.optional or not set(named2) <= {n for n, _ in self.fields}:
+            raise SystemExit('pin: kind %s: second template names %r' % (self.name, named2))
+        if any(dict(self.fields)[n] == 'bytes' for n in named + named2):
+            raise SystemExit('pin: kind %s: a template names a bytes field' % self.name)
 
 
 def load_kinds():
@@ -626,30 +650,51 @@ def load_kinds():
     for w in ['`{"kind": "<kind>", <fields, in the order listed>, "text": "<the template, '
               'filled>"}`',
               '`text` is the row\'s template with each `{field}` replaced by its value',
+              '`string` fields are UTF-8, at most 1,024 bytes each',
+              'A type ending in `?` is optional: absent exactly when the kind\'s meaning says. '
+              'A kind whose optional fields may be absent gives a second template, used when any '
+              'of them is (decision 2026-10-31, c); no template names a field that may be '
+              'absent from it.',
+              'A `bytes` field is a byte string of at most 4,095 bytes (the manifest\'s '
+              'link-target limit, addendum A4; an exception to the 1,024-byte limit): '
+              '`"<name>": "..."` when it is valid UTF-8, else `"<name>_b64": "..."`, base64, as '
+              'the manifest writes bytes (decision 2026-10-31, b).',
               'side: `before` or `after`, one finding per side',
+              # The kinds' meanings render() and explain() implement.
+              'When the RECORD\'s outcome is `unknown` (on both sides), the event is provisional '
+              'and the three counts are absent (decision 2026-10-31, c).',
+              'target: the link\'s target, empty for a file. executable: the owner\'s bit, for a '
+              'file; absent for a symlink, whose own mode says nothing about its target '
+              '(decision 2026-10-31, a).',
+              'target and executable as in git_hook_added, after.',
               'pip and dpkg, which emit events from that content, also emit one '
               '`content_unavailable` event per reason, with side `before` or `after` when all '
               'its paths share it, else `both`, naming the paths']:
         if w not in text:
             raise SystemExit('pin: finding-kinds.md no longer says what reference.py assumes: '
                              '%r' % w)
-    need = {'content_unavailable': (['reason', 'side'], ['text', 'pip', 'dpkg', 'git']),
+    S, I, B = 'string', 'int', 'bool'
+    need = {'content_unavailable': ([('reason', S), ('side', S)], ['text', 'pip', 'dpkg', 'git']),
             'could_not_interpret': ([], ['core']),
             'invalid_finding': ([], ['core']),
-            'pip_installed': (['name', 'version'], ['pip']),
-            'pip_removed': (['name', 'version'], ['pip']),
-            'pip_upgraded': (['name', 'from', 'to'], ['pip']),
-            'pip_downgraded': (['name', 'from', 'to'], ['pip']),
-            'pip_version_changed': (['name', 'from', 'to'], ['pip']),
-            'git_hook_added': (['hook', 'executable', 'target'], ['git']),
-            'git_hook_removed': (['hook', 'target'], ['git']),
-            'git_hook_changed': (['hook', 'executable', 'target'], ['git']),
-            'git_hook_executable_changed': (['hook', 'executable'], ['git']),
+            'pip_installed': ([('name', S), ('version', S)], ['pip']),
+            'pip_removed': ([('name', S), ('version', S)], ['pip']),
+            'pip_upgraded': ([('name', S), ('from', S), ('to', S)], ['pip']),
+            'pip_downgraded': ([('name', S), ('from', S), ('to', S)], ['pip']),
+            'pip_version_changed': ([('name', S), ('from', S), ('to', S)], ['pip']),
+            'pip_reinstalled': ([('name', S), ('version', S), ('files_added', I + '?'),
+                                 ('files_removed', I + '?'), ('files_changed', I + '?')],
+                                ['pip']),
+            'git_hook_added': ([('hook', S), ('executable', B + '?'), ('target', 'bytes')],
+                               ['git']),
+            'git_hook_removed': ([('hook', S), ('target', 'bytes')], ['git']),
+            'git_hook_changed': ([('hook', S), ('executable', B + '?'), ('target', 'bytes')],
+                                 ['git']),
+            'git_hook_executable_changed': ([('hook', S), ('executable', B)], ['git']),
             'git_index_changed': ([], ['git']),
-            'git_reflog_rewritten': (['ref'], ['git'])}
+            'git_reflog_rewritten': ([('ref', S)], ['git'])}
     for k, (fields, interps) in need.items():
-        if k not in kinds or [n for n, _ in kinds[k].fields] != fields or \
-                kinds[k].interps != interps:
+        if k not in kinds or kinds[k].fields != fields or kinds[k].interps != interps:
             raise SystemExit('pin: kind %r no longer has what reference.py assumes' % k)
     # The core's kinds are events too (E6, E9, E10).
     for k in ('could_not_interpret', 'invalid_finding', 'and_more'):
@@ -757,7 +802,14 @@ def _check_claims():
               'alone.',
               'A RECORD whose outcome is `unknown` pairs like any other, by its directory\'s '
               'name, and every event it takes part in is provisional; one present on both '
-              'sides is no proven reinstall and gives none (its rows are not counted).',
+              'sides is a provisional `pip_reinstalled` whose rows are not compared: its three '
+              'counts are absent, under the kind\'s second template.',
+              '`bytes` fields up to 4,095 bytes written as `<name>` when UTF-8 and `<name>_b64` '
+              '(base64) otherwise; an optional field (`?`) is absent where its kind says, and '
+              'then the kind\'s second template is used',
+              'a finding that breaks the row (an unknown kind, a kind of another interpreter or '
+              'level, a field missing, extra or over its bound) is replaced by '
+              '`invalid_finding`',
               'Event order: by normalized name (none first), then kind (in the Kinds table\'s '
               'order), then directory, then the paths it lists.',
               'or a RECORD it must read that cannot be parsed, is one `could_not_interpret` '
@@ -772,8 +824,10 @@ def _check_claims():
               'a directory is none: added, removed, changed (its content, a link\'s target, or '
               'a file becoming a link or back), or -- a file\'s content unchanged -- its '
               'executable bit (the owner\'s), whatever else changed. `executable` is after\'s '
-              '(true for a symlink, whose target\'s mode is not recorded); `target` is the '
-              'link\'s target, empty for a file.',
+              'owner bit, for a file; it is absent for a symlink, whose own mode says nothing '
+              'about its target. `target` is the link\'s target, empty for a file, up to 4,095 '
+              'bytes, and `target_b64` instead when it is not UTF-8: a planted hook is always '
+              'reported.',
               'The index: `git_index_changed` when it is added, removed or its content changed',
               '(an absent before is empty)',
               'or when the reflog was removed (no copy needed), `git_reflog_rewritten`']:
@@ -821,23 +875,52 @@ def string_ok(s):
     return len(s.encode('utf-8')) <= 1024 and '\0' not in s
 
 
+BYTES_MAX = 4095        # "A `bytes` field is a byte string of at most 4,095 bytes"
+
+
+def fill(kind, values):
+    """The kind's text: its template with each `{field}` replaced by its
+    value -- the second template when an optional field is absent (None):
+    "A kind whose optional fields may be absent gives a second template,
+    used when any of them is". "A `bool` field renders in `text` as `true` or
+    `false`"."""
+    k = KINDS[kind]
+    tpl = k.template
+    if any(values[n] is None for n in k.optional) and k.template_absent is not None:
+        tpl = k.template_absent
+    show = lambda v: ('true' if v else 'false') if type(v) is bool else str(v)
+    return re.sub(r'\{([a-z_]+)\}', lambda m: show(values[m.group(1)]), tpl)
+
+
 def render(kind, values):
     """[(key, value)] of a finding: kind, its fields in the pin's order, text
-    ("the template, filled"; "A `bool` field renders in `text` as `true`
-    or `false`")."""
+    ("the template, filled"). An optional field whose value is None is
+    absent ("A field absent from a kind's row never appears", and an optional
+    one is "absent exactly when the kind's meaning says"); a `bytes` value
+    is `<name>` when valid UTF-8, else `<name>_b64`, base64 ("as the manifest
+    writes bytes": standard alphabet, padded)."""
     k = KINDS[kind]
     if [n for n, _ in k.fields] != list(values):
         raise AssertionError('reference bug: %s with %r' % (kind, list(values)))
     out = []
     for n, typ in k.fields:
         v = values[n]
+        if v is None and n in k.optional:
+            continue
         ok = {'int': lambda v: type(v) is int and v >= 0, 'bool': lambda v: type(v) is bool,
-              'string': lambda v: isinstance(v, str) and string_ok(v)}[typ](v)
+              'string': lambda v: isinstance(v, str) and string_ok(v),
+              'bytes': lambda v: isinstance(v, bytes) and len(v) <= BYTES_MAX
+              }[typ.rstrip('?')](v)
         if not ok:
             raise AssertionError('reference bug: %s.%s = %r' % (kind, n, v))
+        if typ.rstrip('?') == 'bytes':
+            try:
+                out.append((n, v.decode('utf-8')))
+            except UnicodeDecodeError:
+                out.append((n + '_b64', base64.b64encode(v).decode('ascii')))
+            continue
         out.append((n, v))
-    show = lambda v: ('true' if v else 'false') if type(v) is bool else str(v)
-    text = re.sub(r'\{([a-z_]+)\}', lambda m: show(values[m.group(1)]), k.template)
+    text = fill(kind, values)
     assert len(text.encode('utf-8')) <= 1024
     return [('kind', kind)] + out + [('text', text)]
 
@@ -901,20 +984,29 @@ def is_hook(e):
     return e is not None and e['type'] in ('reg', 'lnk')
 
 
-def render_or_invalid(kind, values, trace):
-    """A finding whose bytes values must be string fields' values: one that
-    is not (not UTF-8, or over 1,024 bytes) breaks its kind's row and "is
-    replaced by `invalid_finding`" ("Findings"). Only a hook's target can be
-    such a value here (a link's bytes are verbatim: ambiguity I9)."""
-    vs = {}
-    for k, v in values.items():
-        if isinstance(v, bytes):
-            if not string_ok(v):
-                trace.append('invalid-finding')
-                return render('invalid_finding', {})
-            v = v.decode('utf-8')
-        vs[k] = v
-    return render(kind, vs)
+def render_hook(kind, values, trace):
+    """A hook's finding. `target` is a `bytes` field: "up to 4,095 bytes, and
+    `target_b64` instead when it is not UTF-8: a planted hook is always
+    reported". Over 4,095 bytes it would break the row ("over its bound":
+    `invalid_finding`), but the manifest holds no longer link target
+    (addendum A4: a reader rejects one), so that branch is unreachable here."""
+    t = values.get('target', b'')
+    if len(t) > BYTES_MAX:
+        trace.append('invalid-finding')
+        return render('invalid_finding', {})
+    if not is_utf8(t):
+        trace.append('hook-target-b64')
+    if 'executable' in values and values['executable'] is None:
+        trace.append('hook-no-executable')
+    return render(kind, values)
+
+
+def is_utf8(b):
+    try:
+        b.decode('utf-8')
+        return True
+    except UnicodeDecodeError:
+        return False
 
 
 def explain(interp, what, p, b, a, outcome, state, trace):
@@ -923,7 +1015,9 @@ def explain(interp, what, p, b, a, outcome, state, trace):
     content_unavailable finding: "A record's `content_unavailable` findings
     come before side, then after"."""
     bs, as_ = is_reg(b), is_reg(a)
-    executable = lambda e: e['type'] == 'lnk' or bool(e['mode'] & 0o100)  # "the owner's"
+    # "`executable` is after's owner bit, for a file; it is absent for a
+    # symlink, whose own mode says nothing about its target" (None: absent).
+    executable = lambda e: None if e['type'] == 'lnk' else bool(e['mode'] & 0o100)
     target = lambda e: e['link_target'] if e['type'] == 'lnk' else b''
     present = [s for s, ok in zip(SIDES, (bs, as_)) if ok]
     ent = {'before': b, 'after': a}
@@ -947,19 +1041,25 @@ def explain(interp, what, p, b, a, outcome, state, trace):
         elif (interp, what) == ('pip', 'RECORD'):
             # "A RECORD whose outcome is `unknown` pairs like any other, by
             # its directory's name, and every event it takes part in is
-            # provisional; one present on both sides is no proven reinstall
-            # and gives none (its rows are not counted)." One on one side
-            # only is named like any other: one that cannot be named is a
+            # provisional; one present on both sides is a provisional
+            # `pip_reinstalled` whose rows are not compared: its three
+            # counts are absent, under the kind's second template." Either
+            # way it is named like any other: one that cannot be named is a
             # (provisional) could_not_interpret event, and its record carries
             # nothing ("that RECORD's path record carries
-            # `could_not_interpret` too, unless its outcome is `unknown`", E10).
-            # One on both sides is no reinstall and need not be named
-            # (ambiguity I7): nothing at all.
+            # `could_not_interpret` too, unless its outcome is `unknown`",
+            # E10). Its rows are not compared, so no copy is needed: no
+            # content_unavailable.
             state['unknown'].add(p)
             if bs != as_:
                 pip_moved(p, 'removed' if bs else 'added', state, trace)
             elif bs:
                 trace.append('pip-unknown-both-sides')
+                if dist_info(p) is None:
+                    trace += ['pip-unnamed', 'pip-unnamed-unknown-both-sides']
+                    state['unnamed'].append(p)
+                else:
+                    state['reinstalled'].append(p)
         return []
     if outcome == 'metadata_only':
         if (interp, what) == ('git', 'hook') and bs and as_ and executable(b) != executable(a):
@@ -979,8 +1079,7 @@ def explain(interp, what, p, b, a, outcome, state, trace):
             # (R11) unless its outcome is `unknown`, nothing more is read
             # from it" -- a reinstall's content_unavailable included -- "and
             # pip and dpkg emit one `could_not_interpret` event naming it
-            # (E10)". Only a RECORD pip must name: one added, removed or
-            # modified in place (ambiguity I7).
+            # (E10)".
             trace.append('pip-unnamed')
             state['unnamed'].append(p)
             return [render('could_not_interpret', {})]
@@ -998,18 +1097,18 @@ def explain(interp, what, p, b, a, outcome, state, trace):
         h, hb, ha = hook_name(p), is_hook(b), is_hook(a)
         if ha and not hb:
             trace.append('hook-added')
-            return [render_or_invalid('git_hook_added', {'hook': h, 'executable': executable(a),
-                                                         'target': target(a)}, trace)]
+            return [render_hook('git_hook_added', {'hook': h, 'executable': executable(a),
+                                                   'target': target(a)}, trace)]
         if hb and not ha:
             trace.append('hook-removed')
-            return [render_or_invalid('git_hook_removed', {'hook': h, 'target': target(b)},
-                                      trace)]
+            return [render_hook('git_hook_removed', {'hook': h, 'target': target(b)}, trace)]
         if hb and ha:
             # "changed (its content, a link's target, or a file becoming a
-            # link or back)": modified or type_changed, both sides a hook.
+            # link or back)": modified or type_changed, both sides a hook;
+            # "target and executable as in git_hook_added, after".
             trace.append('hook-changed')
-            return [render_or_invalid('git_hook_changed', {'hook': h, 'executable': executable(a),
-                                                           'target': target(a)}, trace)]
+            return [render_hook('git_hook_changed', {'hook': h, 'executable': executable(a),
+                                                     'target': target(a)}, trace)]
     elif (interp, what) == ('git', 'index'):
         # "The index: `git_index_changed` when it is added, removed or its
         # content changed (hashed, never stored)."
@@ -1120,10 +1219,10 @@ def event_or_invalid(interp, kind, values, paths, unknown, trace):
     paths" -- in its place. Every value here is a string field's value
     (dist_info() names no other), so only the text can break the row: a
     template filling three values of up to 1,024 bytes each."""
-    show = lambda v: ('true' if v else 'false') if type(v) is bool else str(v)
-    text = re.sub(r'\{([a-z_]+)\}', lambda m: show(values[m.group(1)]), KINDS[kind].template)
-    if len(text.encode('utf-8')) > 1024:
+    if len(fill(kind, values).encode('utf-8')) > 1024:
         trace.append('pip-invalid-event')
+        if kind == 'pip_reinstalled':
+            trace.append('pip-invalid-event:reinstalled')
         return render_event(interp, 'invalid_finding', {}, paths, unknown)
     return render_event(interp, kind, values, paths, unknown)
 
@@ -1134,8 +1233,10 @@ def pip_end(state, trace):
     cannot be named (E10), by path, then the content_unavailable events --
     then by normalized name, kind (the pin's order), directory. A pair key
     with RECORDs added and removed other than one of each is one
-    could_not_interpret event naming them, "in that name's place". Every
-    event one of whose RECORDs is unknown is provisional (E2)."""
+    could_not_interpret event naming them, "in that name's place". An
+    unknown RECORD on both sides is its own provisional pip_reinstalled,
+    uncounted. Every event one of whose RECORDs is unknown is provisional
+    (E2)."""
     unk = state['unknown']
     if any(p in unk for p, _ in state['moved']):
         trace.append('pip-provisional')
@@ -1183,6 +1284,20 @@ def pip_end(state, trace):
             named.append(((norm, kind_ix(kind), holder, [pp]),
                           event_or_invalid('pip', kind, {'name': name, 'version': ver}, [pp],
                                            unk, trace)))
+    # A RECORD present on both sides, unknown: "a provisional
+    # `pip_reinstalled` whose rows are not compared: its three counts are
+    # absent, under the kind's second template". It is neither added nor
+    # removed, so it pairs with nothing: its own event, in its name's place.
+    for pp in state['reinstalled']:
+        holder, name, ver = dist_info(pp)
+        trace.append('pip-reinstall-uncounted')
+        if (holder, pep503(name)) in keys:
+            trace.append('pip-reinstall-beside-a-move-of-its-name')
+        named.append(((pep503(name), kind_ix('pip_reinstalled'), holder, [pp]),
+                      event_or_invalid('pip', 'pip_reinstalled',
+                                       {'name': name, 'version': ver, 'files_added': None,
+                                        'files_removed': None, 'files_changed': None},
+                                       [pp], unk, trace)))
     named.sort(key=lambda x: x[0])
     unnamed = [render_event('pip', 'could_not_interpret', {}, [p], unk)
                for p in sorted(state['unnamed'])]
@@ -1229,7 +1344,8 @@ def diff(before, after):
               ('scope_remounted', remounted), ('identity_compared', not remounted)]
     assert [('scopes' if k == 'scopes_b64' else k) for k, _ in header] == HEADER_KEYS
     records, counts, traces = [], collections.Counter(), {}
-    states = {i: {'unavailable': [], 'moved': [], 'unnamed': [], 'unknown': set()}
+    states = {i: {'unavailable': [], 'moved': [], 'unnamed': [], 'reinstalled': [],
+                  'unknown': set()}
               for i in INTERP_ORDER}
     paths = sorted(set(eb) | set(ea))
     for p in paths:
