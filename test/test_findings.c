@@ -115,6 +115,10 @@ TEST(a_finding_that_breaks_its_row_is_invalid_finding) {
         const struct belay_fv h[] = { { .s = x, .len = sizeof x }, { .s = y, .len = sizeof y } };
         ASSERT_EQ_INT(0, belay_finding(&g, FK_GIT_HEAD_CHANGED, h, 2));      /* 5 + 500 + 4 + 600 */
         ASSERT_EQ_STR(",\"findings\":[{\"kind\":\"invalid_finding\",\"text\":\"invalid finding\"}]", written(&g));
+        findings_reset(&g, BELAY_INTERP_GIT);                                 /* 1,024 exactly: kept */
+        const struct belay_fv k[] = { { .s = x, .len = sizeof x }, { .s = y, .len = 515 } };
+        ASSERT_EQ_INT(0, belay_finding(&g, FK_GIT_HEAD_CHANGED, k, 2));
+        ASSERT_TRUE(strstr(written(&g), "\"kind\":\"git_head_changed\"") != NULL);
         findings_free(&g);
     }
     /* The bounds themselves are allowed: exactly 1024 bytes of string. */
