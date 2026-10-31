@@ -29,7 +29,8 @@ import os
 import re
 import stat
 
-PIP_BOUND = 64 << 20        # spec: pip RECORD, 64 MiB
+PIP_BOUND = 16 << 20        # spec: pip RECORD, 16 MiB ...
+PIP_ROWS = 262144           # ... and 262,144 rows
 DPKG_BOUND = 256 << 20      # spec: dpkg status, 256 MiB
 EVENT_BOUND = 65536         # E5
 STRING_MAX = 1024           # a string field's value, and a finding's text
@@ -122,12 +123,14 @@ def string_ok(b):
 
 
 def render(kind, values):
-    fields, template = KIND_ROWS[kind]
-    text = template
-    for f in fields:
-        v = values[f]
-        text = text.replace("{" + f + "}", str(v) if isinstance(v, int) else v.decode("utf-8"))
-    return text.encode("utf-8")
+    """The template with each {field} replaced by its value, in one pass: a
+    value that itself holds "{...}" is not replaced again."""
+    _, template = KIND_ROWS[kind]
+
+    def one(m):
+        v = values[m.group(1)]
+        return str(v) if isinstance(v, int) else v.decode("utf-8")
+    return re.sub(r"\{([a-z_]+)\}", one, template).encode("utf-8")
 
 
 def fields_json(kind, values):
@@ -259,15 +262,25 @@ def claim(scope, path):
 
 # ---------------------------------------------------------------- content
 
-def fetch(store, entry, bound):
+def record_row_count(data):
+    """RECORD's rows, for its bound. READING: the rows csv.reader yields
+    that are not empty (a blank line is no row); content that is not UTF-8
+    has no count here (it cannot be parsed, which record_rows says)."""
+    try:
+        text = data.decode("utf-8")
+        return sum(1 for r in csv.reader(io.StringIO(text, newline="")) if r)
+    except (UnicodeDecodeError, csv.Error):
+        return 0
+
+
+def fetch(store, entry, bound, rows_max=None):
     """(reason, None) or (None, bytes): the stored copy of one side."""
-    if store is None:
-        # READING: with no store every needed copy is `no_store`, even one
-        # whose entry records no `stored` copy.
-        return "no_store", None
     s = entry.get("stored")
+    # spec: `missing` "is given before `no_store` when both apply".
     if not s:
         return "missing", None
+    if store is None:
+        return "no_store", None
     p = os.path.join(store, s[:2], s[2:])
     try:
         st = os.lstat(p)
@@ -281,6 +294,8 @@ def fetch(store, entry, bound):
         data = f.read()
     if hashlib.sha256(data).hexdigest() != s:
         return "corrupt", None
+    if rows_max is not None and record_row_count(data) > rows_max:
+        return "too_large", None
     return None, data
 
 
@@ -291,7 +306,7 @@ def is_reg(e):
 PROVEN = ("added", "removed", "modified", "type_changed")
 
 
-def needed_copies(store, b, a, bound, need_before, need_after):
+def needed_copies(store, b, a, bound, need_before, need_after, rows_max=None):
     """Reads the sides needed; returns (findings, unavailable list of
     (side, reason), contents dict)."""
     findings = []
@@ -300,9 +315,9 @@ def needed_copies(store, b, a, bound, need_before, need_after):
     for side, e, need in (("before", b, need_before), ("after", a, need_after)):
         if not need:
             continue
-        reason, data = fetch(store, e, bound)
+        reason, data = fetch(store, e, bound, rows_max)
         if reason:
-            # READING: one finding per side, before's first.
+            # spec: before's finding first, then after's.
             findings.append(finding_json("content_unavailable",
                                          {"reason": reason.encode(), "side": side.encode()}))
             unavailable.append((side, reason))
@@ -660,7 +675,8 @@ def interpret(before_fn, after_fn, store):
                 and (breg or areg):
             pip_names.append(path)
             if breg and areg:
-                findings, u, contents = needed_copies(store, b, a, PIP_BOUND, True, True)
+                findings, u, contents = needed_copies(store, b, a, PIP_BOUND, True, True,
+                                                     PIP_ROWS)
                 unav["pip"] += [(path, s, r) for s, r in u]
                 if not u:
                     pip_reinst.append((path, contents["before"], contents["after"]))
@@ -669,77 +685,113 @@ def interpret(before_fn, after_fn, store):
         res.findings[path] = (b"[" + b",".join(findings) + b"]") if findings else None
 
     # ---- pip end hook
+    # spec: where an interpreter fails on a path (a RECORD it must read cannot
+    # be parsed, a dist-info cannot be named) that path's record carries
+    # could_not_interpret, and the end hook fails (E6). READING: every such
+    # path is marked, not only the first found.
+    fail_paths = {"pip": set(), "dpkg": set()}
     pip_events = []
-    try:
-        named = {}
-        for path in pip_names:
+    pip_failed = []
+    named = {}
+    for path in pip_names:
+        try:
             named[path] = dist_info(path)
-        keys = {}
-        for path, side in pip_pairs.items():
-            holder, name, version = named[path]
-            k = keys.setdefault((holder, pep503(name)), {"A": [], "R": []})
-            k[side].append(path)
-        for (holder, norm), k in keys.items():
-            A, R = sorted(k["A"]), sorted(k["R"])
-            if A and R and len(A) + len(R) > 2:
-                raise InterpFailure("more than one RECORD added and removed for one key")
-            if len(A) == 1 and len(R) == 1:
-                _, name, to = named[A[0]]
-                _, _, frm = named[R[0]]
-                kb = pep440_key(frm.decode("utf-8"))
-                ka = pep440_key(to.decode("utf-8"))
-                if kb is None or ka is None or kb == ka:
-                    kind = "pip_version_changed"
-                elif ka > kb:
-                    kind = "pip_upgraded"
-                else:
-                    kind = "pip_downgraded"
-                pip_events.append(((0, norm, KIND_INDEX[kind], holder, A[0]),
-                                   event_json(kind, "pip", {"name": name, "from": frm, "to": to},
-                                              [A[0], R[0]])))
-                continue
-            for p in A:
-                _, name, version = named[p]
-                pip_events.append(((0, norm, KIND_INDEX["pip_installed"], holder, p),
-                                   event_json("pip_installed", "pip",
-                                              {"name": name, "version": version}, [p])))
-            for p in R:
-                _, name, version = named[p]
-                pip_events.append(((0, norm, KIND_INDEX["pip_removed"], holder, p),
-                                   event_json("pip_removed", "pip",
-                                              {"name": name, "version": version}, [p])))
-        for path, before, after in pip_reinst:
-            holder, name, version = named[path]
+        except InterpFailure as e:
+            fail_paths["pip"].add(path)
+            pip_failed.append(str(e))
+    keys = {}
+    for path, side in pip_pairs.items():
+        if path not in named:
+            continue
+        holder, name, version = named[path]
+        k = keys.setdefault((holder, pep503(name)), {"A": [], "R": []})
+        k[side].append(path)
+    for (holder, norm), k in keys.items():
+        A, R = sorted(k["A"]), sorted(k["R"])
+        if A and R and len(A) + len(R) > 2:
+            pip_failed.append("RECORDs added and removed for one key, not one of each")
+            continue
+        if len(A) == 1 and len(R) == 1:
+            _, name, to = named[A[0]]
+            _, _, frm = named[R[0]]
+            kb = pep440_key(frm.decode("utf-8"))
+            ka = pep440_key(to.decode("utf-8"))
+            if kb is None or ka is None or kb == ka:
+                kind = "pip_version_changed"
+            elif ka > kb:
+                kind = "pip_upgraded"
+            else:
+                kind = "pip_downgraded"
+            pip_events.append(((0, norm, KIND_INDEX[kind], holder, A[0]), kind,
+                               {"name": name, "from": frm, "to": to}, [A[0], R[0]]))
+            continue
+        for p in A:
+            _, name, version = named[p]
+            pip_events.append(((0, norm, KIND_INDEX["pip_installed"], holder, p), "pip_installed",
+                               {"name": name, "version": version}, [p]))
+        for p in R:
+            _, name, version = named[p]
+            pip_events.append(((0, norm, KIND_INDEX["pip_removed"], holder, p), "pip_removed",
+                               {"name": name, "version": version}, [p]))
+    for path, before, after in pip_reinst:
+        try:
             rb = record_rows(before)
             ra = record_rows(after)
-            added = sum(1 for p in ra if p not in rb)
-            removed = sum(1 for p in rb if p not in ra)
-            changed = sum(1 for p in ra if p in rb and ra[p] != rb[p])
-            pip_events.append(((0, pep503(name), KIND_INDEX["pip_reinstalled"], holder, path),
-                               event_json("pip_reinstalled", "pip",
-                                          {"name": name, "version": version,
-                                           "files_added": added, "files_removed": removed,
-                                           "files_changed": changed}, [path])))
-        pip_events += unavailable_events("pip", unav["pip"])
-        # READING: past name, kind and directory, events are ordered by the
-        # first path they list.
-        pip_events = [e for _, e in sorted(pip_events, key=lambda x: x[0])]
-    except InterpFailure as e:
-        res.failed["pip"] = str(e)
+        except InterpFailure as e:
+            fail_paths["pip"].add(path)
+            pip_failed.append(str(e))
+            continue
+        if path not in named:
+            continue
+        holder, name, version = named[path]
+        added = sum(1 for p in ra if p not in rb)
+        removed = sum(1 for p in rb if p not in ra)
+        changed = sum(1 for p in ra if p in rb and ra[p] != rb[p])
+        pip_events.append(((0, pep503(name), KIND_INDEX["pip_reinstalled"], holder, path),
+                           "pip_reinstalled",
+                           {"name": name, "version": version, "files_added": added,
+                            "files_removed": removed, "files_changed": changed}, [path]))
+    for _, kind, vals, _ in pip_events:
+        if len(render(kind, vals)) > STRING_MAX:
+            # spec: an end hook fails when an event's text would exceed 1,024
+            # bytes. READING: no path record is marked for it.
+            pip_failed.append("event text over 1,024 bytes")
+    if pip_failed:
+        res.failed["pip"] = "; ".join(pip_failed)
         pip_events = [event_json("could_not_interpret", "pip", {}, given["pip"])]
+    else:
+        # READING: past name, kind and directory, events are ordered by the
+        # first path they list (the RECORD added, for a pair).
+        lines = [(k, event_json(kind, "pip", vals, paths)) for k, kind, vals, paths in pip_events]
+        lines += unavailable_events("pip", unav["pip"])
+        pip_events = [e for _, e in sorted(lines, key=lambda x: x[0])]
 
     # ---- dpkg end hook
-    dpkg_events = []
-    try:
-        evs = []
-        for path, before, after in dpkg_jobs:
-            evs += dpkg_events_for(path, before, after)
+    dpkg_failed = []
+    evs = []
+    for path, before, after in dpkg_jobs:
+        try:
+            got = dpkg_events_for(path, before, after)
+        except InterpFailure as e:
+            fail_paths["dpkg"].add(path)
+            dpkg_failed.append(str(e))
+            continue
+        for k, kind, vals in got:
+            if len(render(kind, vals)) > STRING_MAX:
+                dpkg_failed.append("event text over 1,024 bytes")
+        evs += got
+    if dpkg_failed:
+        res.failed["dpkg"] = "; ".join(dpkg_failed)
+        dpkg_events = [event_json("could_not_interpret", "dpkg", {}, given["dpkg"])]
+    else:
         evs.sort(key=lambda x: x[0])
         dpkg_events = [e for _, e in sorted(unavailable_events("dpkg", unav["dpkg"]))]
         dpkg_events += [event_json(kind, "dpkg", vals, [k[3]]) for k, kind, vals in evs]
-    except InterpFailure as e:
-        res.failed["dpkg"] = str(e)
-        dpkg_events = [event_json("could_not_interpret", "dpkg", {}, given["dpkg"])]
+
+    for who in ("pip", "dpkg"):
+        for p in fail_paths[who]:
+            # "has its findings there replaced by could_not_interpret"
+            res.findings[p] = b"[" + finding_json("could_not_interpret", {}) + b"]"
 
     res.events = bound_events("pip", pip_events) + bound_events("dpkg", dpkg_events)
     return res

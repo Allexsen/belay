@@ -324,7 +324,7 @@ def render_db(db):
 
 def mutate_db(rng, db):
     db = [dict(s) for s in db]
-    for _ in range(rng.randrange(1, 4)):
+    for _ in range(rng.randrange(1, 7)):
         op = rng.randrange(6)
         if op == 0 and db:                     # removed: stanza dropped or state changed
             i = rng.randrange(len(db))
@@ -471,10 +471,7 @@ def both_dist(case, site, name, version, rows):
 
 def random_case(rng, i):
     c = Case("random-%04d" % i, modes=("store", "nostore"))
-    # No "none" here: with no store, whether an entry that records no copy is
-    # `no_store` or `missing` is a question of its own (probe below), kept out
-    # of the random loop so it cannot mask anything else.
-    store_choices = ["ok"] * 12 + ["absent", "corrupt", "symlink"]
+    store_choices = ["ok"] * 12 + ["none", "absent", "corrupt", "symlink"]
 
     # dpkg: one or two roots
     roots = [b""] + ([b"chroot/bookworm/"] if rng.random() < 0.4 else [])
@@ -482,7 +479,7 @@ def random_case(rng, i):
         roots.append(b"chroot/\xfe/")
     for root in roots:
         sp = root + b"var/lib/dpkg/status"
-        db = rand_stanzas(rng, rng.randrange(0, 8))
+        db = rand_stanzas(rng, rng.randrange(0, 14))
         r = rng.random()
         if r < 0.1:
             c.put("before", sp, reg(render_db(db), store=rng.choice(store_choices)))
@@ -849,6 +846,8 @@ def bad_reg(interp, variant, content, which, gen):
         return reg(content, store="symlink", gen=gen)
     if variant == "too_large":
         return reg(None, big=BIG[interp][which], gen=gen)
+    if variant == "too_large_rows":            # pip: small, but past 262,144 rows
+        return reg(b"w%d,,\n" % which + b"x,,\n" * ref.PIP_ROWS, gen=gen)
     raise ValueError(variant)
 
 
@@ -858,9 +857,6 @@ def cell_content_unavailable():
     sp2 = b"chroot/bookworm/var/lib/dpkg/status"
     S = SITES[0]
     rng = random.Random(99)
-    reason_of = {"missing_nostored": "missing", "missing_absent": "missing",
-                 "missing_unverified": "missing", "corrupt_content": "corrupt",
-                 "corrupt_symlink": "corrupt", "too_large": "too_large"}
 
     def dpkg_case(name, mode, variant, side):
         c = Case(name, modes=(mode,))
@@ -915,7 +911,7 @@ def cell_content_unavailable():
     c.tag("cu.pip.no_store.both")
     out.append(c)
     for side in ("before", "after", "both"):
-        for v in CU_VARIANTS:
+        for v in CU_VARIANTS + ["too_large_rows"]:
             c = pip_case("cu-pip-%s-%s" % (v, side), "store", v, side)
             c.tag("cu.pip.%s.%s" % (v, side))
             out.append(c)
@@ -1148,7 +1144,7 @@ def cell_probes():
     size = 0
     i = 0
     while True:
-        row = "six/m%07d.py,sha256=%s,%d\n" % (i, "A" * 43, i)
+        row = "six/m%07d.py,sha256=%s,%d\n" % (i, "A" * 60, i)
         if size + len(row) > ref.PIP_BOUND - 200:
             break
         rows.append(row)
@@ -1162,7 +1158,33 @@ def cell_probes():
     rec = dist(S, b"six", b"1.16.0")[0]
     c.put("before", rec, reg(before))
     c.put("after", rec, reg(after, gen=1))
+    assert i < ref.PIP_ROWS
     c.tag("probe.pip.record_at_bound")
+    out.append(c)
+
+    c = Case("probe-pip-rows-at-bound")
+    rows = b"".join(b"r%06d,h,1\n" % i for i in range(ref.PIP_ROWS))
+    rec = dist(S, b"six", b"1.16.0")[0]
+    c.put("before", rec, reg(rows))
+    c.put("after", rec, reg(rows.replace(b"r000007,h,1", b"r000007,g,1"), gen=1))
+    c.tag("probe.pip.record_rows_at_bound")
+    out.append(c)
+
+    dpkg_pair("probe-dpkg-text-over-1024",
+              status_bytes(base_db()),
+              status_bytes(base_db() + [stanza(b"p" * 600, b"1." + b"0" * 500)]),
+              "probe.dpkg.E6_event_text_over_1024")
+    dpkg_pair("probe-dpkg-template-in-value",
+              status_bytes(base_db() + [stanza(b"p{arch}q", b"1.0", arch=b"{version}")]),
+              status_bytes(base_db() + [stanza(b"p{arch}q", b"2.0", arch=b"{version}")]),
+              "probe.dpkg.template_text_in_value")
+
+    c = Case("probe-dpkg-md5sums-elsewhere")
+    c.put("after", b"etc/foo.md5sums", reg(b"0" * 32 + b"  x\n"))
+    c.put("after", b"var/lib/dpkg/info/curl.md5sums", reg(b"0" * 32 + b"  y\n"))
+    c.put("before", sp, reg(status_bytes(base_db())))
+    c.put("after", sp, reg(status_bytes(base_db()) + b"no colon\n", gen=1))
+    c.tag("probe.dpkg.md5sums_outside_info")
     out.append(c)
     return out
 
