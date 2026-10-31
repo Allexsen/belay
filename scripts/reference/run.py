@@ -95,7 +95,8 @@ def kinds(mine, interp=None):
 
 REASON_OF = {"no_store": "no_store", "missing_nostored": "missing", "missing_absent": "missing",
              "missing_unverified": "missing", "corrupt_content": "corrupt",
-             "corrupt_symlink": "corrupt", "too_large": "too_large"}
+             "corrupt_symlink": "corrupt", "too_large": "too_large",
+             "too_large_rows": "too_large"}
 
 
 def check_cell(cell, mine):
@@ -168,6 +169,8 @@ def check_cell(cell, mine):
         "probe.dpkg.E6_paths_given": lambda: K == ["could_not_interpret"],
         "probe.pip.E6_row_of_two_fields": lambda: K == ["could_not_interpret"],
         "probe.pip.E6_record_not_utf8": lambda: K == ["could_not_interpret"],
+        "probe.dpkg.E6_event_text_over_1024": lambda: K == ["could_not_interpret"],
+        "probe.dpkg.md5sums_outside_info": lambda: K == ["could_not_interpret"],
     }
     if cell in simple:
         return bool(simple[cell]())
