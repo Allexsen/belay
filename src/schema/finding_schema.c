@@ -12,11 +12,12 @@
 #define B(n) { n, FT_BOOL }
 
 const struct finding_kind_def FINDING_KINDS[FK_COUNT] = {
-    [FK_COULD_NOT_INTERPRET] = { "could_not_interpret", IN_ANY, LV_PATH, { { 0 } },
-        "could not interpret", "The interpreter failed on this path (R11); nothing else from it here." },
-    [FK_INVALID_FINDING] = { "invalid_finding", IN_ANY, LV_PATH, { { 0 } }, "invalid finding",
-        "A finding that broke the rules, replaced." },
-    [FK_AND_MORE] = { "and_more", IN_ANY, LV_PATH, { N("n") }, "and {n} more",
+    [FK_COULD_NOT_INTERPRET] = { "could_not_interpret", IN_CORE, LV_PATH | LV_EVENT, { { 0 } },
+        "could not interpret", "The interpreter failed on this path (R11), nothing else from it "
+        "here; or, as an event, on the paths it names (E6, E10)." },
+    [FK_INVALID_FINDING] = { "invalid_finding", IN_CORE, LV_PATH | LV_EVENT, { { 0 } }, "invalid finding",
+        "A finding that broke the rules, replaced; or, as an event, an event that did (E9)." },
+    [FK_AND_MORE] = { "and_more", IN_CORE, LV_PATH | LV_EVENT, { N("n") }, "and {n} more",
         "In the last place of a record past 4,096 findings, or of an interpreter's events past "
         "65,536: the findings or events from that place on, counted." },
     [FK_CONTENT_UNAVAILABLE] = { "content_unavailable", I_TEXT | I_PIP | I_DPKG | I_GIT,
@@ -75,11 +76,11 @@ const struct finding_kind_def FINDING_KINDS[FK_COUNT] = {
         "deleted {ref} (was {from})", "A ref went away." },
     [FK_GIT_REF_MOVED] = { "git_ref_moved", I_GIT, LV_PATH, { S("ref"), S("from"), S("to") },
         "{ref} {from} -> {to}", "A ref names another commit." },
-    [FK_GIT_HOOK_ADDED] = { "git_hook_added", I_GIT, LV_PATH, { S("hook"), B("executable") },
+    [FK_GIT_HOOK_ADDED] = { "git_hook_added", I_GIT, LV_PATH, { S("hook"), B("executable"), S("target") },
         "hook {hook} added", "" },
-    [FK_GIT_HOOK_REMOVED] = { "git_hook_removed", I_GIT, LV_PATH, { S("hook") }, "hook {hook} removed",
+    [FK_GIT_HOOK_REMOVED] = { "git_hook_removed", I_GIT, LV_PATH, { S("hook"), S("target") }, "hook {hook} removed",
         "" },
-    [FK_GIT_HOOK_CHANGED] = { "git_hook_changed", I_GIT, LV_PATH, { S("hook"), B("executable") },
+    [FK_GIT_HOOK_CHANGED] = { "git_hook_changed", I_GIT, LV_PATH, { S("hook"), B("executable"), S("target") },
         "hook {hook} changed", "Its content changed." },
     [FK_GIT_HOOK_EXECUTABLE_CHANGED] = { "git_hook_executable_changed", I_GIT, LV_PATH,
         { S("hook"), B("executable") }, "hook {hook} executable: {executable}",
@@ -110,8 +111,10 @@ const struct event_rule EVENT_RULES[EVENT_RULE_COUNT] = {
         "has none." },
     { "E2 shape",
         "`{\"event\": \"<kind>\", \"interp\": \"<interpreter>\", <the kind's fields, in "
-        "finding-kinds.md's order>, \"text\": \"<its template>\", \"paths\": [...]}`. The kind is an "
-        "`event`-level kind of finding-kinds.md, or `and_more`." },
+        "finding-kinds.md's order>, \"text\": \"<its template>\", \"provisional\": true, \"paths\": "
+        "[...]}`. The kind is an `event`-level kind of finding-kinds.md. `provisional` is "
+        "present, and `true`, exactly when a path the event was derived from has the outcome "
+        "`unknown` (decision P7): the event may not hold." },
     { "E3 paths",
         "The paths it was derived from, relative to the scope as in path records, sorted "
         "bytewise, each once, at least one (except `and_more`). `paths_b64` instead -- every "
@@ -121,17 +124,32 @@ const struct event_rule EVENT_RULES[EVENT_RULE_COUNT] = {
         "defines it in finding-kinds.md's terms: pip by normalized name, then kind; dpkg by "
         "Package, then Architecture, then kind. The same inputs give the same bytes." },
     { "E5 bound",
-        "At most 65,536 event records per interpreter per diff; past that, one final `{\"event\": "
-        "\"and_more\", \"interp\": ..., \"n\": <the rest>, \"text\": \"and {n} more\", \"paths\": []}`. An "
-        "interpreter's per-diff state is bounded to match." },
+        "At most 65,536 event records per interpreter per diff: past that, the 65,536th is "
+        "`{\"event\": \"and_more\", \"interp\": ..., \"n\": <that one and the rest>, \"text\": \"and {n} "
+        "more\", \"paths\": []}`. An interpreter's per-diff state is bounded to match." },
     { "E6 failure",
-        "An interpreter that fails in its end hook emits `{\"event\": \"could_not_interpret\", "
-        "\"interp\": ..., \"text\": \"could not interpret\", \"paths\": [...]}` with the paths it had "
-        "claimed, and no other event. The diff does not fail." },
+        "An interpreter whose end hook fails emits `{\"event\": \"could_not_interpret\", \"interp\": "
+        "..., \"text\": \"could not interpret\", \"paths\": [...], \"paths_truncated\": <n>}` and no "
+        "other event: `paths` the first 1,024 of the paths it had claimed (bytewise), "
+        "`paths_truncated` the number of the rest, present only when not 0 (decision P4). The "
+        "diff does not fail." },
     { "E7 trailer",
         "The trailer gains `events`: the number of event records. `belay_diff_end` still counts "
         "path records only." },
     { "E8 forward",
         "A consumer ignores an event kind it does not know, as it ignores an unknown finding kind "
         "or field." },
+    { "E9 invalid",
+        "An event an interpreter adds that breaks its kind's row -- a kind not its own, not "
+        "event-level, or the core's; a field missing, extra, or not a string field's value; text "
+        "over 1,024 bytes -- is replaced, in its place, by `{\"event\": \"invalid_finding\", "
+        "\"interp\": ..., \"text\": \"invalid finding\", \"paths\": [<its paths>]}`; the interpreter's "
+        "other events stand (decisions P1, P5)." },
+    { "E10 a file not interpreted",
+        "A file an interpreter claims and cannot interpret gives one `{\"event\": "
+        "\"could_not_interpret\", \"interp\": ..., \"text\": \"could not interpret\", \"paths\": [<the "
+        "files>]}` (and its path record `could_not_interpret`); the interpreter's other events "
+        "stand: pip, a dist-info that cannot be named, a RECORD it must read that cannot be "
+        "parsed, a name with RECORDs added and removed other than one of each; dpkg, a status "
+        "that cannot be parsed (the class of decision P1)." },
 };

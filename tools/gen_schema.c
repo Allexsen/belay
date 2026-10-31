@@ -255,7 +255,7 @@ static void diff_findings_block(void) {
         const struct finding_kind_def *d = &FINDING_KINDS[k];
         char in[128] = "", fl[256] = "";
         size_t w = 0;
-        if (d->interps == IN_ANY) snprintf(in, sizeof in, "any");
+        if (d->interps == IN_CORE) snprintf(in, sizeof in, "core");
         else
             for (int i = 0; i < BELAY_INTERP_COUNT; i++)
                 if (d->interps & (1u << i))

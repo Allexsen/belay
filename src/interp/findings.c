@@ -145,6 +145,22 @@ int belay_finding(struct belay_findings *f, int kind, const struct belay_fv *v, 
     return 0;
 }
 
+int findings_core(struct belay_findings *f, int kind) {
+    if (f->oom) return -1;
+    if (f->n == FINDINGS_PER_RECORD) { f->extra++; return 0; }
+    const char *t = FINDING_KINDS[kind].text;
+    const size_t at = f->objs.len;
+    if ((f->n && sb_str(&f->objs, ",")) || sb_str(&f->objs, "{\"kind\":\"") ||
+        sb_str(&f->objs, FINDING_KINDS[kind].name) || sb_str(&f->objs, "\"") ||
+        put_fields(&f->objs, kind, NULL, 0, t, strlen(t)) || sb_str(&f->objs, "}")) {
+        f->oom = true;
+        return -1;
+    }
+    f->last = at;
+    f->n++;
+    return 0;
+}
+
 int findings_write(const struct belay_findings *f, FILE *out) {
     if (f->n == 0) return 0;
     const size_t keep = f->extra ? f->last : f->objs.len;
@@ -168,8 +184,12 @@ void events_free(struct belay_events *ev) {
     memset(ev, 0, sizeof *ev);
 }
 
+/* E6 names at most E6_PATHS of them; the diff gives paths in its own
+ * (bytewise) order, so the first kept are the first claimed, and the rest
+ * are only counted: bounded however many there are (decision P4). */
 int events_claim(struct belay_events *ev, int interp, const char *path, size_t len) {
     struct ev_per *p = &ev->per[interp];
+    if (p->nclaimed == E6_PATHS) { p->claims_over++; return 0; }
     if (sb_put(&p->claimed, &len, sizeof len) || sb_put(&p->claimed, path, len)) return -1;
     p->nclaimed++;
     return 0;
@@ -184,7 +204,7 @@ static int pth_cmp(const void *a, const void *b) {
 
 /* `"paths":[...]`, or `"paths_b64":[...]` when any is not UTF-8 (E3). */
 static int put_paths(struct sbuf *b, struct pth *ps, size_t n) {
-    qsort(ps, n, sizeof *ps, pth_cmp);
+    if (n > 1) qsort(ps, n, sizeof *ps, pth_cmp);
     bool b64 = false;
     for (size_t i = 0; i < n; i++) b64 |= !belay_utf8_valid(ps[i].p, ps[i].n);
     if (sb_str(b, b64 ? ",\"paths_b64\":[" : ",\"paths\":[")) return -1;
@@ -207,31 +227,37 @@ static int put_paths(struct sbuf *b, struct pth *ps, size_t n) {
     return sb_str(b, "]");
 }
 
+/* One event line: kind, interp, fields, text, provisional (E2), paths, and
+ * paths_truncated when E6 cut its list. */
 static int add_event(struct ev_per *p, int interp, int kind, const struct belay_fv *v, size_t n,
-                     struct pth *ps, size_t np, const char *text, size_t tl) {
+                     const char *text, size_t tl, bool provisional, struct pth *ps, size_t np,
+                     size_t truncated) {
     struct sbuf *b = &p->recs;
     p->last = b->len;
+    char num[48];
+    snprintf(num, sizeof num, ",\"paths_truncated\":%zu", truncated);
     if (sb_str(b, "{\"event\":\"") || sb_str(b, FINDING_KINDS[kind].name) ||
         sb_str(b, "\",\"interp\":\"") || sb_str(b, INTERP_NAMES[interp]) || sb_str(b, "\"") ||
-        put_fields(b, kind, v, n, text, tl) || put_paths(b, ps, np) || sb_str(b, "}\n"))
+        put_fields(b, kind, v, n, text, tl) || (provisional && sb_str(b, ",\"provisional\":true")) ||
+        put_paths(b, ps, np) || (truncated && sb_str(b, num)) || sb_str(b, "}\n"))
         return -1;
     p->n++;
     return 0;
 }
 
-int belay_event(struct belay_events *ev, int kind, const struct belay_fv *v, size_t n,
-                const char *const *paths, const size_t *path_lens, size_t npaths) {
+/* Paths an event may name: at least one, each a manifest path's length. */
+static bool paths_ok(const char *const *paths, const size_t *lens, size_t n) {
+    if (n == 0 || paths == NULL || lens == NULL) return false;
+    for (size_t i = 0; i < n; i++)
+        if (paths[i] == NULL || lens[i] == 0 || lens[i] > 4096) return false;
+    return true;
+}
+
+/* Adds an event the core has checked, its text rendered; counted past E5. */
+static int put_event(struct belay_events *ev, int kind, const struct belay_fv *v, size_t n,
+                     const char *text, size_t tl, bool provisional,
+                     const char *const *paths, const size_t *path_lens, size_t npaths) {
     struct ev_per *p = &ev->per[ev->interp];
-    if (p->oom) return -1;
-    char text[FINDING_STRING_MAX + 1];
-    size_t tl;
-    bool paths_ok = npaths > 0;
-    for (size_t i = 0; i < npaths && paths_ok; i++)
-        paths_ok = paths[i] != NULL && path_lens[i] > 0 && path_lens[i] <= 4096;
-    if (!paths_ok || !valid(kind, ev->interp, LV_EVENT, v, n, text, &tl)) {
-        p->broken = true;                     /* an interpreter bug: E6, said, not hidden */
-        return 0;
-    }
     if (p->n == EVENTS_PER_INTERP) { p->extra++; return 0; }
     struct pth *ps = malloc(npaths * sizeof *ps);
     if (ps == NULL) {
@@ -240,16 +266,41 @@ int belay_event(struct belay_events *ev, int kind, const struct belay_fv *v, siz
         return -1;
     }
     for (size_t i = 0; i < npaths; i++) ps[i] = (struct pth){ paths[i], path_lens[i] };
-    const int r = add_event(p, ev->interp, kind, v, n, ps, npaths, text, tl);
+    const int r = add_event(p, ev->interp, kind, v, n, text, tl, provisional, ps, npaths, 0);
     free(ps);
     if (r == -1) p->oom = true;
     return r;
 }
 
-bool belay_event_fits(const struct belay_events *ev, int kind, const struct belay_fv *v, size_t n) {
+int belay_event(struct belay_events *ev, int kind, const struct belay_fv *v, size_t n,
+                const char *const *paths, const size_t *path_lens, size_t npaths, unsigned flags) {
+    struct ev_per *p = &ev->per[ev->interp];
+    if (p->oom) return -1;
+    if (!paths_ok(paths, path_lens, npaths)) {
+        p->broken = true;                     /* nothing to name: E6, said, not hidden */
+        return 0;
+    }
     char text[FINDING_STRING_MAX + 1];
     size_t tl;
-    return valid(kind, ev->interp, LV_EVENT, v, n, text, &tl);
+    const bool prov = (flags & BELAY_EVENT_PROVISIONAL) != 0;
+    if (!valid(kind, ev->interp, LV_EVENT, v, n, text, &tl)) {     /* E9: that event only */
+        const char *t = FINDING_KINDS[FK_INVALID_FINDING].text;
+        return put_event(ev, FK_INVALID_FINDING, NULL, 0, t, strlen(t), prov, paths, path_lens, npaths);
+    }
+    return put_event(ev, kind, v, n, text, tl, prov, paths, path_lens, npaths);
+}
+
+int belay_event_not_interpreted(struct belay_events *ev, const char *const *paths,
+                                const size_t *path_lens, size_t npaths, unsigned flags) {
+    struct ev_per *p = &ev->per[ev->interp];
+    if (p->oom) return -1;
+    if (!paths_ok(paths, path_lens, npaths)) {
+        p->broken = true;
+        return 0;
+    }
+    const char *t = FINDING_KINDS[FK_COULD_NOT_INTERPRET].text;
+    return put_event(ev, FK_COULD_NOT_INTERPRET, NULL, 0, t, strlen(t),
+                     (flags & BELAY_EVENT_PROVISIONAL) != 0, paths, path_lens, npaths);
 }
 
 bool events_oom(const struct belay_events *ev, int interp) { return ev->per[interp].oom; }
@@ -272,7 +323,8 @@ int events_failed(struct belay_events *ev, int interp) {
         off += sizeof ps[i].n + ps[i].n;
     }
     const char *t = FINDING_KINDS[FK_COULD_NOT_INTERPRET].text;
-    const int r = add_event(p, interp, FK_COULD_NOT_INTERPRET, NULL, 0, ps, p->nclaimed, t, strlen(t));
+    const int r = add_event(p, interp, FK_COULD_NOT_INTERPRET, NULL, 0, t, strlen(t), false, ps,
+                            p->nclaimed, p->claims_over);
     free(ps);
     return r;
 }

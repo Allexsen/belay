@@ -132,7 +132,7 @@ static int explain(struct run *x, const struct belay_entry *b, const struct bela
     if (r == BELAY_INTERP_FINDINGS) return 0;
     findings_reset(&x->findings, id);
     if (r == BELAY_INTERP_DECLINE) return 0;
-    return belay_finding(&x->findings, FK_COULD_NOT_INTERPRET, NULL, 0);
+    return findings_core(&x->findings, FK_COULD_NOT_INTERPRET);
 }
 
 /* Each end hook, with the sink for its events; one that fails, or added an

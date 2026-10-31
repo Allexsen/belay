@@ -124,12 +124,12 @@ TEST(a_finding_that_breaks_its_row_is_invalid_finding) {
     /* The bounds themselves are allowed: exactly 1024 bytes of string. */
     struct belay_findings f = { 0 };
     findings_reset(&f, BELAY_INTERP_GIT);
-    const struct belay_fv hook[] = { { .s = edge, .len = sizeof edge } };
-    ASSERT_EQ_INT(0, belay_finding(&f, FK_GIT_HOOK_REMOVED, hook, 1));
+    const struct belay_fv hook[] = { { .s = edge, .len = sizeof edge }, S("") };
+    ASSERT_EQ_INT(0, belay_finding(&f, FK_GIT_HOOK_REMOVED, hook, 2));
     ASSERT_TRUE(strstr(written(&f), "invalid_finding") != NULL);    /* text: "hook " + 1024 > 1024 */
     findings_reset(&f, BELAY_INTERP_GIT);
-    const struct belay_fv hook2[] = { { .s = edge, .len = FINDING_STRING_MAX - 13 } };
-    ASSERT_EQ_INT(0, belay_finding(&f, FK_GIT_HOOK_REMOVED, hook2, 1));
+    const struct belay_fv hook2[] = { { .s = edge, .len = FINDING_STRING_MAX - 13 }, S("") };
+    ASSERT_EQ_INT(0, belay_finding(&f, FK_GIT_HOOK_REMOVED, hook2, 2));
     ASSERT_TRUE(strstr(written(&f), "\"kind\":\"git_hook_removed\"") != NULL);  /* text: 1024 exactly */
     findings_free(&f);
 }
@@ -166,7 +166,7 @@ static int ev(struct belay_events *e, int interp, int kind, const struct belay_f
     size_t lens[16];
     for (size_t i = 0; i < np; i++) lens[i] = strlen(paths[i]);
     e->interp = interp;
-    return belay_event(e, kind, v, n, paths, lens, np);
+    return belay_event(e, kind, v, n, paths, lens, np, 0);
 }
 
 /* E2, E3: fields, then text, then the paths sorted bytewise, each once. */
@@ -214,32 +214,108 @@ TEST(events_are_written_by_interpreter_in_the_pinned_order) {
 
 /* An event that breaks its row is an interpreter bug: its events become E6's
  * one could_not_interpret, naming the paths it was given. */
-TEST(an_invalid_event_fails_its_interpreter) {
+/* Pin E9 (decisions P1, P5): an event that breaks its kind's row becomes, in
+ * its place, one invalid_finding event naming its paths; the interpreter's
+ * other events stand. Before, any of these failed the whole interpreter
+ * (E6). Only an event naming no path still does: there is nothing to name. */
+TEST(an_invalid_event_is_one_invalid_finding_event_the_rest_stand) {
     const struct belay_fv v[] = { S("numpy"), S("2.1.0") };
     const char *const p[] = { "x" };
-    const struct { const char *why; int kind; size_t n, np; } C[] = {
-        { "a path-level kind", FK_TEXT_ADDED, 1, 1 },
-        { "no paths", FK_PIP_INSTALLED, 2, 0 },
-        { "a field missing", FK_PIP_INSTALLED, 1, 1 },
-        { "another interpreter's kind", FK_DPKG_INSTALLED, 2, 1 },
-        { "and_more from an interpreter", FK_AND_MORE, 1, 1 },
-        { "could_not_interpret from an interpreter", FK_COULD_NOT_INTERPRET, 0, 1 },
+    const struct { const char *why; int kind; size_t n; } C[] = {
+        { "a path-level kind", FK_TEXT_ADDED, 1 },
+        { "a field missing", FK_PIP_INSTALLED, 1 },
+        { "another interpreter's kind", FK_DPKG_INSTALLED, 2 },
+        { "and_more from an interpreter", FK_AND_MORE, 1 },
+        { "could_not_interpret from an interpreter", FK_COULD_NOT_INTERPRET, 0 },
+        { "invalid_finding from an interpreter", FK_INVALID_FINDING, 0 },
     };
     for (size_t i = 0; i < sizeof C / sizeof C[0]; i++) {
         struct belay_events e;
         events_init(&e);
-        ASSERT_EQ_INT(0, events_claim(&e, BELAY_INTERP_PIP, "z/RECORD", 8));
-        ASSERT_EQ_INT(0, events_claim(&e, BELAY_INTERP_PIP, "a/RECORD", 8));
         ASSERT_EQ_INT(0, ev(&e, BELAY_INTERP_PIP, FK_PIP_INSTALLED, v, 2, p, 1));
-        ASSERT_EQ_INT(0, ev(&e, BELAY_INTERP_PIP, C[i].kind, v, C[i].n, p, C[i].np));
-        if (!events_broken(&e, BELAY_INTERP_PIP)) BELAY_FAIL("%s: not marked broken", C[i].why);
-        ASSERT_EQ_INT(0, events_failed(&e, BELAY_INTERP_PIP));
-        if (strcmp(ev_written(&e), "{\"event\":\"could_not_interpret\",\"interp\":\"pip\","
-                                   "\"text\":\"could not interpret\",\"paths\":[\"a/RECORD\",\"z/RECORD\"]}\n") != 0)
+        ASSERT_EQ_INT(0, ev(&e, BELAY_INTERP_PIP, C[i].kind, v, C[i].n, p, 1));
+        if (events_broken(&e, BELAY_INTERP_PIP)) BELAY_FAIL("%s: marked broken", C[i].why);
+        if (strcmp(ev_written(&e), "{\"event\":\"pip_installed\",\"interp\":\"pip\",\"name\":\"numpy\","
+                                   "\"version\":\"2.1.0\",\"text\":\"installed numpy 2.1.0\",\"paths\":[\"x\"]}\n"
+                                   "{\"event\":\"invalid_finding\",\"interp\":\"pip\",\"text\":\"invalid finding\","
+                                   "\"paths\":[\"x\"]}\n") != 0)
             BELAY_FAIL("%s: %s", C[i].why, g_out);
-        ASSERT_EQ_INT(1, (int)events_count(&e));
         events_free(&e);
     }
+    struct belay_events e;                      /* no paths: E6 */
+    events_init(&e);
+    ASSERT_EQ_INT(0, events_claim(&e, BELAY_INTERP_PIP, "z/RECORD", 8));
+    ASSERT_EQ_INT(0, events_claim(&e, BELAY_INTERP_PIP, "a/RECORD", 8));
+    ASSERT_EQ_INT(0, ev(&e, BELAY_INTERP_PIP, FK_PIP_INSTALLED, v, 2, p, 0));
+    ASSERT_TRUE(events_broken(&e, BELAY_INTERP_PIP));
+    ASSERT_EQ_INT(0, events_failed(&e, BELAY_INTERP_PIP));
+    ASSERT_EQ_STR("{\"event\":\"could_not_interpret\",\"interp\":\"pip\",\"text\":\"could not interpret\","
+                  "\"paths\":[\"a/RECORD\",\"z/RECORD\"]}\n", ev_written(&e));
+    events_free(&e);
+}
+
+/* Decision P5: the core's kinds are the core's; an interpreter adding one
+ * to a path has it replaced by invalid_finding -- it cannot write "could not
+ * interpret" over its own findings, or an and_more of its own count. */
+TEST(an_interpreter_cannot_add_the_cores_kinds) {
+    const struct belay_fv n[] = { I(5) };
+    const struct { int kind; const struct belay_fv *v; size_t k; } C[] = {
+        { FK_COULD_NOT_INTERPRET, NULL, 0 }, { FK_INVALID_FINDING, NULL, 0 }, { FK_AND_MORE, n, 1 },
+    };
+    for (size_t i = 0; i < sizeof C / sizeof C[0]; i++) {
+        struct belay_findings f = { 0 };
+        findings_reset(&f, BELAY_INTERP_PIP);
+        ASSERT_EQ_INT(0, belay_finding(&f, C[i].kind, C[i].v, C[i].k));
+        ASSERT_EQ_STR(",\"findings\":[{\"kind\":\"invalid_finding\",\"text\":\"invalid finding\"}]", written(&f));
+        findings_free(&f);
+    }
+    struct belay_findings f = { 0 };            /* the core's own still writes */
+    findings_reset(&f, BELAY_INTERP_PIP);
+    ASSERT_EQ_INT(0, findings_core(&f, FK_COULD_NOT_INTERPRET));
+    ASSERT_EQ_STR(",\"findings\":[{\"kind\":\"could_not_interpret\",\"text\":\"could not interpret\"}]", written(&f));
+    findings_free(&f);
+}
+
+/* Decision P4: E6 names the first 1,024 claimed paths, then counts the rest
+ * (bounded however many were claimed). */
+TEST(a_failed_interpreter_names_1024_paths_and_counts_the_rest) {
+    struct belay_events e;
+    events_init(&e);
+    char path[32];
+    for (int i = 0; i < 1030; i++) {
+        snprintf(path, sizeof path, "p/%05d", i);
+        ASSERT_EQ_INT(0, events_claim(&e, BELAY_INTERP_DPKG, path, strlen(path)));
+    }
+    ASSERT_EQ_INT(0, events_failed(&e, BELAY_INTERP_DPKG));
+    const char *w = ev_written(&e);
+    ASSERT_TRUE(strstr(w, "\"p/01023\"],\"paths_truncated\":6}\n") != NULL);
+    ASSERT_TRUE(strstr(w, "p/01024") == NULL);
+    events_free(&e);
+    events_init(&e);                            /* exactly 1,024: no count */
+    for (int i = 0; i < 1024; i++) {
+        snprintf(path, sizeof path, "p/%05d", i);
+        ASSERT_EQ_INT(0, events_claim(&e, BELAY_INTERP_DPKG, path, strlen(path)));
+    }
+    ASSERT_EQ_INT(0, events_failed(&e, BELAY_INTERP_DPKG));
+    ASSERT_TRUE(strstr(ev_written(&e), "paths_truncated") == NULL);
+    events_free(&e);
+}
+
+/* Decision P7 (E2): provisional sits after text, before paths, only when set. */
+TEST(a_provisional_event_says_so) {
+    struct belay_events e;
+    events_init(&e);
+    const struct belay_fv v[] = { S("n"), S("1") };
+    const char *const p[] = { "x" };
+    const size_t l[] = { 1 };
+    e.interp = BELAY_INTERP_PIP;
+    ASSERT_EQ_INT(0, belay_event(&e, FK_PIP_INSTALLED, v, 2, p, l, 1, BELAY_EVENT_PROVISIONAL));
+    ASSERT_EQ_INT(0, belay_event_not_interpreted(&e, p, l, 1, BELAY_EVENT_PROVISIONAL));
+    ASSERT_EQ_STR("{\"event\":\"pip_installed\",\"interp\":\"pip\",\"name\":\"n\",\"version\":\"1\","
+                  "\"text\":\"installed n 1\",\"provisional\":true,\"paths\":[\"x\"]}\n"
+                  "{\"event\":\"could_not_interpret\",\"interp\":\"pip\",\"text\":\"could not interpret\","
+                  "\"provisional\":true,\"paths\":[\"x\"]}\n", ev_written(&e));
+    events_free(&e);
 }
 
 /* E6 with nothing claimed: no event at all (nothing to name). */
@@ -279,7 +355,10 @@ int main(void) {
     RUN(an_event_lists_its_paths_sorted_and_once);
     RUN(an_event_with_a_non_utf8_path_lists_them_all_in_base64);
     RUN(events_are_written_by_interpreter_in_the_pinned_order);
-    RUN(an_invalid_event_fails_its_interpreter);
+    RUN(an_invalid_event_is_one_invalid_finding_event_the_rest_stand);
+    RUN(an_interpreter_cannot_add_the_cores_kinds);
+    RUN(a_failed_interpreter_names_1024_paths_and_counts_the_rest);
+    RUN(a_provisional_event_says_so);
     RUN(a_failed_interpreter_that_was_given_nothing_emits_nothing);
     RUN(past_65536_events_the_last_is_and_more);
     free(g_out);

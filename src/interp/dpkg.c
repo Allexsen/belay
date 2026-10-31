@@ -33,9 +33,12 @@ struct str { const char *s; size_t n; };
 struct dev {                    /* one pending event */
     int kind;
     struct str package, arch, a, b, path;   /* a, b: version, or from and to */
+    bool prov;                              /* from a status whose outcome is unknown (E2) */
 };
 
-struct unavail { enum stored_why why; enum side side; struct str path; };
+/* A status that could not be read (why: a stored_why) or interpreted (why
+ * SW_ERROR: E10). */
+struct unavail { enum stored_why why; enum side side; struct str path; bool prov; };
 
 struct dpkg {
     struct dev *e;
@@ -43,7 +46,8 @@ struct dpkg {
     struct unavail *u;
     size_t nu, ucap;
     size_t bytes;
-    bool failed;
+    bool prov;                  /* the status being explained has the outcome unknown */
+    bool failed;                /* state over its bound, or memory: E6 */
 };
 
 static void *begin(void) { return calloc(1, sizeof(struct dpkg)); }
@@ -152,13 +156,13 @@ static bool ends_with(const char *s, size_t n, const char *t) {
 
 static int pend(struct dpkg *d, int kind, const struct pkg *k, struct str a, struct str b,
                 const struct belay_interp_input *in) {
-    if (!belay_finding_string_ok(k->package.s, k->package.n) || !belay_finding_string_ok(k->arch.s, k->arch.n) ||
-        !belay_finding_string_ok(a.s, a.n) || !belay_finding_string_ok(b.s, b.n))
-        return -1;
+    /* Values are not checked here: an event the core refuses becomes one
+     * invalid_finding event in its place, the others standing (E9). */
     if (grow((void **)&d->e, &d->cap, d->n, sizeof *d->e, d) == -1) return -1;
     struct dev *e = &d->e[d->n];
     memset(e, 0, sizeof *e);
     e->kind = kind;
+    e->prov = d->prov;
     if (keep(d, &e->package, k->package.s, k->package.n) || keep(d, &e->arch, k->arch.s, k->arch.n) ||
         keep(d, &e->a, a.s, a.n) || keep(d, &e->b, b.s, b.n) ||
         keep(d, &e->path, in->path, in->path_len)) {
@@ -194,9 +198,19 @@ static int unavailable(struct dpkg *d, struct belay_findings *out, const struct 
     struct unavail *u = &d->u[d->nu];
     u->why = w;
     u->side = s;
+    u->prov = d->prov;
     if (keep(d, &u->path, in->path, in->path_len) == -1) return -1;
     d->nu++;
+    if (w == SW_ERROR || d->prov) return 0;     /* E10 has its own; unknown adds no finding (P8) */
     return stored_unavailable(out, w, s);
+}
+
+/* A status could not be interpreted: its record says so (unless its outcome
+ * is unknown: P8), and one could_not_interpret event names it (E10). */
+static enum belay_interp_result not_interpreted(struct dpkg *d, const struct belay_interp_input *in) {
+    belay_err_clear();
+    if (unavailable(d, NULL, in, SW_ERROR, SIDE_AFTER) == -1) d->failed = true;
+    return d->prov ? BELAY_INTERP_DECLINE : BELAY_INTERP_ERROR;
 }
 
 static enum belay_interp_result explain(void *state, const struct belay_interp_input *in,
@@ -204,32 +218,35 @@ static enum belay_interp_result explain(void *state, const struct belay_interp_i
     struct dpkg *d = state;
     if (d == NULL) return BELAY_INTERP_ERROR;
     if (!ends_with(in->abs_path, in->abs_len, "/var/lib/dpkg/status")) return BELAY_INTERP_DECLINE;
-    if (strcmp(in->outcome, "unknown") == 0 || strcmp(in->outcome, "metadata_only") == 0)
-        return BELAY_INTERP_DECLINE;            /* no proven change of content */
+    if (strcmp(in->outcome, "metadata_only") == 0) return BELAY_INTERP_DECLINE;    /* content equal */
     if (!reg(in, SIDE_BEFORE) && !reg(in, SIDE_AFTER)) return BELAY_INTERP_DECLINE;
+    /* An unknown outcome is read too: its events are provisional (P7). */
+    d->prov = strcmp(in->outcome, "unknown") == 0;
     unsigned char *buf[2] = { NULL, NULL };
     size_t len[2] = { 0, 0 };
     enum belay_interp_result r = BELAY_INTERP_DECLINE;
-    bool ok = true;
+    bool ok = true, error = false;
     for (int k = SIDE_BEFORE; k <= SIDE_AFTER; k++) {
         if (!reg(in, (enum side)k)) continue;
         const enum stored_why w = stored_read(in, (enum side)k, DPKG_STATUS_MAX, &buf[k], &len[k]);
         if (w == SW_OK) continue;
         ok = false;
-        r = BELAY_INTERP_FINDINGS;
-        if (w == SW_ERROR || unavailable(d, out, in, w, (enum side)k) == -1) r = BELAY_INTERP_ERROR;
+        if (w == SW_ERROR) error = true;
+        else if (unavailable(d, out, in, w, (enum side)k) == -1) d->failed = true;
+        else if (!d->prov) r = BELAY_INTERP_FINDINGS;
     }
     struct pkgs ps[2] = { { 0 }, { 0 } };
-    if (ok) {
+    if (error) {
+        r = not_interpreted(d, in);
+    } else if (ok) {
         if (pkgs_of(buf[0], len[0], &ps[0]) == -1 || pkgs_of(buf[1], len[1], &ps[1]) == -1) {
-            belay_err_clear();
-            r = BELAY_INTERP_ERROR;
+            r = not_interpreted(d, in);
         } else {
             size_t i = 0, j = 0;
-            while ((i < ps[0].n || j < ps[1].n) && r != BELAY_INTERP_ERROR) {
+            while ((i < ps[0].n || j < ps[1].n) && !d->failed) {
                 const int c = i == ps[0].n ? 1 : j == ps[1].n ? -1 : key_cmp(&ps[0].v[i], &ps[1].v[j]);
                 const struct pkg *x = c <= 0 ? &ps[0].v[i++] : NULL, *y = c >= 0 ? &ps[1].v[j++] : NULL;
-                if (changes(d, x, y, in) == -1) r = BELAY_INTERP_ERROR;
+                if (changes(d, x, y, in) == -1) d->failed = true;       /* state or memory: E6 */
             }
         }
     }
@@ -237,8 +254,7 @@ static enum belay_interp_result explain(void *state, const struct belay_interp_i
     free(ps[1].v);
     free(buf[0]);
     free(buf[1]);
-    if (r == BELAY_INTERP_ERROR) d->failed = true;
-    return r;
+    return d->failed ? BELAY_INTERP_ERROR : r;
 }
 
 /* ---- the events ---- */
@@ -255,26 +271,38 @@ static int dev_cmp(const void *a, const void *b) {
     return c;
 }
 
-/* 0, or -1 when it cannot be added -- memory, or an event its kind's row
- * refuses (its text over 1,024 bytes: each value is checked already), which
- * fails the end hook (E6) rather than being added and dropped. */
+static unsigned flags(bool prov) { return prov ? BELAY_EVENT_PROVISIONAL : 0; }
+
+/* 0, or -1 (memory). An event the core refuses -- a value with a NUL, text
+ * over 1,024 bytes -- becomes invalid_finding in its place (E9). */
 static int emit(struct belay_events *ev, const struct dev *e) {
     const char *path = e->path.s;
     const size_t pl = e->path.n;
     const bool two = e->kind == FK_DPKG_INSTALLED || e->kind == FK_DPKG_REMOVED;
     const struct belay_fv v[] = { FV(e->package), FV(e->arch), FV(e->a), FV(e->b) };
-    const size_t n = two ? 3 : 4;
-    if (!belay_event_fits(ev, e->kind, v, n)) return -1;
-    return belay_event(ev, e->kind, v, n, &path, &pl, 1);
+    return belay_event(ev, e->kind, v, two ? 3 : 4, &path, &pl, 1, flags(e->prov));
 }
 
-/* As pip's: one per reason, before every package event (it has no Package). */
+static int upath_cmp(const void *a, const void *b) {
+    return str_cmp(((const struct unavail *)a)->path, ((const struct unavail *)b)->path);
+}
+
+/* The events with no Package, before every package event (E4: no name sorts
+ * first), in the Kinds table's order: one could_not_interpret per status not
+ * interpreted (E10), by path; then, as pip's, one content_unavailable per
+ * reason. */
 static int unavailable_events(struct dpkg *d, struct belay_events *ev) {
+    if (d->nu > 1) qsort(d->u, d->nu, sizeof *d->u, upath_cmp);
+    for (size_t i = 0; i < d->nu; i++)
+        if (d->u[i].why == SW_ERROR &&
+            belay_event_not_interpreted(ev, &d->u[i].path.s, &d->u[i].path.n, 1, flags(d->u[i].prov)) == -1)
+            return -1;
     for (int w = SW_NO_STORE; w < SW_ERROR; w++) {
         size_t n = 0;
         unsigned sides = 0;
+        bool prov = false;
         for (size_t i = 0; i < d->nu; i++)
-            if (d->u[i].why == (enum stored_why)w) { n++; sides |= 1u << d->u[i].side; }
+            if (d->u[i].why == (enum stored_why)w) { n++; sides |= 1u << d->u[i].side; prov |= d->u[i].prov; }
         if (n == 0) continue;
         const char **paths = malloc(n * sizeof *paths);
         size_t *lens = malloc(n * sizeof *lens);
@@ -285,7 +313,7 @@ static int unavailable_events(struct dpkg *d, struct belay_events *ev) {
         const char *why = stored_why_name((enum stored_why)w);
         const char *side = sides == 1u << SIDE_BEFORE ? "before" : sides == 1u << SIDE_AFTER ? "after" : "both";
         const struct belay_fv v[] = { { .s = why, .len = strlen(why) }, { .s = side, .len = strlen(side) } };
-        const int r = belay_event(ev, FK_CONTENT_UNAVAILABLE, v, 2, paths, lens, n);
+        const int r = belay_event(ev, FK_CONTENT_UNAVAILABLE, v, 2, paths, lens, n, flags(prov));
         free(paths);
         free(lens);
         if (r == -1) return -1;

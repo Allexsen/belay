@@ -129,7 +129,7 @@ static const char *r_path(struct run *r, const char *abs, const struct belay_ent
     if (r->last == BELAY_INTERP_DECLINE) findings_reset(&r->f, r->id);
     if (r->last == BELAY_INTERP_ERROR) {
         findings_reset(&r->f, r->id);
-        belay_finding(&r->f, FK_COULD_NOT_INTERPRET, NULL, 0);
+        findings_core(&r->f, FK_COULD_NOT_INTERPRET);
     }
     return capture(r, false);
 }
@@ -326,12 +326,12 @@ TEST(git_hooks_are_added_removed_changed_or_made_executable) {
     r_begin(&r, BELAY_INTERP_GIT, false);
     const struct belay_entry x = file(NULL, 0755), n = file(NULL, 0644);
     ASSERT_EQ_STR(F1("{\"kind\":\"git_hook_added\",\"hook\":\"pre-commit\",\"executable\":true,"
-                     "\"text\":\"hook pre-commit added\"}"),
+                     "\"target\":\"\",\"text\":\"hook pre-commit added\"}"),
                   r_path(&r, "/s/r/.git/hooks/pre-commit", NULL, &x, "added"));
-    ASSERT_EQ_STR(F1("{\"kind\":\"git_hook_removed\",\"hook\":\"pre-push\",\"text\":\"hook pre-push removed\"}"),
+    ASSERT_EQ_STR(F1("{\"kind\":\"git_hook_removed\",\"hook\":\"pre-push\",\"target\":\"\",\"text\":\"hook pre-push removed\"}"),
                   r_path(&r, "/s/r/.git/hooks/pre-push", &x, NULL, "removed"));
     ASSERT_EQ_STR(F1("{\"kind\":\"git_hook_changed\",\"hook\":\"pre-commit\",\"executable\":false,"
-                     "\"text\":\"hook pre-commit changed\"}"),
+                     "\"target\":\"\",\"text\":\"hook pre-commit changed\"}"),
                   r_path(&r, "/s/r/.git/hooks/pre-commit", &x, &n, "modified"));
     ASSERT_EQ_STR(F1("{\"kind\":\"git_hook_executable_changed\",\"hook\":\"post-checkout\",\"executable\":true,"
                      "\"text\":\"hook post-checkout executable: true\"}"),
@@ -441,15 +441,46 @@ TEST(git_ref_that_cannot_be_parsed_could_not_be_interpreted) {
 TEST(git_paths_that_are_not_files_are_absent) {
     struct run r;
     r_begin(&r, BELAY_INTERP_GIT, true);
-    const struct belay_entry d = other(BELAY_T_DIR, 0755), l = other(BELAY_T_LNK, 0777), x = file(NULL, 0755);
+    const struct belay_entry d = other(BELAY_T_DIR, 0755);
     ASSERT_EQ_STR("", r_path(&r, "/s/r/.git/logs/refs/heads/feature", NULL, &d, "added"));
     ASSERT_EQ_STR("", r_path(&r, "/s/r/.git/logs/refs/heads/feature", &d, NULL, "removed"));
     ASSERT_EQ_STR("", r_path(&r, "/s/r/.git/hooks/pre-push.d", NULL, &d, "added"));
-    ASSERT_EQ_STR("", r_path(&r, "/s/r/.git/hooks/pre-commit", NULL, &l, "added"));
     ASSERT_EQ_STR("", r_path(&r, "/s/r/.git/refs/heads/feature", NULL, &d, "added"));
     ASSERT_EQ_STR("", r_path(&r, "/s/r/.git/index", NULL, &d, "added"));
-    ASSERT_EQ_STR(F1("{\"kind\":\"git_hook_removed\",\"hook\":\"post-merge\",\"text\":\"hook post-merge removed\"}"),
+    r_free(&r);
+}
+
+static struct belay_entry link_to(const char *t) {
+    struct belay_entry e = other(BELAY_T_LNK, 0777);
+    e.has_link_target = true;
+    e.link_target_len = strlen(t);
+    memcpy(e.link_target, t, e.link_target_len);
+    return e;
+}
+
+/* Decision P3: git follows a symlinked hook, so a symlink under hooks/ is a
+ * hook -- added, removed, or changed (its target, or file <-> link) -- and
+ * its target is named. Before P3 a symlink there was no hook. */
+TEST(git_a_symlinked_hook_is_a_hook_and_names_its_target) {
+    struct run r;
+    r_begin(&r, BELAY_INTERP_GIT, false);
+    const struct belay_entry l = link_to("/tmp/evil.sh"), l2 = link_to("../../tools/hook.sh"), x = file(NULL, 0755);
+    ASSERT_EQ_STR(F1("{\"kind\":\"git_hook_added\",\"hook\":\"pre-commit\",\"executable\":true,"
+                     "\"target\":\"/tmp/evil.sh\",\"text\":\"hook pre-commit added\"}"),
+                  r_path(&r, "/s/r/.git/hooks/pre-commit", NULL, &l, "added"));
+    ASSERT_EQ_STR(F1("{\"kind\":\"git_hook_removed\",\"hook\":\"pre-commit\",\"target\":\"/tmp/evil.sh\","
+                     "\"text\":\"hook pre-commit removed\"}"),
+                  r_path(&r, "/s/r/.git/hooks/pre-commit", &l, NULL, "removed"));
+    ASSERT_EQ_STR(F1("{\"kind\":\"git_hook_changed\",\"hook\":\"pre-commit\",\"executable\":true,"
+                     "\"target\":\"../../tools/hook.sh\",\"text\":\"hook pre-commit changed\"}"),
+                  r_path(&r, "/s/r/.git/hooks/pre-commit", &l, &l2, "modified"));
+    ASSERT_EQ_STR(F1("{\"kind\":\"git_hook_changed\",\"hook\":\"post-merge\",\"executable\":true,"
+                     "\"target\":\"/tmp/evil.sh\",\"text\":\"hook post-merge changed\"}"),
                   r_path(&r, "/s/r/.git/hooks/post-merge", &x, &l, "type_changed"));
+    ASSERT_EQ_STR(F1("{\"kind\":\"git_hook_changed\",\"hook\":\"post-merge\",\"executable\":true,"
+                     "\"target\":\"\",\"text\":\"hook post-merge changed\"}"),
+                  r_path(&r, "/s/r/.git/hooks/post-merge", &l, &x, "type_changed"));
+    ASSERT_EQ_STR("", r_path(&r, "/s/r/.git/hooks/pre-commit", &l, &l, "metadata_only"));
     r_free(&r);
 }
 
@@ -559,8 +590,31 @@ TEST(pip_metadata_and_unproven_changes_add_nothing) {
     const struct belay_entry e = file(NULL, 0);
     ASSERT_EQ_STR("", r_path(&r, SP "six-1.16.0.dist-info/METADATA", &e, &e, "modified"));
     ASSERT_EQ_STR("", r_path(&r, REC("six-1.16.0"), &e, &e, "metadata_only"));
-    ASSERT_EQ_STR("", r_path(&r, REC("six-1.16.0"), &e, NULL, "unknown"));
+    ASSERT_EQ_STR("", r_path(&r, REC("six-1.16.0"), &e, &e, "unknown"));     /* no proven reinstall */
     ASSERT_EQ_STR("", r_end(&r));
+    r_free(&r);
+}
+
+/* Decision P7: an unknown RECORD still pairs by its directory's name; every
+ * event from it is provisional, and no path finding is added (P8). Before
+ * P7 an unknown RECORD added nothing, and its partner read as a definite
+ * pip_removed. */
+TEST(pip_an_unknown_record_pairs_and_its_events_are_provisional) {
+    struct run r;
+    r_begin(&r, BELAY_INTERP_PIP, false);
+    const struct belay_entry e = file(NULL, 0);
+    ASSERT_EQ_STR("", r_path(&r, REC("lazy-1.0"), &e, NULL, "removed"));
+    ASSERT_EQ_STR("", r_path(&r, REC("lazy-2.0"), NULL, &e, "unknown"));
+    ASSERT_EQ_STR("", r_path(&r, REC("solo-3.0"), NULL, &e, "unknown"));
+    ASSERT_EQ_STR("", r_path(&r, REC("sure-1.0"), NULL, &e, "added"));
+    ASSERT_EQ_STR(
+        "{\"event\":\"pip_upgraded\",\"interp\":\"pip\",\"name\":\"lazy\",\"from\":\"1.0\",\"to\":\"2.0\","
+        "\"text\":\"upgraded lazy 1.0 -> 2.0\",\"provisional\":true,\"paths\":[\"" REL("lazy-1.0") "\",\"" REL("lazy-2.0") "\"]}\n"
+        "{\"event\":\"pip_installed\",\"interp\":\"pip\",\"name\":\"solo\",\"version\":\"3.0\","
+        "\"text\":\"installed solo 3.0\",\"provisional\":true,\"paths\":[\"" REL("solo-3.0") "\"]}\n"
+        "{\"event\":\"pip_installed\",\"interp\":\"pip\",\"name\":\"sure\",\"version\":\"1.0\","
+        "\"text\":\"installed sure 1.0\",\"paths\":[\"" REL("sure-1.0") "\"]}\n",
+        r_end(&r));
     r_free(&r);
 }
 
@@ -596,7 +650,9 @@ TEST(pip_record_that_cannot_be_read_is_said_on_the_path_and_as_an_event) {
 }
 
 /* What the finding kinds cannot say fails the end hook (E6), never a guess. */
-TEST(pip_what_cannot_be_named_or_paired_fails_the_end_hook) {
+TEST(pip_what_cannot_be_named_or_paired_is_one_event_the_rest_stand) {
+    /* Pin E10 (P1's class): before, each of these failed the end hook (E6)
+     * and every pip event was lost. */
     struct run r;
     r_begin(&r, BELAY_INTERP_PIP, false);
     const struct belay_entry e = file(NULL, 0);
@@ -604,8 +660,9 @@ TEST(pip_what_cannot_be_named_or_paired_fails_the_end_hook) {
                   r_path(&r, SP "nodash.dist-info/RECORD", NULL, &e, "added"));
     r_path(&r, REC("requests-2.32.3"), NULL, &e, "added");
     ASSERT_EQ_STR("{\"event\":\"could_not_interpret\",\"interp\":\"pip\",\"text\":\"could not interpret\","
-                  "\"paths\":[\"lib/python3.12/site-packages/nodash.dist-info/RECORD\",\""
-                  REL("requests-2.32.3") "\"]}\n",
+                  "\"paths\":[\"lib/python3.12/site-packages/nodash.dist-info/RECORD\"]}\n"
+                  "{\"event\":\"pip_installed\",\"interp\":\"pip\",\"name\":\"requests\",\"version\":\"2.32.3\","
+                  "\"text\":\"installed requests 2.32.3\",\"paths\":[\"" REL("requests-2.32.3") "\"]}\n",
                   r_end(&r));
     r_free(&r);
 
@@ -615,14 +672,21 @@ TEST(pip_what_cannot_be_named_or_paired_fails_the_end_hook) {
     const struct belay_entry rb = file(put("six.py,sha256=A,1\n"), 0), ra = file(put("six.py,sha256=A,1\nsix/\xff.py,sha256=X,1\n"), 0);
     ASSERT_EQ_STR(F1("{\"kind\":\"could_not_interpret\",\"text\":\"could not interpret\"}"),
                   r_path(&r, REC("six-1.16.0"), &rb, &ra, "modified"));
-    ASSERT_TRUE(strncmp(r_end(&r), "{\"event\":\"could_not_interpret\"", 30) == 0);
+    ASSERT_EQ_STR("{\"event\":\"could_not_interpret\",\"interp\":\"pip\",\"text\":\"could not interpret\","
+                  "\"paths\":[\"" REL("six-1.16.0") "\"]}\n", r_end(&r));
     r_free(&r);
 
+    /* Two removed and one added of one name: that name's one event, by name. */
     r_begin(&r, BELAY_INTERP_PIP, false);
+    r_path(&r, REC("aaa-1.0"), NULL, &e, "added");
     r_path(&r, REC("numpy-1.26.4"), &e, NULL, "removed");
     r_path(&r, REC("numpy-1.26.3"), &e, NULL, "removed");
     r_path(&r, REC("numpy-2.1.0"), NULL, &e, "added");
-    ASSERT_TRUE(strncmp(r_end(&r), "{\"event\":\"could_not_interpret\"", 30) == 0);
+    ASSERT_EQ_STR("{\"event\":\"pip_installed\",\"interp\":\"pip\",\"name\":\"aaa\",\"version\":\"1.0\","
+                  "\"text\":\"installed aaa 1.0\",\"paths\":[\"" REL("aaa-1.0") "\"]}\n"
+                  "{\"event\":\"could_not_interpret\",\"interp\":\"pip\",\"text\":\"could not interpret\","
+                  "\"paths\":[\"" REL("numpy-1.26.3") "\",\"" REL("numpy-1.26.4") "\",\"" REL("numpy-2.1.0") "\"]}\n",
+                  r_end(&r));
     r_free(&r);
 }
 
@@ -740,6 +804,8 @@ static const char DPKG_AFTER[] =
 
 #define EV(kind, fields, text) "{\"event\":\"" kind "\",\"interp\":\"dpkg\"," fields ",\"text\":\"" text \
                                "\",\"paths\":[\"" STATUS_REL "\"]}\n"
+#define EVP(kind, fields, text) "{\"event\":\"" kind "\",\"interp\":\"dpkg\"," fields ",\"text\":\"" text \
+                                "\",\"provisional\":true,\"paths\":[\"" STATUS_REL "\"]}\n"
 
 TEST(dpkg_status_deltas_are_events_in_package_order) {
     struct run r;
@@ -778,14 +844,35 @@ TEST(dpkg_a_new_status_installs_what_it_lists) {
     r_free(&r);
 }
 
-TEST(dpkg_info_files_and_unproven_changes_add_nothing) {
+TEST(dpkg_info_files_and_metadata_add_nothing) {
     struct run r;
     r_begin(&r, BELAY_INTERP_DPKG, false);
     const struct belay_entry e = file(NULL, 0);
     ASSERT_EQ_STR("", r_path(&r, "/s/var/lib/dpkg/info/bash.list", &e, &e, "modified"));
     ASSERT_EQ_STR("", r_path(&r, STATUS, &e, &e, "metadata_only"));
-    ASSERT_EQ_STR("", r_path(&r, STATUS, &e, &e, "unknown"));
     ASSERT_EQ_STR("", r_end(&r));
+    r_free(&r);
+}
+
+/* Decision P7: a status whose outcome is unknown (raced) is read too; its
+ * events are provisional, and its record gets no finding (P8). Before P7 it
+ * added nothing at all: no package events, read as "no packages changed". */
+TEST(dpkg_an_unknown_status_gives_provisional_events) {
+    struct run r;
+    r_begin(&r, BELAY_INTERP_DPKG, true);
+    const struct belay_entry b = file(put("Package: git\nStatus: install ok installed\nVersion: 1\n"), 0);
+    const struct belay_entry a = file(put("Package: git\nStatus: install ok installed\nVersion: 2\n"), 0);
+    ASSERT_EQ_STR("", r_path(&r, STATUS, &b, &a, "unknown"));
+    ASSERT_EQ_STR(EVP("dpkg_upgraded", "\"package\":\"git\",\"arch\":\"\",\"from\":\"1\",\"to\":\"2\"",
+                      "upgraded git: 1 -> 2"),
+                  r_end(&r));
+    r_free(&r);
+    r_begin(&r, BELAY_INTERP_DPKG, false);                  /* unknown and unreadable */
+    ASSERT_EQ_STR("", r_path(&r, STATUS, &b, &a, "unknown"));
+    ASSERT_EQ_STR("{\"event\":\"content_unavailable\",\"interp\":\"dpkg\",\"reason\":\"no_store\","
+                  "\"side\":\"both\",\"text\":\"content unavailable (both): no_store\",\"provisional\":true,"
+                  "\"paths\":[\"" STATUS_REL "\"]}\n",
+                  r_end(&r));
     r_free(&r);
 }
 
@@ -829,14 +916,20 @@ TEST(dpkg_status_that_cannot_be_read_is_never_no_change) {
     r_free(&r);
 }
 
-TEST(dpkg_status_that_cannot_be_parsed_fails_the_end_hook) {
+TEST(dpkg_a_status_that_cannot_be_parsed_is_one_event_the_rest_stand) {
+    /* Pin E10 (P1's class): before, one unparseable status failed the end
+     * hook (E6) and every dpkg event, of every root, was lost. */
     struct run r;
     r_begin(&r, BELAY_INTERP_DPKG, true);
     const struct belay_entry b = file(put(DPKG_BEFORE), 0), a = file(put("this is not a stanza\n"), 0);
+    const struct belay_entry ok = file(put("Package: zlib1g\nStatus: install ok installed\nVersion: 1\n"), 0);
     ASSERT_EQ_STR(F1("{\"kind\":\"could_not_interpret\",\"text\":\"could not interpret\"}"),
-                  r_path(&r, STATUS, &b, &a, "modified"));
+                  r_path(&r, "/s/c1/var/lib/dpkg/status", &b, &a, "modified"));
+    ASSERT_EQ_STR("", r_path(&r, "/s/c2/var/lib/dpkg/status", NULL, &ok, "added"));
     ASSERT_EQ_STR("{\"event\":\"could_not_interpret\",\"interp\":\"dpkg\",\"text\":\"could not interpret\","
-                  "\"paths\":[\"" STATUS_REL "\"]}\n",
+                  "\"paths\":[\"c1/var/lib/dpkg/status\"]}\n"
+                  "{\"event\":\"dpkg_installed\",\"interp\":\"dpkg\",\"package\":\"zlib1g\",\"arch\":\"\","
+                  "\"version\":\"1\",\"text\":\"installed zlib1g: 1\",\"paths\":[\"c2/var/lib/dpkg/status\"]}\n",
                   r_end(&r));
     ASSERT_EQ_INT(BELAY_OK, belay_err_code());
     r_free(&r);
@@ -864,8 +957,11 @@ TEST(empty_files_are_nothing_listed) {
 /* Found by fuzz_interpreters: a NUL inside a field is UTF-8 but no string
  * field's value; dpkg checks with the core's own rule, so it fails its end
  * hook itself rather than handing the core an event that breaks its row. */
-TEST(dpkg_a_field_with_a_nul_fails_the_end_hook_not_the_row) {
-    static const char st[] = "Package: git\nStatus: install ok installed\nVersion: 2\0x\n";
+TEST(dpkg_a_field_with_a_nul_is_one_invalid_event) {
+    /* Pin E9: a value that is not a string field's value (a NUL) degrades
+     * that one event; before, dpkg failed its end hook and lost them all. */
+    static const char st[] = "Package: git\nStatus: install ok installed\nVersion: 2\0x\n\n"
+                             "Package: vim\nStatus: install ok installed\nVersion: 9\n";
     char hex[65];
     sha_hex(st, sizeof st - 1, hex);
     put_as(hex, st, sizeof st - 1);
@@ -873,10 +969,11 @@ TEST(dpkg_a_field_with_a_nul_fails_the_end_hook_not_the_row) {
     r_begin(&r, BELAY_INTERP_DPKG, true);
     const struct belay_entry b = file(put("Package: git\nStatus: install ok installed\nVersion: 1\n"), 0);
     const struct belay_entry a = file(hex, 0);
-    r_path(&r, STATUS, &b, &a, "modified");
-    r.ev.interp = r.id;
-    const enum belay_interp_result e = r.it->end(r.state, &r.ev);
-    ASSERT_EQ_INT(BELAY_INTERP_ERROR, e);
+    ASSERT_EQ_STR("", r_path(&r, STATUS, &b, &a, "modified"));
+    ASSERT_EQ_STR("{\"event\":\"invalid_finding\",\"interp\":\"dpkg\",\"text\":\"invalid finding\","
+                  "\"paths\":[\"" STATUS_REL "\"]}\n"
+                  EV("dpkg_installed", "\"package\":\"vim\",\"arch\":\"\",\"version\":\"9\"", "installed vim: 9"),
+                  r_end(&r));
     ASSERT_FALSE(events_broken(&r.ev, BELAY_INTERP_DPKG));
     r_free(&r);
 }
@@ -884,20 +981,28 @@ TEST(dpkg_a_field_with_a_nul_fails_the_end_hook_not_the_row) {
 /* Review 2026-10-31, finding 3: every value fits, but the event's text
  * would not (two 600-byte versions): dpkg fails its own end hook (E6),
  * rather than handing the core an event that breaks its row. */
-TEST(dpkg_an_event_whose_text_would_not_fit_fails_the_end_hook) {
+TEST(dpkg_one_oversized_event_among_valid_ones_is_invalid_the_rest_stand) {
+    /* Decision P1 (rejecting the end-hook failure): every value fits, the
+     * text would not (two 600-byte versions). That one event becomes
+     * invalid_finding in its place; bash's and zlib's stand. */
     static char b[2000], a[2000], v1[601], v2[601];
     memset(v1, '1', 600);
     memset(v2, '2', 600);
     snprintf(b, sizeof b, "Package: bash\nStatus: install ok installed\nVersion: 5.1\n\n"
                           "Package: big\nStatus: install ok installed\nVersion: %s\n", v1);
     snprintf(a, sizeof a, "Package: bash\nStatus: install ok installed\nVersion: 5.2\n\n"
-                          "Package: big\nStatus: install ok installed\nVersion: %s\n", v2);
+                          "Package: big\nStatus: install ok installed\nVersion: %s\n\n"
+                          "Package: zlib\nStatus: install ok installed\nVersion: 1\n", v2);
     struct run r;
     r_begin(&r, BELAY_INTERP_DPKG, true);
     const struct belay_entry eb = file(put(b), 0), ea = file(put(a), 0);
     r_path(&r, STATUS, &eb, &ea, "modified");
-    r.ev.interp = r.id;
-    ASSERT_EQ_INT(BELAY_INTERP_ERROR, r.it->end(r.state, &r.ev));
+    ASSERT_EQ_STR(EV("dpkg_upgraded", "\"package\":\"bash\",\"arch\":\"\",\"from\":\"5.1\",\"to\":\"5.2\"",
+                     "upgraded bash: 5.1 -> 5.2")
+                  "{\"event\":\"invalid_finding\",\"interp\":\"dpkg\",\"text\":\"invalid finding\","
+                  "\"paths\":[\"" STATUS_REL "\"]}\n"
+                  EV("dpkg_installed", "\"package\":\"zlib\",\"arch\":\"\",\"version\":\"1\"", "installed zlib: 1"),
+                  r_end(&r));
     ASSERT_FALSE(events_broken(&r.ev, BELAY_INTERP_DPKG));
     r_free(&r);
 }
@@ -927,23 +1032,26 @@ int main(void) {
     RUN(git_reflog_without_a_copy_is_content_unavailable);
     RUN(git_ref_that_cannot_be_parsed_could_not_be_interpreted);
     RUN(git_paths_that_are_not_files_are_absent);
+    RUN(git_a_symlinked_hook_is_a_hook_and_names_its_target);
     RUN(git_a_ref_rewritten_to_the_same_value_says_nothing);
     RUN(pip_installs_removals_and_version_changes_are_events);
     RUN(pip_pairs_within_one_directory_by_normalized_name);
     RUN(pip_reinstall_counts_files_by_record_row);
     RUN(pip_metadata_and_unproven_changes_add_nothing);
+    RUN(pip_an_unknown_record_pairs_and_its_events_are_provisional);
     RUN(pip_record_that_cannot_be_read_is_said_on_the_path_and_as_an_event);
-    RUN(pip_what_cannot_be_named_or_paired_fails_the_end_hook);
+    RUN(pip_what_cannot_be_named_or_paired_is_one_event_the_rest_stand);
     RUN(pip_a_record_past_its_row_bound_is_too_large);
     RUN(text_past_its_line_bound_is_too_large);
     RUN(dpkg_status_deltas_are_events_in_package_order);
     RUN(dpkg_a_new_status_installs_what_it_lists);
-    RUN(dpkg_info_files_and_unproven_changes_add_nothing);
+    RUN(dpkg_info_files_and_metadata_add_nothing);
+    RUN(dpkg_an_unknown_status_gives_provisional_events);
     RUN(dpkg_status_that_cannot_be_read_is_never_no_change);
-    RUN(dpkg_status_that_cannot_be_parsed_fails_the_end_hook);
+    RUN(dpkg_a_status_that_cannot_be_parsed_is_one_event_the_rest_stand);
     RUN(empty_files_are_nothing_listed);
-    RUN(dpkg_a_field_with_a_nul_fails_the_end_hook_not_the_row);
-    RUN(dpkg_an_event_whose_text_would_not_fit_fails_the_end_hook);
+    RUN(dpkg_a_field_with_a_nul_is_one_invalid_event);
+    RUN(dpkg_one_oversized_event_among_valid_ones_is_invalid_the_rest_stand);
     RUN(binary_declines_everything);
     char cmd[400];
     snprintf(cmd, sizeof cmd, "rm -rf '%s'", g_store);

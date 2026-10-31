@@ -286,20 +286,30 @@ a side where the path exists, it says so: the finding `content_unavailable`, wit
 whose package facts come from that content, also emit a `content_unavailable` event naming the
 paths, so a consumer never reads "no packages changed" where the change could not be read.
 
-**Findings.** Each finding is an object: `{"kind": ..., <its fields, in order>, "text": ...}`.
-`int` fields are non-negative integers, `string` fields UTF-8 of at most 1,024 bytes, `bool` fields
-`true` or `false`; `text` is the kind's template with each `{field}` replaced by its value, at most
-1,024 bytes. The core checks every finding against its kind's row below and renders its text, so
-an interpreter supplies values, never text: a finding that breaks the row (an unknown kind, a kind
-of another interpreter or level, a field missing, extra or over its bound) is replaced by
-`invalid_finding`. An interpreter that fails on a path has its findings there replaced by
-`could_not_interpret`; the diff does not fail. A record carries at most 4,096 findings: past that,
-the last place is one `and_more` counting the rest.
+**Findings.** Each finding is an object: `{"kind": ..., <its fields, in order>, "text": ...}`. `int`
+fields are non-negative integers, `string` fields UTF-8 of at most 1,024 bytes, `bool` fields `true`
+or `false`; `text` is the kind's template with each `{field}` replaced by its value, at most 1,024
+bytes. The core checks every finding against its kind's row below and renders its text, so an
+interpreter supplies values, never text: a finding that breaks the row (an unknown kind, a kind of
+another interpreter or level, a field missing, extra or over its bound) is replaced by
+`invalid_finding`. `could_not_interpret`, `invalid_finding` and `and_more` are the core's alone: one
+an interpreter adds is itself replaced by `invalid_finding`, so no interpreter can write "could not
+interpret" over its own findings. An interpreter that fails on a path has its findings there
+replaced by `could_not_interpret`; the diff does not fail. A record carries at most 4,096 findings:
+past that, the 4,096th place is one `and_more` counting the findings from that place on, itself
+included.
 
 **Event records.** A fact about a package rather than a path -- installed, removed, upgraded,
 reinstalled -- is an event record, emitted once every path has been seen, listing the paths it was
-derived from. Every path an event lists has its own record, or is unchanged. At most 65,536 event
-records per interpreter: past that, the last place is one `and_more` counting the rest.
+derived from. Every path an event lists has its own record, or is unchanged. An event derived from a
+path whose outcome is `unknown` says `"provisional": true`: it may not hold. An event that breaks
+its kind's row becomes, in its place, one `invalid_finding` event naming its paths, and a file an
+interpreter cannot interpret one `could_not_interpret` event naming it: either way the interpreter's
+other events stand. Only when its end hook fails as a whole -- its per-diff state over its bound,
+memory, an event naming no path -- are its events one `could_not_interpret` naming at most 1,024 of
+the paths it was given, with `paths_truncated` counting the rest. At most 65,536 event records per
+interpreter: past that, the 65,536th is one `and_more` counting the events from that place on,
+itself included.
 
 <!-- BEGIN GENERATED: diff-events -->
 <!-- From src/schema/finding_schema.c by tools/gen_schema.c. Edit there, then `make gen`. -->
@@ -307,13 +317,15 @@ records per interpreter: past that, the last place is one `and_more` counting th
 | rule | statement |
 |---|---|
 | E1 placement | Event records come after the last path record and before the trailer. A diff with none has none. |
-| E2 shape | `{"event": "<kind>", "interp": "<interpreter>", <the kind's fields, in finding-kinds.md's order>, "text": "<its template>", "paths": [...]}`. The kind is an `event`-level kind of finding-kinds.md, or `and_more`. |
+| E2 shape | `{"event": "<kind>", "interp": "<interpreter>", <the kind's fields, in finding-kinds.md's order>, "text": "<its template>", "provisional": true, "paths": [...]}`. The kind is an `event`-level kind of finding-kinds.md. `provisional` is present, and `true`, exactly when a path the event was derived from has the outcome `unknown` (decision P7): the event may not hold. |
 | E3 paths | The paths it was derived from, relative to the scope as in path records, sorted bytewise, each once, at least one (except `and_more`). `paths_b64` instead -- every element base64 -- when any is not valid UTF-8. |
 | E4 order | By interpreter, in the order text, pip, dpkg, git; within one, as the interpreter defines it in finding-kinds.md's terms: pip by normalized name, then kind; dpkg by Package, then Architecture, then kind. The same inputs give the same bytes. |
-| E5 bound | At most 65,536 event records per interpreter per diff; past that, one final `{"event": "and_more", "interp": ..., "n": <the rest>, "text": "and {n} more", "paths": []}`. An interpreter's per-diff state is bounded to match. |
-| E6 failure | An interpreter that fails in its end hook emits `{"event": "could_not_interpret", "interp": ..., "text": "could not interpret", "paths": [...]}` with the paths it had claimed, and no other event. The diff does not fail. |
+| E5 bound | At most 65,536 event records per interpreter per diff: past that, the 65,536th is `{"event": "and_more", "interp": ..., "n": <that one and the rest>, "text": "and {n} more", "paths": []}`. An interpreter's per-diff state is bounded to match. |
+| E6 failure | An interpreter whose end hook fails emits `{"event": "could_not_interpret", "interp": ..., "text": "could not interpret", "paths": [...], "paths_truncated": <n>}` and no other event: `paths` the first 1,024 of the paths it had claimed (bytewise), `paths_truncated` the number of the rest, present only when not 0 (decision P4). The diff does not fail. |
 | E7 trailer | The trailer gains `events`: the number of event records. `belay_diff_end` still counts path records only. |
 | E8 forward | A consumer ignores an event kind it does not know, as it ignores an unknown finding kind or field. |
+| E9 invalid | An event an interpreter adds that breaks its kind's row -- a kind not its own, not event-level, or the core's; a field missing, extra, or not a string field's value; text over 1,024 bytes -- is replaced, in its place, by `{"event": "invalid_finding", "interp": ..., "text": "invalid finding", "paths": [<its paths>]}`; the interpreter's other events stand (decisions P1, P5). |
+| E10 a file not interpreted | A file an interpreter claims and cannot interpret gives one `{"event": "could_not_interpret", "interp": ..., "text": "could not interpret", "paths": [<the files>]}` (and its path record `could_not_interpret`); the interpreter's other events stand: pip, a dist-info that cannot be named, a RECORD it must read that cannot be parsed, a name with RECORDs added and removed other than one of each; dpkg, a status that cannot be parsed (the class of decision P1). |
 <!-- END GENERATED: diff-events -->
 
 **Reading findings.** A consumer ignores a finding kind, an event kind or a field it does not
@@ -326,9 +338,9 @@ know. Removing a kind or changing a field's meaning is a new diff version.
 
 | kind | interpreter | level | fields | text | meaning |
 |---|---|---|---|---|---|
-| `could_not_interpret` | any | path | -- | `could not interpret` | The interpreter failed on this path (R11); nothing else from it here. |
-| `invalid_finding` | any | path | -- | `invalid finding` | A finding that broke the rules, replaced. |
-| `and_more` | any | path | n: int | `and {n} more` | In the last place of a record past 4,096 findings, or of an interpreter's events past 65,536: the findings or events from that place on, counted. |
+| `could_not_interpret` | core | path, event | -- | `could not interpret` | The interpreter failed on this path (R11), nothing else from it here; or, as an event, on the paths it names (E6, E10). |
+| `invalid_finding` | core | path, event | -- | `invalid finding` | A finding that broke the rules, replaced; or, as an event, an event that did (E9). |
+| `and_more` | core | path, event | n: int | `and {n} more` | In the last place of a record past 4,096 findings, or of an interpreter's events past 65,536: the findings or events from that place on, counted. |
 | `content_unavailable` | text, pip, dpkg, git | path, event | reason: string, side: string | `content unavailable ({side}): {reason}` | The stored copy of a claimed path, on a side where it exists, cannot be read: reason `no_store`, `missing`, `too_large` or `corrupt`; side `before`, `after` (or, for an event, `both`). Never a silent decline. |
 | `text_changed` | text | path | lines_added: int, lines_deleted: int, first_changed_line: int | `+{lines_added} -{lines_deleted} lines, first change at line {first_changed_line}` | Stored on both sides: lines by the longest common subsequence of lines; the first line past the common prefix, 1-based, in before. |
 | `text_rewritten` | text | path | lines_before: int, lines_after: int, first_changed_line: int | `rewritten: {lines_before} lines before, {lines_after} after, first change at line {first_changed_line}` | As text_changed, past 2,000 lines of edit distance: not counted. |
@@ -349,9 +361,9 @@ know. Removing a kind or changing a field's meaning is a new diff version.
 | `git_ref_created` | git | path | ref: string, to: string | `created {ref} at {to}` | A ref appeared. |
 | `git_ref_deleted` | git | path | ref: string, from: string | `deleted {ref} (was {from})` | A ref went away. |
 | `git_ref_moved` | git | path | ref: string, from: string, to: string | `{ref} {from} -> {to}` | A ref names another commit. |
-| `git_hook_added` | git | path | hook: string, executable: bool | `hook {hook} added` |  |
-| `git_hook_removed` | git | path | hook: string | `hook {hook} removed` |  |
-| `git_hook_changed` | git | path | hook: string, executable: bool | `hook {hook} changed` | Its content changed. |
+| `git_hook_added` | git | path | hook: string, executable: bool, target: string | `hook {hook} added` |  |
+| `git_hook_removed` | git | path | hook: string, target: string | `hook {hook} removed` |  |
+| `git_hook_changed` | git | path | hook: string, executable: bool, target: string | `hook {hook} changed` | Its content changed. |
 | `git_hook_executable_changed` | git | path | hook: string, executable: bool | `hook {hook} executable: {executable}` | Only its executable bit changed. |
 | `git_index_changed` | git | path | -- | `index changed` | `.git/index` (hashed, never stored). |
 | `git_reflog_appended` | git | path | ref: string, entries: int | `{ref}: {entries} reflog entries` | Entries appended to the ref's reflog. |
@@ -361,11 +373,16 @@ know. Removing a kind or changing a field's meaning is a new diff version.
 
 ### What each interpreter reports
 
-Every interpreter describes only a proven change of content: for a path whose outcome is `unknown`
-or `metadata_only` it adds nothing (a git hook's executable bit excepted, which is metadata). A
-side on which the path is not a regular file counts as absent. Where an interpreter keeps the first
-of two equal keys (a package, a RECORD path, a packed ref), "first" is in file order. Each reads at
-most a bound of each stored copy; a larger one is `content_unavailable`, reason `too_large`:
+An interpreter adds findings only to a path whose content is proven changed (added, removed,
+modified, type_changed): to a path whose outcome is `unknown` or `metadata_only` it adds none (a git
+hook's executable bit excepted, which is metadata). pip and dpkg still derive events from an
+`unknown` path, each marked provisional. A side on which the path is not a regular file counts as
+absent (git hooks excepted: a symlink is a hook). Where an interpreter keeps the first of two equal
+keys (a package, a RECORD path, a packed ref), "first" is in file order. The limits: each
+interpreter reads at most a bound of each stored copy, and a larger one is `content_unavailable`,
+reason `too_large`; pip's and dpkg's per-diff state is at most 64 MiB; a record carries at most
+4,096 findings and an interpreter at most 65,536 events (and_more past either); a failed end hook
+names at most 1,024 paths:
 
 | interpreter | file | bound |
 |---|---|---|
@@ -374,6 +391,7 @@ most a bound of each stored copy; a larger one is `content_unavailable`, reason 
 | dpkg | `status` | 256 MiB |
 | git | `HEAD`, a loose ref | 64 KiB |
 | git | `packed-refs`, a reflog | 64 MiB |
+| pip, dpkg | per-diff state | 64 MiB (past it, the end hook fails) |
 
 `missing` covers a path whose entry records no `stored` copy as well as a copy the store lacks, and
 is given before `no_store` when both apply. A record's `content_unavailable` findings come before
@@ -382,12 +400,15 @@ side, then after; an interpreter's `content_unavailable` events come one per rea
 `false`.
 
 Where an interpreter fails on a path (a file it claims cannot be parsed, a dist-info cannot be
-named), that path's record carries `could_not_interpret` (R11). Where pip or dpkg cannot give a
-complete, correct set of events, the end hook fails (E6): its events are one `could_not_interpret`
-naming every path given to it, that is every path it claims whose outcome is not `unchanged`. Each
-says below when. Both also fail when their per-diff state would exceed 64 MiB, and when an event's
-text would exceed 1,024 bytes though each of its values is a string field's value (dpkg's fields are
-up to 1,024 bytes each).
+named), that path's record carries `could_not_interpret` (R11), and pip and dpkg emit one
+`could_not_interpret` event naming it (E10); their other events stand. An event a value of which is
+not a string field's value, or whose text would exceed 1,024 bytes, is one `invalid_finding` event
+naming its paths (E9). Events with no name -- `could_not_interpret` for a file,
+`content_unavailable` -- come before every named event, in the Kinds table's order, then by path
+(`content_unavailable`, one per reason, in the reasons' order). The end hook fails (E6) only when
+the interpreter's per-diff state would exceed 64 MiB or memory runs out: its events are then one
+`could_not_interpret` naming the first 1,024 paths given to it (every path it claims whose outcome
+is not `unchanged`) and counting the rest.
 
 **text.** Stored on both sides: `text_changed`, counted from the longest common subsequence of
 lines; when the two differ in more than 2,000 lines, `text_rewritten` gives the line counts only.
@@ -408,13 +429,15 @@ modified in place is `pip_reinstalled`: its rows (path, hash, size; UTF-8 text i
 dialect, so a RECORD that is not UTF-8, or a row of other than three fields, cannot be parsed)
 compared by path, a path listed twice keeping its first row; `files_changed` counts the paths whose
 hash or size differs. Only a reinstall reads content (both RECORDs); the others come from the paths
-alone. An event lists the RECORD paths it was derived from. Event order: by normalized name, then
-kind (in the Kinds table's order), then directory; a `content_unavailable` event has no name and
-comes first. The end hook fails (E6) when a dist-info cannot be named (no `-`, an empty name or
-version, or one that is not a string field's value) or a RECORD it must read cannot be parsed --
-that RECORD's record also carries `could_not_interpret` -- and when one pair key has RECORDs both
-added and removed other than exactly one of each (no kind says that). Several added with none
-removed are each `pip_installed`; several removed with none added, each `pip_removed`.
+alone. A RECORD whose outcome is `unknown` pairs like any other, by its directory's name, and every
+event it takes part in is provisional; one present on both sides is no proven reinstall and gives
+none (its rows are not counted). An event lists the RECORD paths it was derived from. Event order:
+by normalized name (none first), then kind (in the Kinds table's order), then directory. A dist-info
+that cannot be named (no `-`, an empty name or version, or one that is not a string field's value),
+or a RECORD it must read that cannot be parsed, is one `could_not_interpret` event naming that
+RECORD; one pair key with RECORDs both added and removed other than exactly one of each (no kind
+says that) is one `could_not_interpret` event naming them, in that name's place. Several added with
+none removed are each `pip_installed`; several removed with none added, each `pip_removed`.
 
 **dpkg.** From the `status` file before and after (an absent side lists no packages): a package is
 keyed by `Package` and `Architecture` (empty when absent), the first stanza of a key kept, and is
@@ -425,26 +448,29 @@ after and not before: `dpkg_installed`, with the version after; the reverse, `dp
 the version before; installed on both sides at versions that differ by Debian ordering (as `dpkg
 --compare-versions`), `dpkg_upgraded` or `dpkg_downgraded`; and whenever `Status` differs and no
 installed or removed event covers the package, `dpkg_state_changed` (an upgrade whose `Status` also
-changed has both). An event lists the status path. Event order: by Package, then Architecture, then
-kind (in the Kinds table's order), then path; a `content_unavailable` event comes first. The end
-hook fails (E6) when a status cannot be parsed or a value an event would carry is not a string
-field's value; the status path's record then also carries `could_not_interpret`. The `info/` files
-are claimed so captures keep them (the baseline M2's integrity check needs); they add no findings.
+changed has both). A status whose outcome is `unknown` is read too, and every event from it is
+provisional. An event lists the status path. Event order: by Package, then Architecture, then kind
+(in the Kinds table's order), then path; the events with no name first. A status that cannot be
+parsed is one `could_not_interpret` event naming it; an event a value of which is not a string
+field's value (a NUL in a field) is one `invalid_finding` event in its place. The `info/` files are
+claimed so captures keep them (the baseline M2's integrity check needs); they add no findings.
 
 **git.** No objects are read: refs, hooks, the index and the reflog only. A path is placed by the
 part after its `.git/` (the last one that fits). `HEAD`: `git_head_changed`, from and to being the
 symbolic ref's name or the object id (empty on a side where it is absent); nothing when the two are
 equal. A loose ref or a line of `packed-refs` (in ref order): `git_ref_created`, `git_ref_deleted`,
 `git_ref_moved` (only when the value differs), the ref being its full name (`refs/heads/main`). A
-hook, from the manifest alone: added, removed, changed (its content), or -- its content unchanged --
-its executable bit (the owner's), whatever else changed; `executable` is after's. A symlink or a
-directory under `hooks/` is no hook (not a regular file). The index: `git_index_changed` when it is
-added, removed or its content changed (hashed, never stored). A reflog (`logs/HEAD` is ref `HEAD`,
-`logs/refs/...` is `refs/...`): when before's bytes are a prefix of after's ending at a line's end
-(an absent before is empty), `git_reflog_appended` counts the entries after it, and each of those
-that is not a plain commit (operation `commit` or `commit (initial)`) or a fast-forward (its message
-contains `Fast-forward`) is a `git_reflog_move`, its operation being the message before its first
-`:`; otherwise, or when the reflog was removed (no copy needed), `git_reflog_rewritten`. **The
-reflog is written by the process being watched: it is evidence, not proof.** A process can write any
-reflog it likes; a capture taken from outside the process (host-reader mode) is the answer when that
-matters.
+hook, from the manifest alone, is a regular file or a symlink -- git follows a symlinked hook, so it
+is a working hook; a directory is none: added, removed, changed (its content, a link's target, or a
+file becoming a link or back), or -- a file's content unchanged -- its executable bit (the owner's),
+whatever else changed. `executable` is after's (true for a symlink, whose target's mode is not
+recorded); `target` is the link's target, empty for a file. The index: `git_index_changed` when it
+is added, removed or its content changed (hashed, never stored). A reflog (`logs/HEAD` is ref
+`HEAD`, `logs/refs/...` is `refs/...`): when before's bytes are a prefix of after's ending at a
+line's end (an absent before is empty), `git_reflog_appended` counts the entries after it, and each
+of those that is not a plain commit (operation `commit` or `commit (initial)`) or a fast-forward
+(its message contains `Fast-forward`) is a `git_reflog_move`, its operation being the message before
+its first `:`; otherwise, or when the reflog was removed (no copy needed), `git_reflog_rewritten`.
+**The reflog is written by the process being watched: it is evidence, not proof.** A process can
+write any reflog it likes; a capture taken from outside the process (host-reader mode) is the answer
+when that matters.

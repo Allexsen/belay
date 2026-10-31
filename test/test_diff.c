@@ -458,8 +458,8 @@ static enum belay_interp_result t_end_event(void *state, struct belay_events *ev
     const char *p[] = { PIP_B, PIP_A };
     const size_t l[] = { strlen(PIP_B), strlen(PIP_A) };
     const struct belay_fv v[] = { { .s = "a", .len = 1 }, { .s = "1", .len = 1 } };
-    belay_event(ev, FK_PIP_INSTALLED, v, 2, p, l, 2);
-    belay_event(ev, FK_PIP_REMOVED, v, 2, p, l, 1);
+    belay_event(ev, FK_PIP_INSTALLED, v, 2, p, l, 2, 0);
+    belay_event(ev, FK_PIP_REMOVED, v, 2, p, l, 1, 0);
     return BELAY_INTERP_FINDINGS;
 }
 
