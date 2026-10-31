@@ -1,0 +1,2 @@
+debian_versions_sort_as_documented
+pep440_versions_sort_as_the_pep_shows
