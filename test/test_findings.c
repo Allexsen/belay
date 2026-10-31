@@ -96,6 +96,27 @@ TEST(a_finding_that_breaks_its_row_is_invalid_finding) {
             BELAY_FAIL("%s: %s", C[i].why, g_out);
         findings_free(&f);
     }
+    /* S3 K3: a field the template does not name is still required. */
+    {
+        struct belay_findings g = { 0 };
+        findings_reset(&g, BELAY_INTERP_GIT);
+        const struct belay_fv h[] = { S("pre-commit") };
+        ASSERT_EQ_INT(0, belay_finding(&g, FK_GIT_HOOK_ADDED, h, 1));
+        ASSERT_EQ_STR(",\"findings\":[{\"kind\":\"invalid_finding\",\"text\":\"invalid finding\"}]", written(&g));
+        findings_free(&g);
+    }
+    /* S3 K6: the text bound holds when the last thing rendered is a field. */
+    {
+        static char x[500], y[600];
+        memset(x, 'x', sizeof x);
+        memset(y, 'y', sizeof y);
+        struct belay_findings g = { 0 };
+        findings_reset(&g, BELAY_INTERP_GIT);
+        const struct belay_fv h[] = { { .s = x, .len = sizeof x }, { .s = y, .len = sizeof y } };
+        ASSERT_EQ_INT(0, belay_finding(&g, FK_GIT_HEAD_CHANGED, h, 2));      /* 5 + 500 + 4 + 600 */
+        ASSERT_EQ_STR(",\"findings\":[{\"kind\":\"invalid_finding\",\"text\":\"invalid finding\"}]", written(&g));
+        findings_free(&g);
+    }
     /* The bounds themselves are allowed: exactly 1024 bytes of string. */
     struct belay_findings f = { 0 };
     findings_reset(&f, BELAY_INTERP_GIT);
