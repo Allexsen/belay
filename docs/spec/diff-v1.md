@@ -356,3 +356,38 @@ know. Removing a kind or changing a field's meaning is a new diff version.
 | `git_reflog_move` | git | path | ref: string, from: string, to: string, operation: string | `{ref} {from} -> {to} by {operation}` | An appended entry that is not a plain commit or a fast-forward. The reflog is written by the watched process: evidence, not proof. |
 | `git_reflog_rewritten` | git | path | ref: string | `{ref}: reflog rewritten` | The reflog before is not a prefix of the reflog after. |
 <!-- END GENERATED: diff-findings -->
+
+### What each interpreter reports
+
+**text.** Stored on both sides: `text_changed`, counted from the longest common subsequence of
+lines; when the two differ in more than 2,000 lines, `text_rewritten` gives the line counts only.
+A line is the bytes up to and including a newline, or the bytes after the last newline. Added or
+removed and stored on its one side: `text_added` / `text_removed`, its line count. Content that is
+not text is still counted in lines.
+
+**pip.** A dist-info directory's name gives the distribution and its version
+(`{name}-{version}.dist-info`); distributions are paired by their directory (the site-packages they
+are in) and their name normalized as PEP 503 does (lowercase, runs of `-`, `_`, `.` as one `-`). A
+RECORD added with none removed of the same name is `pip_installed`; removed with none added,
+`pip_removed`; one removed and one added, `pip_upgraded`, `pip_downgraded` (PEP 440 ordering) or
+`pip_version_changed` (equal by PEP 440, or not PEP 440 versions). The same dist-info on both sides
+with its RECORD changed is `pip_reinstalled`, with RECORD's rows compared by path (that one needs
+both RECORDs' content). Event order: by normalized name, then kind.
+
+**dpkg.** From the `status` file before and after: a package is keyed by `Package` and
+`Architecture`, and is installed when its `Status` field's third word is `installed`. Installed
+after and not before: `dpkg_installed`; the reverse, `dpkg_removed`; installed on both sides at
+another version, `dpkg_upgraded` or `dpkg_downgraded` (Debian version ordering, as
+`dpkg --compare-versions`); any other change to `Status`, `dpkg_state_changed`. Event order: by
+Package, then Architecture, then kind. The `info/` files are claimed so captures keep them (the
+baseline M2's integrity check needs); they add no findings.
+
+**git.** No objects are read: refs, hooks, the index and the reflog only. `HEAD`: `git_head_changed`.
+A loose ref or a line of `packed-refs`: `git_ref_created`, `git_ref_deleted`, `git_ref_moved`. A
+hook: added, removed, changed (its hash), or only its executable bit. The index: changed (hashed,
+never stored). A reflog (`logs/HEAD`, `logs/refs/...`): the entries appended, and each appended
+entry that is not a plain commit or a fast-forward as `git_reflog_move`, with git's own operation
+(reset, commit (amend), rebase, checkout, ...); a reflog whose earlier entries were removed or
+altered is `git_reflog_rewritten`. **The reflog is written by the process being watched: it is
+evidence, not proof.** A process can write any reflog it likes; a capture taken from outside the
+process (host-reader mode) is the answer when that matters.

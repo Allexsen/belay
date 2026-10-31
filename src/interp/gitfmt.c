@@ -98,7 +98,7 @@ int git_reflog_each(const char *buf, size_t len, git_reflog_fn fn, void *ctx) {
         while (os < opl && msg[os] == ' ') os++;
         while (opl > os && msg[opl - 1] == ' ') opl--;
         if (opl - os > GIT_NAME_MAX) goto bad;
-        const struct git_reflog_entry e = { l, sp1 + 1, msg + os, ol, opl - os, line };
+        const struct git_reflog_entry e = { l, sp1 + 1, msg + os, ol, opl - os, line, msg, ml };
         const int r = fn(&e, ctx);
         if (r != 0) return r;
         continue;
