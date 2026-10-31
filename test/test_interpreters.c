@@ -1007,6 +1007,39 @@ TEST(dpkg_one_oversized_event_among_valid_ones_is_invalid_the_rest_stand) {
     r_free(&r);
 }
 
+/* The reference author's case B: a read field over 1,024 bytes parses; the
+ * event that carries it is invalid_finding in its place (E9), the others
+ * stand, and a long value no event carries changes nothing. Before, the
+ * whole status could not be parsed: one could_not_interpret, every package
+ * lost -- P1's class. */
+TEST(dpkg_a_value_over_1024_bytes_breaks_only_its_event) {
+    static char a[4000], p[1026];
+    memset(p, 'p', 1025);
+    snprintf(a, sizeof a, "Package: %s\nStatus: install ok installed\nArchitecture: amd64\nVersion: 1\n\n"
+                          "Package: q\nStatus: install ok installed\nArchitecture: amd64\nVersion: 1.0\n", p);
+    struct run r;
+    r_begin(&r, BELAY_INTERP_DPKG, true);
+    const struct belay_entry ea = file(put(a), 0);
+    ASSERT_EQ_STR("", r_path(&r, STATUS, NULL, &ea, "added"));
+    ASSERT_EQ_STR("{\"event\":\"invalid_finding\",\"interp\":\"dpkg\",\"text\":\"invalid finding\","
+                  "\"paths\":[\"" STATUS_REL "\"]}\n"
+                  EV("dpkg_installed", "\"package\":\"q\",\"arch\":\"amd64\",\"version\":\"1.0\"",
+                     "installed q:amd64 1.0"),
+                  r_end(&r));
+    r_free(&r);
+    snprintf(a, sizeof a, "Package: %s\nStatus: purge ok not-installed\n\n"
+                          "Package: q\nStatus: install ok installed\nArchitecture: amd64\nVersion: 1.0\n", p);
+    static char b[4000];
+    snprintf(b, sizeof b, "Package: %s\nStatus: purge ok not-installed\n", p);
+    r_begin(&r, BELAY_INTERP_DPKG, true);
+    const struct belay_entry eb2 = file(put(b), 0), ea2 = file(put(a), 0);
+    ASSERT_EQ_STR("", r_path(&r, STATUS, &eb2, &ea2, "modified"));
+    ASSERT_EQ_STR(EV("dpkg_installed", "\"package\":\"q\",\"arch\":\"amd64\",\"version\":\"1.0\"",
+                     "installed q:amd64 1.0"),
+                  r_end(&r));
+    r_free(&r);
+}
+
 /* ================================ binary =============================== */
 
 TEST(binary_declines_everything) {
@@ -1052,6 +1085,7 @@ int main(void) {
     RUN(empty_files_are_nothing_listed);
     RUN(dpkg_a_field_with_a_nul_is_one_invalid_event);
     RUN(dpkg_one_oversized_event_among_valid_ones_is_invalid_the_rest_stand);
+    RUN(dpkg_a_value_over_1024_bytes_breaks_only_its_event);
     RUN(binary_declines_everything);
     char cmd[400];
     snprintf(cmd, sizeof cmd, "rm -rf '%s'", g_store);

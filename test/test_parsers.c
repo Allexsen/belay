@@ -90,13 +90,20 @@ TEST(a_malformed_dpkg_status_is_an_error) {
             BELAY_FAIL("accepted: %s", bad[i]);
         belay_err_clear();
     }
-    char *big = malloc(STANZA_VALUE_MAX + 40);
+}
+
+/* The reference author's case B (2026-10-31): a read field of any length
+ * parses -- one too long for an event breaks only that event (E9), not the
+ * file. Before, 1,025 bytes made the whole status unparseable. */
+TEST(a_long_read_field_parses) {
+    char *big = malloc(1025 + 40);
     REQUIRE(big != NULL);
     int w = sprintf(big, "Package: ");
-    memset(big + w, 'x', STANZA_VALUE_MAX + 1);
-    big[w + STANZA_VALUE_MAX + 1] = '\n';
-    ASSERT_EQ_INT(-1, stanza_each(big, (size_t)w + STANZA_VALUE_MAX + 2, keep_pkg, NULL));
-    belay_err_clear();
+    memset(big + w, 'x', 1025);
+    big[w + 1025] = '\n';
+    g_n = 0;
+    ASSERT_EQ_INT(0, stanza_each(big, (size_t)w + 1026, keep_pkg, NULL));
+    ASSERT_EQ_INT(1, (int)g_n);
     free(big);
 }
 
@@ -271,6 +278,7 @@ int main(void) {
     RUN(a_dpkg_status_file_gives_each_package);
     RUN(a_long_field_that_is_not_read_is_fine);
     RUN(a_malformed_dpkg_status_is_an_error);
+    RUN(a_long_read_field_parses);
     RUN(a_pip_record_gives_each_row);
     RUN(a_malformed_pip_record_is_an_error);
     RUN(git_ref_files_packed_refs_and_reflogs_parse);
