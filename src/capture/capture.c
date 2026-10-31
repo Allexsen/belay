@@ -5,6 +5,7 @@
  */
 #define _GNU_SOURCE
 #include "capture_internal.h"
+#include "store_internal.h"
 
 #include "belay/error.h"
 #include "belay/hash.h"
@@ -25,6 +26,20 @@ static enum belay_entry_type type_of(mode_t m) {
     for (int t = 0; t < ENTRY_TYPE_COUNT; t++)
         if (((uint32_t)m & ENTRY_IFMT) == ENTRY_TYPES[t].ifmt) return (enum belay_entry_type)t;
     return BELAY_T_CHR;
+}
+
+/* Whether the first SNIFF_BYTES of `fd` hold a NUL (hash_fd's rule); false
+ * when they cannot be read. Leaves the offset past what it read. */
+static bool sniff_binary(const struct fsops *ops, int fd, unsigned char *buf) {
+    uint64_t got = 0;
+    while (got < SNIFF_BYTES) {
+        const ssize_t n = ops->read(ops->ctx, fd, buf, (size_t)(SNIFF_BYTES - got));
+        if (n < 0 && errno == EINTR) continue;
+        if (n <= 0) return false;
+        if (memchr(buf, '\0', (size_t)n) != NULL) return true;
+        got += (uint64_t)n;
+    }
+    return false;
 }
 
 /* Hashes by fd: no path is re-resolved, so there is no window between the
@@ -370,27 +385,6 @@ int cap_read_file(int pfd, const char *name, const struct stat *st, const char *
         return V_OK;
     }
 
-    /* mark's prefilter: unchanged since the previous manifest, by the rule
-     * (previous.h), so not read -- its hash and copy are the previous
-     * entry's. It is still opened, checked against its stat and its extras
-     * read (inode flags need an fd): only the hashing is skipped. The
-     * end-of-walk re-check applies to it as to any other. */
-    if (wc->prev != NULL) {
-        const struct prev_rec *p = prev_find(wc->prev, (uint64_t)st->st_dev, (uint64_t)st->st_ino);
-        if (prev_trusted(p, st, wc->reference_ns)) {
-            e->has_hash = true;
-            prev_hex(p, e->sha256_hex);
-            if (p->has_stored && wc->store != NULL) {
-                e->has_stored = true;
-                memcpy(e->stored_hex, e->sha256_hex, sizeof e->stored_hex);
-            }
-            wc->trusted++;
-            close(fd);
-            return V_OK;
-        }
-        if (p != NULL && prev_trusted(p, st, INT64_MAX)) wc->racy++;   /* unchanged, but racy */
-    }
-
     /* What must be kept: an interpreter's claim overrides the size threshold
      * (stored whatever its size) or forbids storing (hash only); unclaimed
      * files are kept if small and text. */
@@ -405,6 +399,49 @@ int cap_read_file(int pfd, const char *name, const struct stat *st, const char *
     }
     bool want = wc->store != NULL && claim.keep != BELAY_KEEP_HASH &&
                 (claim.keep == BELAY_KEEP_STORE || e->size <= wc->opts->store_max_bytes);
+
+    /* mark's prefilter: unchanged since the previous manifest, by the rule
+     * (previous.h), so not read -- its hash is the previous entry's. It is
+     * still opened, checked against its stat and its extras read (inode
+     * flags need an fd): only the hashing is skipped. Whether a copy is kept
+     * is decided now, as for any file (review 2026-10-31, Phase 5, 6): a
+     * copy wanted and already in the store is recorded; one wanted and not
+     * there -- a claim that changed, a store object gone, a writer that had
+     * kept it out last time -- means the file is read after all. The
+     * end-of-walk re-check applies to it as to any other. */
+    if (wc->prev != NULL) {
+        const struct prev_rec *p = prev_find(wc->prev, (uint64_t)st->st_dev, (uint64_t)st->st_ino);
+        if (prev_trusted(p, st, wc->reference_ns)) {
+            char hex[65];
+            prev_hex(p, hex);
+            const bool copy = want && p->has_stored && store_has(wc->store, hex, e->size);
+            /* An unclaimed file without a copy may be binary, which a full
+             * capture would not keep either: that is decided by its first
+             * SNIFF_BYTES, unchanged with the rest, so only they are read. */
+            bool skip = !want || copy;
+            if (!skip && !p->has_stored && claim.keep == BELAY_KEEP_DEFAULT) {
+                skip = sniff_binary(wc->ops, fd, wc->readbuf);
+                if (!skip && lseek(fd, 0, SEEK_SET) == -1) {      /* read whole below, from 0 */
+                    close(fd);
+                    outcome_apply(e, FACET_CONTENT, OUT_DENIED, &wc->tally);
+                    return V_OK;
+                }
+            }
+            if (skip) {
+                e->has_hash = true;
+                memcpy(e->sha256_hex, hex, sizeof e->sha256_hex);
+                if (copy) {
+                    e->has_stored = true;
+                    memcpy(e->stored_hex, hex, sizeof e->stored_hex);
+                }
+                wc->trusted++;
+                close(fd);
+                return V_OK;
+            }
+        } else if (p != NULL && prev_trusted(p, st, INT64_MAX)) {
+            wc->racy++;                                         /* unchanged, but racy */
+        }
+    }
 
     /*
      *  A copy is kept only if no writer had the file open when the read

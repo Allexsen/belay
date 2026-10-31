@@ -304,6 +304,18 @@ int belay_store_sync(struct belay_store *s) {
     return 0;
 }
 
+bool store_has(struct belay_store *s, const char *hex, uint64_t size) {
+    if (s == NULL || !valid_hex(hex)) return false;
+    const char prefix[3] = { hex[0], hex[1], '\0' };
+    const int pfd = openat(s->dfd, prefix, O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC);
+    if (pfd == -1) return false;
+    struct stat st;
+    const bool ok = fstatat(pfd, hex + 2, &st, AT_SYMLINK_NOFOLLOW) == 0 && S_ISREG(st.st_mode) &&
+                    (uint64_t)st.st_size == size;
+    close(pfd);
+    return ok;
+}
+
 int belay_store_verify(struct belay_store *s, const char *hex) {
     if (s == NULL || !valid_hex(hex)) {
         belay_err_set(BELAY_ERR_INVALID, 0, "store_verify: bad argument");

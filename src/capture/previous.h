@@ -30,20 +30,16 @@ struct prev_index;
 
 struct prev_info {
     int64_t newest_validated_ns;    /* the newest ctime_ns of an entry validation passed */
-    int64_t manifest_ctime_ns;      /* the manifest file's own ctime */
-    bool same_device;               /* the manifest is on the scope root's device */
-    int64_t reference_ns;           /* R: the larger of the two, the second only on one device */
+    int64_t reference_ns;           /* R: the previous walk's start, else newest_validated_ns */
     uint64_t hash_max_bytes, store_max_bytes;
     size_t files;                   /* regular files indexed */
 };
 
 /* Loads `path`, written for a scope whose root is on `root_dev`. 0; 1 when
- * the prefilter cannot be used (another scope, other limits, the index over
- * PREV_BYTES_MAX: *why says which); -1 with belay_err (unreadable, corrupt,
- * memory). */
+ * the prefilter cannot be used (another scope, other limits, unreadable or
+ * corrupt, the index over PREV_BYTES_MAX: *why says which); -1 with
+ * belay_err (memory). */
 struct fsops;
-/* The manifest file's ctime is read through `ops`, as every other stat of
- * the walk, so one clock judges both. */
 int prev_load(const struct fsops *ops, const char *path, const char *scope, uint64_t root_dev,
               const struct belay_manifest_opts *opts, struct prev_index **out,
               struct prev_info *info, const char **why);

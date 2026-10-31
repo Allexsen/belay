@@ -8,8 +8,8 @@
  *  strings during a walk, so a swapped directory or a symlink cannot redirect
  *  it. The writer writes only the manifest (a temporary beside it, renamed
  *  into place), its unlinked temporary runs, and objects in the store. If
- *  those lie inside the scope, the next check records them as changes:
- *  excluding belay's own state directory is phase 5 work.
+ *  those lie inside the scope, the next check records them as changes, unless
+ *  opts->exclude names that directory (the CLI does).
  */
 #ifndef BELAY_MANIFEST_H
 #define BELAY_MANIFEST_H
@@ -168,7 +168,9 @@ struct belay_manifest_opts {
      *  Memory budget for the writer's sort buffer. 0 selects the default
      *  (4 MiB). Values below the minimum (one maximal entry, ~70 KB) are
      *  raised to it. Peak writer memory is roughly this plus ~1 MiB of merge
-     *  cursors, independent of how many entries the scope holds.
+     *  cursors, independent of how many entries the scope holds -- plus,
+     *  with `previous`, its index: about 76 bytes a regular file, at most
+     *  64 MiB.
      */
     size_t   run_bytes;
 
@@ -181,6 +183,15 @@ struct belay_manifest_opts {
      *  index): a full walk, said in stats->prefilter_skipped.
      */
     const char *previous;
+    /* The time the previous walk began, on the scope filesystem's clock
+     * (stats->walk_start_ns of that capture); 0 when unknown. A file is
+     * trusted only with a ctime before it: any write after that walk began
+     * -- during it too, after the file was read -- has a ctime at or past
+     * it (review 2026-10-31, Phase 5, 5). 0: the previous manifest's newest
+     * validated ctime is used instead, which a write during the previous
+     * walk, within its file's own ctime tick, can pass on a filesystem with
+     * coarse timestamps. */
+    int64_t  previous_start_ns;
 
     /*
      *  A directory not walked: belay's own state directory inside the scope
@@ -223,6 +234,9 @@ struct belay_manifest_stats {
     int64_t newest_ctime_ns;        /* the newest ctime_ns this walk saw */
     int64_t previous_newest_ns;     /* the previous manifest's newest validated ctime */
     int64_t reference_ns;           /* R */
+    int64_t walk_start_ns;          /* the time this walk began, on the scope filesystem's
+                                       clock (a probe file's ctime beside the output); 0 when
+                                       the output is not on the scope's device */
 };
 
 /*

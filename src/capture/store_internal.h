@@ -10,5 +10,9 @@
 #include "fsops.h"
 
 int store_open(const struct fsops *ops, const char *dir, struct belay_store **out);
+/* Is object `hex` there: a regular file (no link followed, no FIFO opened)
+ * of `size` bytes? Its bytes are verified whenever it is read (content.c);
+ * this is for mark, which records a copy it does not make again. */
+bool store_has(struct belay_store *s, const char *hex, uint64_t size);
 
 #endif
