@@ -46,10 +46,12 @@ The corpus has three parts:
     status files (one or two per diff, a side with no stored copy, a type
     change, an unknown status: provisional) and info files, pip RECORDs
     installed, removed, upgraded, downgraded, version-changed, reinstalled,
-    unknown (provisional), could_not_interpret events (E10) and
-    invalid_finding events (E9), git hooks, the index, HEAD, loose refs,
-    packed-refs, reflogs, a claimed directory, symlinked hooks (added,
-    removed, retargeted, a target that is no string field's value),
+    unknown (provisional; on both sides, a reinstall whose files are not
+    counted), could_not_interpret events (E10) and invalid_finding events
+    (E9), git hooks, the index, HEAD, loose refs, packed-refs, reflogs, a
+    claimed directory, symlinked hooks (added, removed, retargeted, with no
+    `executable`; a target not UTF-8, over 1,024 bytes, of 4,095 -- the
+    manifest's limit, addendum A4, which the generator keeps to),
     directories under hooks/, symlinks and directories under logs/refs/, a
     hook that becomes a symlink or back, and an unclaimed file below .git/;
   - random pairs: n-bases random trees, each with four mutated variants
@@ -592,7 +594,26 @@ def violations(t):
             elif pe.get('unreadable') or pe.get('mount'):
                 v.append('below a sealed directory %r' % p)
         v += ['%r: rule %s' % (p, r) for r in entry_violations(e, t)]
+        # test/expect/manifest-v1-addendum.md A3 and A4: a reader rejects a
+        # longer path or link target.
+        if len(p) > ADDENDUM_MAX['path'] or len(e.get('link_target', b'')) > \
+                ADDENDUM_MAX['link_target']:
+            v.append('%r: addendum A3/A4' % p)
     return v
+
+
+def addendum_limits():
+    """The two rows of the manifest addendum pin the generator keeps to."""
+    text = open(os.path.join(REPO, 'test', 'expect', 'manifest-v1-addendum.md'),
+                encoding='utf-8').read()
+    for w in ['| A3 | A `path` is at most 4095 bytes; a reader rejects a longer one. |',
+              '| A4 | A `link_target` is at most 4095 bytes; a reader rejects a longer one. |']:
+        if w not in text:
+            die('pin: the manifest addendum no longer says %r' % w)
+    return {'path': 4095, 'link_target': 4095}
+
+
+ADDENDUM_MAX = addendum_limits()
 
 # ---------------------------------------------------------------------------
 # Writing (canonical encoding, manifest-v1.md "Encoding").
@@ -2427,7 +2448,7 @@ def interpreters(w, rng):
          'another name (E10)'])
     # An unknown RECORD pairs like any other, its events provisional (E2):
     # with a removed one of its name (an upgrade), alone (an install); on
-    # both sides, no reinstall and nothing at all.
+    # both sides, a provisional reinstall, its files not counted.
     one('pip: one RECORD of a name removed, the other added but raced',
         lambda rng: (lambda s: dist(s, b'lazy-1.0', 'removed', with_metadata=False)
                      + [(s + b'lazy-2.0.dist-info/RECORD', 'raced_added', S(own_dir=True))])(
@@ -2441,7 +2462,8 @@ def interpreters(w, rng):
         ['pip events: an unknown RECORD with none of the other side (E2)'])
     one('pip: a RECORD in place, iflags on one side only',
         lambda rng: [(rng.choice(SITE) + b'idle-1.0.dist-info/RECORD', 'iflags', O)],
-        ['pip RECORD: unknown, a regular file on both sides'])
+        ['pip RECORD: unknown, a regular file on both sides',
+         'pip events: a provisional reinstall, its files not counted'])
     one('pip: a RECORD added but raced, its dist-info not named, beside a reinstall',
         lambda rng: (lambda s: [(s + b'x-.dist-info/RECORD', 'raced_added', S(own_dir=True)),
                                 (s + b'mid-1.0.dist-info/RECORD', 'modified', O)])(
@@ -2477,13 +2499,40 @@ def interpreters(w, rng):
         ["pip RECORD: added, a dist-info whose name or version is not a string field's value"])
     # A dist-info that cannot be named, rewritten in place: could_not_interpret
     # on its record and one event, "nothing more is read from it" (no
-    # content_unavailable); unknown on both sides, nothing (ambiguity I7).
+    # content_unavailable); unknown on both sides, named like any other: a
+    # provisional could_not_interpret event, nothing on its record (E10).
     one('pip: a RECORD rewritten in place, its dist-info not named',
         lambda rng: [(rng.choice(SITE) + b'nover.dist-info/RECORD', 'modified', O)],
         ['pip RECORD: modified, a dist-info that cannot be named'])
     one('pip: a RECORD in place, iflags on one side only, its dist-info not named',
         lambda rng: [(rng.choice(SITE) + b'idle-.dist-info/RECORD', 'iflags', O)],
-        ['pip RECORD: unknown, a regular file on both sides, a dist-info that cannot be named'])
+        ['pip RECORD: unknown, a regular file on both sides, a dist-info that cannot be named',
+         'pip events: an unknown RECORD on both sides that cannot be named (E10, E2)'])
+    # An unknown RECORD on both sides is a provisional pip_reinstalled with
+    # its three counts absent (the kind's second template): beside other
+    # names (by normalized name), beside an install of its own name in its
+    # directory (then by kind), beside one that cannot be named (no name
+    # first), and one whose text would exceed 1,024 bytes (E9).
+    one('pip: a RECORD in place, iflags on one side only, between two other names',
+        lambda rng: (lambda s: dist(s, b'alpha-2.0', 'removed', with_metadata=False)
+                     + [(s + b'Mid_Pkg-1.0.dist-info/RECORD', 'iflags', O)]
+                     + dist(s, b'zed-1.0', 'added', with_metadata=False))(rng.choice(SITE)),
+        ['pip events: a provisional reinstall, its files not counted'])
+    one('pip: a RECORD in place, iflags on one side only, its name installed beside it',
+        lambda rng: (lambda s: [(s + b'same-1.0.dist-info/RECORD', 'iflags', O)]
+                     + dist(s, b'Same-2.0', 'added', with_metadata=False))(rng.choice(SITE)),
+        ['pip events: a provisional reinstall beside an install or removal of its name '
+         '(by kind)'])
+    one('pip: a RECORD in place, iflags on one side only, beside one not named',
+        lambda rng: (lambda s: [(s + b'ok-1.0.dist-info/RECORD', 'iflags', O),
+                                (s + b'nover.dist-info/RECORD', 'iflags', O)])(
+                                    rng.choice(SITE)),
+        ['pip events: a provisional reinstall beside an unknown RECORD on both sides that '
+         'cannot be named'])
+    one('pip: a RECORD in place, iflags on one side only, its text over 1,024 bytes (E9)',
+        lambda rng: [(rng.choice(SITE) + b'r' * 600 + b'-' + b'9' * 600
+                      + b'.dist-info/RECORD', 'iflags', O)],
+        ['pip events: a provisional reinstall whose text would exceed 1,024 bytes (E9)'])
     # Two events of one name, kind and directory: "then the paths it lists"
     # -- here against the versions' order and the order they are written in
     # (`Twin-2.0` before `twin-1.0` bytewise); `twin_` is another name
@@ -2547,9 +2596,10 @@ def interpreters(w, rng):
     # a regular file counts as absent: nothing from a directory under hooks/
     # or a symlink or directory under logs/refs/. A symlinked hook is added,
     # removed, changed (retargeted, or a file becoming a link or back), its
-    # `target` the link's (empty for a file), `executable` true. A target
-    # that is not a string field's value (not UTF-8, over 1,024 bytes) breaks
-    # the row: invalid_finding (ambiguity I9 in reference.py).
+    # `target` the link's (empty for a file), `executable` absent for a
+    # symlink after. `target` is a `bytes` field: up to 4,095 bytes (the
+    # manifest's own limit, addendum A4, so no longer one can be built),
+    # `target_b64` when not UTF-8 -- never invalid_finding.
     one('git: a symlink under hooks/ added',
         lambda rng: [(g(rng, b'hooks/pre-commit'), 'lnk_added',
                       S(target=b'tools/pre-commit.sh'))],
@@ -2569,6 +2619,25 @@ def interpreters(w, rng):
         lambda rng: [(g(rng, b'hooks/pre-commit'), 'lnk_added',
                       S(target=b'd/' * 511 + b'xx'))],
         ['git hook: added, a symlink, its target of exactly 1,024 bytes'])
+    one('git: a symlink under hooks/ added, its target 4,095 bytes (the manifest\'s limit)',
+        lambda rng: [(g(rng, b'hooks/pre-commit'), 'lnk_added',
+                      S(target=b'd/' * 2046 + b'xxx'))],
+        ['git hook: added, a symlink, its target of 4,095 bytes',
+         'git hook: removed, a symlink, its target of 4,095 bytes'])
+    one('git: a symlink under hooks/ added, its target 4,095 bytes, not UTF-8',
+        lambda rng: [(g(rng, b'hooks/post-rewrite'), 'lnk_added',
+                      S(target=b'x/' * 2046 + b'\xfe\xff\xc3'))],
+        ['git hook: added, a symlink, its target of 4,095 bytes, not UTF-8',
+         'git hook: removed, a symlink, its target of 4,095 bytes, not UTF-8'])
+    one('git: a symlinked hook retargeted to a target not UTF-8',
+        lambda rng: [(g(rng, b'hooks/pre-push'), 'lnk_retarget',
+                      S(target=b'hooks.d/pre-push', to_target=b'hooks.d/pre-push\xe9'))],
+        ['git hook: modified, a symlink, its target not UTF-8'])
+    one('git: a hook becomes a symlink whose target is not UTF-8',
+        lambda rng: [(g(rng, b'hooks/pre-applypatch'), 'to_lnk',
+                      S(mode=0o755, target=b'\x80\x81/pre-applypatch'))],
+        ['git hook: type_changed, reg -> lnk, its target not UTF-8',
+         'git hook: type_changed, lnk -> reg, executable'])
     one('git: a symlinked hook retargeted',
         lambda rng: [(g(rng, b'hooks/pre-push'), 'lnk_retarget',
                       S(target=b'hooks.d/pre-push-v1', to_target=b'hooks.d/pre-push-v2'))],
@@ -2595,7 +2664,8 @@ def interpreters(w, rng):
     one('git: a hook not executable becomes a symlink',
         lambda rng: [(g(rng, b'hooks/prepare-commit-msg'), 'to_lnk',
                       S(mode=0o644, target=b'shared/prepare-commit-msg'))],
-        ['git hook: type_changed, reg -> lnk', 'git hook: type_changed, lnk -> reg'])
+        ['git hook: type_changed, reg -> lnk', 'git hook: type_changed, lnk -> reg',
+         'git hook: type_changed, lnk -> reg, not executable'])
     one('text: a stored *.md5sums outside var/lib/dpkg/info/',
         lambda rng: [(rng.choice([b'dist/sums.md5sums', b'var/lib/dpkg/sums.md5sums']),
                       'modified', O)],

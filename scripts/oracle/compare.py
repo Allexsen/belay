@@ -872,7 +872,16 @@ INTERP_SCENARIOS = (
                                     'one unknown (E10, E2)',
                                     'an event whose text would exceed 1,024 bytes (E9)',
                                     'one name, several RECORDs on one side in one directory '
-                                    '(then by paths)')]
+                                    '(then by paths)',
+                                    'a provisional reinstall, its files not counted',
+                                    'a provisional reinstall beside an install or removal of '
+                                    'its name (by kind)',
+                                    'an unknown RECORD on both sides that cannot be named '
+                                    '(E10, E2)',
+                                    'a provisional reinstall beside an unknown RECORD on both '
+                                    'sides that cannot be named',
+                                    'a provisional reinstall whose text would exceed 1,024 '
+                                    'bytes (E9)')]
     + ['pip RECORD: modified', 'pip RECORD: unknown, a regular file on one side only',
        'pip RECORD: unknown, a regular file on both sides', 'pip METADATA: modified',
        'pip METADATA: added',
@@ -894,8 +903,17 @@ INTERP_SCENARIOS = (
        'git hook: added, a symlink', 'git hook: removed, a symlink',
        'git hook: modified, a symlink', 'git hook: metadata_only, a symlink',
        'git hook: added, a symlink, its target not UTF-8',
+       'git hook: removed, a symlink, its target not UTF-8',
+       'git hook: modified, a symlink, its target not UTF-8',
+       'git hook: type_changed, reg -> lnk, its target not UTF-8',
        'git hook: added, a symlink, its target over 1,024 bytes',
        'git hook: added, a symlink, its target of exactly 1,024 bytes',
+       'git hook: added, a symlink, its target of 4,095 bytes',
+       'git hook: removed, a symlink, its target of 4,095 bytes',
+       'git hook: added, a symlink, its target of 4,095 bytes, not UTF-8',
+       'git hook: removed, a symlink, its target of 4,095 bytes, not UTF-8',
+       'git hook: type_changed, lnk -> reg, executable',
+       'git hook: type_changed, lnk -> reg, not executable',
        'git hook: added, not a regular file on either side (dir)',
        'git reflog: added, not a regular file on either side (dir)',
        'git reflog: added, not a regular file on either side (lnk)',
@@ -961,13 +979,25 @@ def interp_coverage(stem, tags):
                     tags.add("%s %s: %s, a dist-info whose name or version is not a string "
                              "field's value" % (interp, what, o))
             tags.add(tag)
-            if what == 'hook' and lnk:
-                for x in [e['link_target'] for e in (b, a) if e is not None and
-                          e['type'] == 'lnk']:
-                    tags.add(tag + (', its target not UTF-8' if not is_utf8(x) else
-                                    ', its target over 1,024 bytes' if len(x) > 1024 else
-                                    ', its target of exactly 1,024 bytes' if len(x) == 1024
-                                    else ''))
+            # The target a hook's finding carries: before's for a removed
+            # hook, else after's ("target and executable as in
+            # git_hook_added, after"); a `bytes` field, `target_b64` when
+            # not UTF-8, up to 4,095 bytes (the manifest's own limit).
+            fe = b if o == 'removed' else a
+            if what == 'hook' and fe is not None and fe['type'] == 'lnk':
+                x = fe['link_target']
+                if not is_utf8(x):
+                    tags.add(tag + ', its target not UTF-8')
+                if len(x) > 1024:
+                    tags.add(tag + ', its target over 1,024 bytes')
+                if len(x) == 1024:
+                    tags.add(tag + ', its target of exactly 1,024 bytes')
+                if len(x) == 4095:
+                    tags.add(tag + ', its target of 4,095 bytes'
+                             + ('' if is_utf8(x) else ', not UTF-8'))
+            # A file after: `executable` present, the owner's bit.
+            if what == 'hook' and o == 'type_changed' and a['type'] == 'reg':
+                tags.add(tag + (', executable' if a['mode'] & 0o100 else ', not executable'))
             if what == 'status' and o in ('added', 'removed', 'modified') and \
                     all('stored' in e for e in regs):
                 status_sides.append(frozenset('before' if e is b else 'after' for e in regs))
@@ -994,7 +1024,13 @@ def interp_coverage(stem, tags):
                                                  'and removed, one unknown (E10, E2)',
                 'pip-invalid-event': 'an event whose text would exceed 1,024 bytes (E9)',
                 'pip-one-name-several-one-side': 'one name, several RECORDs on one side in one '
-                                                 'directory (then by paths)'}
+                                                 'directory (then by paths)',
+                'pip-reinstall-uncounted': 'a provisional reinstall, its files not counted',
+                'pip-reinstall-beside-a-move-of-its-name': 'a provisional reinstall beside an '
+                                                           'install or removal of its name (by '
+                                                           'kind)',
+                'pip-invalid-event:reinstalled': 'a provisional reinstall whose text would '
+                                                 'exceed 1,024 bytes (E9)'}
     end = traces[b'']
     for t in end:
         if t in pip_tags:
@@ -1002,6 +1038,12 @@ def interp_coverage(stem, tags):
     # The tags a named pair key gives rise to: another name's event.
     named = {'pip_installed', 'pip_removed', 'pip_upgraded', 'pip_downgraded',
              'pip_version_changed:equal', 'pip_version_changed:not-pep440'}
+    unnamed_both = any('pip-unnamed-unknown-both-sides' in traces[r['path']] for r in records)
+    if unnamed_both:
+        tags.add('pip events: an unknown RECORD on both sides that cannot be named (E10, E2)')
+        if 'pip-reinstall-uncounted' in end:
+            tags.add('pip events: a provisional reinstall beside an unknown RECORD on both sides '
+                     'that cannot be named')
     if 'pip-unnamed-event' in end and 'pip_installed' in end:
         tags.add('pip events: a dist-info that cannot be named beside a named install (E10)')
     if 'pip-ambiguous-key' in end and named & set(end):
