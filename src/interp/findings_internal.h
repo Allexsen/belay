@@ -25,9 +25,11 @@ struct ev_per {
     size_t n, extra;
     bool broken;                /* an event broke its kind's row: E6 */
     bool oom;
-    struct sbuf claimed;        /* paths given to the interpreter: (size_t len, bytes)... */
-    size_t nclaimed;
+    struct sbuf claimed;        /* the first E6_PATHS paths given: (size_t len, bytes)... */
+    size_t nclaimed, claims_over;
 };
+
+#define E6_PATHS 1024u          /* paths an E6 event names; the rest counted (decision P4) */
 
 struct belay_events {
     int interp;                 /* whose end hook is running */
@@ -38,6 +40,9 @@ void findings_reset(struct belay_findings *f, int interp);
 void findings_free(struct belay_findings *f);
 size_t findings_count(const struct belay_findings *f);
 bool findings_oom(const struct belay_findings *f);
+/* Adds a core kind (could_not_interpret) to a record: interpreters cannot
+ * (decision P5). 0, or -1 (memory). */
+int findings_core(struct belay_findings *f, int kind);
 /* `,"findings":[...]` when there are any. 0, or -1 (write error). */
 int findings_write(const struct belay_findings *f, FILE *out);
 

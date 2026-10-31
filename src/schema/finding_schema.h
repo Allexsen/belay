@@ -34,9 +34,9 @@ enum field_type { FT_UNSET, FT_INT, FT_STRING, FT_BOOL };
 #define FINDINGS_PER_RECORD 4096u       /* then one and_more (decision Q4) */
 #define EVENTS_PER_INTERP 65536u        /* then one and_more (diff-events E5) */
 
-/* Which interpreters may emit a kind: a mask of 1 << belay_interp_id;
- * IN_ANY is every one. */
-#define IN_ANY 0x1Fu
+/* Which interpreters may emit a kind: a mask of 1 << belay_interp_id.
+ * IN_CORE is none: the core's own kinds (decision P5). */
+#define IN_CORE 0u
 
 struct finding_field { const char *name; enum field_type type; };
 
@@ -52,7 +52,7 @@ struct finding_kind_def {
 extern const struct finding_kind_def FINDING_KINDS[FK_COUNT];
 
 /* The rules of event records (diff-events.md), by id ("E1 placement"). */
-#define EVENT_RULE_COUNT 8
+#define EVENT_RULE_COUNT 10
 struct event_rule { const char *id, *statement; };
 extern const struct event_rule EVENT_RULES[EVENT_RULE_COUNT];
 

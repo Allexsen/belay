@@ -38,9 +38,12 @@ struct dist {
     size_t key_len, norm_len, name_len, version_len, path_len;
     enum change change;
     size_t files_added, files_removed, files_changed;
+    bool prov;                      /* its RECORD's outcome is unknown (P7) */
 };
 
-struct unavail { enum stored_why why; enum side side; const char *path; size_t path_len; };
+/* A RECORD that could not be read (why: a stored_why) or interpreted (why
+ * SW_ERROR: E10). */
+struct unavail { enum stored_why why; enum side side; const char *path; size_t path_len; bool prov; };
 
 struct pip {
     struct dist *d;
@@ -48,7 +51,8 @@ struct pip {
     struct unavail *u;
     size_t nu, ucap;
     size_t bytes;                   /* of state, against PIP_STATE_MAX */
-    bool failed;
+    bool prov;                      /* the RECORD being explained has the outcome unknown */
+    bool failed;                    /* state over its bound, or memory: E6 */
 };
 
 static void *begin(void) { return calloc(1, sizeof(struct pip)); }
@@ -201,7 +205,8 @@ static bool ends_with(const char *s, size_t n, const char *t) {
 }
 
 /* Names the dist-info holding `in`'s RECORD into d. -1: it cannot be named
- * (no '-', an empty name or version, not UTF-8, over a field's bound). */
+ * (no '-', an empty name or version, not a string field's value); -2: the
+ * state is full, or memory. */
 static int name_dist(struct pip *p, const struct belay_interp_input *in, struct dist *d) {
     static const char SUFFIX[] = ".dist-info/RECORD";
     const size_t base_end = in->abs_len - (sizeof SUFFIX - 1);
@@ -218,7 +223,7 @@ static int name_dist(struct pip *p, const struct belay_interp_input *in, struct 
     if ((d->key = keep(p, in->abs_path, start)) == NULL || (d->norm = keep(p, norm, ml)) == NULL ||
         (d->name = keep(p, base, nl)) == NULL || (d->version = keep(p, dash + 1, vl)) == NULL ||
         (d->path = keep(p, in->path, in->path_len)) == NULL)
-        return -1;
+        return -2;                                      /* state full, or memory */
     d->key_len = start;
     d->norm_len = ml;
     d->name_len = nl;
@@ -227,13 +232,24 @@ static int name_dist(struct pip *p, const struct belay_interp_input *in, struct 
     return 0;
 }
 
+/* Records a RECORD that could not be read (and says so on its record, unless
+ * its outcome is unknown: P8), or interpreted (why SW_ERROR: E10). */
 static int unavailable(struct pip *p, struct belay_findings *out, const struct belay_interp_input *in,
                        enum stored_why w, enum side s) {
     if (grow((void **)&p->u, &p->ucap, p->nu, sizeof *p->u, p) == -1) return -1;
     const char *path = keep(p, in->path, in->path_len);
     if (path == NULL) return -1;
-    p->u[p->nu++] = (struct unavail){ w, s, path, in->path_len };
+    p->u[p->nu++] = (struct unavail){ w, s, path, in->path_len, p->prov };
+    if (w == SW_ERROR || p->prov) return 0;
     return stored_unavailable(out, w, s);
+}
+
+/* A RECORD not interpreted: its record says so (unless unknown), and one
+ * could_not_interpret event names it (E10); the other events stand. */
+static enum belay_interp_result not_interpreted(struct pip *p, const struct belay_interp_input *in) {
+    belay_err_clear();
+    if (unavailable(p, NULL, in, SW_ERROR, SIDE_AFTER) == -1) p->failed = true;
+    return p->failed ? BELAY_INTERP_ERROR : p->prov ? BELAY_INTERP_DECLINE : BELAY_INTERP_ERROR;
 }
 
 static enum belay_interp_result explain(void *state, const struct belay_interp_input *in,
@@ -241,27 +257,40 @@ static enum belay_interp_result explain(void *state, const struct belay_interp_i
     struct pip *p = state;
     if (p == NULL) return BELAY_INTERP_ERROR;
     if (!ends_with(in->abs_path, in->abs_len, ".dist-info/RECORD")) return BELAY_INTERP_DECLINE;
-    if (strcmp(in->outcome, "unknown") == 0 || strcmp(in->outcome, "metadata_only") == 0)
-        return BELAY_INTERP_DECLINE;            /* no proven change of content */
+    if (strcmp(in->outcome, "metadata_only") == 0) return BELAY_INTERP_DECLINE;    /* content equal */
     const bool b = reg(in, SIDE_BEFORE), a = reg(in, SIDE_AFTER);
     if (!b && !a) return BELAY_INTERP_DECLINE;
+    /* An unknown RECORD still pairs, by its directory's name (P7); one on both
+     * sides is no proven reinstall, and its rows are not counted. */
+    p->prov = strcmp(in->outcome, "unknown") == 0;
+    if (p->prov && b && a) return BELAY_INTERP_DECLINE;
     struct dist d = { 0 };
     d.change = b && a ? C_REINSTALLED : a ? C_ADDED : C_REMOVED;
-    if (grow((void **)&p->d, &p->cap, p->n, sizeof *p->d, p) == -1 || name_dist(p, in, &d) == -1) {
-        dist_free(&d);
+    d.prov = p->prov;
+    if (grow((void **)&p->d, &p->cap, p->n, sizeof *p->d, p) == -1) {
         p->failed = true;
         return BELAY_INTERP_ERROR;
+    }
+    const int named = name_dist(p, in, &d);
+    if (named != 0) {
+        dist_free(&d);
+        if (named == -2) {
+            p->failed = true;
+            return BELAY_INTERP_ERROR;
+        }
+        return not_interpreted(p, in);
     }
     enum belay_interp_result r = BELAY_INTERP_FINDINGS;
     if (d.change == C_REINSTALLED) {
         unsigned char *buf[2] = { NULL, NULL };
         size_t len[2];
-        bool ok = true;
+        bool ok = true, error = false;
         for (int k = SIDE_BEFORE; k <= SIDE_AFTER; k++) {
             const enum stored_why w = stored_read(in, (enum side)k, PIP_RECORD_MAX, &buf[k], &len[k]);
             if (w == SW_OK) continue;
             ok = false;
-            if (w == SW_ERROR || unavailable(p, out, in, w, (enum side)k) == -1) r = BELAY_INTERP_ERROR;
+            if (w == SW_ERROR) error = true;
+            else if (unavailable(p, out, in, w, (enum side)k) == -1) p->failed = true;
         }
         struct rows rs[2] = { { 0 }, { 0 } };
         for (int k = SIDE_BEFORE; k <= SIDE_AFTER && ok; k++) {
@@ -269,19 +298,18 @@ static enum belay_interp_result explain(void *state, const struct belay_interp_i
             if (rc == 0) continue;
             ok = false;
             belay_err_clear();
-            if (rc == -1 || unavailable(p, out, in, SW_TOO_LARGE, (enum side)k) == -1)
-                r = BELAY_INTERP_ERROR;
+            if (rc == -1) error = true;
+            else if (unavailable(p, out, in, SW_TOO_LARGE, (enum side)k) == -1) p->failed = true;
         }
-        struct rows ra = rs[0], rb = rs[1];
-        if (ok) count_files(&ra, &rb, &d);
-        rows_free(&ra);
-        rows_free(&rb);
+        if (ok) count_files(&rs[0], &rs[1], &d);
+        rows_free(&rs[0]);
+        rows_free(&rs[1]);
         free(buf[0]);
         free(buf[1]);
         if (!ok) {                                  /* no event for it: said instead */
             dist_free(&d);
-            if (r == BELAY_INTERP_ERROR) p->failed = true;
-            return r;
+            if (error) return not_interpreted(p, in);
+            return p->failed ? BELAY_INTERP_ERROR : r;
         }
     }
     p->d[p->n++] = d;
@@ -293,6 +321,8 @@ static enum belay_interp_result explain(void *state, const struct belay_interp_i
 struct pev {
     const struct dist *x, *y;       /* y: the added one of a pair */
     int kind;
+    size_t first, count;            /* could_not_interpret (E10): the group in p->d */
+    bool prov;
 };
 
 static int str_cmp(const char *a, size_t al, const char *b, size_t bl) {
@@ -328,9 +358,23 @@ static int pev_cmp(const void *a, const void *b) {
 
 #define FV(p, n) { .s = (p), .len = (n) }
 
-/* As dpkg's: an event its kind's row refuses fails the end hook (E6). */
-static int emit(struct belay_events *ev, const struct pev *e) {
+static unsigned flags(bool prov) { return prov ? BELAY_EVENT_PROVISIONAL : 0; }
+
+/* 0, or -1 (memory). An event the core refuses is invalid_finding in its
+ * place (E9). */
+static int emit(struct pip *p, struct belay_events *ev, const struct pev *e) {
     const struct dist *x = e->x, *y = e->y;
+    if (e->kind == FK_COULD_NOT_INTERPRET) {    /* a name no kind pairs: its RECORDs (E10) */
+        const char **paths = malloc(e->count * sizeof *paths);
+        size_t *lens = malloc(e->count * sizeof *lens), np = 0;
+        if (paths == NULL || lens == NULL) { free(paths); free(lens); return -1; }
+        for (size_t k = e->first; k < e->first + e->count; k++)
+            if (p->d[k].change != C_REINSTALLED) { paths[np] = p->d[k].path; lens[np++] = p->d[k].path_len; }
+        const int r = belay_event_not_interpreted(ev, paths, lens, np, flags(e->prov));
+        free(paths);
+        free(lens);
+        return r;
+    }
     const char *paths[2] = { x->path, y ? y->path : NULL };
     const size_t lens[2] = { x->path_len, y ? y->path_len : 0 };
     const size_t np = y ? 2 : 1;
@@ -353,19 +397,30 @@ static int emit(struct belay_events *ev, const struct pev *e) {
         v[2] = (struct belay_fv)FV(y->version, y->version_len);
         n = 3;
     }
-    if (!belay_event_fits(ev, e->kind, v, n)) return -1;
-    return belay_event(ev, e->kind, v, n, paths, lens, np);
+    return belay_event(ev, e->kind, v, n, paths, lens, np, flags(e->prov));
 }
 
-/* One content_unavailable event per reason, naming its paths; the side is
- * theirs when they share one, else "both". Before every named event: it has
- * no name, and sorts first. */
+static int upath_cmp(const void *a, const void *b) {
+    const struct unavail *x = a, *y = b;
+    return str_cmp(x->path, x->path_len, y->path, y->path_len);
+}
+
+/* The events with no name, before every named one (E4: no name sorts
+ * first), in the Kinds table's order: one could_not_interpret per RECORD not
+ * interpreted (E10), by path; then one content_unavailable per reason, naming
+ * its paths, the side theirs when they share one, else "both". */
 static int unavailable_events(struct pip *p, struct belay_events *ev) {
+    if (p->nu > 1) qsort(p->u, p->nu, sizeof *p->u, upath_cmp);
+    for (size_t i = 0; i < p->nu; i++)
+        if (p->u[i].why == SW_ERROR &&
+            belay_event_not_interpreted(ev, &p->u[i].path, &p->u[i].path_len, 1, flags(p->u[i].prov)) == -1)
+            return -1;
     for (int w = SW_NO_STORE; w < SW_ERROR; w++) {
         size_t n = 0;
         unsigned sides = 0;
+        bool prov = false;
         for (size_t i = 0; i < p->nu; i++)
-            if (p->u[i].why == (enum stored_why)w) { n++; sides |= 1u << p->u[i].side; }
+            if (p->u[i].why == (enum stored_why)w) { n++; sides |= 1u << p->u[i].side; prov |= p->u[i].prov; }
         if (n == 0) continue;
         const char **paths = malloc(n * sizeof *paths);
         size_t *lens = malloc(n * sizeof *lens);
@@ -376,7 +431,7 @@ static int unavailable_events(struct pip *p, struct belay_events *ev) {
         const char *why = stored_why_name((enum stored_why)w);
         const char *side = sides == 1u << SIDE_BEFORE ? "before" : sides == 1u << SIDE_AFTER ? "after" : "both";
         const struct belay_fv v[] = { FV(why, strlen(why)), FV(side, strlen(side)) };
-        const int r = belay_event(ev, FK_CONTENT_UNAVAILABLE, v, 2, paths, lens, n);
+        const int r = belay_event(ev, FK_CONTENT_UNAVAILABLE, v, 2, paths, lens, n, flags(prov));
         free(paths);
         free(lens);
         if (r == -1) return -1;
@@ -409,10 +464,12 @@ static enum belay_interp_result end(void *state, struct belay_events *ev) {
                 j++;
             }
             const struct dist *rem = NULL, *add = NULL;
+            bool gprov = false;
             for (size_t k = i; k < j; k++) {
                 const struct dist *d = &p->d[k];
-                if (d->change == C_REINSTALLED) out[no++] = (struct pev){ d, NULL, FK_PIP_REINSTALLED };
-                else if (d->change == C_REMOVED) rem = d;
+                if (d->change == C_REINSTALLED) { out[no++] = (struct pev){ d, NULL, FK_PIP_REINSTALLED, 0, 0, d->prov }; continue; }
+                gprov |= d->prov;
+                if (d->change == C_REMOVED) rem = d;
                 else add = d;
             }
             if (added == 1 && removed == 1) {
@@ -421,14 +478,15 @@ static enum belay_interp_result end(void *state, struct belay_events *ev) {
                                             add->version_len, &cmp) == -1 || cmp == 0
                                      ? FK_PIP_VERSION_CHANGED
                                      : cmp < 0 ? FK_PIP_UPGRADED : FK_PIP_DOWNGRADED;
-                out[no++] = (struct pev){ rem, add, kind };
-            } else if (added && removed) {
-                r = BELAY_INTERP_ERROR;     /* several of one name on a side: no kind says it */
+                out[no++] = (struct pev){ rem, add, kind, 0, 0, gprov };
+            } else if (added && removed) {          /* no kind says it: E10, the rest stand */
+                out[no++] = (struct pev){ &p->d[i], NULL, FK_COULD_NOT_INTERPRET, i, j - i, gprov };
             } else {
                 for (size_t k = i; k < j; k++)
                     if (p->d[k].change != C_REINSTALLED)
                         out[no++] = (struct pev){ &p->d[k], NULL,
-                                                  p->d[k].change == C_ADDED ? FK_PIP_INSTALLED : FK_PIP_REMOVED };
+                                                  p->d[k].change == C_ADDED ? FK_PIP_INSTALLED : FK_PIP_REMOVED,
+                                                  0, 0, p->d[k].prov };
             }
             i = j;
         }
@@ -436,7 +494,7 @@ static enum belay_interp_result end(void *state, struct belay_events *ev) {
             if (no > 1) qsort(out, no, sizeof *out, pev_cmp);
             if (unavailable_events(p, ev) == -1) r = BELAY_INTERP_ERROR;
             for (size_t i = 0; i < no && r == BELAY_INTERP_FINDINGS; i++)
-                if (emit(ev, &out[i]) == -1) r = BELAY_INTERP_ERROR;
+                if (emit(p, ev, &out[i]) == -1) r = BELAY_INTERP_ERROR;
         }
     }
     free(out);

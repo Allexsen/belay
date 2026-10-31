@@ -442,7 +442,7 @@ static void unquote(char *s) {
 
 /* "text, pip" or "any" -> an interpreter mask; 0 when a name is unknown. */
 static unsigned interps_of(const char *s) {
-    if (strcmp(s, "any") == 0) return IN_ANY;
+    if (strcmp(s, "core") == 0) return IN_CORE;
     char buf[256];
     unsigned m = 0;
     snprintf(buf, sizeof buf, "%s", s);

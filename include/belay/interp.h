@@ -87,21 +87,26 @@ struct belay_events;            /* one interpreter's events over one diff */
  * checks with this, the core's own rule. */
 bool belay_finding_string_ok(const char *s, size_t len);
 
-/* Would an event of `kind` with these values, from the interpreter whose end
- * hook is running, meet its kind's row -- every value a string field's
- * value, and the text the template renders at most 1,024 bytes? */
-bool belay_event_fits(const struct belay_events *ev, int kind, const struct belay_fv *v, size_t n);
-
 /* Adds a finding of `kind` (enum finding_kind, src/schema/finding_schema.h)
  * to the path being explained. Past 4,096 on one record they are counted
  * into one final and_more. 0, or -1 (out of memory: the diff fails). */
 int belay_finding(struct belay_findings *f, int kind, const struct belay_fv *v, size_t n);
 
 /* Adds an event of `kind` listing `npaths` paths (relative to the scope;
- * sorted and deduplicated by the core). Past 65,536 for one interpreter they
- * are counted into one final and_more. 0, or -1 (out of memory). */
+ * sorted and deduplicated by the core). One that breaks its kind's row is
+ * replaced, in its place, by an invalid_finding event naming its paths (E9);
+ * one naming no path fails the end hook (E6). Past 65,536 for one
+ * interpreter they are counted into one final and_more. `flags`:
+ * BELAY_EVENT_PROVISIONAL when a path it was derived from has the outcome
+ * unknown (E2). 0, or -1 (out of memory). */
+#define BELAY_EVENT_PROVISIONAL 1u
 int belay_event(struct belay_events *ev, int kind, const struct belay_fv *v, size_t n,
-                const char *const *paths, const size_t *path_lens, size_t npaths);
+                const char *const *paths, const size_t *path_lens, size_t npaths, unsigned flags);
+
+/* E10: one could_not_interpret event naming files the interpreter claims and
+ * cannot interpret; its other events stand. 0, or -1 (out of memory). */
+int belay_event_not_interpreted(struct belay_events *ev, const char *const *paths,
+                                const size_t *path_lens, size_t npaths, unsigned flags);
 
 /*
  *  Stored copies, read back for an interpreter (decision 2026-10-31, Q1:

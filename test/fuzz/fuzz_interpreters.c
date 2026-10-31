@@ -6,9 +6,9 @@
  *  capture would. For ANY content: no crash, no out-of-bounds access; the
  *  output valid UTF-8; every event line an object starting `{"event":"` and
  *  ending `}`; at most 4,096 findings; no built-in ever adds an event that
- *  breaks its kind's row (it fails its end hook instead, E6); text, pip and
- *  dpkg never an invalid_finding (their strings are checked before they are
- *  given); and the same bytes twice.
+ *  names no path; text and pip never an invalid_finding (their strings are
+ *  checked before they are given; dpkg's are not, and a hostile value is one
+ *  invalid_finding event, E9); and the same bytes twice.
  */
 #define _GNU_SOURCE
 #include "belay/error.h"
@@ -80,11 +80,11 @@ static char *once(size_t which, const char *outcome, struct belay_entry *b, stru
     enum belay_interp_result r = it->explain(st, &in, &f);
     if (findings_oom(&f)) BROKEN("out of memory");
     if (r != BELAY_INTERP_FINDINGS) findings_reset(&f, CASES[which].id);
-    if (r == BELAY_INTERP_ERROR) belay_finding(&f, FK_COULD_NOT_INTERPRET, NULL, 0);
+    if (r == BELAY_INTERP_ERROR) findings_core(&f, FK_COULD_NOT_INTERPRET);
     ev.interp = CASES[which].id;
     if (it->end) {
         const enum belay_interp_result e = it->end(st, &ev);
-        if (events_broken(&ev, CASES[which].id)) BROKEN("an event broke its row");
+        if (events_broken(&ev, CASES[which].id)) BROKEN("an event named no path");
         if (e == BELAY_INTERP_ERROR) events_failed(&ev, CASES[which].id);
     }
     belay_err_clear();
@@ -99,8 +99,9 @@ static char *once(size_t which, const char *outcome, struct belay_entry *b, stru
             BROKEN("an event line that is not one object");
         l = e;
     }
-    if (CASES[which].id != BELAY_INTERP_GIT && strstr(out, "\"invalid_finding\"") != NULL)
-        BROKEN("an invalid_finding from text, pip or dpkg");
+    if ((CASES[which].id == BELAY_INTERP_TEXT || CASES[which].id == BELAY_INTERP_PIP) &&
+        strstr(out, "\"invalid_finding\"") != NULL)
+        BROKEN("an invalid_finding from text or pip");
     findings_free(&f);
     events_free(&ev);
     return out;
@@ -113,7 +114,7 @@ int LLVMFuzzerTestOneInput(const uint8_t *data, size_t size) {
         mkdir(g_store, 0700);
     }
     const size_t which = data[0] % NCASES;
-    const int shape = (data[0] / NCASES) % 4;       /* modified, added, removed, metadata_only */
+    const int shape = (data[0] / NCASES) % 5;       /* modified, added, removed, metadata_only, unknown */
     const int exec = data[1] & 1;
     data += 2;
     size = size - 2;
@@ -134,7 +135,7 @@ int LLVMFuzzerTestOneInput(const uint8_t *data, size_t size) {
     struct belay_content *c = NULL;
     if (belay_content_open(g_store, &c) == -1) abort();
 
-    static const char *const OUTCOME[] = { "modified", "added", "removed", "metadata_only" };
+    static const char *const OUTCOME[] = { "modified", "added", "removed", "metadata_only", "unknown" };
     struct belay_entry *pb = shape == 1 ? NULL : &b, *pa = shape == 2 ? NULL : &a;
     size_t n1, n2;
     char *o1 = once(which, OUTCOME[shape], pb, pa, c, &n1);
