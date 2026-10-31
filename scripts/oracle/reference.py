@@ -634,15 +634,16 @@ def load_kinds():
             raise SystemExit('pin: finding-kinds.md no longer says what reference.py assumes: '
                              '%r' % w)
     need = {'content_unavailable': (['reason', 'side'], ['text', 'pip', 'dpkg', 'git']),
-            'could_not_interpret': ([], ['any']),
+            'could_not_interpret': ([], ['core']),
+            'invalid_finding': ([], ['core']),
             'pip_installed': (['name', 'version'], ['pip']),
             'pip_removed': (['name', 'version'], ['pip']),
             'pip_upgraded': (['name', 'from', 'to'], ['pip']),
             'pip_downgraded': (['name', 'from', 'to'], ['pip']),
             'pip_version_changed': (['name', 'from', 'to'], ['pip']),
-            'git_hook_added': (['hook', 'executable'], ['git']),
-            'git_hook_removed': (['hook'], ['git']),
-            'git_hook_changed': (['hook', 'executable'], ['git']),
+            'git_hook_added': (['hook', 'executable', 'target'], ['git']),
+            'git_hook_removed': (['hook', 'target'], ['git']),
+            'git_hook_changed': (['hook', 'executable', 'target'], ['git']),
             'git_hook_executable_changed': (['hook', 'executable'], ['git']),
             'git_index_changed': ([], ['git']),
             'git_reflog_rewritten': (['ref'], ['git'])}
@@ -650,6 +651,10 @@ def load_kinds():
         if k not in kinds or [n for n, _ in kinds[k].fields] != fields or \
                 kinds[k].interps != interps:
             raise SystemExit('pin: kind %r no longer has what reference.py assumes' % k)
+    # The core's kinds are events too (E6, E9, E10).
+    for k in ('could_not_interpret', 'invalid_finding', 'and_more'):
+        if kinds[k].levels != ['path', 'event']:
+            raise SystemExit('pin: kind %r is no longer path and event level' % k)
     return kinds
 
 
@@ -660,12 +665,21 @@ def load_event_rules():
         'E1': ['Event records come after the last path record and before the trailer. A diff '
                'with none has none.'],
         'E2': ['`{"event": "<kind>", "interp": "<interpreter>", <the kind\'s fields, in '
-               'finding-kinds.md\'s order>, "text": "<its template>", "paths": [...]}`'],
+               'finding-kinds.md\'s order>, "text": "<its template>", "provisional": true, '
+               '"paths": [...]}`',
+               '`provisional` is present, and `true`, exactly when a path the event was '
+               'derived from has the outcome `unknown`'],
         'E3': ['sorted bytewise, each once', '`paths_b64` instead -- every element base64 -- '
                'when any is not valid UTF-8'],
         'E4': ['By interpreter, in the order text, pip, dpkg, git'],
-        'E6': ['`{"event": "could_not_interpret", "interp": ..., "text": "could not interpret", '
-               '"paths": [...]}` with the paths it had claimed, and no other event'],
+        'E9': ['is replaced, in its place, by `{"event": "invalid_finding", "interp": ..., '
+               '"text": "invalid finding", "paths": [<its paths>]}`; the interpreter\'s other '
+               'events stand'],
+        'E10': ['A file an interpreter claims and cannot interpret gives one `{"event": '
+                '"could_not_interpret", "interp": ..., "text": "could not interpret", "paths": '
+                '[<the files>]}`', 'the interpreter\'s other events stand: pip, a dist-info '
+                'that cannot be named, a RECORD it must read that cannot be parsed, a name '
+                'with RECORDs added and removed other than one of each'],
         'E7': ['The trailer gains `events`: the number of event records.'],
     }
     for r, words in said.items():
@@ -715,9 +729,11 @@ def _check_claims():
             raise SystemExit('spec: "Which interpreter" no longer names %r' % tail)
     for w in ['An unclaimed path is **text** when its entry is `stored` on every side it exists '
               'on', 'any other is **binary**, which adds nothing',
-              'for a path whose outcome is `unknown` or `metadata_only` it adds nothing (a git '
-              "hook's executable bit excepted, which is metadata)",
-              'A side on which the path is not a regular file counts as absent.',
+              "to a path whose outcome is `unknown` or `metadata_only` it adds none (a git "
+              "hook's executable bit excepted, which is metadata). pip and dpkg still derive "
+              'events from an `unknown` path, each marked provisional.',
+              'A side on which the path is not a regular file counts as absent (git hooks '
+              'excepted: a symlink is a hook).',
               '`missing` covers a path whose entry records no `stored` copy as well as a copy '
               'the store lacks, and is given before `no_store` when both apply.',
               "A record's `content_unavailable` findings come before side, then after",
@@ -726,20 +742,33 @@ def _check_claims():
               'A `bool` field renders in `text` as `true` or `false`.',
               'Where an interpreter fails on a path (a file it claims cannot be parsed, a '
               "dist-info cannot be named), that path's record carries `could_not_interpret` "
-              '(R11).',
-              "its events are one `could_not_interpret` naming every path given to it, that is "
-              'every path it claims whose outcome is not `unchanged`',
+              '(R11), and pip and dpkg emit one `could_not_interpret` event naming it (E10); '
+              'their other events stand.',
+              'Events with no name -- `could_not_interpret` for a file, `content_unavailable` '
+              '-- come before every named event, in the Kinds table\'s order, then by path '
+              '(`content_unavailable`, one per reason, in the reasons\' order).',
+              'The end hook fails (E6) only when the interpreter\'s per-diff state would exceed '
+              '64 MiB or memory runs out',
               'Only a reinstall reads content (both RECORDs); the others come from the paths '
               'alone.',
-              'a `content_unavailable` event has no name and comes first',
-              "that RECORD's record also carries `could_not_interpret`",
-              'when one pair key has RECORDs both added and removed other than exactly one of '
-              'each',
+              'A RECORD whose outcome is `unknown` pairs like any other, by its directory\'s '
+              'name, and every event it takes part in is provisional; one present on both '
+              'sides is no proven reinstall and gives none (its rows are not counted).',
+              'Event order: by normalized name (none first), then kind (in the Kinds table\'s '
+              'order), then directory.',
+              'or a RECORD it must read that cannot be parsed, is one `could_not_interpret` '
+              'event naming that RECORD; one pair key with RECORDs both added and removed other '
+              'than exactly one of each (no kind says that) is one `could_not_interpret` event '
+              'naming them, in that name\'s place.',
               'Several added with none removed are each `pip_installed`',
-              'A hook, from the manifest alone',
-              '-- its content unchanged -- its executable bit (the owner\'s), whatever else '
-              'changed',
-              'A symlink or a directory under `hooks/` is no hook (not a regular file).',
+              'A status whose outcome is `unknown` is read too, and every event from it is '
+              'provisional.',
+              'A hook, from the manifest alone, is a regular file or a symlink',
+              'a directory is none: added, removed, changed (its content, a link\'s target, or '
+              'a file becoming a link or back), or -- a file\'s content unchanged -- its '
+              'executable bit (the owner\'s), whatever else changed. `executable` is after\'s '
+              '(true for a symlink, whose target\'s mode is not recorded); `target` is the '
+              'link\'s target, empty for a file.',
               'The index: `git_index_changed` when it is added, removed or its content changed',
               '(an absent before is empty)',
               'or when the reflog was removed (no copy needed), `git_reflog_rewritten`']:
@@ -808,16 +837,19 @@ def render(kind, values):
     return [('kind', kind)] + out + [('text', text)]
 
 
-def render_event(interp, kind, values, paths):
-    """E2: event, interp, the kind's fields, text, paths (E3: sorted bytewise,
-    each once; `paths_b64` when any is not UTF-8)."""
+def render_event(interp, kind, values, paths, unknown=frozenset()):
+    """E2: event, interp, the kind's fields, text, `"provisional": true`
+    exactly when one of its paths is in `unknown` (the paths whose outcome is
+    `unknown`), paths (E3: sorted bytewise, each once; `paths_b64` when any is
+    not UTF-8)."""
     f = render(kind, values)
     ps = sorted(set(paths))
     try:
         pv = ('paths', [x.decode('utf-8') for x in ps])
     except UnicodeDecodeError:
         pv = ('paths_b64', [base64.b64encode(x).decode('ascii') for x in ps])
-    return [('event', kind), ('interp', interp)] + f[1:] + [pv]
+    prov = [('provisional', True)] if any(x in unknown for x in ps) else []
+    return [('event', kind), ('interp', interp)] + f[1:] + prov + [pv]
 
 
 def is_reg(e):
@@ -855,19 +887,71 @@ def reflog_ref(p):
     return git_place(p)[len(b'logs/'):].decode('utf-8')
 
 
+def is_hook(e):
+    """"A hook, from the manifest alone, is a regular file or a symlink --
+    git follows a symlinked hook, so it is a working hook; a directory is
+    none", and "A side on which the path is not a regular file counts as
+    absent (git hooks excepted: a symlink is a hook)": a fifo, socket or
+    device under hooks/ is none either."""
+    return e is not None and e['type'] in ('reg', 'lnk')
+
+
+def render_or_invalid(kind, values, trace):
+    """A finding whose bytes values must be string fields' values: one that
+    is not (not UTF-8, or over 1,024 bytes) breaks its kind's row and "is
+    replaced by `invalid_finding`" ("Findings"). Only a hook's target can be
+    such a value here (a link's bytes are verbatim: ambiguity I9)."""
+    vs = {}
+    for k, v in values.items():
+        if isinstance(v, bytes):
+            if not string_ok(v):
+                trace.append('invalid-finding')
+                return render('invalid_finding', {})
+            v = v.decode('utf-8')
+        vs[k] = v
+    return render(kind, vs)
+
+
 def explain(interp, what, p, b, a, outcome, state, trace):
     """The findings of one record of a claimed or text path; events go to
     `state`. Each needed side whose copy cannot be read is one
     content_unavailable finding: "A record's `content_unavailable` findings
     come before side, then after"."""
     bs, as_ = is_reg(b), is_reg(a)
-    state['claimed'].append(p)
-    executable = lambda e: bool(e['mode'] & 0o100)          # "the owner's"
-    # "Every interpreter describes only a proven change of content: for a
-    # path whose outcome is `unknown` or `metadata_only` it adds nothing (a
-    # git hook's executable bit excepted, which is metadata)."
+    executable = lambda e: e['type'] == 'lnk' or bool(e['mode'] & 0o100)  # "the owner's"
+    target = lambda e: e['link_target'] if e['type'] == 'lnk' else b''
+    present = [s for s, ok in zip(SIDES, (bs, as_)) if ok]
+    ent = {'before': b, 'after': a}
+    # "An interpreter adds findings only to a path whose content is proven
+    # changed (added, removed, modified, type_changed): to a path whose
+    # outcome is `unknown` or `metadata_only` it adds none (a git hook's
+    # executable bit excepted, which is metadata). pip and dpkg still derive
+    # events from an `unknown` path, each marked provisional."
     if outcome == 'unknown':
         trace.append('interp-unknown')
+        if (interp, what) == ('dpkg', 'status'):
+            # "A status whose outcome is `unknown` is read too, and every
+            # event from it is provisional": with no store, each side it
+            # exists on is a provisional content_unavailable event, and no
+            # finding on the record.
+            state['unknown'].add(p)
+            for s in present:
+                r = unavailable(ent[s])
+                trace.append('event-unavailable-%s-%s' % (s, r))
+                state['unavailable'].append((r, s, p))
+        elif (interp, what) == ('pip', 'RECORD'):
+            # "A RECORD whose outcome is `unknown` pairs like any other, by
+            # its directory's name, and every event it takes part in is
+            # provisional; one present on both sides is no proven reinstall
+            # and gives none (its rows are not counted)." One on one side
+            # only is named like any other: one that cannot be named is a
+            # (provisional) could_not_interpret event, and its record carries
+            # nothing (ambiguity I10).
+            state['unknown'].add(p)
+            if bs != as_:
+                pip_moved(p, 'removed' if bs else 'added', state, trace)
+            elif bs:
+                trace.append('pip-unknown-both-sides')
         return []
     if outcome == 'metadata_only':
         if (interp, what) == ('git', 'hook') and bs and as_ and executable(b) != executable(a):
@@ -876,8 +960,6 @@ def explain(interp, what, p, b, a, outcome, state, trace):
                            {'hook': hook_name(p), 'executable': executable(a)})]
         trace.append('interp-metadata-only')
         return []
-    present = [s for s, ok in zip(SIDES, (bs, as_)) if ok]
-    ent = {'before': b, 'after': a}
     need = []                                   # the sides whose content is needed
     if interp == TEXT or (interp, what) in (('dpkg', 'status'), ('git', 'HEAD'),
                                             ('git', 'ref'), ('git', 'packed-refs')):
@@ -887,16 +969,17 @@ def explain(interp, what, p, b, a, outcome, state, trace):
             # "Where an interpreter fails on a path (..., a dist-info cannot
             # be named), that path's record carries `could_not_interpret`
             # (R11)" -- its findings there replaced ("Findings"), a
-            # reinstall's content_unavailable included -- and the end hook
-            # fails (E6). Only a RECORD pip must name: one added, removed or
-            # modified in place (ambiguity I7).
+            # reinstall's content_unavailable included -- "and pip and dpkg
+            # emit one `could_not_interpret` event naming it (E10)". Only a
+            # RECORD pip must name: one added, removed or modified in place
+            # (ambiguity I7).
             trace.append('pip-unnamed')
-            state['failed'] = True
+            state['unnamed'].append(p)
             return [render('could_not_interpret', {})]
         if bs and as_:
             need = present                      # a reinstall reads both RECORDs
         elif bs or as_:
-            state['moved'].append((p, 'removed' if bs else 'added'))
+            pip_moved(p, 'removed' if bs else 'added', state, trace)
     elif (interp, what) == ('git', 'reflog'):
         if as_:
             need = present                      # appended or rewritten: read
@@ -904,16 +987,21 @@ def explain(interp, what, p, b, a, outcome, state, trace):
             trace.append('reflog-removed')
             return [render('git_reflog_rewritten', {'ref': reflog_ref(p)})]
     elif (interp, what) == ('git', 'hook'):     # "from the manifest alone"
-        h = hook_name(p)
-        if as_ and not bs:
+        h, hb, ha = hook_name(p), is_hook(b), is_hook(a)
+        if ha and not hb:
             trace.append('hook-added')
-            return [render('git_hook_added', {'hook': h, 'executable': executable(a)})]
-        if bs and not as_:
+            return [render_or_invalid('git_hook_added', {'hook': h, 'executable': executable(a),
+                                                         'target': target(a)}, trace)]
+        if hb and not ha:
             trace.append('hook-removed')
-            return [render('git_hook_removed', {'hook': h})]
-        if bs and as_:
+            return [render_or_invalid('git_hook_removed', {'hook': h, 'target': target(b)},
+                                      trace)]
+        if hb and ha:
+            # "changed (its content, a link's target, or a file becoming a
+            # link or back)": modified or type_changed, both sides a hook.
             trace.append('hook-changed')
-            return [render('git_hook_changed', {'hook': h, 'executable': executable(a)})]
+            return [render_or_invalid('git_hook_changed', {'hook': h, 'executable': executable(a),
+                                                           'target': target(a)}, trace)]
     elif (interp, what) == ('git', 'index'):
         # "The index: `git_index_changed` when it is added, removed or its
         # content changed (hashed, never stored)."
@@ -929,11 +1017,23 @@ def explain(interp, what, p, b, a, outcome, state, trace):
     return out
 
 
+def pip_moved(p, how, state, trace):
+    """A RECORD on one side only, for the end hook to pair by its directory's
+    name; one whose dist-info cannot be named is one could_not_interpret
+    event naming it (E10)."""
+    if dist_info(p) is None:
+        trace.append('pip-unnamed')
+        state['unnamed'].append(p)
+    else:
+        state['moved'].append((p, how))
+
+
 def unavailable_events(interp, state):
     """One content_unavailable event per reason (pin, content_unavailable):
     side `before` or `after` when all its paths share it, else `both`. Two
     reasons: "one per reason, in the order `no_store`, `missing`,
-    `too_large`, `corrupt`"."""
+    `too_large`, `corrupt`". Provisional when one of its paths is unknown
+    (a dpkg status)."""
     out = []
     for r in REASONS:
         hits = [(s, p) for rr, s, p in state['unavailable'] if rr == r]
@@ -942,7 +1042,7 @@ def unavailable_events(interp, state):
         sides = {s for s, _ in hits}
         side = sides.pop() if len(sides) == 1 else 'both'
         out.append(render_event(interp, 'content_unavailable', {'reason': r, 'side': side},
-                                [p for _, p in hits]))
+                                [p for _, p in hits], state['unknown']))
     return out
 
 
@@ -1006,13 +1106,31 @@ def dist_info(p):
     return holder, name.decode('utf-8'), ver.decode('utf-8')
 
 
+def event_or_invalid(interp, kind, values, paths, unknown, trace):
+    """E9: "An event a value of which is not a string field's value, or whose
+    text would exceed 1,024 bytes, is one `invalid_finding` event naming its
+    paths" -- in its place. Every value here is a string field's value
+    (dist_info() names no other), so only the text can break the row: a
+    template filling three values of up to 1,024 bytes each."""
+    show = lambda v: ('true' if v else 'false') if type(v) is bool else str(v)
+    text = re.sub(r'\{([a-z_]+)\}', lambda m: show(values[m.group(1)]), KINDS[kind].template)
+    if len(text.encode('utf-8')) > 1024:
+        trace.append('pip-invalid-event')
+        return render_event(interp, 'invalid_finding', {}, paths, unknown)
+    return render_event(interp, kind, values, paths, unknown)
+
+
 def pip_end(state, trace):
-    """pip's events ("What each interpreter reports", pip): the
-    content_unavailable events first, then by normalized name, kind (the
-    pin's order), directory. None when the end hook fails (E6)."""
-    if state.get('failed'):                     # a dist-info that cannot be named
-        trace.append('pip-unnamed')
-        return None
+    """pip's events ("What each interpreter reports", pip): the events with
+    no name first -- a could_not_interpret for each RECORD whose dist-info
+    cannot be named (E10), by path, then the content_unavailable events --
+    then by normalized name, kind (the pin's order), directory. A pair key
+    with RECORDs added and removed other than one of each is one
+    could_not_interpret event naming them, "in that name's place". Every
+    event one of whose RECORDs is unknown is provisional (E2)."""
+    unk = state['unknown']
+    if any(p in unk for p, _ in state['moved']):
+        trace.append('pip-provisional')
     keys = collections.OrderedDict()
     for p, how in state['moved']:
         holder, name, ver = dist_info(p)
@@ -1022,9 +1140,13 @@ def pip_end(state, trace):
     for (holder, norm), d in keys.items():
         A, R = d['added'], d['removed']
         if A and R and (len(A), len(R)) != (1, 1):
-            # "when one pair key has more than one RECORD added and removed"
             trace.append('pip-ambiguous-key')
-            return None
+            ps = [x[0] for x in A + R]
+            if any(x in unk for x in ps):
+                trace.append('pip-ambiguous-key-provisional')
+            named.append(((norm, kind_ix('could_not_interpret'), holder, min(ps)),
+                          render_event('pip', 'could_not_interpret', {}, ps, unk)))
+            continue
         if A and R:
             (pa, name, to), (pr, rname, frm) = A[0], R[0]
             ka, kb = pep440_key(to), pep440_key(frm)
@@ -1037,33 +1159,40 @@ def pip_end(state, trace):
                 trace.append(kind)
             if name != rname:
                 trace.append('pip-pair-spelled-differently')
-            named.append(((norm, kind_ix(kind), holder),
-                          render_event('pip', kind, {'name': name, 'from': frm, 'to': to},
-                                       [pa, pr])))
+            if pa in unk or pr in unk:
+                trace.append('pip-provisional-pair')
+            named.append(((norm, kind_ix(kind), holder, min(pa, pr)),
+                          event_or_invalid('pip', kind, {'name': name, 'from': frm, 'to': to},
+                                           [pa, pr], unk, trace)))
             continue
         for (pp, name, ver) in A + R:
             kind = 'pip_installed' if A else 'pip_removed'
             trace.append(kind)
-            named.append(((norm, kind_ix(kind), holder),
-                          render_event('pip', kind, {'name': name, 'version': ver}, [pp])))
+            if pp in unk:
+                trace.append('pip-provisional-single')
+            named.append(((norm, kind_ix(kind), holder, pp),
+                          event_or_invalid('pip', kind, {'name': name, 'version': ver}, [pp],
+                                           unk, trace)))
     named.sort(key=lambda x: x[0])
-    return unavailable_events('pip', state) + [e for _, e in named]
+    unnamed = [render_event('pip', 'could_not_interpret', {}, [p], unk)
+               for p in sorted(state['unnamed'])]
+    if unnamed:
+        trace.append('pip-unnamed-event')
+    return unnamed + unavailable_events('pip', state) + [e for _, e in named]
 
 
 def end(interp, state, trace):
-    """An interpreter's events; one could_not_interpret event naming the
-    paths it had claimed -- "every path given to it, that is every path it
-    claims whose outcome is not `unchanged`" -- when
-    its end hook fails (E6)."""
+    """An interpreter's events. The end hook fails as a whole (E6) only when
+    its per-diff state would exceed 64 MiB or memory runs out, which a corpus
+    of small manifests and no store never reaches: not modelled."""
     if interp == 'pip':
-        ev = pip_end(state, trace)
-    elif interp == 'dpkg':
+        return pip_end(state, trace)
+    if interp == 'dpkg':
         ev = unavailable_events('dpkg', state)
-    else:
-        ev = []
-    if ev is None:
-        return [render_event(interp, 'could_not_interpret', {}, state['claimed'])]
-    return ev
+        if any(dict(e).get('provisional') for e in ev):
+            trace.append('dpkg-provisional-unavailable')
+        return ev
+    return []
 
 
 def diff(before, after):
@@ -1090,7 +1219,8 @@ def diff(before, after):
               ('scope_remounted', remounted), ('identity_compared', not remounted)]
     assert [('scopes' if k == 'scopes_b64' else k) for k, _ in header] == HEADER_KEYS
     records, counts, traces = [], collections.Counter(), {}
-    states = {i: {'claimed': [], 'unavailable': [], 'moved': []} for i in INTERP_ORDER}
+    states = {i: {'unavailable': [], 'moved': [], 'unnamed': [], 'unknown': set()}
+              for i in INTERP_ORDER}
     paths = sorted(set(eb) | set(ea))
     for p in paths:
         b, a = eb.get(p), ea.get(p)

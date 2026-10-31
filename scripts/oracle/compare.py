@@ -850,19 +850,34 @@ INTERP_SCENARIOS = (
        'dpkg info: modified', 'dpkg info: added',
        'dpkg events: two status files with different sides',
        'dpkg events: two status files with the same side',
-       'dpkg status: unknown', 'dpkg events: two reasons in one diff']
+       'dpkg status: unknown, a regular file on both sides',
+       'dpkg status: unknown, a regular file on one side only',
+       'dpkg status: unknown, a side with no stored copy, a regular file on one side only',
+       'dpkg events: two reasons in one diff']
     + ['pip events: ' + k for k in ('pip_installed', 'pip_removed', 'pip_upgraded',
                                     'pip_downgraded', 'pip_version_changed, equal by PEP 440',
                                     'pip_version_changed, not a PEP 440 version',
                                     'a pair whose names are spelled differently',
-                                    'a dist-info that cannot be named (E6)',
-                                    'a pair key with more than one RECORD added and removed (E6)',
+                                    'a dist-info that cannot be named (E10)',
+                                    'a pair key with more than one RECORD added and removed '
+                                    '(E10)',
                                     'content_unavailable first, then several names',
-                                    'E6 names every path given to pip, METADATA included')]
-    + ['pip RECORD: modified', 'pip RECORD: unknown', 'pip METADATA: modified',
+                                    'a dist-info that cannot be named beside a named install '
+                                    '(E10)',
+                                    'a pair key with more than one RECORD added and removed '
+                                    'beside another name (E10)',
+                                    'an unknown RECORD paired with one of the other side (E2)',
+                                    'an unknown RECORD with none of the other side (E2)',
+                                    'a pair key with more than one RECORD added and removed, '
+                                    'one unknown (E10, E2)',
+                                    'an event whose text would exceed 1,024 bytes (E9)')]
+    + ['pip RECORD: modified', 'pip RECORD: unknown, a regular file on one side only',
+       'pip RECORD: unknown, a regular file on both sides', 'pip METADATA: modified',
        'pip METADATA: added',
        'pip RECORD: added, a dist-info that cannot be named',
-       'pip RECORD: removed, a dist-info that cannot be named']
+       'pip RECORD: removed, a dist-info that cannot be named',
+       'pip RECORD: unknown, a regular file on one side only, a dist-info that cannot be named',
+       "pip RECORD: added, a dist-info whose name or version is not a string field's value"]
     + ['git hook: added, executable', 'git hook: added, not executable', 'git hook: removed',
        'git hook: modified', 'git hook: metadata_only, the executable bit changed',
        'git hook: metadata_only, the executable bit unchanged',
@@ -872,12 +887,16 @@ INTERP_SCENARIOS = (
     + ['git packed-refs: modified', 'git HEAD: modified, a side with no stored copy',
        'git ref: added, a side with no stored copy',
        'git ref: added, not a regular file on either side (dir)',
-       'git hook: added, not a regular file on either side (lnk)',
-       'git hook: removed, not a regular file on either side (lnk)',
+       'git hook: added, a symlink', 'git hook: removed, a symlink',
+       'git hook: modified, a symlink', 'git hook: metadata_only, a symlink',
+       'git hook: added, a symlink, its target not UTF-8',
+       'git hook: added, a symlink, its target over 1,024 bytes',
+       'git hook: added, a symlink, its target of exactly 1,024 bytes',
        'git hook: added, not a regular file on either side (dir)',
        'git reflog: added, not a regular file on either side (dir)',
        'git reflog: added, not a regular file on either side (lnk)',
        'git hook: type_changed, reg -> lnk', 'git hook: type_changed, lnk -> reg',
+       'git hook: type_changed, lnk -> dir',
        'text: a stored *.md5sums file outside var/lib/dpkg/info/, modified']
     + ['events: from pip and dpkg in one diff', 'events: none, though records carry findings'])
 NEED_CONTENT = ('status', 'RECORD', 'HEAD', 'ref', 'packed-refs', 'reflog')
@@ -909,21 +928,42 @@ def interp_coverage(stem, tags):
         else:
             interp, what = it
             tag = '%s %s: %s' % (interp, what, o)
-            if what == 'hook' and o == 'added' and a['type'] == 'reg':
+            # A hook is a regular file or a symlink (diff-v1, git).
+            hooks = [e for e in (b, a) if ref.is_hook(e)] if what == 'hook' else regs
+            lnk = any(e is not None and e['type'] == 'lnk' for e in (b, a))
+            if what == 'hook' and o in ('added', 'removed', 'modified', 'metadata_only') \
+                    and lnk:
+                tag += ', a symlink'
+            elif what == 'hook' and o == 'added' and a['type'] == 'reg':
                 tag += ', executable' if a['mode'] & 0o100 else ', not executable'
-            if what == 'hook' and o == 'metadata_only':
+            elif what == 'hook' and o == 'metadata_only':
                 tag += ', the executable bit %s' % ('changed' if (b['mode'] ^ a['mode']) & 0o100
                                                     else 'unchanged')
             if what in NEED_CONTENT and any('stored' not in e for e in regs):
                 tag += ', a side with no stored copy'
             if o == 'type_changed':
                 tag += ', %s -> %s' % (b['type'], a['type'])
-            if not regs:
+            if o == 'unknown' and regs:
+                tag += ', a regular file on %s' % ('both sides' if len(regs) == 2
+                                                   else 'one side only')
+            if not hooks:
                 tag += ', not a regular file on either side (%s)' % '/'.join(
                     sorted({e['type'] for e in (b, a) if e is not None}))
             if 'pip-unnamed' in traces[p]:
                 tag += ', a dist-info that cannot be named'
+                stem = p[:-len(b'/RECORD')].rsplit(b'/', 1)[-1][:-len(b'.dist-info')]
+                n, _, v = stem.partition(b'-')
+                if n and v:
+                    tags.add("%s %s: %s, a dist-info whose name or version is not a string "
+                             "field's value" % (interp, what, o))
             tags.add(tag)
+            if what == 'hook' and lnk:
+                for x in [e['link_target'] for e in (b, a) if e is not None and
+                          e['type'] == 'lnk']:
+                    tags.add(tag + (', its target not UTF-8' if not is_utf8(x) else
+                                    ', its target over 1,024 bytes' if len(x) > 1024 else
+                                    ', its target of exactly 1,024 bytes' if len(x) == 1024
+                                    else ''))
             if what == 'status' and o in ('added', 'removed', 'modified') and \
                     all('stored' in e for e in regs):
                 status_sides.append(frozenset('before' if e is b else 'after' for e in regs))
@@ -940,16 +980,27 @@ def interp_coverage(stem, tags):
                 'pip_version_changed:equal': 'pip_version_changed, equal by PEP 440',
                 'pip_version_changed:not-pep440': 'pip_version_changed, not a PEP 440 version',
                 'pip-pair-spelled-differently': 'a pair whose names are spelled differently',
-                'pip-unnamed': 'a dist-info that cannot be named (E6)',
+                'pip-unnamed-event': 'a dist-info that cannot be named (E10)',
                 'pip-ambiguous-key': 'a pair key with more than one RECORD added and removed '
-                                     '(E6)'}
-    for t in traces[b'']:
+                                     '(E10)',
+                'pip-provisional-pair': 'an unknown RECORD paired with one of the other side '
+                                        '(E2)',
+                'pip-provisional-single': 'an unknown RECORD with none of the other side (E2)',
+                'pip-ambiguous-key-provisional': 'a pair key with more than one RECORD added '
+                                                 'and removed, one unknown (E10, E2)',
+                'pip-invalid-event': 'an event whose text would exceed 1,024 bytes (E9)'}
+    end = traces[b'']
+    for t in end:
         if t in pip_tags:
             tags.add('pip events: ' + pip_tags[t])
-    if 'pip-unnamed' in traces[b''] and \
-            any('interp:pip:METADATA' in traces[r['path']] for r in records) and \
-            sum('interp:pip:RECORD' in traces[r['path']] for r in records) >= 2:
-        tags.add('pip events: E6 names every path given to pip, METADATA included')
+    # The tags a named pair key gives rise to: another name's event.
+    named = {'pip_installed', 'pip_removed', 'pip_upgraded', 'pip_downgraded',
+             'pip_version_changed:equal', 'pip_version_changed:not-pep440'}
+    if 'pip-unnamed-event' in end and 'pip_installed' in end:
+        tags.add('pip events: a dist-info that cannot be named beside a named install (E10)')
+    if 'pip-ambiguous-key' in end and named & set(end):
+        tags.add('pip events: a pair key with more than one RECORD added and removed beside '
+                 'another name (E10)')
     pip_ev = [dict(e) for e in events if dict(e)['interp'] == 'pip']
     if pip_ev and pip_ev[0]['event'] == 'content_unavailable' and \
             len({e.get('name') for e in pip_ev[1:]} - {None}) >= 2:
