@@ -3,8 +3,8 @@
  *
  *  BELAY_DESIGN.md §5.1.1 is binding here. These functions operate purely on
  *  strings: they touch no filesystem, follow no symlink, and prove nothing
- *  about where a path actually lands. They exist to validate user-supplied
- *  --scope arguments before anything is opened, and to compute the advisory
+ *  about where a path actually lands. They exist to validate the scope
+ *  argument of belay_manifest_write before anything is opened, and to compute the advisory
  *  (never decisive) target_outside_scope annotation of a recorded symlink.
  *
  *  Containment during a walk is by construction (root dirfd + openat/fstatat

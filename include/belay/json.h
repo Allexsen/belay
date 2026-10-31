@@ -2,9 +2,10 @@
  *  Minimal JSON output, plus the UTF-8 and base64 helpers the manifest format
  *  needs for byte-exact path encoding.
  *
- *  Write-only by design: belay emits JSON for manifests and for --json output,
- *  and reads only its own NDJSON, which the manifest reader parses directly.
- *  A general-purpose parser is a much larger attack surface than this needs.
+ *  Write-only by design: belay emits JSON for manifests and for --json output.
+ *  The manifest reader parses manifests directly; the CLI reads its own
+ *  meta.json and diff.v1 back through src/cli/jsonr.c (bounded depth). A
+ *  general-purpose parser is a much larger attack surface than this needs.
  */
 #ifndef BELAY_JSON_H
 #define BELAY_JSON_H

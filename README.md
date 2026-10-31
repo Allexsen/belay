@@ -12,8 +12,9 @@ that may still change, and there are no releases. Nothing that changes your file
   checkpoint, record what changed since the last one, show the difference, list checkpoints. They
   need no privileges and only read the directory they are given; belay writes only under its own
   state directory.
-- Interpreters that explain changes to pip installs, dpkg's package database, git refs, hooks and
-  reflogs, and small text files ([docs/spec/diff-v1.md](docs/spec/diff-v1.md)).
+- Interpreters that explain changes to pip installs, dpkg's package database, git refs, hooks,
+  reflogs (up to the store limit, 64 KiB by default) and small text files
+  ([docs/spec/diff-v1.md](docs/spec/diff-v1.md)).
 - The manifest format ([docs/spec/manifest-v1.md](docs/spec/manifest-v1.md)) and the diff format
   (diff.v1, a draft).
 - Tests on Linux (x86_64, arm64), on macOS, and inside a Docker container as an unprivileged user,
@@ -27,13 +28,14 @@ No integrity checking against a baseline, no policy layer, no Python package, no
 
 ## Deliberate limits
 
-belay is a **safety** boundary, not a **security** boundary — it is built for accidents, not for
-hostile code. It will not contain a process that is actively trying to escape. See
-[SECURITY.md](SECURITY.md).
+Today belay only records and reports; it contains nothing. The session engine, when it ships, is
+meant as a **safety** boundary, not a **security** boundary — built for accidents, not for hostile
+code; it will not contain a process that is actively trying to escape. See [SECURITY.md](SECURITY.md).
 
-Some things are outside any belay session and can never be captured or undone: anything done through
-a daemon started outside it, network effects (pushes, API calls, emails), and any path deliberately
-passed through. These will be listed explicitly rather than glossed over.
+What a checkpoint does not see: anything outside the scope, anything below a mount point inside it,
+belay's own state directory (left out, and said), and network effects (pushes, API calls, emails).
+On filesystems with coarse timestamps some same-size rewrites can be missed; the limits are in
+[docs/spec/manifest-v1.md](docs/spec/manifest-v1.md).
 
 ## Build
 
@@ -41,7 +43,8 @@ passed through. These will be listed explicitly rather than glossed over.
 make check
 ```
 
-Requires a C11 compiler and GNU make, on Linux or macOS. The binary is `bin/belay`.
+`make` needs a C11 compiler and GNU make, on Linux or macOS; `make check` also needs python3. The
+binary is `bin/belay`.
 
 ## Contributing
 

@@ -7,13 +7,9 @@ A manifest is the record of what a scope looked like at one instant. `belay chec
 
 ## Location
 
-```
-$XDG_STATE_HOME/belay/checkpoints/<id>/
-  manifest.ndjson     the manifest (this document)
-  store/              content-addressed copies of stored files
-```
-
-`$XDG_STATE_HOME` defaults to `$HOME/.local/state`.
+`belay` keeps each checkpoint's manifest as `checkpoints/<id>/manifest.ndjson` under the scope's
+directory in its state directory, beside one content-addressed `store/` shared by the scope's
+checkpoints: the layout is in [docs/cli.md](../cli.md), "The state directory".
 
 ## Encoding
 
@@ -335,7 +331,7 @@ What the store rule does not cover:
   filesystems without lease support; and for files belay's user does not own, unless it runs
   with `CAP_LEASE` (root does).
 - Files belay does not own are stored anyway, by decision. Interpreter-claimed files (dpkg's
-  `status`, a wheel's `RECORD`) are root-owned and stored whatever their size; refusing them
+  `status`, a wheel's `RECORD`) are often root-owned (system installs) and stored whatever their size; refusing them
   would break those interpreters for every run that is not root. The risk is low for exactly
   this class: **no installer measured overwrites existing bytes in place** (traced 2026-10-28,
   first install and reinstall). dpkg writes `<file>.dpkg-new` and renames it over the old file,
@@ -352,7 +348,7 @@ What the store rule does not cover:
 - On overlayfs (a container's root, Docker's `/tmp`), a shared writable mapping whose file
   descriptor was closed holds the upper layer's file, not the overlay's, so the probe does not
   see it (measured). A writer holding the file open is seen. Reading the upper layer directly,
-  as host-reader mode does, sees both.
+  as a host-reader mode would (not built yet), sees both.
 - On Linux, a writer opening the file during the probe makes the kernel send SIGIO, whose
   default action would end the process. While a capture that stores content runs, SIGIO at its
   default action is set to ignored, and put back when the capture ends; a handler the host
@@ -364,9 +360,9 @@ checked against the files' final content; the files read while a writer held the
 real, partly written states. **That means none of those workloads had an in-place overwriter or
 a shared-mapping writer, not that torn reads do not happen**: both tear reads, as measured above.
 
-All of this applies only while something writes to the tree during the check. In RL mode the
-policy's processes are killed before the scan, and host-reader mode reads from outside the
-sandbox, so these are limits of dev-tier and live checks, not of the trust model.
+All of this applies only while something writes to the tree during the check. Every check belay
+makes today is such a live check, so these limits apply to it. (A mode that stops the writers
+before the scan, or reads from outside a sandbox, would not have them; neither is built.)
 
 (Two earlier statements were wrong. The commit that introduced the store said "the store never
 holds bytes that match no state of the file"; its first correction said that holds on Linux
@@ -427,6 +423,6 @@ hidden-traversal risk the NUL rule above exists to prevent.
   because opening them has side effects. A change to any of these still moves `ctime_ns`, which
   the ctime rule above reports on a regular file or symlink and counts on a directory; on a FIFO,
   socket or device node ctime is not compared, so such a change is not seen there.
-- **File content**, except copies under `store/` for files within `store_max_bytes` or claimed by an
-  interpreter.
+- **File content**, except copies under `store/` of small text files (within `store_max_bytes`) and
+  of files an interpreter claims for storage.
 - **Anything below a mount boundary** inside a scope.
