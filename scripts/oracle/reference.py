@@ -677,9 +677,12 @@ def load_event_rules():
                'events stand'],
         'E10': ['A file an interpreter claims and cannot interpret gives one `{"event": '
                 '"could_not_interpret", "interp": ..., "text": "could not interpret", "paths": '
-                '[<the files>]}`', 'the interpreter\'s other events stand: pip, a dist-info '
-                'that cannot be named, a RECORD it must read that cannot be parsed, a name '
-                'with RECORDs added and removed other than one of each'],
+                '[<the files>]}`; the interpreter\'s other events stand',
+                'pip: a dist-info that cannot be named, or a RECORD it must read that cannot be '
+                'parsed -- that RECORD\'s path record carries `could_not_interpret` too, unless '
+                'its outcome is `unknown`, and nothing more is read from it; a name with '
+                'RECORDs added and removed other than one of each -- one event naming them, '
+                'their path records carrying nothing'],
         'E7': ['The trailer gains `events`: the number of event records.'],
     }
     for r, words in said.items():
@@ -742,8 +745,9 @@ def _check_claims():
               'A `bool` field renders in `text` as `true` or `false`.',
               'Where an interpreter fails on a path (a file it claims cannot be parsed, a '
               "dist-info cannot be named), that path's record carries `could_not_interpret` "
-              '(R11), and pip and dpkg emit one `could_not_interpret` event naming it (E10); '
-              'their other events stand.',
+              '(R11) unless its outcome is `unknown`, nothing more is read from it, and pip and '
+              'dpkg emit one `could_not_interpret` event naming it (E10); their other events '
+              'stand.',
               'Events with no name -- `could_not_interpret` for a file, `content_unavailable` '
               '-- come before every named event, in the Kinds table\'s order, then by path '
               '(`content_unavailable`, one per reason, in the reasons\' order).',
@@ -755,11 +759,12 @@ def _check_claims():
               'name, and every event it takes part in is provisional; one present on both '
               'sides is no proven reinstall and gives none (its rows are not counted).',
               'Event order: by normalized name (none first), then kind (in the Kinds table\'s '
-              'order), then directory.',
+              'order), then directory, then the paths it lists.',
               'or a RECORD it must read that cannot be parsed, is one `could_not_interpret` '
               'event naming that RECORD; one pair key with RECORDs both added and removed other '
               'than exactly one of each (no kind says that) is one `could_not_interpret` event '
-              'naming them, in that name\'s place.',
+              'naming them, in that name\'s place; their records carry nothing, as the pairing '
+              'is known only once every path record is written.',
               'Several added with none removed are each `pip_installed`',
               'A status whose outcome is `unknown` is read too, and every event from it is '
               'provisional.',
@@ -946,7 +951,10 @@ def explain(interp, what, p, b, a, outcome, state, trace):
             # and gives none (its rows are not counted)." One on one side
             # only is named like any other: one that cannot be named is a
             # (provisional) could_not_interpret event, and its record carries
-            # nothing (ambiguity I10).
+            # nothing ("that RECORD's path record carries
+            # `could_not_interpret` too, unless its outcome is `unknown`", E10).
+            # One on both sides is no reinstall and need not be named
+            # (ambiguity I7): nothing at all.
             state['unknown'].add(p)
             if bs != as_:
                 pip_moved(p, 'removed' if bs else 'added', state, trace)
@@ -968,11 +976,11 @@ def explain(interp, what, p, b, a, outcome, state, trace):
         if (bs or as_) and dist_info(p) is None:
             # "Where an interpreter fails on a path (..., a dist-info cannot
             # be named), that path's record carries `could_not_interpret`
-            # (R11)" -- its findings there replaced ("Findings"), a
-            # reinstall's content_unavailable included -- "and pip and dpkg
-            # emit one `could_not_interpret` event naming it (E10)". Only a
-            # RECORD pip must name: one added, removed or modified in place
-            # (ambiguity I7).
+            # (R11) unless its outcome is `unknown`, nothing more is read
+            # from it" -- a reinstall's content_unavailable included -- "and
+            # pip and dpkg emit one `could_not_interpret` event naming it
+            # (E10)". Only a RECORD pip must name: one added, removed or
+            # modified in place (ambiguity I7).
             trace.append('pip-unnamed')
             state['unnamed'].append(p)
             return [render('could_not_interpret', {})]
@@ -1144,7 +1152,7 @@ def pip_end(state, trace):
             ps = [x[0] for x in A + R]
             if any(x in unk for x in ps):
                 trace.append('pip-ambiguous-key-provisional')
-            named.append(((norm, kind_ix('could_not_interpret'), holder, min(ps)),
+            named.append(((norm, kind_ix('could_not_interpret'), holder, sorted(ps)),
                           render_event('pip', 'could_not_interpret', {}, ps, unk)))
             continue
         if A and R:
@@ -1161,16 +1169,18 @@ def pip_end(state, trace):
                 trace.append('pip-pair-spelled-differently')
             if pa in unk or pr in unk:
                 trace.append('pip-provisional-pair')
-            named.append(((norm, kind_ix(kind), holder, min(pa, pr)),
+            named.append(((norm, kind_ix(kind), holder, sorted([pa, pr])),
                           event_or_invalid('pip', kind, {'name': name, 'from': frm, 'to': to},
                                            [pa, pr], unk, trace)))
             continue
+        if len(A + R) > 1:
+            trace.append('pip-one-name-several-one-side')
         for (pp, name, ver) in A + R:
             kind = 'pip_installed' if A else 'pip_removed'
             trace.append(kind)
             if pp in unk:
                 trace.append('pip-provisional-single')
-            named.append(((norm, kind_ix(kind), holder, pp),
+            named.append(((norm, kind_ix(kind), holder, [pp]),
                           event_or_invalid('pip', kind, {'name': name, 'version': ver}, [pp],
                                            unk, trace)))
     named.sort(key=lambda x: x[0])

@@ -870,13 +870,17 @@ INTERP_SCENARIOS = (
                                     'an unknown RECORD with none of the other side (E2)',
                                     'a pair key with more than one RECORD added and removed, '
                                     'one unknown (E10, E2)',
-                                    'an event whose text would exceed 1,024 bytes (E9)')]
+                                    'an event whose text would exceed 1,024 bytes (E9)',
+                                    'one name, several RECORDs on one side in one directory '
+                                    '(then by paths)')]
     + ['pip RECORD: modified', 'pip RECORD: unknown, a regular file on one side only',
        'pip RECORD: unknown, a regular file on both sides', 'pip METADATA: modified',
        'pip METADATA: added',
        'pip RECORD: added, a dist-info that cannot be named',
        'pip RECORD: removed, a dist-info that cannot be named',
        'pip RECORD: unknown, a regular file on one side only, a dist-info that cannot be named',
+       'pip RECORD: modified, a dist-info that cannot be named',
+       'pip RECORD: unknown, a regular file on both sides, a dist-info that cannot be named',
        "pip RECORD: added, a dist-info whose name or version is not a string field's value"]
     + ['git hook: added, executable', 'git hook: added, not executable', 'git hook: removed',
        'git hook: modified', 'git hook: metadata_only, the executable bit changed',
@@ -949,7 +953,7 @@ def interp_coverage(stem, tags):
             if not hooks:
                 tag += ', not a regular file on either side (%s)' % '/'.join(
                     sorted({e['type'] for e in (b, a) if e is not None}))
-            if 'pip-unnamed' in traces[p]:
+            if what == 'RECORD' and ref.dist_info(p) is None:
                 tag += ', a dist-info that cannot be named'
                 stem = p[:-len(b'/RECORD')].rsplit(b'/', 1)[-1][:-len(b'.dist-info')]
                 n, _, v = stem.partition(b'-')
@@ -988,7 +992,9 @@ def interp_coverage(stem, tags):
                 'pip-provisional-single': 'an unknown RECORD with none of the other side (E2)',
                 'pip-ambiguous-key-provisional': 'a pair key with more than one RECORD added '
                                                  'and removed, one unknown (E10, E2)',
-                'pip-invalid-event': 'an event whose text would exceed 1,024 bytes (E9)'}
+                'pip-invalid-event': 'an event whose text would exceed 1,024 bytes (E9)',
+                'pip-one-name-several-one-side': 'one name, several RECORDs on one side in one '
+                                                 'directory (then by paths)'}
     end = traces[b'']
     for t in end:
         if t in pip_tags:
