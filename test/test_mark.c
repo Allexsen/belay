@@ -350,6 +350,22 @@ TEST(a_mark_keeps_the_copies_a_full_capture_would) {
     if (a == NULL || b == NULL || strcmp(a, b) != 0) BELAY_FAIL("%s", "store objects gone: mark differs");
     free(a); free(b);
 
+    /* A writer present at the mark, not at the capture before it: no copy
+     * recorded, as a full capture with that writer records none. */
+    REQUIRE(capture(prev, NULL, &st) == 0);
+    g_ops.writer_present = w_writer;
+    g_writer_on = 1;
+    const int rm = capture(next, prev, &st);
+    const int64_t start = g_last_start;
+    const int rf = capture(full, NULL, &st);
+    g_writer_on = 0;
+    g_ops.writer_present = g_real->writer_present;
+    g_last_start = start;
+    REQUIRE(rm == 0 && rf == 0);
+    a = body(next); b = body(full);
+    if (a == NULL || b == NULL || strcmp(a, b) != 0) BELAY_FAIL("%s", "a writer at the mark: mark differs");
+    free(a); free(b);
+
     /* A large file, unclaimed, then claimed by pip's RECORD rule through a
      * directory rename: stored whatever its size once claimed. */
     snprintf(cmd, sizeof cmd, "mkdir -p '%s/staging' && head -c 9000 /dev/zero | tr '\\\\0' x > '%s/staging/RECORD'",

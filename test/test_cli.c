@@ -257,6 +257,9 @@ TEST(mark_says_when_it_reads_every_file) {
     ASSERT_TRUE(strstr(g_out, "\"full_reason\":\"no checkpoint before\"") != NULL);
     ASSERT_EQ_INT(0, belay("mark", "--scope", g_scope, "--json", NULL));
     ASSERT_TRUE(strstr(g_out, "\"used\":true") != NULL);
+    /* The state directory is on the scope's filesystem here: the previous
+     * walk's start is the reference point (second review, D3). */
+    ASSERT_TRUE(strstr(g_out, "\"reference\":\"walk_start\"") != NULL);
     ASSERT_EQ_INT(0, belay("mark", "--scope", g_scope, "--full", "--json", NULL));
     ASSERT_TRUE(strstr(g_out, "\"full_reason\":\"asked for (--full)\"") != NULL);
     ASSERT_EQ_INT(0, belay("mark", "--scope", g_scope, "--full-every", "2", "--json", NULL));
@@ -543,6 +546,114 @@ TEST(state_of_another_scope_is_corrupt_exit_4) {
     ASSERT_TRUE(strstr(g_err, "belongs to the scope /elsewhere") != NULL);
 }
 
+/* Second review 2026-10-31, D1: a manifest is opened from the directory
+ * fds before its path is handed on -- a link or FIFO planted in its place
+ * is corrupt state (exit 4), not a manifest to trust or diff. */
+TEST(a_planted_manifest_is_corrupt_state) {
+    fresh();
+    ASSERT_EQ_INT(0, belay("check", "--scope", g_scope, NULL));
+    ASSERT_EQ_INT(0, belay("check", "--scope", g_scope, NULL));
+    char d[700], cmd[4000];
+    scope_dir(d, sizeof d);
+    REQUIRE(d[0] != '\0');
+    for (int id = 1; id <= 2; id++) {     /* 1: diff --to reads it; 2, the latest: mark's previous */
+        snprintf(cmd, sizeof cmd, "cp '%s/checkpoints/%d/manifest.ndjson' '%s/elsewhere%d.ndjson' && "
+                 "rm '%s/checkpoints/%d/manifest.ndjson' && "
+                 "ln -s '%s/elsewhere%d.ndjson' '%s/checkpoints/%d/manifest.ndjson'",
+                 d, id, g_dir, id, d, id, g_dir, id, d, id);
+        sh("%s", cmd);
+        if (id == 1) ASSERT_EQ_INT(4, belay("diff", "--scope", g_scope, "--since", "1", "--to", "2", NULL));
+    }
+    ASSERT_EQ_INT(4, belay("mark", "--scope", g_scope, NULL));
+    sh("rm '%s/checkpoints/2/manifest.ndjson' && mkfifo '%s/checkpoints/2/manifest.ndjson'", d, d);
+    struct sigaction sa = { 0 }, old;
+    sa.sa_handler = on_alarm;
+    sigaction(SIGALRM, &sa, &old);
+    volatile int rc = -1;
+    if (sigsetjmp(g_hang, 1) == 0) {
+        alarm(5);
+        rc = belay("mark", "--scope", g_scope, NULL);
+        alarm(0);
+        ASSERT_EQ_INT(4, rc);
+    } else {
+        BELAY_FAIL("%s", "a FIFO for a manifest: belay waited on it");
+    }
+    sigaction(SIGALRM, &old, NULL);
+}
+
+/* Second review 2026-10-31, D2: a state root whose parent others can write
+ * could be swapped after it was checked: refused, exit 3. A relative
+ * BELAY_STATE_DIR is refused too (D8). */
+TEST(a_state_root_others_could_swap_is_refused) {
+    fresh();
+    char shared[700];
+    snprintf(shared, sizeof shared, "%s/shared", g_dir);
+    sh("rm -rf '%s' && mkdir -p '%s/st' && chmod 0777 '%s' && chmod 0700 '%s/st'", shared, shared, shared, shared);
+    char root[800];
+    snprintf(root, sizeof root, "%s/st", shared);
+    setenv("BELAY_STATE_DIR", root, 1);
+    const int rc = belay("check", "--scope", g_scope, NULL);
+    const bool said = strstr(g_err, "above the state directory") != NULL;
+    sh("chmod 1777 '%s'", shared);                                   /* sticky, as /tmp: fine */
+    const int sticky = belay("check", "--scope", g_scope, NULL);
+    setenv("BELAY_STATE_DIR", "relative/state", 1);
+    const int rel = belay("check", "--scope", g_scope, NULL);
+    setenv("BELAY_STATE_DIR", g_state, 1);
+    sh("chmod 0700 '%s'", shared);
+    ASSERT_EQ_INT(3, rc);
+    ASSERT_TRUE(said);
+    ASSERT_EQ_INT(0, sticky);
+    ASSERT_EQ_INT(3, rel);
+}
+
+/* Second review 2026-10-31, D5: what belay prints back from its state, and
+ * errors naming a path, cannot carry a terminal sequence or a second line;
+ * a meta.json that is not what belay wrote is corrupt. */
+TEST(nothing_printed_back_forges_a_line) {
+    fresh();
+    ASSERT_EQ_INT(0, belay("check", "--scope", g_scope, NULL));
+    char d[700];
+    scope_dir(d, sizeof d);
+    REQUIRE(d[0] != '\0');
+    sh("mkdir '%s/checkpoints/2' && cp '%s/checkpoints/1/manifest.ndjson' '%s/checkpoints/2/' && "
+       "sed 's/\"id\":1,/\"id\":2,/; s/\"full_reason\":\"[^\"]*\"/\"full_reason\":\"\\\\u001b[31mRED\\\\nforged line\"/' "
+       "'%s/checkpoints/1/meta.json' > '%s/checkpoints/2/meta.json'", d, d, d, d, d);
+    ASSERT_EQ_INT(0, belay("log", "--scope", g_scope, NULL));
+    ASSERT_TRUE(strchr(g_out, '\x1b') == NULL);
+    ASSERT_TRUE(strstr(g_out, "\nforged line") == NULL);
+    ASSERT_EQ_INT(0, belay("log", "--scope", g_scope, "--json", NULL));
+    ASSERT_TRUE(strchr(g_out, '\x1b') == NULL);
+    sh("sed -i.bak 's/\"kind\":\"check\"/\"kind\":\"a\\\\\"}\"/' '%s/checkpoints/2/meta.json'", d);
+    ASSERT_EQ_INT(4, belay("log", "--scope", g_scope, "--json", NULL));
+    sh("sed 's/\"id\":1,/\"id\":2.5,/' '%s/checkpoints/1/meta.json' > '%s/checkpoints/2/meta.json'", d, d);
+    ASSERT_EQ_INT(4, belay("log", "--scope", g_scope, NULL));
+    sh("rm -rf '%s/checkpoints/2'", d);
+    /* An error naming a scope whose name holds ESC and a newline: one line. */
+    char evil[700];
+    snprintf(evil, sizeof evil, "%s/evil\x1b[2J\nforged: all clear", g_dir);
+    ASSERT_EQ_INT(3, belay("check", "--scope", evil, NULL));
+    ASSERT_TRUE(strchr(g_err, '\x1b') == NULL);
+    ASSERT_TRUE(strchr(g_err, '\n') == g_err + strlen(g_err) - 1);
+}
+
+/* Second review 2026-10-31, D7 and D8: ids run out at 999,999,999 (exit 4,
+ * documented); a diff of a scope never captured leaves no state behind. */
+TEST(ids_run_out_and_a_failed_diff_leaves_nothing) {
+    fresh();
+    ASSERT_EQ_INT(0, belay("check", "--scope", g_scope, NULL));
+    char d[700];
+    scope_dir(d, sizeof d);
+    REQUIRE(d[0] != '\0');
+    sh("mkdir '%s/checkpoints/999999999'", d);
+    ASSERT_EQ_INT(4, belay("check", "--scope", g_scope, NULL));
+    ASSERT_TRUE(strstr(g_err, "no checkpoint ids left") != NULL);
+    char other[700];
+    snprintf(other, sizeof other, "%s/src", g_scope);
+    sh("rm -rf '%s'/*", g_state);
+    ASSERT_EQ_INT(2, belay("diff", "--scope", other, "--since", "1", NULL));
+    ASSERT_TRUE(empty_dir(g_state));
+}
+
 int main(void) {
     snprintf(g_dir, sizeof g_dir, "/tmp/belay_cli_%d", (int)getpid());
     mkdir(g_dir, 0700);
@@ -574,6 +685,10 @@ int main(void) {
     RUN(a_parent_with_search_permission_only_is_enough);
     RUN(output_that_cannot_be_written_is_exit_4);
     RUN(state_of_another_scope_is_corrupt_exit_4);
+    RUN(a_planted_manifest_is_corrupt_state);
+    RUN(a_state_root_others_could_swap_is_refused);
+    RUN(nothing_printed_back_forges_a_line);
+    RUN(ids_run_out_and_a_failed_diff_leaves_nothing);
     free(g_out);
     free(g_err);
     char cmd[800];

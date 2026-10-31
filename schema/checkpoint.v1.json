@@ -73,6 +73,7 @@
       "additionalProperties": false,
       "required": [
         "used",
+        "reference",
         "trusted",
         "racy",
         "full_reason"
@@ -80,6 +81,14 @@
       "properties": {
         "used": {
           "type": "boolean"
+        },
+        "reference": {
+          "enum": [
+            "none",
+            "walk_start",
+            "newest_ctime"
+          ],
+          "description": "what a file's ctime was compared with: the previous walk's start, or (belay's state on another filesystem) the newest ctime it recorded; none when every file was read"
         },
         "trusted": {
           "type": "integer",

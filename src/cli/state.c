@@ -2,6 +2,7 @@
 #include "state.h"
 
 #include "jsonr.h"
+#include "receipt.h"
 #include "../utils.h"
 
 #include "belay/error.h"
@@ -112,6 +113,10 @@ int scope_resolve(const char *arg, struct scope *out) {
 static int state_root(char *buf, size_t cap) {
     const char *d = getenv("BELAY_STATE_DIR");
     int n;
+    if (d != NULL && d[0] != '\0' && d[0] != '/') {
+        belay_err_set(BELAY_ERR_INVALID, 0, "BELAY_STATE_DIR must be an absolute path");
+        return -1;
+    }
     if (d != NULL && d[0] != '\0') n = snprintf(buf, cap, "%s", d);
     else if ((d = getenv("XDG_STATE_HOME")) != NULL && d[0] == '/') n = snprintf(buf, cap, "%s/belay", d);
     else if ((d = getenv("HOME")) != NULL && d[0] == '/') n = snprintf(buf, cap, "%s/.local/state/belay", d);
@@ -120,7 +125,7 @@ static int state_root(char *buf, size_t cap) {
         return -1;
     }
     if (n < 0 || (size_t)n >= cap - 128) {
-        belay_err_set(BELAY_ERR_RANGE, 0, "the state directory's path is too long");
+        belay_err_set(BELAY_ERR_INVALID, 0, "the state directory's path is too long");
         return -1;
     }
     return 0;
@@ -234,6 +239,38 @@ static int write_whole(int dfd, const char *name, const char *data, size_t len, 
     return 0;
 }
 
+/* Every directory above `real` (resolved) must be the user's or root's, and
+ * writable by no one else unless sticky: whoever can rename one of them can
+ * put another directory where the state root was checked to be (second
+ * review 2026-10-31, D2). Group write is allowed for the user's own group.
+ * 0, or -1 with belay_err INVALID. */
+static int ancestors_safe(const char *real) {
+    char p[PATH_MAX];
+    snprintf(p, sizeof p, "%s", real);
+    for (char *slash = strrchr(p, '/'); slash != NULL; slash = strrchr(p, '/')) {
+        if (slash == p) slash[1] = '\0';
+        else *slash = '\0';
+        struct stat a;
+        if (lstat(p, &a) == -1) {
+            belay_err_set(BELAY_ERR_INVALID, errno, "cannot check %s, above the state directory", p);
+            return -1;
+        }
+        const bool sticky = (a.st_mode & S_ISVTX) != 0;
+        if (a.st_uid != geteuid() && a.st_uid != 0) {
+            belay_err_set(BELAY_ERR_INVALID, 0, "%s, above the state directory, belongs to uid %lu", p,
+                          (unsigned long)a.st_uid);
+            return -1;
+        }
+        if (!sticky && ((a.st_mode & 002) || ((a.st_mode & 020) && a.st_gid != getegid()))) {
+            belay_err_set(BELAY_ERR_INVALID, 0, "%s, above the state directory, is writable by others (mode %04o)",
+                          p, (unsigned)(a.st_mode & 07777));
+            return -1;
+        }
+        if (strcmp(p, "/") == 0) break;
+    }
+    return 0;
+}
+
 /* Whether `path` is `dir` or below it, both resolved. */
 static bool within(const char *path, const char *dir) {
     const size_t n = strlen(dir);
@@ -256,7 +293,7 @@ int state_open(const struct scope *sc, bool create, struct state *st, FILE *note
         belay_hex_encode(hex, d, sizeof d);
     }
     hex[16] = '\0';
-    snprintf(st->dir, sizeof st->dir, "%s/scopes/%s", st->root, hex);
+    snprintf(st->dir, sizeof st->dir, "%s/scopes/%s", st->root, hex);   /* resolved below, once the root is */
     snprintf(st->store, sizeof st->store, "%s/store", st->dir);
     if (create && mkdir_p(st->root, 0700) == -1) {
         belay_err_set(BELAY_ERR_IO, errno, "cannot create the state directory %s", st->root);
@@ -292,21 +329,35 @@ int state_open(const struct scope *sc, bool create, struct state *st, FILE *note
     }
     st->root_dev = (uint64_t)rs.st_dev;
     st->root_ino = (uint64_t)rs.st_ino;
-    /* A scope that is the state directory, or inside it, would record
-     * belay's own writes (review 2026-10-31, Phase 5, 9). */
+    /* From here the root is its resolved path, its ancestors checked, and it
+     * must still be the directory checked above: the manifest writer and
+     * diff reach their files by path (second review 2026-10-31, D1, D2). */
     {
         char *rr = realpath(st->root, NULL);
-        const bool inside = rr != NULL && within(sc->path, rr);
-        if (inside)
-            belay_err_set(BELAY_ERR_INVALID, 0, "the scope %s is belay's state directory %s or inside it",
-                          sc->path, rr);
-        free(rr);
-        if (inside || (sc->dev == st->root_dev && sc->ino == st->root_ino)) {
-            if (!inside)
-                belay_err_set(BELAY_ERR_INVALID, 0, "the scope %s is belay's state directory", sc->path);
+        struct stat again;
+        if (rr == NULL || strlen(rr) >= sizeof st->root - 128 || stat(rr, &again) == -1 ||
+            again.st_dev != rs.st_dev || again.st_ino != rs.st_ino) {
+            belay_err_set(BELAY_ERR_INVALID, 0, "the state directory %s changed while it was opened", st->root);
+            free(rr);
             close(rfd);
             return -1;
         }
+        snprintf(st->root, sizeof st->root, "%s", rr);
+        free(rr);
+    }
+    if (ancestors_safe(st->root) == -1) {
+        close(rfd);
+        return -1;
+    }
+    snprintf(st->dir, sizeof st->dir, "%s/scopes/%s", st->root, hex);
+    snprintf(st->store, sizeof st->store, "%s/store", st->dir);
+    /* A scope that is the state directory, or inside it, would record
+     * belay's own writes (review 2026-10-31, Phase 5, 9). */
+    if (within(sc->path, st->root) || (sc->dev == st->root_dev && sc->ino == st->root_ino)) {
+        belay_err_set(BELAY_ERR_INVALID, 0, "the scope %s is belay's state directory %s or inside it",
+                      sc->path, st->root);
+        close(rfd);
+        return -1;
     }
     char shown[PATH_MAX + 96];
     snprintf(shown, sizeof shown, "%s/scopes", st->root);
@@ -349,7 +400,9 @@ int state_open(const struct scope *sc, bool create, struct state *st, FILE *note
                 return -1;
             }
             if (note != NULL) {
-                fprintf(note, "belay: waiting for another belay working on %s\n", sc->path);
+                fputs("belay: waiting for another belay working on ", note);
+                receipt_fputs(note, sc->path);
+                fputs("\n", note);
                 fflush(note);
             }
             while (flock(st->lock_fd, LOCK_EX) == -1) {
@@ -431,7 +484,20 @@ static int read_meta(const struct state *st, const char *name, long id, struct c
     }
     memset(c, 0, sizeof *c);
     c->id = (long)jint(&v, "id", -1);
-    snprintf(c->kind, sizeof c->kind, "%s", jstr(&v, "kind"));
+    const struct jval *jid = jget(&v, "id");
+    const char *kind = jstr(&v, "kind");
+    const struct jval *pf = jget(&v, "prefilter");
+    const char *reason = jstr(pf, "full_reason");
+    /* What is printed back must be what belay wrote (second review
+     * 2026-10-31, D5): an integral id, a known kind, a UTF-8 reason. */
+    if (jid == NULL || jid->t != J_NUM || jid->num != (double)jid->i ||
+        (strcmp(kind, "check") && strcmp(kind, "mark") && strcmp(kind, "diff")) ||
+        !belay_utf8_valid(reason, strlen(reason))) {
+        jsonr_free(&v);
+        belay_err_set(BELAY_ERR_CORRUPT, 0, "%s is not a checkpoint's meta.json", shown);
+        return -1;
+    }
+    snprintf(c->kind, sizeof c->kind, "%s", kind);
     c->created_ns = jint(&v, "created_ns", 0);
     c->entries = (uint64_t)jint(&v, "entries", 0);
     c->raced = (uint64_t)jint(&v, "raced", 0);
@@ -441,8 +507,8 @@ static int read_meta(const struct state *st, const char *name, long id, struct c
     c->walk_start_ns = jint(&v, "walk_start_ns", 0);
     const struct jval *p = jget(&v, "provisional");
     c->provisional = p != NULL && p->t == J_BOOL && p->b;
-    const struct jval *pf = jget(&v, "prefilter");
     const struct jval *used = jget(pf, "used");
+    c->walk_start_reference = strcmp(jstr(pf, "reference"), "walk_start") == 0;
     c->full = !(used != NULL && used->t == J_BOOL && used->b);
     snprintf(c->full_reason, sizeof c->full_reason, "%s", jstr(pf, "full_reason"));
     c->trusted = (uint64_t)jint(pf, "trusted", 0);
@@ -528,6 +594,39 @@ int state_json_member(char *buf, size_t cap, const char *key, const char *s) {
     return 0;
 }
 
+const char *state_reference(const struct checkpoint *c) {
+    return c->full ? "none" : c->walk_start_reference ? "walk_start" : "newest_ctime";
+}
+
+int state_check_manifest(const struct state *st, long id) {
+    char name[16], shown[PATH_MAX + 160];
+    snprintf(name, sizeof name, "%ld", id);
+    snprintf(shown, sizeof shown, "%s/checkpoints/%ld", st->dir, id);
+    if (st->cp_fd == -1) {
+        belay_err_set(BELAY_ERR_CORRUPT, 0, "%s is missing", shown);
+        return -1;
+    }
+    const int dfd = dir_at(st->cp_fd, name, false, shown);
+    if (dfd == -1) {
+        if (errno == ENOENT) belay_err_set(BELAY_ERR_CORRUPT, 0, "%s is missing", shown);
+        return -1;
+    }
+    snprintf(shown, sizeof shown, "%s/checkpoints/%ld/manifest.ndjson", st->dir, id);
+    const int fd = openat(dfd, "manifest.ndjson", O_RDONLY | O_NONBLOCK | O_NOFOLLOW | O_CLOEXEC);
+    const int e = errno;
+    close(dfd);
+    struct stat fs;
+    if (fd == -1 || fstat(fd, &fs) == -1 || !S_ISREG(fs.st_mode)) {
+        belay_err_set(fd == -1 && e == ENOENT ? BELAY_ERR_CORRUPT : fd == -1 && e != ELOOP ? BELAY_ERR_IO
+                                                                                            : BELAY_ERR_CORRUPT,
+                      fd == -1 ? e : 0, "%s is not a manifest belay wrote", shown);
+        if (fd != -1) close(fd);
+        return -1;
+    }
+    close(fd);
+    return 0;
+}
+
 static int write_meta(const struct state *st, int dfd, const struct checkpoint *c) {
     static char scope[6 * PATH_MAX + 32], why[6 * 160 + 8], buf[META_MAX];
     char shown[PATH_MAX + 128];
@@ -539,11 +638,12 @@ static int write_meta(const struct state *st, int dfd, const struct checkpoint *
             "{\"id\":%ld,\"kind\":\"%s\",\"created_ns\":%lld,%s,\"entries\":%llu,"
             "\"raced\":%llu,\"unstable\":%llu,\"vanished\":%llu,\"provisional\":%s,\"excluded\":%llu,"
             "\"walk_start_ns\":%lld,"
-            "\"prefilter\":{\"used\":%s,\"trusted\":%llu,\"racy\":%llu,\"full_reason\":\"%s\"}}\n",
+            "\"prefilter\":{\"used\":%s,\"reference\":\"%s\",\"trusted\":%llu,\"racy\":%llu,\"full_reason\":\"%s\"}}\n",
             c->id, c->kind, (long long)c->created_ns, scope, (unsigned long long)c->entries,
             (unsigned long long)c->raced, (unsigned long long)c->unstable, (unsigned long long)c->vanished,
             c->provisional ? "true" : "false", (unsigned long long)c->excluded, (long long)c->walk_start_ns,
-            c->full ? "false" : "true", (unsigned long long)c->trusted, (unsigned long long)c->racy, why);
+            c->full ? "false" : "true", state_reference(c), (unsigned long long)c->trusted,
+            (unsigned long long)c->racy, why);
     if (n < 0 || (size_t)n >= sizeof buf) {
         belay_err_set(BELAY_ERR_RANGE, 0, "%s: too large", shown);
         return -1;
@@ -600,6 +700,13 @@ int state_capture(struct state *st, const struct capture_req *req, struct checkp
         else if (req->full_every > 0 && since_full + 1 >= req->full_every)
             snprintf(c.full_reason, sizeof c.full_reason, "every %ld marks", req->full_every);
         else {
+            /* Opened from the fds first: a link or FIFO planted there is
+             * corrupt state, not a manifest to trust (second review, D1). */
+            if (state_check_manifest(st, list[n - 1].id) == -1) {
+                free(list);
+                close(dfd);
+                return -1;
+            }
             state_manifest(st, list[n - 1].id, prev, sizeof prev);
             previous = prev;
             previous_start = list[n - 1].walk_start_ns;
@@ -634,6 +741,7 @@ int state_capture(struct state *st, const struct capture_req *req, struct checkp
         c.full = false;
         c.trusted = s.trusted;
         c.racy = s.racy;
+        c.walk_start_reference = previous_start > 0;
     }
     c.entries = s.entries;
     c.raced = s.raced;

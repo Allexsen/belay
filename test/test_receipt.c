@@ -237,6 +237,30 @@ TEST(a_line_of_many_strings_is_read_in_linear_memory) {
     ASSERT_TRUE(g_text != NULL && strstr(g_text, "and 199985 more") != NULL);
 }
 
+/* Second review 2026-10-31, D6 and D8: invisible format and bidi
+ * characters, overlong forms, surrogates, DEL and code points past
+ * U+10FFFF are shown as bytes; a type change that is also a privilege
+ * change says both. */
+TEST(invisible_and_invalid_bytes_are_shown_and_a_type_change_is_said) {
+    static const struct side_meta before[] = { { "tc", 2, 0040755, false }, { NULL, 0, 0, false } };
+    static const struct side_meta after[] = { { "tc", 2, 0104755, false }, { NULL, 0, 0, false } };
+    g_sides[0] = before;
+    g_sides[1] = after;
+    g_fn = table_mode;
+    const int rc = render(HEAD
+        "{\"path\":\"rlo\\u202eexe.txt\",\"outcome\":\"added\",\"type\":\"reg\"}\n"
+        "{\"path_b64\":\"YcCvYu2ggGP0kICAZH8=\",\"outcome\":\"added\",\"type\":\"reg\"}\n"
+        "{\"path\":\"tc\",\"outcome\":\"type_changed\",\"type\":\"reg\",\"type_before\":\"dir\"}\n"
+        "{\"path\":\"zw\\u200bj\\u2028x\\ufeff\",\"outcome\":\"added\",\"type\":\"reg\"}\n"
+        TRAIL("0", "3", "0", "0", "0", "0", "0"), false);
+    g_fn = fake_mode;
+    ASSERT_EQ_INT(0, rc);
+    ASSERT_TRUE(strstr(g_text, "  A rlo\\xe2\\x80\\xaeexe.txt\n") != NULL);
+    ASSERT_TRUE(strstr(g_text, "  A a\\xc0\\xafb\\xed\\xa0\\x80c\\xf4\\x90\\x80\\x80d\\x7f\n") != NULL);
+    ASSERT_TRUE(strstr(g_text, "  T tc   dir -> reg, setuid added (mode 0755 -> 4755)\n") != NULL);
+    ASSERT_TRUE(strstr(g_text, "  A zw\\xe2\\x80\\x8bj\\xe2\\x80\\xa8x\\xef\\xbb\\xbf\n") != NULL);
+}
+
 int main(void) {
     RUN(a_receipt_puts_events_then_privilege_then_changes);
     RUN(long_sections_fold_but_privilege_never_does);
@@ -246,6 +270,7 @@ int main(void) {
     RUN(unknown_records_never_fold);
     RUN(a_diff_of_another_version_is_rejected_and_b64_scopes_shown);
     RUN(a_line_of_many_strings_is_read_in_linear_memory);
+    RUN(invisible_and_invalid_bytes_are_shown_and_a_type_change_is_said);
     free(g_text);
     return belay_test_report();
 }

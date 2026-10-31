@@ -414,7 +414,11 @@ int cap_read_file(int pfd, const char *name, const struct stat *st, const char *
         if (prev_trusted(p, st, wc->reference_ns)) {
             char hex[65];
             prev_hex(p, hex);
-            const bool copy = want && p->has_stored && store_has(wc->store, hex, e->size);
+            /* A copy is recorded only as a full capture would record it: in
+             * the store at its size, and no writer holding the file open
+             * (second review 2026-10-31, D4). */
+            const bool copy = want && p->has_stored && store_has(wc->store, hex, e->size) &&
+                              wc->ops->writer_present(wc->ops->ctx, fd) != 1;
             /* An unclaimed file without a copy may be binary, which a full
              * capture would not keep either: that is decided by its first
              * SNIFF_BYTES, unchanged with the rest, so only they are read. */
