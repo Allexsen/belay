@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Validates JSON lines on stdin against a schema file (the subset belay's
 schemas use: type, enum, required, properties, additionalProperties,
-minimum, items). Stdlib only: CI images need no extra package.
+minimum, items, allOf, oneOf). Stdlib only: CI images need no extra package.
 
     check-json-schema.py schema/checkpoint.v1.json < output.ndjson
 """
@@ -34,6 +34,16 @@ def check(v, s, where, errs):
                 check(x, props[k], f"{where}.{k}", errs)
             elif s.get("additionalProperties") is False:
                 errs.append(f"{where}: unexpected {k}")
+    for sub in s.get("allOf", []):
+        check(v, sub, where, errs)
+    if "oneOf" in s:
+        ok = 0
+        for sub in s["oneOf"]:
+            e = []
+            check(v, sub, where, e)
+            ok += not e
+        if ok != 1:
+            errs.append(f"{where}: matches {ok} of oneOf, not exactly 1")
     if isinstance(v, list) and "items" in s:
         for i, x in enumerate(v):
             check(x, s["items"], f"{where}[{i}]", errs)

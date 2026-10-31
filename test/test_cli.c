@@ -12,11 +12,15 @@
 #include <errno.h>
 #include <limits.h>
 #include <fcntl.h>
+#include <setjmp.h>
+#include <signal.h>
 #include <stdarg.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/resource.h>
 #include <sys/stat.h>
+#include <sys/wait.h>
 #include <unistd.h>
 
 static char g_dir[256], g_scope[400], g_state[400];
@@ -52,7 +56,8 @@ static void sh(const char *fmt, ...) {
 }
 
 static void fresh(void) {
-    sh("rm -rf '%s' '%s' && mkdir -p '%s/src' '%s'", g_scope, g_state, g_scope, g_state);
+    sh("chmod -R u+rwx '%s' 2>/dev/null; rm -rf '%s' '%s' && mkdir -p '%s/src' '%s' && chmod 700 '%s'",
+       g_dir, g_scope, g_state, g_scope, g_state, g_state);
     sh("printf 'a\\nb\\n' > '%s/src/x.txt' && printf 'tool\\n' > '%s/tool'", g_scope, g_scope);
 }
 
@@ -71,6 +76,27 @@ TEST(usage_errors_exit_2) {
     ASSERT_EQ_INT(2, belay("check", "--scope", g_scope, "--since", "1", NULL));    /* diff's */
     ASSERT_EQ_INT(2, belay("mark", "--scope", g_scope, "--full-every", "x", NULL));
     ASSERT_EQ_STR("", g_out);                                   /* nothing on stdout for an error */
+}
+
+/* Review 2026-10-31, Phase 5, 10 and 15: an error is one line; ids are
+ * digits without a leading zero; --full-every is a number (0: never), and
+ * mark's and diff's only. */
+TEST(a_usage_error_is_one_line_and_ids_are_strict) {
+    ASSERT_EQ_INT(2, belay("check", "--scope", g_scope, "--bogus", NULL));
+    size_t lines = 0;
+    for (const char *c = g_err; *c; c++) lines += *c == '\n';
+    ASSERT_EQ_INT(1, (int)lines);
+    ASSERT_EQ_INT(2, belay(NULL));
+    ASSERT_TRUE(strchr(g_err, '\n') == strrchr(g_err, '\n'));
+    ASSERT_EQ_INT(2, belay("diff", "--scope", g_scope, "--since", "01", NULL));
+    ASSERT_EQ_INT(2, belay("diff", "--scope", g_scope, "--since", "+1", NULL));
+    ASSERT_EQ_INT(2, belay("diff", "--scope", g_scope, "--since", "99999999999999999999", NULL));
+    ASSERT_EQ_INT(2, belay("mark", "--scope", g_scope, "--full-every", "", NULL));
+    ASSERT_EQ_INT(2, belay("mark", "--scope", g_scope, "--full-every", "-1", NULL));
+    ASSERT_EQ_INT(2, belay("check", "--scope", g_scope, "--full-every", "3", NULL));
+    ASSERT_EQ_INT(2, belay("log", "--scope", g_scope, "--full-every", "3", NULL));
+    ASSERT_EQ_INT(0, belay("help", "check", NULL));
+    ASSERT_TRUE(strstr(g_out, "schema/checkpoint.v1.json") != NULL);
 }
 
 TEST(help_and_version_exit_0) {
@@ -255,6 +281,268 @@ TEST(log_lists_checkpoints_or_says_there_are_none) {
     if (strncmp(g_out, "{\"id\":1,\"kind\":\"check\",", 23) != 0) BELAY_FAIL("log --json: %.200s", g_out);
 }
 
+/* The scope directory under the state root, into buf. */
+static void scope_dir(char *buf, size_t cap) {
+    char cmd[1200], f[700];
+    snprintf(f, sizeof f, "%s/sdir", g_dir);
+    snprintf(cmd, sizeof cmd, "ls -d '%s'/scopes/* | head -1 > '%s'", g_state, f);
+    sh("%s", cmd);
+    buf[0] = '\0';
+    FILE *in = fopen(f, "r");
+    if (in) { if (fgets(buf, (int)cap, in) == NULL) buf[0] = '\0'; fclose(in); }
+    buf[strcspn(buf, "\n")] = '\0';
+}
+
+static bool empty_dir(const char *p) {
+    char cmd[2600];
+    snprintf(cmd, sizeof cmd, "[ -z \"$(ls -A '%s' 2>/dev/null)\" ]", p);
+    return system(cmd) == 0;
+}
+
+/* Review 2026-10-31, Phase 5, 1: nothing in the state directory is written
+ * through a symlink, and a root others could plant links in is refused. */
+TEST(the_state_directory_never_writes_through_a_link) {
+    fresh();
+    char d[700], out[700];
+    snprintf(out, sizeof out, "%s/outside", g_dir);
+    sh("rm -rf '%s' && mkdir -p '%s/cp' && printf 'IMPORTANT\\n' > '%s/victim'", out, out, out);
+    ASSERT_EQ_INT(0, belay("check", "--scope", g_scope, NULL));
+    scope_dir(d, sizeof d);
+    REQUIRE(d[0] != '\0');
+    /* checkpoints/ a symlink: refused, nothing written outside. */
+    sh("mv '%s/checkpoints' '%s/cp.real' && ln -s '%s/cp' '%s/checkpoints'", d, d, out, d);
+    ASSERT_EQ_INT(4, belay("check", "--scope", g_scope, NULL));
+    char cp[2400];
+    snprintf(cp, sizeof cp, "%s/cp", out);
+    ASSERT_TRUE(empty_dir(cp));
+    sh("rm '%s/checkpoints' && mv '%s/cp.real' '%s/checkpoints'", d, d, d);
+    /* lock a dangling symlink: refused, nothing created. */
+    sh("rm '%s/lock' && ln -s '%s/created-by-lock' '%s/lock'", d, out, d);
+    ASSERT_EQ_INT(4, belay("check", "--scope", g_scope, NULL));
+    snprintf(cp, sizeof cp, "%s/created-by-lock", out);
+    ASSERT_TRUE(access(cp, F_OK) == -1);
+    sh("rm '%s/lock'", d);
+    /* scope.tmp planted before the scope file is written: unlinked, never followed. */
+    sh("rm '%s/scope' && ln -s '%s/victim' '%s/scope.tmp'", d, out, d);
+    ASSERT_EQ_INT(0, belay("check", "--scope", g_scope, NULL));
+    snprintf(cp, sizeof cp, "grep -qx IMPORTANT '%s/victim' && [ -f '%s/scope' ] && [ ! -L '%s/scope' ]", out, d, d);
+    ASSERT_EQ_INT(0, system(cp));
+    /* A root others can write: refused, exit 3. */
+    sh("chmod 777 '%s'", g_state);
+    ASSERT_EQ_INT(3, belay("check", "--scope", g_scope, NULL));
+    ASSERT_TRUE(strstr(g_err, "writable by others") != NULL);
+    sh("chmod 700 '%s'", g_state);
+}
+
+/* Review 2026-10-31, Phase 5, 2: a FIFO where belay reads its own state is
+ * corrupt state, exit 4 -- never a wait. */
+static sigjmp_buf g_hang;
+static void on_alarm(int sig) { (void)sig; siglongjmp(g_hang, 1); }
+
+TEST(a_fifo_in_the_state_directory_is_corrupt_not_a_wait) {
+    fresh();
+    ASSERT_EQ_INT(0, belay("check", "--scope", g_scope, NULL));
+    char d[700];
+    scope_dir(d, sizeof d);
+    REQUIRE(d[0] != '\0');
+    struct sigaction sa = { 0 }, old;
+    sa.sa_handler = on_alarm;
+    sigaction(SIGALRM, &sa, &old);
+    static const char *const where[] = { "checkpoints/7/meta.json", "scope" };
+    for (size_t i = 0; i < 2; i++) {
+        if (i == 0) sh("mkdir -p '%s/checkpoints/7' && mkfifo '%s/%s'", d, d, where[i]);
+        else sh("rm -rf '%s/checkpoints/7' && rm '%s/scope' && mkfifo '%s/scope'", d, d, d);
+        volatile int rc = -1;
+        if (sigsetjmp(g_hang, 1) == 0) {
+            alarm(5);
+            rc = belay(i == 0 ? "log" : "check", "--scope", g_scope, NULL);
+            alarm(0);
+            ASSERT_EQ_INT(4, rc);
+        } else {
+            BELAY_FAIL("a FIFO at %s: belay waited on it", where[i]);
+        }
+    }
+    sigaction(SIGALRM, &old, NULL);
+}
+
+/* Review 2026-10-31, Phase 5, 3: captures racing on a scope's first use
+ * all succeed, one after another, under the lock. */
+TEST(concurrent_first_captures_all_succeed) {
+  for (int round = 0; round < 20; round++) {     /* contention is timing: several rounds */
+    fresh();
+    enum { N = 6 };
+    pid_t kids[N];
+    for (int i = 0; i < N; i++) {
+        kids[i] = fork();
+        if (kids[i] == 0) {
+            char ep[800];
+            snprintf(ep, sizeof ep, "%s/kid%d.err", g_dir, i);
+            FILE *o = fopen("/dev/null", "w"), *e = fopen(ep, "w");
+            char *argv[] = { "belay", "check", "--scope", g_scope, NULL };
+            const int rc = o && e ? cli_main(4, argv, o, e) : 9;
+            if (o) fclose(o);
+            if (e) fclose(e);               /* _exit does not flush stdio */
+            _exit(rc);
+        }
+    }
+    int ok = 0;
+    for (int i = 0; i < N; i++) {
+        int st = 0;
+        if (kids[i] > 0 && waitpid(kids[i], &st, 0) == kids[i] && WIFEXITED(st) && WEXITSTATUS(st) == 0) ok++;
+        else {                                       /* what it said, for the failure line */
+            char ep[800], line[600] = "";
+            snprintf(ep, sizeof ep, "%s/kid%d.err", g_dir, i);
+            FILE *e = fopen(ep, "r");
+            if (e != NULL) {
+                char l[600];
+                while (fgets(l, sizeof l, e) != NULL)
+                    if (strstr(l, "waiting") == NULL) snprintf(line, sizeof line, "%s", l);
+                fclose(e);
+            }
+            BELAY_FAIL("child %d: status %d: %s", i, st, line);
+        }
+    }
+    ASSERT_EQ_INT(N, ok);
+    ASSERT_EQ_INT(0, belay("log", "--scope", g_scope, "--json", NULL));
+    size_t lines = 0;
+    for (const char *c = g_out; *c; c++) lines += *c == '\n';
+    ASSERT_EQ_INT(N, (int)lines);
+  }
+}
+
+/* Review 2026-10-31, Phase 5, 4: a change directly in the scope root is
+ * not the clock going backwards, on any mark after it. */
+TEST(a_change_in_the_scope_root_keeps_the_prefilter) {
+    fresh();
+    ASSERT_EQ_INT(0, belay("check", "--scope", g_scope, NULL));
+    sh("rm '%s/tool'", g_scope);
+    for (int i = 0; i < 3; i++) {
+        ASSERT_EQ_INT(0, belay("mark", "--scope", g_scope, "--json", NULL));
+        if (strstr(g_out, "ctime went backwards") != NULL || strstr(g_out, "\"used\":true") == NULL)
+            BELAY_FAIL("mark %d after a root change: %.300s", i + 2, g_out);
+    }
+}
+
+/* Review 2026-10-31, Phase 5, 8: diff's own capture says what any capture
+ * says -- in the receipt, or on stderr under --json, never in the JSON. */
+TEST(diff_says_what_its_capture_left_out) {
+    fresh();
+    char inside[700];
+    snprintf(inside, sizeof inside, "%s/.state", g_scope);
+    setenv("BELAY_STATE_DIR", inside, 1);
+    int rc1 = belay("check", "--scope", g_scope, NULL);
+    int rc2 = belay("diff", "--scope", g_scope, "--since", "1", NULL);
+    const bool said = g_out != NULL && strstr(g_out, "not recorded: belay's own state directory") != NULL;
+    int rc3 = belay("diff", "--scope", g_scope, "--since", "1", "--json", NULL);
+    setenv("BELAY_STATE_DIR", g_state, 1);
+    ASSERT_EQ_INT(0, rc1);
+    ASSERT_EQ_INT(0, rc2);
+    ASSERT_EQ_INT(0, rc3);
+    ASSERT_TRUE(said);
+    ASSERT_TRUE(strstr(g_err, "not recorded: belay's own state directory") != NULL);
+    ASSERT_TRUE(strstr(g_out, "not recorded") == NULL);
+}
+
+/* Review 2026-10-31, Phase 5, 9: a scope that is the state directory, or
+ * inside it, would record belay's own writes: refused, exit 3. */
+TEST(a_scope_in_the_state_directory_is_refused) {
+    fresh();
+    ASSERT_EQ_INT(3, belay("check", "--scope", g_state, NULL));
+    ASSERT_EQ_INT(0, belay("check", "--scope", g_scope, NULL));
+    char d[700];
+    scope_dir(d, sizeof d);
+    REQUIRE(d[0] != '\0');
+    ASSERT_EQ_INT(3, belay("check", "--scope", d, NULL));
+    ASSERT_TRUE(strstr(g_err, "state directory") != NULL);
+}
+
+/* Review 2026-10-31, Phase 5, 10 and 11: a directory whose name is not an
+ * id is not a checkpoint and does not move the next id; a meta.json larger
+ * than 8 KiB is read whole. */
+TEST(odd_checkpoint_names_and_long_meta_are_handled) {
+    fresh();
+    ASSERT_EQ_INT(0, belay("check", "--scope", g_scope, NULL));
+    char d[700];
+    scope_dir(d, sizeof d);
+    REQUIRE(d[0] != '\0');
+    sh("mkdir '%s/checkpoints/99999999999999999999' '%s/checkpoints/05' '%s/checkpoints/+7'", d, d, d);
+    ASSERT_EQ_INT(0, belay("check", "--scope", g_scope, NULL));
+    ASSERT_TRUE(strncmp(g_out, "check 2 ", 8) == 0);
+    /* A scope whose path escapes to more than 8 KiB of JSON: up to 6 levels
+     * of 250 control bytes, as many as PATH_MAX allows (Linux: all 6; on
+     * macOS, PATH_MAX 1024, no scope path can reach 8 KiB escaped, and the
+     * test only checks such a scope is recorded and listed). */
+    char deep[2400];
+    int w = snprintf(deep, sizeof deep, "%s", g_scope);
+    for (int lvl = 0; lvl < 6 && (size_t)w + 251 < PATH_MAX - 64; lvl++) {
+        deep[w++] = '/';
+        memset(deep + w, 1, 250);
+        w += 250;
+        deep[w] = '\0';
+        REQUIRE(mkdir(deep, 0700) == 0 || errno == EEXIST);
+    }
+    ASSERT_EQ_INT(0, belay("check", "--scope", deep, NULL));
+    ASSERT_EQ_INT(0, belay("log", "--scope", deep, NULL));
+    ASSERT_TRUE(strstr(g_out, "check 1 ") != NULL);
+    ASSERT_EQ_INT(0, belay("diff", "--scope", deep, "--since", "1", "--exit-code", NULL));
+    sh("rm -rf '%s'/*", g_state);
+}
+
+/* Review 2026-10-31, Phase 5, 12: a scope that is not UTF-8 gives JSON
+ * that is JSON: scope_b64 and manifest_b64. */
+TEST(checkpoint_json_for_a_scope_that_is_not_utf8) {
+    fresh();
+    char bad[600];
+    snprintf(bad, sizeof bad, "%s/bad\xff", g_scope);
+    if (mkdir(bad, 0700) == -1) SKIP("this filesystem refuses a name that is not UTF-8");
+    ASSERT_EQ_INT(0, belay("check", "--scope", bad, "--json", NULL));
+    ASSERT_TRUE(strstr(g_out, "\"scope_b64\":\"") != NULL);
+    ASSERT_TRUE(strstr(g_out, "\"manifest\":\"") != NULL);        /* under the state root: UTF-8 */
+    ASSERT_TRUE(strstr(g_out, "\xff") == NULL);
+}
+
+/* Review 2026-10-31, Phase 5, 13: search permission on the scope's parents
+ * is enough, as it is for the capture itself. */
+TEST(a_parent_with_search_permission_only_is_enough) {
+#if !defined(O_PATH) && !defined(O_SEARCH)
+    SKIP("no O_PATH or O_SEARCH here: a parent must be readable");
+#endif
+    if (geteuid() == 0) SKIP("root reads anything");
+    fresh();
+    char p[700];
+    snprintf(p, sizeof p, "%s/src", g_scope);
+    sh("chmod 311 '%s'", g_scope);
+    const int rc = belay("check", "--scope", p, NULL);
+    sh("chmod 755 '%s'", g_scope);
+    ASSERT_EQ_INT(0, rc);
+}
+
+/* Review 2026-10-31, Phase 5, 14: output that cannot be written is exit 4. */
+TEST(output_that_cannot_be_written_is_exit_4) {
+    FILE *full = fopen("/dev/full", "w");
+    if (full == NULL) SKIP("no /dev/full here");
+    fresh();
+    char *argv[] = { "belay", "check", "--scope", g_scope, "--json", NULL };
+    FILE *err = fopen("/dev/null", "w");
+    const int rc = cli_main(5, argv, full, err);
+    fclose(full);
+    if (err) fclose(err);
+    ASSERT_EQ_INT(4, rc);
+}
+
+/* Review 2026-10-31, Phase 5, 15: a scope directory that names another
+ * scope is corrupt state: exit 4, as docs/cli.md says. */
+TEST(state_of_another_scope_is_corrupt_exit_4) {
+    fresh();
+    ASSERT_EQ_INT(0, belay("check", "--scope", g_scope, NULL));
+    char d[700];
+    scope_dir(d, sizeof d);
+    REQUIRE(d[0] != '\0');
+    sh("printf '/elsewhere\\n' > '%s/scope'", d);
+    ASSERT_EQ_INT(4, belay("check", "--scope", g_scope, NULL));
+    ASSERT_TRUE(strstr(g_err, "belongs to the scope /elsewhere") != NULL);
+}
+
 int main(void) {
     snprintf(g_dir, sizeof g_dir, "/tmp/belay_cli_%d", (int)getpid());
     mkdir(g_dir, 0700);
@@ -274,6 +562,18 @@ int main(void) {
     RUN(diff_keeps_its_capture_and_exit_code_is_opt_in);
     RUN(mark_says_when_it_reads_every_file);
     RUN(log_lists_checkpoints_or_says_there_are_none);
+    RUN(a_usage_error_is_one_line_and_ids_are_strict);
+    RUN(the_state_directory_never_writes_through_a_link);
+    RUN(a_fifo_in_the_state_directory_is_corrupt_not_a_wait);
+    RUN(concurrent_first_captures_all_succeed);
+    RUN(a_change_in_the_scope_root_keeps_the_prefilter);
+    RUN(diff_says_what_its_capture_left_out);
+    RUN(a_scope_in_the_state_directory_is_refused);
+    RUN(odd_checkpoint_names_and_long_meta_are_handled);
+    RUN(checkpoint_json_for_a_scope_that_is_not_utf8);
+    RUN(a_parent_with_search_permission_only_is_enough);
+    RUN(output_that_cannot_be_written_is_exit_4);
+    RUN(state_of_another_scope_is_corrupt_exit_4);
     free(g_out);
     free(g_err);
     char cmd[800];

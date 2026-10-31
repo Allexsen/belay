@@ -5,7 +5,10 @@
  *  setgid, sticky) -- never folded, never filtered -- then the other
  *  records by path; each record at most RECEIPT_FINDINGS findings, then
  *  "and N more"; flagged entries named on their own lines, no global
- *  "provisional" banner.
+ *  "provisional" banner. Every string from the diff is printed escaped:
+ *  control bytes, C1 controls and bytes that are not UTF-8 as \xNN, a
+ *  backslash as \\ -- a path cannot forge a line, a heading or a terminal
+ *  sequence (review 2026-10-31, Phase 5, 7).
  */
 #ifndef BELAY_CLI_RECEIPT_H
 #define BELAY_CLI_RECEIPT_H
@@ -18,15 +21,22 @@
 #define RECEIPT_FINDINGS 15     /* per record, then "and N more" */
 #define RECEIPT_FOLD     50     /* events or other records shown, then "and N more" (unless all) */
 
-/* A path's mode on a side (0 before, 1 after): 0 and *mode, or -1 when the
+/* What the receipt needs of a path on one side that diff.v1 does not carry
+ * yet (pin PR #24): its mode, and whether it has file capabilities. */
+struct receipt_meta {
+    uint32_t mode;
+    bool has_caps;
+};
+
+/* A path's metadata on a side (0 before, 1 after): 0 and *m, or -1 when the
  * side does not record the path. Records arrive in path order, so a lookup
- * may move forward only. diff.v1 does not carry values yet (pin PR #24). */
-typedef int (*receipt_mode_fn)(void *ctx, int side, const char *path, size_t len, uint32_t *mode);
+ * may move forward only. `path` is the bytes, base64 already decoded. */
+typedef int (*receipt_mode_fn)(void *ctx, int side, const char *path, size_t len, struct receipt_meta *m);
 
 struct receipt_opts {
     const char *from, *to;      /* how the two sides are named in the heading */
     bool all;                   /* nothing folded */
-    receipt_mode_fn mode;       /* NULL: setuid/setgid/sticky cannot be told from other mode changes */
+    receipt_mode_fn mode;       /* NULL: setuid/setgid/sticky and caps on added or removed files cannot be told */
     void *mode_ctx;
 };
 
