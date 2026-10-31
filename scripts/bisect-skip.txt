@@ -60,3 +60,24 @@
 2026-10-30T21:04:48+04:00	oracle: every required pair built once, by construction, and checked
 2026-10-30T21:13:25+04:00	oracle: the gate requires the new cases, built on purpose
 2026-10-30T21:19:53+04:00	spec: a directory's own timestamps, worded as pin O5
+
+# Phase 4 (the interpreters, m1/phase4-interpreters), merged by rebase. Each of
+# these passes `make check`; each fails `make oracle` (in the linux-x86_64 job),
+# because the oracle is updated only by its separate author, after the code
+# and the prose it is written from: the trailer gained `events` and records
+# gained findings in the first of them, and the oracle passes again from
+# "oracle: the interpreters' prose as restated" on.
+2026-10-31T17:20:41+04:00	interp: structured findings and event records (pins #18, #19)
+2026-10-31T17:21:14+04:00	interp: the text, pip, dpkg and git interpreters
+2026-10-31T17:21:43+04:00	fuzz: the interpreters over (before, after) content pairs
+2026-10-31T17:21:43+04:00	bench: what the interpreters cost, time and peak memory
+2026-10-31T17:22:32+04:00	spec: what each interpreter reports, enough to write it again
+2026-10-31T17:23:07+04:00	spec: where a stored copy is, for whoever builds a store by hand
+2026-10-31T17:26:43+04:00	spec: reflow two paragraphs to the 100-column width
+2026-10-31T17:29:29+04:00	test: the cases the first S3 run showed no test held
+2026-10-31T17:30:19+04:00	test: a text of exactly 1,024 bytes ending in a field is kept
+2026-10-31T17:44:50+04:00	interp: the independent review's defects (NOTES/reviews/m1-phase4-review.md)
+2026-10-31T17:44:50+04:00	spec: what the oracle's and the review's questions showed unsaid
+2026-10-31T17:34:23+04:00	oracle: the trailer's events, a record's findings and the event records
+2026-10-31T17:39:14+04:00	oracle: the interpreters in the coverage gate, with no store
+2026-10-31T17:39:35+04:00	oracle: gen_corpus.py says what the interpreter pairs hold
