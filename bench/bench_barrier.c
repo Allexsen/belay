@@ -1,10 +1,12 @@
 /*
  *  What F_BARRIERFSYNC costs a first capture (macOS): 2,000 new small files
- *  with the content store on, timed with the platform adapter as it is and
- *  with every sync it makes issuing F_BARRIERFSYNC instead -- the store's
- *  batched sync and the manifest's sync before its rename, plus the one
- *  after it, so an upper bound. Rounds alternate; the medians are printed.
- *  Elsewhere F_BARRIERFSYNC does not exist and both columns are fsync.
+ *  with the content store on, timed three ways -- the platform adapter as
+ *  it is (fsync); every sync it makes issuing F_BARRIERFSYNC instead (an
+ *  upper bound); and one barrier only, on the last sync before the
+ *  manifest's rename (the store directory's parent), which is all that
+ *  ordering the copies' names before the manifest needs on one device.
+ *  Rounds alternate; the medians are printed. Elsewhere F_BARRIERFSYNC does
+ *  not exist and every column is fsync.
  *
  *    bench_barrier [files] [rounds]
  */
@@ -22,12 +24,20 @@
 #include <unistd.h>
 
 static const struct fsops *g_real;
+static struct stat g_last;              /* the store directory's parent */
 
 static int barrier_fsync(void *ctx, int fd) {
     (void)ctx;
 #ifdef F_BARRIERFSYNC
     if (fcntl(fd, F_BARRIERFSYNC) == 0) return 0;
 #endif
+    return fsync(fd);
+}
+
+static int one_barrier_fsync(void *ctx, int fd) {
+    struct stat st;
+    if (fstat(fd, &st) == 0 && st.st_dev == g_last.st_dev && st.st_ino == g_last.st_ino)
+        return barrier_fsync(ctx, fd);
     return fsync(fd);
 }
 
@@ -61,15 +71,21 @@ int main(int argc, char **argv) {
         fclose(f);
     }
     g_real = fsops_default();
-    struct fsops barrier = *g_real;
+    struct fsops barrier = *g_real, one = *g_real;
     barrier.fsync = barrier_fsync;
-    const struct fsops *variant[2] = { g_real, &barrier };
-    double *t[2] = { calloc((size_t)rounds, sizeof(double)), calloc((size_t)rounds, sizeof(double)) };
+    one.fsync = one_barrier_fsync;
+    const struct fsops *variant[3] = { g_real, &barrier, &one };
+    double *t[3];
+    for (int v = 0; v < 3; v++) t[v] = calloc((size_t)rounds, sizeof(double));
+    char outdir[300];
+    snprintf(outdir, sizeof outdir, "%s/out", base);    /* not the store's parent */
+    mkdir(outdir, 0700);
+    if (stat(base, &g_last) != 0) { perror(base); return 1; }
     for (int r = 0; r < rounds; r++)
-        for (int v = 0; v < 2; v++) {
-            char store[300], out[300];
+        for (int v = 0; v < 3; v++) {
+            char store[300], out[350];
             snprintf(store, sizeof store, "%s/store", base);
-            snprintf(out, sizeof out, "%s/m.ndjson", base);
+            snprintf(out, sizeof out, "%s/m.ndjson", outdir);
             snprintf(cmd, sizeof cmd, "rm -rf '%s' '%s'", store, out);
             if (system(cmd) != 0) return 1;
             struct belay_manifest_opts o = { .hash_max_bytes = BELAY_HASH_MAX_BYTES_DEFAULT,
@@ -83,8 +99,8 @@ int main(int argc, char **argv) {
             }
             t[v][r] = now() - a;
         }
-    for (int v = 0; v < 2; v++) qsort(t[v], (size_t)rounds, sizeof(double), cmp);
-    const double m0 = t[0][rounds / 2], m1 = t[1][rounds / 2];
+    for (int v = 0; v < 3; v++) qsort(t[v], (size_t)rounds, sizeof(double), cmp);
+    const double m0 = t[0][rounds / 2], m1 = t[1][rounds / 2], m2 = t[2][rounds / 2];
 #ifdef F_BARRIERFSYNC
     const char *what = "F_BARRIERFSYNC";
 #else
@@ -92,8 +108,10 @@ int main(int argc, char **argv) {
 #endif
     printf("bench_barrier: %d files, %d rounds, first capture with the store\n", files, rounds);
     printf("  fsync:   median %.3f s (min %.3f, max %.3f)\n", m0, t[0][0], t[0][rounds - 1]);
-    printf("  barrier: median %.3f s (min %.3f, max %.3f) -- %s\n", m1, t[1][0], t[1][rounds - 1], what);
-    printf("  overhead: %+.1f%%\n", (m1 - m0) / m0 * 100.0);
+    printf("  every sync a barrier: median %.3f s (min %.3f, max %.3f), %+.1f%% -- %s\n", m1,
+           t[1][0], t[1][rounds - 1], (m1 - m0) / m0 * 100.0, what);
+    printf("  one barrier before the rename: median %.3f s (min %.3f, max %.3f), %+.1f%%\n", m2,
+           t[2][0], t[2][rounds - 1], (m2 - m0) / m0 * 100.0);
     snprintf(cmd, sizeof cmd, "rm -rf '%s'", base);
     return system(cmd) == 0 ? 0 : 1;
 }
