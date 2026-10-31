@@ -61,7 +61,7 @@ SAN_FLAGS	= -fsanitize=address,undefined -fno-omit-frame-pointer -g -O1
 SAN_BUILD	= $(BUILD)/san
 SAN_TEST_BIN	= $(TEST_SRC:test/%.c=$(SAN_BUILD)/test/%)
 
-.PHONY: all clean test check check-san fuzz bench platform fs-scenarios gen gen-check measure oracle lib lint ci-check
+.PHONY: all clean test check check-san fuzz bench platform fs-scenarios gen gen-check measure oracle reference lib lint ci-check
 
 all: $(BIN)
 
@@ -206,6 +206,18 @@ measure: $(MEASURE)
 ORACLE_BASES	?= 200
 oracle: all
 	scripts/oracle/run.sh $(ORACLE_BASES)
+
+# The dpkg and pip interpreters against an independent Python reference on a
+# generated corpus (scripts/reference/). The driver sees public headers only.
+# REFERENCE_N random cases besides the required cells; REFERENCE_SEED seeds them.
+REF_DRIVER	= $(BUILD)/reference/driver
+REFERENCE_N	?= 300
+REFERENCE_SEED	?= 1
+$(REF_DRIVER): scripts/reference/driver.c $(CORE_OBJ)
+	@mkdir -p $(dir $@)
+	$(CC) $(CFLAGS) $(WARN) -Iinclude -o $@ $< $(CORE_OBJ)
+reference: $(REF_DRIVER)
+	BUILD=$(BUILD) scripts/reference/run.sh $(REFERENCE_N) $(REFERENCE_SEED)
 
 bench: $(BENCH_BIN)
 	@echo "built: $(BENCH_BIN)"
