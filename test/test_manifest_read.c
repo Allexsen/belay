@@ -1436,6 +1436,11 @@ TEST(v2_is_read_strictly) {
           "reference and read_all disagree" },
         { "trusted without a reference", H2 ROOT_E T1 ",\"trusted\":3,\"reference\":\"none\",\"read_all\":\"check\"}\n",
           "trusts files without a reference" },
+        { "an entry below an excluded path", H2_PRE ",\"excluded\":[{\"path\":\"d\",\"reason\":\"user\",\"dev\":1,\"ino\":2}],"
+          "\"walk_start_ns\":5}\n" ROOT_E
+          "{\"path\":\"d\",\"type\":\"dir\",\"mode\":16877,\"uid\":1,\"gid\":1,\"size\":1,\"mtime_ns\":1,\"ctime_ns\":1,\"ino\":2,\"dev\":1,\"nlink\":2}\n"
+          "{\"belay_manifest_end\":2,\"vanished\":0,\"unreadable\":0,\"unstable\":0,\"mounts\":0,\"raced\":0,"
+          "\"trusted\":0,\"reference\":\"none\",\"read_all\":\"check\"}\n", "an entry at or below an excluded path" },
         { "trusted past the entries", H2 ROOT_E T1 ",\"trusted\":9,\"reference\":\"walk_start\",\"read_all\":\"\"}\n",
           "trusts more files than entries" },
     };
