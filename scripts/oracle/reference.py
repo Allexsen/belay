@@ -51,7 +51,7 @@ What the prose leaves to generated tables:
   - the order of a record's keys after `path`, `outcome` and `type` (the
     record table is generated): compare.py does not check it -- except
     where a pin states it in words: `before` and `after` "after `changed`
-    and before `unknown`" (diff-values V1), "after `type_before`" (V6).
+    and before `unknown`" (diff-values V1, V6).
 """
 import base64, collections, hashlib, json, os, re, sys
 
@@ -614,23 +614,24 @@ def load_values_pin():
                'after `changed` and before `unknown`',
                "for every field `changed` names, in `changed`'s order, that side's value, under "
                'the key and in the encoding the manifest uses for it',
-               'A record without `changed` carries neither, a `type_changed` record excepted '
-               '(V6)'],
+               'A record without `changed` carries neither. A record that carries `type_before` '
+               "carries V6's values instead (V6)."],
         'V2': ["A field that side's entry does not record (iflags not read, no caps, no "
-               "xattrs) is absent from that side's object; the other side's value stands "
-               'alone.',
-               # Read as VA1 below: the sentence that is false when the only
-               # field `changed` names is recorded on one side only.
-               'Neither object is ever empty: a field in `changed` is recorded on at least one '
-               'side.'],
+               "xattrs, a symlink's target that could not be read) is absent from that side's "
+               "object; the other side's value stands alone.",
+               "A side's object is therefore `{}` when the only changed field is absent on that "
+               'side (caps or an xattr set added or removed); the two are never both empty',
+               'an unreadable target is left out, not written as `""`'],
         'V3': ['`link_target_b64` for a target that is not UTF-8; `xattrs_sha256` for an xattr '
                'set recorded as its digest only. Each side chooses its own spelling.'],
         'V4': ['The values are carried, never compared again'],
         'V5': ['No line of diff.v1 has a fixed length bound'],
-        'V6': ['A `type_changed` record carries `"before"` and `"after"` (after `type_before`), '
-               "each holding that side's `mode` and its type's content fields: `size` and "
-               '`sha256` for `reg`, `link_target` (or `link_target_b64`) for `lnk`, `rdev` for '
-               '`chr` and `blk`; `mode` alone for `dir`, `fifo` and `sock`.',
+        'V6': ['A record that carries `type_before` -- every `type_changed` record, and an '
+               '`unknown` one whose type also changed, as a raced swap does',
+               'carries `"before"` and `"after"` (after `changed`, which is `["type"]` on every '
+               "type change), each holding that side's `mode` and its type's content fields: "
+               '`size` and `sha256` for `reg`, `link_target` (or `link_target_b64`) for `lnk`, '
+               '`rdev` for `chr` and `blk`; `mode` alone for `dir`, `fifo` and `sock`.',
                "A field the side's entry does not record (a `sha256` not computed) is absent "
                '(V2).'],
     }
@@ -641,7 +642,8 @@ def load_values_pin():
                                  '%r' % (r, w))
     # The field table: every field `changed` can name (a compared field, or
     # `ctime_ns` under rule 5) has a row, and nothing else -- `type`, the one
-    # name `changed` holds across a type change, has none (ambiguity VA2).
+    # name `changed` holds across a type change, has none: a record whose
+    # types differ carries V6's values instead (V1, V6).
     fields = [r['field'] for r in md_table(text, 'field')]
     can_change = [f for f, s in FIELDS.items() if s.cls in COMPARED_CLASSES + (CTIME,)]
     if fields != can_change:
@@ -701,57 +703,79 @@ def side_values(raw, names):
     return out
 
 
-def record_values(outcome, changed, rb, ra, trace):
+# Ambiguity VA6 (side_values_v6()): False carries a target the manifest
+# wrote on an `unreadable` link; True leaves it out as an unknown one is.
+VA6_EVERY_UNREADABLE_TARGET_LEFT_OUT = False
+
+
+def side_values_v6(raw, trace, side):
+    """V6: one side's `mode` and its type's content fields (TYPE_VALUES), each
+    the side's entry records. "A field the side's entry does not record (a
+    `sha256` not computed) is absent (V2)"; V2 counts among those "a
+    symlink's target that could not be read": the manifest records an
+    unknown target as "" ("Empty only on an `unreadable` link, meaning the
+    target is unknown"), and V2 says it "is left out, not written as `""`".
+
+    A target the manifest did write on an `unreadable` link (it is not empty:
+    the link was flagged though its bytes were read, the target "kept
+    changing while being read" -- manifest-v1, `unreadable`) is recorded,
+    so it is carried as written: V2 leaves out a target "that could not be
+    read", and the manifest calls only the empty one unknown (ambiguity
+    VA6). The other reading -- every `unreadable` link's target left out,
+    as diff-fields never compares it "when either side is `unreadable`" --
+    is VA6_EVERY_UNREADABLE_TARGET_LEFT_OUT = True."""
+    v = side_values(raw, TYPE_VALUES[raw['type']])
+    if raw['type'] == 'lnk' and raw.get('unreadable') and VA6_EVERY_UNREADABLE_TARGET_LEFT_OUT:
+        v = [(k, x) for k, x in v if k not in MANIFEST_KEYS['link_target']]
+    if raw['type'] == 'reg' and 'sha256' not in raw:
+        trace.append('values:V6-no-sha256-' + side)
+    if raw['type'] == 'lnk' and raw.get('link_target') == '':
+        v = [(k, x) for k, x in v if k not in MANIFEST_KEYS['link_target']]
+        trace.append('values:V2-target-unknown-' + side)
+    elif raw['type'] == 'lnk' and raw.get('unreadable'):
+        trace.append('values:VA6-unreadable-target-' + side)
+    return v
+
+
+def record_values(rb, ra, changed, trace):
     """(before, after) as [(key, value)] each, or None when the record
     carries neither.
 
-    V6: a `type_changed` record carries each side's `mode` and its type's
-    content fields (TYPE_VALUES) -- whatever `changed` holds; diff-v1 and pin
-    O7 give it `changed` ["type"], which V4 keeps ("`changed` ... decided as
-    before"), though V1's "a `type_changed` record excepted" and V6's
-    example write it with no `changed` (ambiguity VA4: `changed` is kept).
+    V6: a record that carries `type_before` -- the path is on both sides and
+    its types differ, "every `type_changed` record, and an `unknown` one
+    whose type also changed, as a raced swap does" -- carries each side's
+    `mode` and its type's content fields (side_values_v6()); its `changed`
+    is ["type"] (O7; V6: "which is `["type"]` on every type change"), and
+    V1 gives way to V6 ("A record that carries `type_before` carries V6's
+    values instead").
 
-    V1: otherwise, with `changed`, the fields it names, in its order. That
-    includes a path whose types differ while `raced` makes it `unknown`:
-    `changed` is ["type"] there (O7), V6 speaks of a `type_changed` record
-    only, so V1 applies as written -- `type` under the manifest's key and
-    encoding, {"type": "reg"} -- though the pin's field table has no `type`
-    row (ambiguity VA2).
+    V1: otherwise, with `changed`, the fields it names, in its order.
 
     V2: a field the side does not record is left out of that side's object.
     When the only field `changed` names is recorded on one side only (`caps`
     or an xattr set added or removed: absent means none where read, so it is
-    compared and differs), that side's object holds nothing: V2's "Neither
-    object is ever empty" cannot hold then -- its reason, "a field in
-    `changed` is recorded on at least one side", proves only that the two
-    are not both empty. V1 ("also carries `before` and `after`") is kept:
-    the object is written, empty, `{}` (ambiguity VA1).
-
-    An unreadable symlink whose target is unknown records `link_target` as
-    "" (manifest-v1: "Empty only on an `unreadable` link, meaning the target
-    is unknown"): the field is recorded, so V6 carries "" -- it is not "a
-    field the side's entry does not record" (ambiguity VA5). (`changed`
-    never names it there: the target is not compared when either side is
-    unreadable.)"""
-    if outcome == 'type_changed':
-        vb = side_values(rb, TYPE_VALUES[rb['type']])
-        va = side_values(ra, TYPE_VALUES[ra['type']])
+    compared and differs), that side's object is `{}` ("A side's object is
+    therefore `{}` when the only changed field is absent on that side"). A
+    link target is never in `changed` when either side is `unreadable` (the
+    target is compared "when neither side is `unreadable`"), so an unknown
+    target is left out under V6 only."""
+    if rb['type'] != ra['type']:
         trace.append('values:V6')
-        for side, raw, v in (('before', rb, vb), ('after', ra, va)):
-            if raw['type'] == 'reg' and 'sha256' not in raw:
-                trace.append('values:V6-no-sha256-' + side)
-            if raw['type'] == 'lnk' and raw.get('link_target') == '':
-                trace.append('values:V6-empty-target-' + side)
+        if rb.get('raced') or ra.get('raced'):
+            trace.append('values:V6-raced')
+        vb = side_values_v6(rb, trace, 'before')
+        va = side_values_v6(ra, trace, 'after')
     elif changed:
         vb, va = side_values(rb, changed), side_values(ra, changed)
-        if changed == ['type']:
-            trace.append('values:type-not-type_changed')
         if not vb or not va:
-            trace.append('values:VA1-empty-object')
+            trace.append('values:V2-empty-object')
         elif len(vb) != len(changed) or len(va) != len(changed):
             trace.append('values:V2-one-side')
     else:
         return None
+    # V2: "the two are never both empty".
+    if not vb and not va:
+        raise AssertionError('reference bug: both value objects empty (%s)' % changed)
     if any(k in ALTERNATE_KEYS for k, _ in vb + va):
         trace.append('values:V3-alternate')
     return vb, va
@@ -1580,8 +1604,8 @@ def diff(before, after):
         if changed:
             rec['changed'] = changed
         # diff-values V1: `before` and `after` "after `changed` and before
-        # `unknown`"; V6: on a `type_changed` record "after `type_before`".
-        vals = (record_values(out, changed, rawb[p], rawa[p], traces[p])
+        # `unknown`"; V6: on a record with `type_before`, "after `changed`".
+        vals = (record_values(rawb[p], rawa[p], changed, traces[p])
                 if b is not None and a is not None else None)
         if vals is not None:
             rec['before'], rec['after'] = dict(vals[0]), dict(vals[1])
@@ -1636,7 +1660,7 @@ def canonical(v):
         return str(v).encode('ascii')
     if isinstance(v, str):
         return canonical_string(v)
-    if isinstance(v, dict):            # an object, empty or not (diff-values VA1: `{}`)
+    if isinstance(v, dict):            # an object, empty or not (diff-values V2: `{}`)
         return b'{' + b','.join(canonical_string(k) + b':' + canonical(x)
                                 for k, x in v.items()) + b'}'
     if v and all(isinstance(x, tuple) and len(x) == 2 and isinstance(x[0], str) for x in v):
