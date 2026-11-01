@@ -4,7 +4,8 @@
 list, and make it reversible.
 
 **Status: pre-alpha.** The checkpoint and diff engine runs (below); the formats it writes are drafts
-that may still change, and there are no releases. Nothing that changes your files exists yet.
+that may still change, and the first pre-release is v0.1.0-alpha. Nothing that changes your files
+exists yet.
 
 ## What exists today
 
@@ -25,7 +26,7 @@ that may still change, and there are no releases. Nothing that changes your file
 
 No `commit`, `discard`, restore or undo: belay records and explains, and changes nothing. The
 session engine under `src/session/` (namespaces and overlays) is not part of the `belay` binary.
-No integrity checking against a baseline, no policy layer, no Python package, no releases.
+No integrity checking against a baseline, no policy layer, no Python package, no stable release.
 
 ## Deliberate limits
 
@@ -34,7 +35,8 @@ meant as a **safety** boundary, not a **security** boundary — built for accide
 code; it will not contain a process that is actively trying to escape. See [SECURITY.md](SECURITY.md).
 
 What a checkpoint does not see: anything outside the scope, anything below a mount point inside it,
-belay's own state directory (left out, and said), and network effects (pushes, API calls, emails).
+belay's own state directory and the paths you exclude (left out, and named in every manifest), and
+network effects (pushes, API calls, emails).
 On filesystems with coarse timestamps some same-size rewrites can be missed; the limits are in
 [docs/spec/manifest-v1.md](docs/spec/manifest-v1.md).
 
