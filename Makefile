@@ -64,7 +64,7 @@ SAN_FLAGS	= -fsanitize=address,undefined -fno-omit-frame-pointer -g -O1
 SAN_BUILD	= $(BUILD)/san
 SAN_TEST_BIN	= $(TEST_SRC:test/%.c=$(SAN_BUILD)/test/%)
 
-.PHONY: e2e all clean test check check-san fuzz bench platform fs-scenarios gen gen-check measure oracle reference lib lint ci-check
+.PHONY: dogfood-test e2e all clean test check check-san fuzz bench platform fs-scenarios gen gen-check measure oracle reference lib lint ci-check
 
 all: $(BIN) $(SESSION_OBJ)
 
@@ -209,6 +209,11 @@ measure: $(MEASURE)
 # The diff core against a naive reference on a generated corpus of manifest
 # pairs (scripts/oracle/). ORACLE_BASES scales the corpus (~15 pairs each).
 ORACLE_BASES	?= 200
+# The M1.5 hooks on scripted sessions (scripts/dogfood/selftest.sh): needs jq,
+# python3 and GNU date; run by the linux-x86_64 CI job.
+dogfood-test: $(BIN)
+	@sh scripts/dogfood/selftest.sh $(BIN)
+
 oracle: all
 	scripts/oracle/run.sh $(ORACLE_BASES)
 
