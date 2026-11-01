@@ -406,6 +406,13 @@ side, then after; an interpreter's `content_unavailable` events come one per rea
 `no_store`, `missing`, `too_large`, `corrupt`. A `bool` field renders in `text` as `true` or
 `false`.
 
+Three rules for a reflog over its bound, stated because independent authors had to infer them
+(decided 2026-11-01): the reflog's `too_large` stands where `missing` would, so it too is given
+before `no_store` when both apply; "over its 16 MiB bound" means a `size` strictly larger than
+16,777,216 bytes (a reflog of exactly 16 MiB is kept and read); and a reflog entry that carries no
+hash because it is larger than the capture's `hash_max_bytes` (`unverified`) is `too_large` by the
+same `size` rule, like one recorded without a copy.
+
 Where an interpreter fails on a path (a file it claims cannot be parsed, a dist-info cannot be
 named), that path's record carries `could_not_interpret` (R11) unless its outcome is `unknown`,
 nothing more is read from it, and pip and dpkg emit one `could_not_interpret` event naming it (E10);
