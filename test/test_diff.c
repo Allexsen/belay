@@ -924,8 +924,9 @@ TEST(a_raced_type_change_names_the_type_before) {
     m_begin("after", "/s", 1000); ROOT(); E(.path = "x", .type = "lnk", .target = "t", .raced = true); m_end();
     REQUIRE(run() == 0);
     ASSERT_TRUE(has("x", "\"outcome\":\"unknown\",\"type\":\"lnk\",\"type_before\":\"reg\","
-                         "\"changed\":[\"type\"],\"before\":{\"type\":\"reg\"},\"after\":{\"type\":\"lnk\"},"
-                         "\"unknown\":[\"raced\"]}"));
+                         "\"changed\":[\"type\"],\"before\":{\"mode\":33188,\"size\":3,\"sha256\":\"" HA "\"},"
+                         "\"after\":{\"mode\":41380,\"link_target\":\"t\"},\"unknown\":[\"raced\"]}"));
+    /* (decision 2026-11-01, 3: a raced swap carries V6's values, like any type change) */
     /* raced on the other side, the same */
     m_begin("before", "/s", 1000); ROOT(); E(.path = "x", .type = "reg", .size = 3, .sha = HA, .raced = true); m_end();
     m_begin("after", "/s", 1000); ROOT(); E(.path = "x", .type = "lnk", .target = "t"); m_end();
@@ -1250,11 +1251,13 @@ TEST(a_type_change_carries_each_sides_content_fields) {
     E(.path = "d", .type = "dir");
     E(.path = "t", .type = "reg", .size = 3, .sha = HA);
     E(.path = "u", .type = "reg", .size = 2000);                       /* over hash_max: no sha256 */
+    E(.path = "v", .type = "reg", .size = 3, .sha = HA);
     m_end();
     m_begin("after", "/s", 1000); ROOT();
     E(.path = "d", .type = "chr", .rdev = 7);
     E(.path = "t", .type = "lnk", .target = "fixtures/real.py");
     E(.path = "u", .type = "dir");
+    E(.path = "v", .type = "lnk", .unreadable = true);                 /* its target not read */
     m_end();
     REQUIRE(run() == 0);
     ASSERT_TRUE(has("t", "\"outcome\":\"type_changed\",\"type\":\"lnk\",\"type_before\":\"reg\","
@@ -1262,6 +1265,8 @@ TEST(a_type_change_carries_each_sides_content_fields) {
                          "\"after\":{\"mode\":41380,\"link_target\":\"fixtures/real.py\"}}"));
     ASSERT_TRUE(has("d", "\"before\":{\"mode\":16804},\"after\":{\"mode\":8612,\"rdev\":7}}"));
     ASSERT_TRUE(has("u", "\"before\":{\"mode\":33188,\"size\":2000},\"after\":{\"mode\":16804}}"));
+    /* decision 2026-11-01, 4: an unreadable target is left out, never "" */
+    ASSERT_TRUE(has("v", "\"after\":{\"mode\":41380}") && !has("v", "link_target"));
 }
 
 /* V5: a record's line has no fixed bound: two 4,095-byte targets of

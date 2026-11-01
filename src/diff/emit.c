@@ -89,10 +89,11 @@ void emit_close(struct emitter *em) {
 }
 
 /* The fields a side's values carry (pin diff-values.md). With `changed`:
- * those it names (V1). On type_changed: the side's mode and its type's
- * content fields (V6). */
-static uint32_t value_fields(const struct verdict *v, const struct belay_entry *e) {
-    if (v->outcome != D_TYPE_CHANGED) return v->changed;
+ * those it names (V1). When the type differs between the sides --
+ * type_changed, or unknown with a raced swap (decision 2026-11-01, 3) --
+ * the side's mode and its type's content fields (V6). */
+static uint32_t value_fields(const struct verdict *v, const struct belay_entry *e, bool type_differs) {
+    if (!type_differs) return v->changed;
     uint32_t f = FBIT(F_MODE);
     switch (e->type) {
     case BELAY_T_REG: f |= FBIT(F_SIZE) | FBIT(F_SHA256); break;
@@ -120,6 +121,7 @@ static int put_values(struct emitter *em, enum diff_record_field key, const stru
         enum entry_field g = (enum entry_field)f;
         if (g == F_XATTRS && !(present & FBIT(F_XATTRS))) g = F_XATTRS_SHA256;
         if (!(present & FBIT(g))) continue;
+        if (g == F_LINK_TARGET && e->unreadable) continue;     /* not recorded: left out (V2) */
         if (!first) em->vals[w++] = ',';
         first = false;
         if (entry_put_field(e, g, em->vals, EMIT_VALUES_CAP - 1, &w) == -1) return -1;
@@ -190,14 +192,15 @@ int emit_path(struct emitter *em, const struct belay_entry *before,
     }
     /* The values (pin diff-values.md): after `changed`, before `unknown`.
      * The head so far goes first; the values follow it in the file. */
-    if (v->changed || (v->outcome == D_TYPE_CHANGED && before != NULL && after != NULL)) {
+    const bool type_differs = before != NULL && after != NULL && before->type != after->type;
+    if (v->changed || type_differs) {
         if (fwrite(b.p, 1, b.w, em->f) != b.w) {
             belay_err_set(BELAY_ERR_IO, errno, "diff: write failed");
             return -1;
         }
         b.w = 0;
-        if (put_values(em, DF_BEFORE, before, value_fields(v, before)) == -1 ||
-            put_values(em, DF_AFTER, after, value_fields(v, after)) == -1)
+        if (put_values(em, DF_BEFORE, before, value_fields(v, before, type_differs)) == -1 ||
+            put_values(em, DF_AFTER, after, value_fields(v, after, type_differs)) == -1)
             return -1;
     }
     if (v->outcome == D_UNKNOWN && v->reasons) {

@@ -54,7 +54,7 @@ consumers MUST handle lines of any length.
 | `type` | string | The entry's type after (before, for `removed`). |
 | `type_before` | string | When the path is on both sides and its types differ: the type before. That is every `type_changed`, and an `unknown` whose type also changed (`raced`). |
 | `changed` | array | The compared fields that differ, in the manifest's field order; absent when none. |
-| `before` | object | With `changed`: each field it names, the before side's value under the manifest's key and encoding (`link_target_b64`, `xattrs_sha256` where the manifest spells it so); a field that side does not record is left out. On `type_changed`: that side's `mode` and its type's content fields (`size`, `sha256` for `reg`; `link_target` for `lnk`; `rdev` for `chr`, `blk`). Carried, never compared: the outcome does not depend on it (`test/expect/diff-values.md`). |
+| `before` | object | With `changed`: each field it names, the before side's value under the manifest's key and encoding (`link_target_b64`, `xattrs_sha256` where the manifest spells it so); a field that side does not record is left out. Where the type differs (`type_changed`, or `unknown` with `type_before`): that side's `mode` and its type's content fields (`size`, `sha256` for `reg`; `link_target` for `lnk`; `rdev` for `chr`, `blk`). Carried, never compared: the outcome does not depend on it (`test/expect/diff-values.md`). |
 | `after` | object | As `before`, for the after side. |
 | `unknown` | array | For `unknown` only: the reasons, in the order of the reasons table. |
 | `findings` | array | What an interpreter explained about the change, one object each (Findings, below); absent when none. Annotations only: an interpreter never sets or changes the outcome. |

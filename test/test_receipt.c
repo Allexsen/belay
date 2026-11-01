@@ -321,6 +321,25 @@ TEST(a_receipt_shows_the_values_a_person_reads) {
     ASSERT_TRUE(strstr(g_text, "  M l   link_target a -> /etc/\\x1bshadow\n") != NULL);
 }
 
+/* Decision 2026-11-01, 5 (R11's coverage): a value the receipt prints is
+ * attacker-controlled -- a link target, or a string where a number belongs
+ * in a diff belay did not write -- and goes through the escaping paths and
+ * texts do: no terminal sequence, no forged line or heading. */
+TEST(values_the_receipt_prints_are_escaped) {
+    ASSERT_EQ_INT(0, render(HEAD
+        "{\"path\":\"l\",\"outcome\":\"modified\",\"type\":\"lnk\",\"changed\":[\"link_target\"],"
+        "\"before\":{\"link_target\":\"ok\"},"
+        "\"after\":{\"link_target\":\"x\\n\\nprivilege\\n  ~ all fine\\u001b[2J\\u009b31m\\u202e\\\\\"}}\n"
+        "{\"path\":\"m\",\"outcome\":\"metadata_only\",\"type\":\"reg\",\"changed\":[\"uid\"],"
+        "\"before\":{\"uid\":\"\\u001b]0;pwned\\u0007\"},\"after\":{\"uid\":0}}\n"
+        TRAIL("1", "0", "1", "0", "0", "0", "0"), true));
+    ASSERT_TRUE(strstr(g_text, "  M l   link_target ok -> x\\x0a\\x0aprivilege\\x0a  ~ all fine\\x1b[2J"
+                               "\\xc2\\x9b31m\\xe2\\x80\\xae\\\\\n") != NULL);
+    ASSERT_TRUE(strstr(g_text, "  ~ m   uid \\x1b]0;pwned\\x07 -> 0\n") != NULL);
+    ASSERT_TRUE(strchr(g_text, '\x1b') == NULL && strchr(g_text, '\x07') == NULL);
+    ASSERT_TRUE(strstr(g_text, "\nprivilege\n") == NULL);              /* no forged heading */
+}
+
 int main(void) {
     RUN(a_receipt_puts_events_then_privilege_then_changes);
     RUN(long_sections_fold_but_privilege_never_does);
@@ -334,6 +353,7 @@ int main(void) {
     RUN(entries_that_changed_while_read_are_counted_in_one_line);
     RUN(and_more_findings_are_counted_in_the_receipt);
     RUN(a_receipt_shows_the_values_a_person_reads);
+    RUN(values_the_receipt_prints_are_escaped);
     free(g_text);
     return belay_test_report();
 }
