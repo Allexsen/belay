@@ -13,7 +13,8 @@ is decided.
 NDJSON, like the manifest: one header line, one record per path whose outcome is not `unchanged`,
 in the manifests' path order (bytewise), then the event records (see "Interpreters"), and a
 trailer line. Readers MUST reject a version they do not know, and treat a missing trailer as a
-truncated diff.
+truncated diff. No line has a fixed length bound (a record's findings alone make it unbounded):
+consumers MUST handle lines of any length.
 
 ```json
 {"belay_diff":1,"scopes":["/home/u/proj"],"before_created_ns":1761000000000000000,"after_created_ns":1761000600000000000,"before_hash_max_bytes":67108864,"after_hash_max_bytes":67108864,"scope_remounted":false,"identity_compared":true}
