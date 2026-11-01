@@ -23,10 +23,13 @@ extern const enum entry_field DECODE_ORDER[F_COUNT];
  * 0, or -1 with the error set. */
 int decode_entry(const struct obj *o, struct belay_entry *e);
 
-/* The header line. */
-int decode_header(const struct obj *o, struct belay_manifest_header *h);
+/* The header line, version 1 or 2, each by its own key set; a v2 header's
+ * `excluded` decoded into `excluded` (BELAY_EXCLUDED_MAX), which
+ * h->excluded then points at. */
+int decode_header(const struct obj *o, struct belay_manifest_header *h, struct belay_excluded *excluded);
 
-/* The trailer line's values, indexed by enum trailer_field. */
-int decode_trailer(const struct obj *o, uint64_t v[TR_COUNT]);
+/* The trailer line's values, indexed by enum trailer_field; for version 2
+ * also `trusted`, `reference` and `read_all` into *t. */
+int decode_trailer(const struct obj *o, uint64_t version, uint64_t v[TR_COUNT], struct belay_manifest_stats *t);
 
 #endif

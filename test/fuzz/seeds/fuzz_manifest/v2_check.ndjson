@@ -1,0 +1,6 @@
+{"belay_manifest":2,"created_ns":1793521767406232209,"scopes":["/s"],"hash":"sha256","hash_max_bytes":67108864,"store_max_bytes":65536,"excluded":[],"walk_start_ns":1793521767405808539}
+{"path":".","type":"dir","mode":16877,"uid":1000,"gid":1000,"size":4096,"mtime_ns":1793521767402261435,"ctime_ns":1793521767402261435,"ino":81298,"dev":2096,"nlink":3,"iflags":524288}
+{"path":"a","type":"dir","mode":16877,"uid":1000,"gid":1000,"size":4096,"mtime_ns":1793521767401536025,"ctime_ns":1793521767401536025,"ino":81300,"dev":2096,"nlink":2,"iflags":524288}
+{"path":"a/f","type":"reg","mode":33188,"uid":1000,"gid":1000,"size":3,"mtime_ns":1793521767402261435,"ctime_ns":1793521767402261435,"ino":81308,"dev":2096,"nlink":1,"iflags":524288,"sha256":"98ea6e4f216f2fb4b69fff9b3a44842c38686ca685f3f55dc48c5d3fb1107be4","stored":"98ea6e4f216f2fb4b69fff9b3a44842c38686ca685f3f55dc48c5d3fb1107be4"}
+{"path":"g","type":"reg","mode":33188,"uid":1000,"gid":1000,"size":2,"mtime_ns":1793521767402261435,"ctime_ns":1793521767402261435,"ino":81310,"dev":2096,"nlink":1,"iflags":524288,"sha256":"73cb3858a687a8494ca3323053016282f3dad39d42cf62ca4e79dda2aac7d9ac","stored":"73cb3858a687a8494ca3323053016282f3dad39d42cf62ca4e79dda2aac7d9ac"}
+{"belay_manifest_end":4,"vanished":0,"unreadable":0,"unstable":0,"mounts":0,"raced":0,"trusted":0,"reference":"none","read_all":"check"}

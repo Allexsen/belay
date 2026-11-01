@@ -158,6 +158,38 @@ const struct line_field_def TRAILER_FIELDS[TR_COUNT] = {
         "manifest is not a single instant." },
 };
 
+const struct line_field_def HEADER2_FIELDS[H2_COUNT] = {
+    [H2_EXCLUDED] = { "excluded", NULL, "array",
+        "What inside the scope was not walked, one object each (below), sorted by path bytes; `[]` "
+        "when nothing was. It has no entry, nor anything below it; its name still counts in its "
+        "parent's listing. Nothing is ever excluded silently." },
+    [H2_WALK_START] = { "walk_start_ns", NULL, "int",
+        "When the walk began, on the scope filesystem's clock (the ctime of a file the writer "
+        "creates on the scope's device as the walk starts); `0` when that clock could not be read. "
+        "A later capture's prefilter compares with it." },
+};
+
+const struct line_field_def TRAILER2_FIELDS[TR2_COUNT] = {
+    [TR2_TRUSTED] = { "trusted", NULL, "int",
+        "Regular files whose hash and copy decision came from a previous manifest instead of a "
+        "read (mark's prefilter); `0` for a full walk." },
+    [TR2_REFERENCE] = { "reference", NULL, "string",
+        "What a trusted file's ctime was compared with: `walk_start` (the previous manifest's "
+        "`walk_start_ns`), `newest_ctime` (its newest validated ctime, the start unknown), `none` "
+        "(no previous manifest used)." },
+    [TR2_READ_ALL] = { "read_all", NULL, "string",
+        "Why every file was read: `check` for a full check, or the reason a capture with a "
+        "previous manifest read everything; `\"\"` when the prefilter was used." },
+};
+
+const struct line_field_def EXCLUDED_FIELDS[EX_COUNT] = {
+    [EX_PATH] = { "path", "path_b64", "string", "Relative to the scope, as entry paths are." },
+    [EX_REASON] = { "reason", NULL, "string",
+        "`state_dir`: belay's own state directory; `user`: an exclude configured for the scope." },
+    [EX_DEV] = { "dev", NULL, "int", "The device of what was there." },
+    [EX_INO] = { "ino", NULL, "int", "Its inode." },
+};
+
 #define T_REG  TBIT(BELAY_T_REG)
 #define T_DIR  TBIT(BELAY_T_DIR)
 #define T_LNK  TBIT(BELAY_T_LNK)

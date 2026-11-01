@@ -65,9 +65,28 @@ static int visit(int parent_fd, const char *name, char *rel, size_t relsz,
             return VISIT_INCOMPLETE;
         }
 
+        /* Not walked: belay's own state directory (Q6), by identity, or a
+         * path configured for the scope, exactly. Each is named in the v2
+         * header with what was there -- never excluded silently. */
+        int reason = -1;
         if (wc->opts->exclude && S_ISDIR(st.st_mode) && (uint64_t)st.st_dev == wc->opts->exclude_dev &&
-            (uint64_t)st.st_ino == wc->opts->exclude_ino) {
-            wc->excluded++;
+            (uint64_t)st.st_ino == wc->opts->exclude_ino)
+            reason = BELAY_EXCLUDE_STATE_DIR;
+        for (size_t i = 0; reason == -1 && i < wc->opts->n_exclude_paths; i++)
+            if (strlen(wc->opts->exclude_paths[i]) == rel_len && memcmp(wc->opts->exclude_paths[i], rel, rel_len) == 0)
+                reason = BELAY_EXCLUDE_USER;
+        if (reason != -1) {
+            if (wc->excluded >= BELAY_EXCLUDED_MAX || rel_len >= sizeof wc->xs[0].path) {
+                belay_err_set(BELAY_ERR_RANGE, 0, "manifest: more than %d excluded entries", BELAY_EXCLUDED_MAX);
+                return -1;
+            }
+            struct belay_excluded *x = &wc->xs[wc->excluded++];
+            memcpy(x->path, rel, rel_len);
+            x->path[rel_len] = '\0';
+            x->path_len = rel_len;
+            x->reason = (enum belay_exclude_reason)reason;
+            x->dev = (uint64_t)st.st_dev;
+            x->ino = (uint64_t)st.st_ino;
             return VISIT_EXCLUDED;
         }
         {

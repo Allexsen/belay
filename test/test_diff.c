@@ -54,13 +54,15 @@ static char g_out[300];
 static FILE *g_f;
 static size_t g_n, g_unreadable, g_unstable, g_mounts, g_raced, g_vanished;
 static long long g_created = 1;           /* the next manifest's created_ns */
+static bool g_v2;                         /* the next manifest is version 2 */
 
 static void m_begin(const char *name, const char *scope, unsigned long long hash_max) {
     char p[400];
     snprintf(p, sizeof p, "%s/%s", g_dir, name);
     g_f = fopen(p, "wb");
-    fprintf(g_f, "{\"belay_manifest\":1,\"created_ns\":%lld,\"scopes\":[\"%s\"],\"hash\":\"sha256\","
-                 "\"hash_max_bytes\":%llu,\"store_max_bytes\":0}\n", g_created, scope, hash_max);
+    fprintf(g_f, "{\"belay_manifest\":%d,\"created_ns\":%lld,\"scopes\":[\"%s\"],\"hash\":\"sha256\","
+                 "\"hash_max_bytes\":%llu,\"store_max_bytes\":0%s}\n", g_v2 ? 2 : 1, g_created, scope, hash_max,
+            g_v2 ? ",\"excluded\":[],\"walk_start_ns\":0" : "");
     g_created = 1;
     g_n = g_unreadable = g_unstable = g_mounts = g_raced = g_vanished = 0;
 }
@@ -101,8 +103,9 @@ static void m_entry(struct me e) {
 
 static void m_end(void) {
     fprintf(g_f, "{\"belay_manifest_end\":%zu,\"vanished\":%zu,\"unreadable\":%zu,\"unstable\":%zu,"
-                 "\"mounts\":%zu,\"raced\":%zu}\n", g_n, g_vanished, g_unreadable, g_unstable,
-            g_mounts, g_raced);
+                 "\"mounts\":%zu,\"raced\":%zu%s}\n", g_n, g_vanished, g_unreadable, g_unstable,
+            g_mounts, g_raced, g_v2 ? ",\"trusted\":0,\"reference\":\"none\",\"read_all\":\"check\"" : "");
+    g_v2 = false;
     fclose(g_f);
 }
 
@@ -201,7 +204,8 @@ TEST(a_remounted_scope_reports_once_and_still_compares_content) {
     m_begin("after", "/s", 1000); ROOT(.dev = 9); E(.path = "f", .type = "reg", .size = 3, .sha = HA, .ino = 70, .dev = 9);
     E(.path = "g", .type = "reg", .size = 3, .sha = HB, .ino = 80, .dev = 9); m_end();
     REQUIRE(run() == 0);
-    ASSERT_TRUE(strstr(g_text, "\"scope_remounted\":true,\"identity_compared\":false}") != NULL);
+    ASSERT_TRUE(strstr(g_text, "\"scope_remounted\":true,\"identity_compared\":false,\"before_manifest_version\":1,"
+                               "\"after_manifest_version\":1}") != NULL);
     ASSERT_TRUE(record("f") == NULL);                    /* renumbered, nothing else */
     ASSERT_TRUE(has("g", "\"outcome\":\"modified\"") && has("g", "\"changed\":[\"sha256\"]"));
     ASSERT_TRUE(record(".") == NULL);
@@ -219,7 +223,8 @@ TEST(inode_numbers_compare_only_within_one_device) {
     m_begin("after", "/s", 1000); ROOT(); E(.path = "f", .type = "reg", .size = 3, .sha = HA, .ino = 8, .dev = 6); m_end();
     REQUIRE(run() == 0);
     ASSERT_TRUE(record("f") == NULL);                    /* off the root's device on both sides */
-    ASSERT_TRUE(strstr(g_text, "\"scope_remounted\":false,\"identity_compared\":true}") != NULL);
+    ASSERT_TRUE(strstr(g_text, "\"scope_remounted\":false,\"identity_compared\":true,\"before_manifest_version\":1,"
+                               "\"after_manifest_version\":1}") != NULL);
 }
 
 /* Item 1c: ttys and FIFOs stamp themselves when used, and a mount root's
@@ -1308,6 +1313,31 @@ TEST(a_record_line_has_no_fixed_bound) {
     ASSERT_TRUE(longest > 65536);                                      /* past the old cap */
 }
 
+/* Manifest v2, V2-R4: manifests of different versions compare, the same
+ * records either way; the header names both versions (provenance only). */
+TEST(manifests_of_different_versions_compare) {
+    static char one[1 << 16];
+    for (int way = 0; way < 2; way++) {
+        m_begin("before", "/s", 1000); ROOT(); E(.path = "f", .type = "reg", .size = 3, .sha = HA); m_end();
+        g_v2 = way == 1;
+        m_begin("after", "/s", 1000); ROOT(); E(.path = "f", .type = "reg", .size = 4, .sha = HB); m_end();
+        REQUIRE(run() == 0);
+        char want[120];
+        snprintf(want, sizeof want, "\"before_manifest_version\":1,\"after_manifest_version\":%d}\n", way ? 2 : 1);
+        ASSERT_TRUE(strstr(g_text, want) != NULL);
+        const char *rec = strchr(g_text, '\n');                        /* past the header */
+        REQUIRE(rec != NULL);
+        const char *end = strstr(rec, "{\"belay_diff_end\"");          /* the trailer: digests differ */
+        REQUIRE(end != NULL);
+        if (way == 0) snprintf(one, sizeof one, "%.*s", (int)(end - rec), rec);
+        else {
+            char two[sizeof one];
+            snprintf(two, sizeof two, "%.*s", (int)(end - rec), rec);
+            ASSERT_EQ_STR(one, two);                                    /* the records alike */
+        }
+    }
+}
+
 int main(void) {
     snprintf(g_dir, sizeof g_dir, "/tmp/belay_diff_%d", (int)getpid());
     snprintf(g_out, sizeof g_out, "%s/diff.ndjson", g_dir);
@@ -1363,6 +1393,7 @@ int main(void) {
     RUN(values_keep_the_manifests_alternate_spellings);
     RUN(a_type_change_carries_each_sides_content_fields);
     RUN(a_record_line_has_no_fixed_bound);
+    RUN(manifests_of_different_versions_compare);
     snprintf(cmd, sizeof cmd, "rm -rf '%s'", g_dir);
     if (system(cmd) != 0) { /* best effort */ }
     return belay_test_report();

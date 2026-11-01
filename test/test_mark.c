@@ -76,18 +76,14 @@ static void writef(const char *rel, const char *data, size_t n) {
     fclose(f);
 }
 
-/* A capture of g_tree into `out`, with `previous` (NULL: full), given the
- * last capture's walk start as the CLI gives it (meta.json). */
-static int64_t g_last_start;
+/* A capture of g_tree into `out`, with `previous` (NULL: full); the previous
+ * walk's start comes from its manifest's header (v2). */
 static int capture(const char *out, const char *previous, struct belay_manifest_stats *st) {
     char store[300];
     snprintf(store, sizeof store, "%s/store", g_dir);
     const struct belay_manifest_opts o = { .hash_max_bytes = 1u << 20, .store_max_bytes = 4096,
-                                           .store_dir = store, .previous = previous,
-                                           .previous_start_ns = previous ? g_last_start : 0 };
-    const int r = capture_write(&g_ops, out, g_tree, &o, st);
-    if (r == 0) g_last_start = st->walk_start_ns;
-    return r;
+                                           .store_dir = store, .previous = previous };
+    return capture_write(&g_ops, out, g_tree, &o, st);
 }
 
 /* The manifest's entry lines (everything but the header). */
@@ -105,6 +101,11 @@ static char *body(const char *path) {
         if (n == sz) b = realloc(b, sz *= 2);
     }
     b[n] = '\0';
+    /* The entries only: the trailer (v2) also says how the walk read --
+     * trusted, reference, read_all -- which a mark and a check differ in. */
+    if (n > 0 && b[n - 1] == '\n') b[n - 1] = '\0';
+    char *last = strrchr(b, '\n');
+    if (last != NULL) last[1] = '\0';
     fclose(f);
     free(all);
     return b;
@@ -148,6 +149,28 @@ static void mutate(void) {
         snprintf(data, sizeof data, "content %08u", f);
         writef(rel, data, strlen(data));
     }
+}
+
+/* The previous walk's start made unknown, as a capture whose output was on
+ * another filesystem writes it: the header's walk_start_ns set to 0. 0, or -1. */
+static int unknown_start(const char *path) {
+    FILE *in = fopen(path, "r");
+    if (in == NULL) return -1;
+    static char text[1 << 20];
+    const size_t n = fread(text, 1, sizeof text - 1, in);
+    fclose(in);
+    text[n] = '\0';
+    char *k = strstr(text, "\"walk_start_ns\":"), *nl = strchr(text, '\n');
+    if (k == NULL || nl == NULL || k > nl) return -1;
+    char *d = k + strlen("\"walk_start_ns\":"), *e = d + strspn(d, "0123456789");
+    if (e == d) return -1;
+    *d = '0';
+    memmove(d + 1, e, strlen(e) + 1);
+    FILE *out = fopen(path, "w");
+    if (out == NULL) return -1;
+    const size_t m = strlen(text);
+    const int ok = fwrite(text, 1, m, out) == m;
+    return fclose(out) == 0 && ok ? 0 : -1;
 }
 
 static void fresh_tree(void) {
@@ -197,9 +220,7 @@ static void differential(long round_ns, int steps) {
                                       st.prefilter_skipped ? st.prefilter_skipped : "?");
         trusted += st.trusted;
         racy += st.racy;
-        const int64_t mark_start = g_last_start;
         if (capture(full, NULL, &st) != 0) { BELAY_FAIL("check %d: %s", i, belay_err_msg()); return; }
-        g_last_start = mark_start;
         char *a = body(mark), *b = body(full);
         if (a == NULL || b == NULL || strcmp(a, b) != 0) {
             BELAY_FAIL("step %d (round %ld ns): mark and check differ", i, round_ns);
@@ -303,9 +324,7 @@ TEST(a_rewrite_during_the_walk_after_its_read_is_read_by_every_mark) {
     if (g_rewrite_armed) BELAY_FAIL("%s", "the rewrite never happened: the test proves nothing");
     next_tick(g_round_ns);
     REQUIRE(capture(next, prev, &st) == 0);
-    const int64_t start = g_last_start;
     REQUIRE(capture(full, NULL, &st) == 0);
-    g_last_start = start;
     char *a = body(next), *b = body(full);
     if (a == NULL || b == NULL || strcmp(a, b) != 0) BELAY_FAIL("%s", "mark trusted a file rewritten during the walk");
     free(a);
@@ -356,11 +375,9 @@ TEST(a_mark_keeps_the_copies_a_full_capture_would) {
     g_ops.writer_present = w_writer;
     g_writer_on = 1;
     const int rm = capture(next, prev, &st);
-    const int64_t start = g_last_start;
     const int rf = capture(full, NULL, &st);
     g_writer_on = 0;
     g_ops.writer_present = g_real->writer_present;
-    g_last_start = start;
     REQUIRE(rm == 0 && rf == 0);
     a = body(next); b = body(full);
     if (a == NULL || b == NULL || strcmp(a, b) != 0) BELAY_FAIL("%s", "a writer at the mark: mark differs");
@@ -402,9 +419,7 @@ TEST(a_small_binary_file_without_a_copy_is_trusted) {
     REQUIRE(capture(prev, NULL, &st) == 0);
     REQUIRE(capture(next, prev, &st) == 0);
     ASSERT_EQ_INT(13, (int)st.trusted);
-    const int64_t start = g_last_start;
     REQUIRE(capture(full, NULL, &st) == 0);
-    g_last_start = start;
     char *a = body(next), *b = body(full);
     if (a == NULL || b == NULL || strcmp(a, b) != 0) BELAY_FAIL("%s", "mark and check differ");
     free(a);
@@ -425,7 +440,7 @@ TEST(the_fallback_reads_everything_on_coarse_timestamps) {
     fresh_tree();
     next_tick(g_round_ns);
     REQUIRE(capture(prev, NULL, &st) == 0);
-    g_last_start = 0;                                   /* the walk's start unknown */
+    REQUIRE(unknown_start(prev) == 0);                  /* the walk's start unknown */
     REQUIRE(capture(next, prev, &st) == 0);
     ASSERT_TRUE(!st.prefilter);
     ASSERT_TRUE(st.prefilter_skipped != NULL && strstr(st.prefilter_skipped, "coarse") != NULL);
@@ -434,7 +449,7 @@ TEST(the_fallback_reads_everything_on_coarse_timestamps) {
     const struct timespec tick = { 0, 50000000L };
     nanosleep(&tick, NULL);
     REQUIRE(capture(prev, NULL, &st) == 0);
-    g_last_start = 0;
+    REQUIRE(unknown_start(prev) == 0);
     REQUIRE(capture(next, prev, &st) == 0);
     ASSERT_TRUE(st.prefilter);                          /* fine-grained: the fallback stands */
     ASSERT_TRUE(st.reference_ns == st.previous_newest_ns);
@@ -549,12 +564,106 @@ TEST(a_mount_root_does_not_make_a_coarse_scope_fine) {
     REQUIRE(got == 0);
     snprintf(cmd, sizeof cmd, "grep -q '\"path\":\"m\".*000000123.*\"mount\":true' '%s'", prev);
     REQUIRE(system(cmd) == 0);
-    g_last_start = 0;
+    REQUIRE(unknown_start(prev) == 0);
     REQUIRE(capture(next, prev, &st) == 0);
     ASSERT_TRUE(!st.prefilter);
     if (st.prefilter_skipped == NULL || strstr(st.prefilter_skipped, "coarse") == NULL)
         BELAY_FAIL("not refused as coarse: %s", st.prefilter_skipped ? st.prefilter_skipped : "(used)");
     g_round_ns = 0;
+}
+
+/* The first and last lines of a manifest, into h and t. */
+static void ends(const char *path, char *h, size_t hc, char *t, size_t tc) {
+    h[0] = t[0] = '\0';
+    FILE *f = fopen(path, "r");
+    if (f == NULL) return;
+    static char line[1 << 16];
+    bool first = true;
+    while (fgets(line, sizeof line, f) != NULL) {
+        const size_t l = strlen(line);
+        if (first) { memcpy(h, line, l < hc ? l : hc - 1); h[l < hc ? l : hc - 1] = '\0'; }
+        memcpy(t, line, l < tc ? l : tc - 1);
+        t[l < tc ? l : tc - 1] = '\0';
+        first = false;
+    }
+    fclose(f);
+}
+
+/* Manifest v2 (test/expect/manifest-v2.md, V2-3..6): the trailer says how
+ * the walk read, the header when it began -- for a check, a full walk with
+ * the caller's reason, and a mark. */
+TEST(the_v2_trailer_says_how_the_walk_read) {
+    g_round_ns = 0;
+    fresh_tree();
+    const struct timespec tick = { 0, 50000000L };
+    nanosleep(&tick, NULL);
+    char prev[400], next[400], h[4096], t[4096], store[300];
+    snprintf(prev, sizeof prev, "%s/p.ndjson", g_dir);
+    snprintf(next, sizeof next, "%s/n.ndjson", g_dir);
+    snprintf(store, sizeof store, "%s/store", g_dir);
+    struct belay_manifest_stats st;
+    REQUIRE(capture(prev, NULL, &st) == 0);
+    ends(prev, h, sizeof h, t, sizeof t);
+    ASSERT_TRUE(strstr(h, "{\"belay_manifest\":2,") == h);
+    ASSERT_TRUE(strstr(h, ",\"excluded\":[],\"walk_start_ns\":") != NULL && strstr(h, "\"walk_start_ns\":0}") == NULL);
+    ASSERT_TRUE(strstr(t, ",\"trusted\":0,\"reference\":\"none\",\"read_all\":\"check\"}") != NULL);
+    REQUIRE(capture(next, prev, &st) == 0);
+    ends(next, h, sizeof h, t, sizeof t);
+    ASSERT_TRUE(strstr(t, ",\"trusted\":12,\"reference\":\"walk_start\",\"read_all\":\"\"}") != NULL);
+    ASSERT_EQ_STR("walk_start", st.reference);
+    const struct belay_manifest_opts why = { .hash_max_bytes = 1u << 20, .store_max_bytes = 4096,
+                                             .store_dir = store, .full_reason = "asked for (--full)" };
+    REQUIRE(capture_write(&g_ops, next, g_tree, &why, &st) == 0);
+    ends(next, h, sizeof h, t, sizeof t);
+    ASSERT_TRUE(strstr(t, ",\"trusted\":0,\"reference\":\"none\",\"read_all\":\"asked for (--full)\"}") != NULL);
+    /* without the walk's start: the newest-ctime reference, said */
+    REQUIRE(unknown_start(prev) == 0);
+    REQUIRE(capture(next, prev, &st) == 0);
+    ends(next, h, sizeof h, t, sizeof t);
+    ASSERT_TRUE(strstr(t, "\"reference\":\"newest_ctime\",\"read_all\":\"\"}") != NULL);
+}
+
+/* V2-2 (excluded's reason): a path configured for the scope is not walked,
+ * nor anything below it, and is named in the header with what was there --
+ * beside belay's own state directory. */
+TEST(an_excluded_path_is_not_walked_and_is_named) {
+    g_round_ns = 0;
+    fresh_tree();
+    char out[400], h[4096], t[4096], store[300], sd[700];
+    snprintf(out, sizeof out, "%s/x.ndjson", g_dir);
+    snprintf(store, sizeof store, "%s/store", g_dir);
+    snprintf(sd, sizeof sd, "%s/d2", g_tree);
+    struct stat sds;
+    REQUIRE(stat(sd, &sds) == 0);
+    static const char *const ex[] = { "d1", "d0/f3", "nothing/here" };
+    const struct belay_manifest_opts o = { .hash_max_bytes = 1u << 20, .store_max_bytes = 4096, .store_dir = store,
+                                           .exclude = true, .exclude_dev = (uint64_t)sds.st_dev,
+                                           .exclude_ino = (uint64_t)sds.st_ino,
+                                           .exclude_paths = ex, .n_exclude_paths = 3 };
+    struct belay_manifest_stats st;
+    REQUIRE(capture_write(&g_ops, out, g_tree, &o, &st) == 0);
+    ends(out, h, sizeof h, t, sizeof t);
+    char want[400];
+    snprintf(want, sizeof want, "\"excluded\":[{\"path\":\"d0/f3\",\"reason\":\"user\",\"dev\":%llu,\"ino\":",
+             (unsigned long long)sds.st_dev);
+    ASSERT_TRUE(strstr(h, want) != NULL);
+    ASSERT_TRUE(strstr(h, "{\"path\":\"d1\",\"reason\":\"user\",") != NULL);
+    ASSERT_TRUE(strstr(h, "{\"path\":\"d2\",\"reason\":\"state_dir\",") != NULL);
+    ASSERT_TRUE(strstr(h, "nothing/here") == NULL);                    /* nothing was there: no blind spot */
+    char *b = body(out);
+    REQUIRE(b != NULL);
+    ASSERT_TRUE(strstr(b, "\"path\":\"d1") == NULL && strstr(b, "\"path\":\"d2") == NULL);
+    ASSERT_TRUE(strstr(b, "\"path\":\"d0/f3\"") == NULL && strstr(b, "\"path\":\"d0/f0\"") != NULL);
+    free(b);
+    ASSERT_EQ_INT(3, (int)st.excluded);
+    struct belay_manifest_reader *rd = NULL;                          /* and it reads back */
+    REQUIRE(belay_manifest_open(out, &rd) == 0);
+    ASSERT_EQ_INT(3, (int)belay_manifest_header(rd)->n_excluded);
+    static struct belay_entry e;
+    int got;
+    while ((got = belay_manifest_next(rd, &e)) == 1) { }
+    ASSERT_EQ_INT(0, got);
+    belay_manifest_close(rd);
 }
 
 /* S3 (M3): a file rewritten at the same size with its mtime put back -- the
@@ -681,6 +790,8 @@ int main(void) {
     RUN(the_fallback_reads_everything_on_coarse_timestamps);
     RUN(a_reflog_is_kept_past_the_store_limit);
     RUN(a_mount_root_does_not_make_a_coarse_scope_fine);
+    RUN(the_v2_trailer_says_how_the_walk_read);
+    RUN(an_excluded_path_is_not_walked_and_is_named);
     RUN(an_unusable_previous_manifest_means_a_full_walk);
     RUN(the_walk_reports_the_newest_ctime_it_saw);
     RUN(an_excluded_directory_is_not_recorded);

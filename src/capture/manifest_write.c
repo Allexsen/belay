@@ -27,6 +27,7 @@
 
 #include "belay/manifest.h"
 #include "belay/error.h"
+#include "belay/json.h"
 #include "belay/path.h"
 #include "belay/store.h"
 
@@ -136,8 +137,9 @@ int capture_write(const struct fsops *ops, const char *out_path, const char *sco
     wc->readbuf = malloc(READ_CHUNK);
     wc->xlist = malloc(XLIST_CAP + 1);
     wc->xnames = malloc((XLIST_CAP / 2 + 1) * sizeof *wc->xnames);
+    wc->xs = calloc(BELAY_EXCLUDED_MAX, sizeof *wc->xs);
     if (wc->pack == NULL || wc->line == NULL || wc->readbuf == NULL || wc->xlist == NULL ||
-        wc->xnames == NULL) {
+        wc->xnames == NULL || wc->xs == NULL) {
         belay_err_set(BELAY_ERR_NOMEM, 0, "manifest: out of memory");
         goto cleanup;
     }
@@ -245,7 +247,8 @@ int capture_write(const struct fsops *ops, const char *out_path, const char *sco
         close(ofd);
         goto cleanup;
     }
-    if (cap_write_header(ops, out, real, opts, wc->line) == -1) goto cleanup;
+    if (cap_write_header(ops, out, real, wc->xs, wc->excluded, walk_start_ns, opts, wc->line) == -1)
+        goto cleanup;
 
     /* The output pass: each entry with its re-check verdict applied, counted
      * as emitted, serialized once. */
@@ -310,6 +313,25 @@ int capture_write(const struct fsops *ops, const char *out_path, const char *sco
     int tw = fputc('{', out) == EOF ? -1 : 0;
     for (size_t i = 0; i < TR_COUNT && tw >= 0; i++)
         tw = fprintf(out, "%s\"%s\":%zu", i ? "," : "", TRAILER_FIELDS[i].name, tv[i]);
+    /* Version 2: how the walk read (test/expect/manifest-v2.md, V2-4..6).
+     * The prefilter was used, or every file was read and read_all says why:
+     * the previous manifest's unusability, the caller's reason, or a check. */
+    const char *reference = wc->prev == NULL ? "none"
+                          : pinfo.walk_start_ns > 0 ? "walk_start" : "newest_ctime";
+    const char *read_all = wc->prev != NULL ? ""
+                         : prev_why != NULL ? prev_why
+                         : opts->full_reason != NULL ? opts->full_reason : "check";
+    if (tw >= 0) {
+        const size_t rl = strlen(read_all);
+        if (rl >= LINE_CAP / 8 || !belay_utf8_valid(read_all, rl) ||
+            belay_json_escape(wc->line, LINE_CAP, read_all, rl) == -1) {
+            belay_err_set(BELAY_ERR_INVALID, 0, "manifest: the read_all reason is not short UTF-8 text");
+            goto cleanup;
+        }
+        tw = fprintf(out, ",\"%s\":%zu,\"%s\":\"%s\",\"%s\":\"%s\"", TRAILER2_FIELDS[TR2_TRUSTED].name,
+                     wc->trusted, TRAILER2_FIELDS[TR2_REFERENCE].name, reference,
+                     TRAILER2_FIELDS[TR2_READ_ALL].name, wc->line);
+    }
     if (tw < 0 || fputs("}\n", out) == EOF) {
         belay_err_set(BELAY_ERR_IO, errno, "manifest: trailer write failed");
         goto cleanup;
@@ -349,6 +371,8 @@ int capture_write(const struct fsops *ops, const char *out_path, const char *sco
         stats->previous_newest_ns = wc->prev != NULL ? pinfo.newest_validated_ns : INT64_MIN;
         stats->reference_ns = wc->reference_ns;
         stats->walk_start_ns = walk_start_ns;
+        snprintf(stats->reference, sizeof stats->reference, "%s", reference);
+        snprintf(stats->read_all, sizeof stats->read_all, "%s", read_all);
     }
     rc = 0;
 
@@ -365,6 +389,7 @@ cleanup:
         free(wc->readbuf);
         free(wc->xlist);
         free(wc->xnames);
+        free(wc->xs);
         free(wc->abs);
         prev_free(wc->prev);
         belay_store_close(wc->store);

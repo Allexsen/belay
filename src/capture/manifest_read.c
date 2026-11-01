@@ -47,6 +47,7 @@ struct belay_manifest_reader {
     int    state;           /* 0 open, 1 ended cleanly, -1 failed (sticky) */
 
     struct belay_manifest_header header;
+    struct belay_excluded excluded[BELAY_EXCLUDED_MAX];   /* header.excluded points here (v2) */
     struct belay_manifest_stats  trailer;
     bool   have_trailer;
 
@@ -99,7 +100,7 @@ static int read_header(struct belay_manifest_reader *r, struct belay_manifest_he
         return -1;
     }
     struct obj o;
-    if (lex_object(r->line, r->len, &o) == -1 || decode_header(&o, h) == -1) {
+    if (lex_object(r->line, r->len, &o) == -1 || decode_header(&o, h, r->excluded) == -1) {
         err_at_line(r->lineno);
         return -1;
     }
@@ -187,7 +188,7 @@ static int fail(struct belay_manifest_reader *r) {
 
 static int parse_trailer(struct belay_manifest_reader *r, const struct obj *o) {
     uint64_t v[TR_COUNT];
-    if (decode_trailer(o, v) == -1) return -1;
+    if (decode_trailer(o, r->header.version, v, &r->trailer) == -1) return -1;
     if (stream_end(&r->st, v) == -1) return -1;
     r->trailer.entries    = (size_t)v[TR_ENTRIES];
     r->trailer.vanished   = (size_t)v[TR_VANISHED];

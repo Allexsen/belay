@@ -539,7 +539,8 @@ TEST(header_records_version_and_scope) {
     fx_write("h", "x", 1);
     size_t n = 0;
     ASSERT_EQ_INT(0, run_check(NULL, &n));
-    ASSERT_TRUE(strstr(g_header, "\"belay_manifest\":1") != NULL);
+    ASSERT_TRUE(strstr(g_header, "\"belay_manifest\":2,") != NULL);       /* v2 since 2026-11-01 */
+    ASSERT_TRUE(strstr(g_header, ",\"excluded\":[],\"walk_start_ns\":") != NULL);
     ASSERT_TRUE(strstr(g_header, "\"hash\":\"sha256\"") != NULL);
     ASSERT_TRUE(strstr(g_header, "\"scopes\"") != NULL);
     fx_rm("h");

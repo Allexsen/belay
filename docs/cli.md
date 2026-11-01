@@ -44,6 +44,7 @@ capture resolves the path again and refuses it unless it is the same directory (
 -- exit 3. The resolved path is what the checkpoint records.
 
 If belay's own state directory is inside the scope, it is not recorded, and every capture says so:
+in the manifest's header (`excluded`, reason `state_dir`; [manifest v2](spec/manifest-v2.md)),
 `check` and `mark` in their output (`"excluded"` in `--json`), `diff` after its receipt, or on
 standard error with `--json`. A scope that is the state directory, or inside it, is refused.
 
@@ -87,7 +88,8 @@ A regular file is not read again, and keeps the previous checkpoint's hash, when
 size, modification time and change time (ctime) are all what the previous checkpoint recorded,
 and its ctime is before a reference point: the time the previous checkpoint's walk began, on the
 scope filesystem's clock (the ctime of a file belay creates in the state directory as the walk
-starts). A file written after that point -- during that walk included -- gets a ctime at or past
+starts), which the previous manifest's header records (`walk_start_ns`). Each manifest's trailer
+says how its walk read: `trusted`, `reference`, and `read_all` (why every file was read, or `""`). A file written after that point -- during that walk included -- gets a ctime at or past
 it and is read. Whether a copy is kept is decided anew, as a full capture would decide it -- in
 the store, no writer holding the file open, a binary file without one -- with one difference: a
 file stored under an interpreter's claim keeps its copy after losing the claim (its content is

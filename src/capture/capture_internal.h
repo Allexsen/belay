@@ -72,6 +72,7 @@ struct walk_ctx {
     int64_t reference_ns;
     size_t trusted, racy, excluded;
     int64_t newest_ctime_ns;
+    struct belay_excluded *xs;  /* what was not walked, for the v2 header: `excluded` of them */
 
     struct belay_store *store;  /* NULL when content storage is off */
     size_t store_failed;        /* copies the store failed to keep (R11) */
@@ -141,6 +142,7 @@ int  cons_verdict_get(FILE *f, const unsigned char *key, uint32_t klen);
 /* publish.c */
 FILE *cap_tmpfile(void *ctx);
 int  cap_write_header(const struct fsops *ops, FILE *f, const char *scope_real,
+                      const struct belay_excluded *xs, size_t nx, int64_t walk_start_ns,
                       const struct belay_manifest_opts *opts, char *buf);
 
 #endif

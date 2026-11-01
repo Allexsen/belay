@@ -365,7 +365,7 @@ static int run(int argc, char **argv, FILE *out, FILE *err) {
     if (argc < 2) return usage(err, "no command");
     const char *cmd = argv[1];
     if (!strcmp(cmd, "--version") || !strcmp(cmd, "version")) {
-        fprintf(out, "belay %s (manifest v1, diff.v1)\n", BELAY_VERSION_STRING);
+        fprintf(out, "belay %s (manifest v2, diff.v1)\n", BELAY_VERSION_STRING);
         return EXIT_DONE;
     }
     if (!strcmp(cmd, "help") || !strcmp(cmd, "--help") || !strcmp(cmd, "-h")) {

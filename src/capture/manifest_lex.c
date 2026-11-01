@@ -90,6 +90,35 @@ static int scan_int(const char *s, const char *lim, const char **end) {
     return 0;
 }
 
+/* A flat object at p: '{' key ':' (string | integer) (',' ...)* '}'. Its
+ * end (past the '}') into *end. 0, or -1. */
+static int scan_flat(const char *p, const char *lim, const char **end) {
+    if (p >= lim || *p != '{') return lex_corrupt("array element is not an object");
+    p++;
+    for (;;) {
+        if (p >= lim || *p != '"') return lex_corrupt("expected a key");
+        const char *k = ++p;
+        while (p < lim && ((*p >= 'a' && *p <= 'z') || (*p >= '0' && *p <= '9') || *p == '_')) p++;
+        if (p == k || p >= lim || *p != '"') return lex_corrupt("malformed key");
+        p++;
+        if (p >= lim || *p != ':') return lex_corrupt("expected ':' after a key");
+        p++;
+        const char *e;
+        if (p < lim && *p == '"') {
+            if (scan_string(p + 1, lim, &e) == -1) return -1;
+            p = e + 1;
+        } else if (p < lim && (*p == '-' || (*p >= '0' && *p <= '9'))) {
+            if (scan_int(p, lim, &e) == -1) return -1;
+            p = e;
+        } else {
+            return lex_corrupt("malformed value in an array element");
+        }
+        if (p < lim && *p == ',') { p++; continue; }
+        if (p < lim && *p == '}') { *end = p + 1; return 0; }
+        return lex_corrupt("expected ',' or '}' in an array element");
+    }
+}
+
 /* Parses one whole line into `o`. Duplicate keys are rejected. */
 int lex_object(const char *s, size_t len, struct obj *o) {
     const char *p = s, *lim = s + len;
@@ -130,6 +159,24 @@ int lex_object(const char *s, size_t len, struct obj *o) {
             pr->val = p;
             pr->vlen = 4;
             p += 4;
+        } else if (p < lim && *p == '[' && p + 1 < lim && (p[1] == ']' || p[1] == '{')) {
+            /* Version 2: `[]`, or flat objects. Field decoders that want
+             * strings refuse both by kind or count. */
+            pr->kind = p[1] == ']' ? V_ARR : V_OBJS;
+            pr->val = p + 1;
+            pr->nelem = 0;
+            p++;
+            while (*p != ']') {
+                const char *e;
+                if (scan_flat(p, lim, &e) == -1) return -1;
+                pr->nelem++;
+                p = e;
+                if (p < lim && *p == ',' && p + 1 < lim && p[1] == '{') { p++; continue; }
+                if (p < lim && *p == ']') break;
+                return lex_corrupt("malformed array");
+            }
+            p++;
+            pr->vlen = (size_t)(p - 1 - pr->val);
         } else if (p < lim && *p == '[') {
             pr->kind = V_ARR;
             pr->val = p + 1;
@@ -193,6 +240,16 @@ int lex_order(const struct obj *o, const char *const *order, size_t n) {
         next = k + 1;
     }
     return 0;
+}
+
+int lex_elem(const struct pair *arr, size_t i, struct obj *out) {
+    if (arr->kind != V_OBJS || i >= arr->nelem) return lex_corrupt("no such array element");
+    const char *p = arr->val, *lim = arr->val + arr->vlen, *e = p;
+    for (size_t k = 0; ; k++) {
+        if (scan_flat(p, lim, &e) == -1) return -1;
+        if (k == i) return lex_object(p, (size_t)(e - p), out);
+        p = e + 1;                          /* past the ',' */
+    }
 }
 
 const struct pair *lex_get(const struct obj *o, const char *key) {

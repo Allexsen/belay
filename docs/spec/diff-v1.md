@@ -17,7 +17,7 @@ truncated diff. No line has a fixed length bound (a record's findings alone make
 consumers MUST handle lines of any length.
 
 ```json
-{"belay_diff":1,"scopes":["/home/u/proj"],"before_created_ns":1761000000000000000,"after_created_ns":1761000600000000000,"before_hash_max_bytes":67108864,"after_hash_max_bytes":67108864,"scope_remounted":false,"identity_compared":true}
+{"belay_diff":1,"scopes":["/home/u/proj"],"before_created_ns":1761000000000000000,"after_created_ns":1761000600000000000,"before_hash_max_bytes":67108864,"after_hash_max_bytes":67108864,"scope_remounted":false,"identity_compared":true,"before_manifest_version":2,"after_manifest_version":2}
 {"path":"src/main.c","outcome":"modified","type":"reg","changed":["size","mtime_ns","sha256"]}
 {"path":"build","outcome":"unknown","type":"dir","unknown":["unstable"]}
 {"belay_diff_end":2,"unchanged":1840,"added":0,"removed":0,"modified":1,"type_changed":0,"metadata_only":0,"unknown":1,"dir_timestamps_only":0,"events":0,"before_vanished":0,"before_unstable":0,"before_raced":0,"after_vanished":0,"after_unstable":1,"after_raced":0,"provisional":true,"before_sha256":"9f2c...","after_sha256":"41ab..."}
@@ -40,6 +40,8 @@ consumers MUST handle lines of any length.
 | `after_hash_max_bytes` | int | The second manifest's hash limit. |
 | `scope_remounted` | bool | The scope root's `dev` differs between the manifests: it was remounted, and devices were numbered anew. |
 | `identity_compared` | bool | Whether `ino` was compared: never across a remount of the scope root, since an inode number means something only within one device. Content still compares by hash. |
+| `before_manifest_version` | int | The before manifest's format version (`belay_manifest`): provenance only; the outcomes do not depend on it (test/expect/manifest-v2.md, V2-R4). |
+| `after_manifest_version` | int | The after manifest's format version, likewise. |
 <!-- END GENERATED: diff-header -->
 
 ### Records
