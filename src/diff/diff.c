@@ -164,6 +164,19 @@ static int same_scope(struct run *x) {
     return -1;
 }
 
+/* Whether `path` is at or below a path the manifest `h` excluded (v2): that
+ * manifest did not look there, so its absence says nothing -- not captured,
+ * as below a mount, never "removed" or "added" (decision 2026-11-01, 3). */
+static bool excluded_covers(const struct belay_manifest_header *h, const char *path, size_t len) {
+    for (size_t i = 0; i < h->n_excluded; i++) {
+        const struct belay_excluded *x = &h->excluded[i];
+        if (len >= x->path_len && memcmp(path, x->path, x->path_len) == 0 &&
+            (len == x->path_len || path[x->path_len] == '/'))
+            return true;
+    }
+    return false;
+}
+
 static int run_pipeline(struct run *x) {
     const struct belay_manifest_header *hb = belay_manifest_header(x->rb);
     const struct belay_manifest_header *ha = belay_manifest_header(x->ra);
@@ -184,7 +197,10 @@ static int run_pipeline(struct run *x) {
             if (classify_both(&x->ctx, b, a, &v) == -1) return -1;
         } else {
             const struct belay_entry *e = b != NULL ? b : a;
-            const enum anc absent = ancestry_of(&x->anc[b != NULL ? 1 : 0], e->path, e->path_len);
+            const struct belay_manifest_header *lacking = b != NULL ? ha : hb;
+            const enum anc absent = excluded_covers(lacking, e->path, e->path_len)
+                                        ? ANC_SEALED
+                                        : ancestry_of(&x->anc[b != NULL ? 1 : 0], e->path, e->path_len);
             if (classify_one(e, a != NULL, absent, &v) == -1) return -1;
         }
         if (b != NULL) ancestry_feed(&x->anc[0], b);

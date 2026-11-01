@@ -40,7 +40,8 @@ const struct diff_name_def DIFF_REASONS[DR_COUNT] = {
         "present." },
     [DR_NOT_CAPTURED] = { "not_captured",
         "Absent on a side whose nearest recorded ancestor directory is `unreadable` or a "
-        "`mount`: nothing below it was captured." },
+        "`mount`, or that excluded the path or a directory above it (manifest v2's `excluded`): "
+        "nothing there was captured." },
 };
 
 #define T_REG  TBIT(BELAY_T_REG)

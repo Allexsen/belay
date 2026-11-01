@@ -121,4 +121,28 @@ struct capture_req {
 /* Captures the scope into a new checkpoint. 0 with *out; -1 with belay_err. */
 int state_capture(struct state *st, const struct capture_req *req, struct checkpoint *out);
 
+/*
+ *  User excludes (decision 2026-11-01, 3; manifest v2's `excluded`, reason
+ *  `user`): paths relative to the scope that captures do not walk, kept in
+ *  the scope's directory as `excludes`, one a line. Each is a blind spot,
+ *  named in every manifest's header and every receipt. Protected paths
+ *  (M2) will never be excludable.
+ */
+#define STATE_EXCLUDES_MAX 31          /* BELAY_EXCLUDED_MAX, less the state directory */
+struct excludes {
+    char path[STATE_EXCLUDES_MAX][PATH_MAX];
+    size_t n;
+};
+
+/* Whether `p` can be an exclude: relative, canonical (no "", ".", ".."
+ * component, no leading or trailing '/'), no newline, under PATH_MAX. */
+bool state_exclude_valid(const char *p);
+
+/* The scope's excludes (none when there is no file). 0, or -1 with belay_err
+ * (CORRUPT: not a file belay wrote, or a line that is not an exclude). */
+int state_excludes_read(const struct state *st, struct excludes *x);
+
+/* Replaces them, under the lock (state_open with create). 0, or -1. */
+int state_excludes_write(const struct state *st, const struct excludes *x);
+
 #endif

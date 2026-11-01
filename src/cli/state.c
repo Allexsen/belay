@@ -655,6 +655,51 @@ static int64_t now_ns(void) {
     return (int64_t)t.tv_sec * 1000000000LL + t.tv_nsec;
 }
 
+bool state_exclude_valid(const char *p) {
+    const size_t n = strlen(p);
+    if (n == 0 || n >= PATH_MAX || p[0] == '/' || p[n - 1] == '/' || strchr(p, '\n') != NULL) return false;
+    for (const char *c = p; *c != '\0';) {
+        const size_t k = strcspn(c, "/");
+        if (k == 0 || (k == 1 && c[0] == '.') || (k == 2 && c[0] == '.' && c[1] == '.')) return false;
+        c += k;
+        if (*c == '/') c++;
+    }
+    return true;
+}
+
+int state_excludes_read(const struct state *st, struct excludes *x) {
+    x->n = 0;
+    if (st->dir_fd == -1) return 0;
+    static char buf[STATE_EXCLUDES_MAX * PATH_MAX + 1];
+    char shown[PATH_MAX + 96];
+    snprintf(shown, sizeof shown, "%s/excludes", st->dir);
+    const ssize_t got = read_small(st->dir_fd, "excludes", buf, sizeof buf, shown);
+    if (got == -1) return errno == ENOENT ? 0 : -1;
+    for (char *line = buf, *nl; *line != '\0'; line = nl + 1) {
+        nl = strchr(line, '\n');
+        if (nl == NULL || x->n == STATE_EXCLUDES_MAX) {
+            belay_err_set(BELAY_ERR_CORRUPT, 0, "%s is not a file belay wrote", shown);
+            return -1;
+        }
+        *nl = '\0';
+        if (!state_exclude_valid(line)) {
+            belay_err_set(BELAY_ERR_CORRUPT, 0, "%s holds a line that is not an exclude", shown);
+            return -1;
+        }
+        snprintf(x->path[x->n++], PATH_MAX, "%s", line);
+    }
+    return 0;
+}
+
+int state_excludes_write(const struct state *st, const struct excludes *x) {
+    static char buf[STATE_EXCLUDES_MAX * PATH_MAX + 1];
+    char shown[PATH_MAX + 96];
+    snprintf(shown, sizeof shown, "%s/excludes", st->dir);
+    size_t w = 0;
+    for (size_t i = 0; i < x->n; i++) w += (size_t)snprintf(buf + w, sizeof buf - w, "%s\n", x->path[i]);
+    return write_whole(st->dir_fd, "excludes", buf, w, shown);
+}
+
 int state_capture(struct state *st, const struct capture_req *req, struct checkpoint *out) {
     struct checkpoint *list = NULL;
     size_t n = 0;
@@ -712,7 +757,15 @@ int state_capture(struct state *st, const struct capture_req *req, struct checkp
     }
     free(list);
 
+    static struct excludes ex;
+    static const char *exp[STATE_EXCLUDES_MAX];
+    if (state_excludes_read(st, &ex) == -1) {
+        close(dfd);
+        return -1;
+    }
+    for (size_t i = 0; i < ex.n; i++) exp[i] = ex.path[i];
     struct belay_manifest_opts o = {
+        .exclude_paths = exp, .n_exclude_paths = ex.n,
         .hash_max_bytes = BELAY_HASH_MAX_BYTES_DEFAULT, .store_max_bytes = BELAY_STORE_MAX_BYTES_DEFAULT,
         .store_dir = st->store, .previous = previous,
         .full_reason = c.full_reason[0] != '\0' ? c.full_reason : NULL,   /* the trailer's read_all */

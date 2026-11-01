@@ -5,6 +5,7 @@ belay check --scope DIR [--json]
 belay mark  --scope DIR [--full] [--full-every N] [--json]
 belay diff  --scope DIR --since ID [--to ID] [--full-every N] [--json] [--exit-code] [--all]
 belay log   --scope DIR [--json]
+belay exclude --scope DIR [--add PATH | --remove PATH]
 belay help [command]  |  belay <command> --help  |  belay --version
 ```
 
@@ -48,6 +49,17 @@ in the manifest's header (`excluded`, reason `state_dir`; [manifest v2](spec/man
 `check` and `mark` in their output (`"excluded"` in `--json`), `diff` after its receipt, or on
 standard error with `--json`. A scope that is the state directory, or inside it, is refused.
 
+## Excludes
+
+`belay exclude --scope DIR --add PATH` makes this scope's captures skip `PATH`, relative to `DIR`
+and matched exactly (`--remove PATH` undoes it; without either, the list). They are for speed --
+a `node_modules` that a package manager owns -- not for noise: each one is a blind spot. Every
+manifest names what it did not walk in its header (`excluded`, with the reason `user` or, for
+belay's own state directory, `state_dir`), `check` and `mark` say so, and a receipt lists them
+under "not compared". A diff across an exclude reports what one side holds there as `unknown`,
+`not_captured`, never as removed or added. At most 31 per scope. Protected paths (a later
+milestone) will never be excludable.
+
 ## The state directory
 
 ```
@@ -58,6 +70,7 @@ standard error with `--json`. A scope that is the state directory, or inside it,
     checkpoints/<id>/manifest.ndjson
     checkpoints/<id>/diff-from-<since>.ndjson   what diff --since computed for this checkpoint
     checkpoints/<id>/meta.json  written last: a checkpoint exists once it does
+    excludes                    the scope's excludes, one a line (belay exclude)
     lock                        one writer at a time
 ```
 
