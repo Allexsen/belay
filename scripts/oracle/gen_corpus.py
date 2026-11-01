@@ -57,8 +57,10 @@ The corpus has three parts:
     hook that becomes a symlink or back, and an unclaimed file below .git/;
     and the values a record carries (values(), diff-values.md): link
     targets not UTF-8 on both sides, a type change whose symlink's target
-    is not UTF-8 or unknown, or whose regular file has no hash, `caps`
-    added beside a mode change, and the longest record (V5);
+    is not UTF-8, unknown or written on an unreadable link, or whose
+    regular file has no hash, a raced type change to and from a symlink
+    (its target unknown or not), `caps` added beside a mode change, and the
+    longest record (V5);
   - random pairs: n-bases random trees, each with four mutated variants
     (several changes at once), compared in both directions and with
     themselves;
@@ -2159,8 +2161,13 @@ def values(w, rng):
     where the other targeted pairs do not build it deterministically: a link
     target not UTF-8 on both sides (V3: each side its own spelling, both
     `link_target_b64`); a type change whose symlink's target is not UTF-8,
-    or unknown (an unreadable link's empty target, V6); a type change from a
-    regular file with no hash (V6: "a `sha256` not computed is absent");
+    unknown (an unreadable link's empty target: V2, left out) or written on
+    an unreadable link (carried, ambiguity VA6); a raced type change, an
+    `unknown` record that carries V6's values, from a regular file to a
+    symlink and from an unreadable symlink whose target is unknown to a
+    regular file, raced on the side that is not the symlink; a type change
+    from a regular file with no hash (V6: "a `sha256` not computed is
+    absent");
     `caps` added beside a mode change (V2: the other side's value stands
     alone, beside a field both sides record); and V5's longest record: two
     link targets of 4,095 bytes (A4), every byte a control character the
@@ -2209,6 +2216,41 @@ def values(w, rng):
     w.targeted(rng, 'values: type lnk (unreadable, target unknown) -> reg', unknown_target,
                scenarios=['values: a type change %s an unreadable symlink whose target is '
                           'unknown (empty)' % d for d in ('from', 'to')])
+
+    def written_target(rng):
+        t = base_tree(rng)
+        e = in_context('unreadable', clear_flags(subject(rng, t, 'lnk'), t, rng), t, rng)
+        if e['link_target'] == b'':
+            e['link_target'] = rng.choice(INSIDE_TARGETS)   # size stays as stat'ed
+        e2 = change_type(e, 'reg', t, rng)
+        return with_subject(t, e, e2)
+    w.targeted(rng, 'values: type lnk (unreadable, target written) -> reg', written_target,
+               scenarios=['values: a type change %s an unreadable symlink whose target is '
+                          'written' % d for d in ('from', 'to')])
+
+    def raced_to_lnk(rng):
+        t = base_tree(rng)
+        e = clear_flags(subject(rng, t, 'reg'), t, rng)
+        e2 = change_type(e, 'lnk', t, rng)
+        e2['raced'] = True
+        return with_subject(t, e, e2)
+    w.targeted(rng, 'values: type reg -> lnk, raced on the symlink side', raced_to_lnk,
+               scenarios=['values: a raced type change %s a symlink' % d
+                          for d in ('from', 'to')])
+
+    def raced_unknown_target(rng):
+        t = base_tree(rng)
+        e = in_context('unreadable', clear_flags(subject(rng, t, 'lnk'), t, rng), t, rng)
+        e['link_target'] = b''                  # "target unknown"
+        e2 = change_type(e, 'reg', t, rng)
+        e2.pop('unreadable', None)
+        settle_hash(e2, t, rng)
+        e2['raced'] = True
+        return with_subject(t, e, e2)
+    w.targeted(rng, 'values: type lnk (unreadable, target unknown) -> reg, raced on the reg side',
+               raced_unknown_target,
+               scenarios=['values: a raced type change %s an unreadable symlink whose target '
+                          'is unknown (empty)' % d for d in ('from', 'to')])
 
     def caps_beside_mode(rng):
         t = base_tree(rng)

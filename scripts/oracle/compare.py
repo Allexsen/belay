@@ -16,7 +16,7 @@ must agree on
   - every record's `before` and `after` (test/expect/diff-values.md), exactly:
     keys in order, values and JSON types, the bytes `"before":{...}` and
     `"after":{...}` in the record's line, and where they stand ("after
-    `changed` and before `unknown`", V1; "after `type_before`", V6);
+    `changed` and before `unknown`", V1, V6);
   - the event records (E1: after the path records, before the trailer),
     byte for byte against the reference's rendering;
   - the trailer: every key, its value and their order (belay_diff_end, the
@@ -34,7 +34,8 @@ must agree on
   `metadata_only` a non-content one, `type_changed` is exactly ["type"],
   `unknown` appears only on an `unknown` outcome (rules 3 and 4), `before`
   and `after` appear together exactly on a record with `changed` (V1),
-  each naming only what V1 or V6 allows, under a key the manifest uses.
+  each naming only what V1 allows, or V6 on a record with `type_before`
+  (`unknown` too), under a key the manifest uses, never both `{}` (V2).
   Disagreements are grouped by the rule that explains them; OTHER is what no
   rule of the reference's trace explains.
 scope-NNNNN.before/.after (different scopes): the driver must fail and leave
@@ -62,10 +63,13 @@ the generator's labels (coverage(), required(), gate()):
     change), the trailer's walk counts, ...; and the values a record carries
     (diff-values.md): a type change for every ordered pair of types, raced
     on neither side (V6), from and to a regular file with no hash and a
-    symlink whose target is not UTF-8 or unknown, link targets and xattr
-    sets in each side's own spelling (V3), `caps`, `xattrs` or
-    `xattrs_sha256` recorded on one side only (V2, ambiguity VA1), and a
-    record line over 64 KiB (V5);
+    symlink whose target is not UTF-8, unknown (V2: left out) or written
+    on an unreadable link (ambiguity VA6); a raced type change (an
+    `unknown` record, V6) raced before only, after only and on both sides,
+    from and to a symlink, and from and to an unreadable symlink whose
+    target is unknown; link targets and xattr sets in each side's own
+    spelling (V3), `caps`, `xattrs` or `xattrs_sha256` recorded on one side
+    only (V2: `{}`), and a record line over 64 KiB (V5);
   - every interpreter item (INTERP_SCENARIOS): which interpreter claims a
     path, what its entries hold and the outcome, with no store -- text,
     binary, dpkg, pip and git paths, the pip and dpkg end hooks' inputs,
@@ -156,11 +160,16 @@ G_DIGEST = 'xattrs: an inline set against a digest, by the formula (manifest-v1)
 G_O8 = 'unverified on a side that also carries mount: no reason; on the other side its own (O8)'
 # diff-values.md: the values of a record that otherwise agrees, by what the
 # reference's trace says about them.
-G_VALUES = {'values:V6': 'VALUES: a type_changed record, mode and content fields (V6)',
-            'values:type-not-type_changed': 'VALUES: `changed` ["type"] on an unknown record '
-                                            '(V1 as written, ambiguity VA2)',
-            'values:VA1-empty-object': 'VALUES: the only changed field recorded on one side '
-                                       '(V2, ambiguity VA1: `{}`)',
+G_VALUES = {'values:V6': 'VALUES: a record with type_before, mode and content fields (V6)',
+            'values:V6-raced': 'VALUES: a raced type change, an unknown record (V6)',
+            'values:V2-target-unknown-before': "VALUES: an unknown link target left out (V2)",
+            'values:V2-target-unknown-after': "VALUES: an unknown link target left out (V2)",
+            'values:VA6-unreadable-target-before': 'VALUES: a target written on an unreadable '
+                                                   'link, carried (ambiguity VA6)',
+            'values:VA6-unreadable-target-after': 'VALUES: a target written on an unreadable '
+                                                  'link, carried (ambiguity VA6)',
+            'values:V2-empty-object': 'VALUES: the only changed field recorded on one side '
+                                      '(V2: `{}`)',
             'values:V2-one-side': 'VALUES: a changed field recorded on one side only (V2)',
             'values:V3-alternate': 'VALUES: an alternate key (V3)'}
 
@@ -221,9 +230,11 @@ def contradicts_itself(g):
     if o != 'unknown' and 'unknown' in g:
         return '%s with reasons' % o
     # diff-values V1: `before` and `after` together, exactly on a record with
-    # `changed` (every `type_changed` has ["type"], above); each a JSON
-    # object whose keys are, in order, the fields V6 or `changed` names,
-    # each under one of its manifest keys.
+    # `changed` (every record with `type_before` has ["type"], above); each a
+    # JSON object whose keys are, in order, the fields V6 names on a record
+    # with `type_before` (V1: "carries V6's values instead"), else those
+    # `changed` names, each under one of its manifest keys; never both `{}`
+    # (V2).
     if ('before' in g) != bool(ch) or ('after' in g) != bool(ch):
         return 'before/after %s on a record whose changed is %s' % (
             [k for k in ('before', 'after') if k in g], ch)
@@ -234,13 +245,15 @@ def contradicts_itself(g):
         if not isinstance(v, list) or any(not isinstance(x, tuple) for x in v):
             return '%s is not an object' % side
         names = ref.TYPE_VALUES.get(g.get('type_before' if side == 'before' else 'type'), []) \
-            if o == 'type_changed' else ch
+            if 'type_before' in g else ch
         keys = [k for k, _ in v]
         it = iter(names)
         if not all(any(k in ref.MANIFEST_KEYS.get(f, [f]) for f in it) for k in keys):
             return '%s holds %s, not among %s in order' % (side, keys, names)
-        if o == 'type_changed' and keys[:1] != ['mode']:
-            return '%s of a type_changed record without mode' % side
+        if 'type_before' in g and keys[:1] != ['mode']:
+            return '%s of a record with type_before, without mode' % side
+    if g.get('before') == [] and g.get('after') == []:
+        return 'before and after both {}'
     # "Interpreters": `findings` is "absent when none"; "for a path whose
     # outcome is `unknown` or `metadata_only` it adds nothing (a git hook's
     # executable bit excepted, which is metadata)".
@@ -283,7 +296,7 @@ def compare_record(path, exp, got, trace, orders):
         if extra:
             groups.append('OTHER: record has %s' % sorted(extra))
         # V1: "after `changed` and before `unknown`"; V6: "after
-        # `type_before`"; `before`, then `after`.
+        # `changed`"; `before`, then `after`.
         at = [k for k in ('type_before', 'changed', 'before', 'after', 'unknown') if k in keys]
         if [k for k in keys if k in at] != at:
             groups.append('OTHER: record key order %s (diff-values V1, V6)' % keys)
@@ -620,15 +633,22 @@ SCENARIOS = (['dev relation: an entry leaves the root device',
              # test/expect/diff-values.md: what `before` and `after` carry. V6
              # for every type change the corpus can build, raced on neither
              # side (a `type_changed` record), from and to a regular file with
-             # no hash, a symlink whose target is not UTF-8 (V3) or unknown;
+             # no hash, a symlink whose target is not UTF-8 (V3), unknown (V2:
+             # left out) or written on an unreadable link (ambiguity VA6);
              # V3 each side's own spelling; V2 a field recorded on one side
-             # only, alone (ambiguity VA1) and beside another; V5 a line over
-             # 64 KiB.
+             # only, alone (`{}`) and beside another; V5 a line over 64 KiB.
              + ['values: a type change %s -> %s, not raced' % (t1, t2)
                 for t1 in ref.TYPES for t2 in ref.TYPES if t1 != t2]
              + ['values: a type change %s %s' % (d, w) for w in (
                  'a regular file with no sha256', 'a symlink whose target is not UTF-8',
-                 'an unreadable symlink whose target is unknown (empty)') for d in ('from', 'to')]
+                 'an unreadable symlink whose target is unknown (empty)',
+                 'an unreadable symlink whose target is written') for d in ('from', 'to')]
+             # V6 on an `unknown` record (a raced swap): raced before only,
+             # after only and on both sides are the raced type changes above;
+             # here a symlink's target, known and unknown (V2), on it.
+             + ['values: a raced type change %s %s' % (d, w) for w in (
+                 'a symlink', 'an unreadable symlink whose target is unknown (empty)')
+                for d in ('from', 'to')]
              + ['values: a link target that differs, UTF-8 on one side, not on the other',
                 'values: a link target that differs, not UTF-8 on both sides',
                 'values: xattrs inline on one side, xattrs_sha256 on the other, the sets differ']
@@ -690,6 +710,12 @@ def values_coverage(b, a, D, tags):
     raced = b.get('raced') or a.get('raced')
     if b['type'] != a['type']:
         if raced:
+            for e, d in ((b, 'from'), (a, 'to')):
+                if e['type'] == 'lnk':
+                    tags.add('values: a raced type change %s a symlink' % d)
+                if e['type'] == 'lnk' and e.get('unreadable') and e['link_target'] == b'':
+                    tags.add('values: a raced type change %s an unreadable symlink whose '
+                             'target is unknown (empty)' % d)
             return
         tags.add('values: a type change %s -> %s, not raced' % (b['type'], a['type']))
         for e, d in ((b, 'from'), (a, 'to')):
@@ -700,6 +726,9 @@ def values_coverage(b, a, D, tags):
             if e['type'] == 'lnk' and e.get('unreadable') and e['link_target'] == b'':
                 tags.add('values: a type change %s an unreadable symlink whose target is '
                          'unknown (empty)' % d)
+            if e['type'] == 'lnk' and e.get('unreadable') and e['link_target'] != b'':
+                tags.add('values: a type change %s an unreadable symlink whose target is '
+                         'written' % d)
         return
     if b['type'] == 'lnk' and b['link_target'] != a['link_target'] and \
             not (b.get('unreadable') or a.get('unreadable')):
