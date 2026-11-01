@@ -393,10 +393,12 @@ names at most 1,024 paths:
 | pip | RECORD | 16 MiB, and 262,144 rows |
 | dpkg | `status` | 256 MiB |
 | git | `HEAD`, a loose ref | 64 KiB |
-| git | `packed-refs`, a reflog | 64 MiB (a reflog is copied only within `store_max_bytes`, 64 KiB by default: a longer one has no copy, `content_unavailable`, reason `missing`) |
+| git | `packed-refs` | 64 MiB |
+| git | a reflog | 16 MiB: a capture keeps a reflog up to this whatever `store_max_bytes` says, and a side recorded without a copy because it is larger is `content_unavailable`, reason `too_large` |
 | pip, dpkg | per-diff state | 64 MiB (past it, the end hook fails) |
 
-`missing` covers a path whose entry records no `stored` copy as well as a copy the store lacks, and
+`missing` covers a path whose entry records no `stored` copy (a reflog over its 16 MiB bound
+excepted: `too_large`) as well as a copy the store lacks, and
 is given before `no_store` when both apply. A record's `content_unavailable` findings come before
 side, then after; an interpreter's `content_unavailable` events come one per reason, in the order
 `no_store`, `missing`, `too_large`, `corrupt`. A `bool` field renders in `text` as `true` or

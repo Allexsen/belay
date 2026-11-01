@@ -241,7 +241,9 @@ Each rule below closes a way for a state the format records to be rendered as "n
 - **`raced` means the recorded state held during the walk but not at its end.** Report the entry
   as changed during capture, not as unchanged.
 - **Non-zero `vanished`, `unstable` or `raced` in the trailer makes the whole result provisional**:
-  the tree was changing while it was read. Say so, and recommend a re-check.
+  the tree was changing while it was read. diff.v1 says so in its trailer (`provisional`); belay's
+  receipt names each flagged entry and counts, in one line, the entries that changed while they
+  were read, saying that running belay again settles them.
 - **`unstable`, `raced` and `unverified` map to the outcome `unknown`, never to "unchanged".** In the
   diff schema (diff.v1), `unknown` is a first-class outcome beside added, removed, modified,
   type-changed and metadata-only.
@@ -249,10 +251,9 @@ Each rule below closes a way for a state the format records to be rendered as "n
   directory `a`): the writer never emits one, and the check costs memory in proportion to a
   path's depth, not to the number of directories.
 - **`unverified` (including `unstable`) never reports "unchanged" on content alone.** With identical
-  metadata the honest label is "unchanged (unverified)"; on a protected path it is a failure to
-  verify, not a pass.
+  metadata the outcome is `unknown`, reason `unverified` (diff.v1).
 - **A change in `iflags`, `caps` or the xattr set is a metadata change**, reported as such
-  (diff.v1: metadata-only), naming the attributes where `xattrs` is inline.
+  (diff.v1: metadata-only).
 - **`xattrs_sha256` is the sha256 of the bytes `xattrs` would hold between its brackets**, exactly
   as a writer emits them -- the elements sorted by the attributes' own name bytes (before any `x:`
   spelling), each in its double quotes, joined by `,` with no space, every hex digit lowercase --
@@ -268,8 +269,9 @@ Each rule below closes a way for a state the format records to be rendered as "n
   stamp themselves when used and a mount root's times belong to the mounted filesystem, so a ctime
   change there is evidence of nothing -- and an unrecorded attribute changed on such an entry is
   not seen.
-- **Compare under the same `hash_max_bytes`**, or report entries hashed on one side and unverified
-  on the other as unverified rather than changed.
+- **Compare under the same `hash_max_bytes`.** Where the two differ, an entry hashed on one side and
+  unverified on the other is `unknown`, reason `unverified`, unless its size differs, which proves
+  it `modified` (diff.v1).
 
 ## What a manifest of a live tree promises
 
