@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """Runs belay (through the driver) and the reference on every generated pair,
-compares the dpkg and pip findings and events byte for byte, and gates on
+compares the dpkg, pip and git-reflog findings and the pip, dpkg and git
+events (git's: none) byte for byte, and gates on
 coverage: every cell a builder declares must be hit at least once.
 
     run.py --driver build/reference/driver --work DIR [--n N] [--seed S] [--keep]
@@ -68,7 +69,8 @@ def compare(belay, mine):
             diffs.append("findings %r (%s):\n    belay     %s\n    reference %s"
                          % (p, mf, bf.decode("utf-8", "replace") if bf else None,
                             rf.decode("utf-8", "replace") if rf else None))
-    bev = [e for e in events if json.loads(e).get("interp") in ("pip", "dpkg")]
+    # git's kinds are path-level: the reference expects no git event at all.
+    bev = [e for e in events if json.loads(e).get("interp") in ("pip", "dpkg", "git")]
     if bev != mine.events:
         i = 0
         while i < min(len(bev), len(mine.events)) and bev[i] == mine.events[i]:
@@ -101,6 +103,53 @@ REASON_OF = {"no_store": "no_store", "missing_nostored": "missing", "missing_abs
 
 CNI = b"[" + ref.finding_json("could_not_interpret", {}) + b"]"
 
+GIT_REASON_OF = {"too_large_nostored": "too_large", "too_large_unverified": "too_large",
+                 "too_large_stored": "too_large", "missing_nostored_at_bound": "missing",
+                 "missing_nostored": "missing", "missing_absent": "missing",
+                 "corrupt_content": "corrupt"}
+
+
+def git_records(mine):
+    """The reference's findings on each reflog it claims: path -> list."""
+    return {p: json.loads(mine.findings[p]) if mine.findings.get(p) else []
+            for p, who in mine.claims.items() if who == "git"}
+
+
+def cu(reason, side):
+    return {"kind": "content_unavailable", "reason": reason, "side": side,
+            "text": "content unavailable (%s): %s" % (side, reason)}
+
+
+def check_git(cell, mine):
+    R = git_records(mine)
+    F = [f for fs in R.values() for f in fs]
+    no_cu = not any(f["kind"] == "content_unavailable" for f in F)
+    parts = cell.split(".")
+    if parts[1] == "git" and parts[2] in GIT_REASON_OF:
+        reason, side = GIT_REASON_OF[parts[2]], parts[3]
+        want = [cu(reason, s) for s in (["before", "after"] if side == "both" else [side])]
+        return list(R.values()) == [want]
+    checks = {
+        "cu.git.too_large_before_no_store":
+            lambda: list(R.values()) == [[cu("too_large", "before"), cu("no_store", "after")]],
+        "cu.git.missing_before_no_store":
+            lambda: list(R.values()) == [[cu("missing", "before"), cu("no_store", "after")]],
+        "git.reflog_appended": lambda: any(f["kind"] == "git_reflog_appended" for f in F),
+        "git.reflog_move": lambda: any(f["kind"] == "git_reflog_move" for f in F),
+        "git.ref_name_refs": lambda: any(f.get("ref") == "refs/heads/main" for f in F),
+        "git.reflog_rewritten": lambda: [f["kind"] for f in F] == ["git_reflog_rewritten"] * 2,
+        "git.reflog_added": lambda: any(f["kind"] == "git_reflog_appended"
+                                        and f["entries"] == 5 for f in F),
+        "git.reflog_removed_no_copy": lambda: R.get(gen.REFLOG_MAIN) == [
+            {"kind": "git_reflog_rewritten", "ref": "refs/heads/main",
+             "text": "refs/heads/main: reflog rewritten"}],
+        "git.reflog_read_at_bound": lambda: no_cu and R.get(gen.REFLOG_HEAD, [{}])[0].get(
+            "entries") == gen.reflog_of_size(ref.REFLOG_BOUND)[1],
+        "git.reflog_over_store_max_bytes": lambda: no_cu and R.get(gen.REFLOG_MAIN, [{}])[0].get(
+            "entries") == 1500,
+    }
+    return bool(checks[cell]())
+
 
 def cni_records(mine):
     """How many records the reference gives could_not_interpret."""
@@ -122,6 +171,8 @@ def check_cell(cell, mine, belay=None):
     def has(kind, **kw):
         return any(e["event"] == kind and all(e.get(k) == v for k, v in kw.items()) for e in E)
 
+    if cell.startswith("git.") or cell.startswith("cu.git."):
+        return check_git(cell, mine)
     if cell.startswith("cu."):
         parts = cell.split(".")
         interp, variant, side = parts[1], parts[2], parts[-1]

@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Deterministic corpus for the dpkg/pip reference (scripts/reference/).
+"""Deterministic corpus for the dpkg/pip/reflog reference (scripts/reference/).
 
 A case is two trees, before and after, written as two manifest-v1 files plus
 a store: copies at <store>/<first two hex of sha256>/<other 62>
@@ -598,8 +598,190 @@ def random_case(rng, i):
                 c.put("after", rec, reg(record_bytes(rows, term), mode=0o100600, gen=1))
             else:
                 both_dist(c, site, name, v1, rows)
+    if rng.random() < 0.4:
+        random_reflog(rng, c)
     c.tag("random")
     return c
+
+
+# ---------------------------------------------------------------- git reflogs
+
+REFLOG_HEAD = b"proj/.git/logs/HEAD"
+REFLOG_MAIN = b"proj/.git/logs/refs/heads/main"
+# operation: message; True when it is no git_reflog_move (a plain commit or a
+# fast-forward)
+REFLOG_MSGS = [(b"commit: fix the parser", True), (b"commit (initial): start", True),
+               (b"merge topic: Fast-forward", True), (b"pull: Fast-forward", True),
+               (b"checkout: moving from main to topic", False),
+               (b"reset: moving to HEAD~1", False), (b"commit (amend): fix", False),
+               (b"rebase (finish): returning to refs/heads/main", False),
+               (b"branch: Created from HEAD", False), (b"cherry-pick: a fix", False),
+               (b"merge topic: Merge made by the 'ort' strategy.", False)]
+
+
+def oid(rng):
+    return rng.randbytes(20).hex().encode()
+
+
+def reflog_entry(old, new, msg, t):
+    return (old + b" " + new + b" Ref Erence <ref@example.org> %d +0000\t" % (1761000000 + t)
+            + msg + b"\n")
+
+
+def rand_reflog(rng, n, last=None, t=0):
+    """n entries continuing from `last` (an object id, or the zero id)."""
+    old = last or b"0" * 40
+    out = []
+    for i in range(n):
+        new = oid(rng)
+        out.append(reflog_entry(old, new, rng.choice(REFLOG_MSGS)[0], t + i))
+        old = new
+    return b"".join(out), old
+
+
+def reflog_of_size(size):
+    """Plain commits, `size` bytes exactly; the entries it holds."""
+    head = reflog_entry(b"0" * 40, b"1" * 40, b"commit: ", 0)
+    body_len = len(head)
+    n = size // body_len
+    out = [reflog_entry(b"%040x" % i, b"%040x" % (i + 1), b"commit: ", i) for i in range(n - 1)]
+    used = sum(len(x) for x in out)
+    last = reflog_entry(b"%040x" % n, b"%040x" % (n + 1), b"commit: ", n)
+    last = last[:-1] + b"x" * (size - used - len(last)) + b"\n"
+    data = b"".join(out) + last
+    assert len(data) == size
+    return data, n
+
+
+REFLOG_BIG = ref.REFLOG_BOUND + 1
+
+
+def cell_git_reflog():
+    out = []
+    rng = random.Random(4242)
+    L, M = REFLOG_HEAD, REFLOG_MAIN
+    B = ref.REFLOG_BOUND
+    small = lambda n=3: rand_reflog(rng, n)
+
+    c = Case("git-reflog-appended")
+    before, last = small(3)
+    more = (reflog_entry(last, oid(rng), b"commit: x", 9) + reflog_entry(b"a" * 40, b"b" * 40,
+            b"reset: moving to HEAD~1", 10) + reflog_entry(b"b" * 40, b"c" * 40,
+            b"pull: Fast-forward", 11) + reflog_entry(b"c" * 40, b"d" * 40,
+            b"checkout: moving from main to topic", 12))
+    c.put("before", L, reg(before))
+    c.put("after", L, reg(before + more, gen=1))
+    c.put("before", M, reg(before))
+    c.put("after", M, reg(before + reflog_entry(last, b"e" * 40, b"commit (amend): y", 13), gen=1))
+    c.tag("git.reflog_appended")
+    c.tag("git.reflog_move")
+    c.tag("git.ref_name_refs")
+    out.append(c)
+
+    c = Case("git-reflog-rewritten")
+    before, _ = small(4)
+    c.put("before", L, reg(before))
+    c.put("after", L, reg(before[:len(before) // 2] + b"\n" + small(2)[0], gen=1))
+    # a prefix that ends inside a line of after
+    c.put("before", M, reg(before[:-1]))
+    c.put("after", M, reg(before + small(1)[0], gen=1))
+    c.tag("git.reflog_rewritten")
+    out.append(c)
+
+    c = Case("git-reflog-added-removed")
+    c.put("after", L, reg(small(5)[0]))
+    # removed, no copy and over the bound: no copy is needed
+    c.put("before", M, reg(None, big=REFLOG_BIG, store="none"))
+    c.tag("git.reflog_added")
+    c.tag("git.reflog_removed_no_copy")
+    out.append(c)
+
+    # read in full up to 16 MiB, whatever store_max_bytes (65,536 here) says
+    c = Case("git-reflog-read-at-bound")
+    data, _ = reflog_of_size(B)
+    c.put("after", L, reg(data))
+    before, last = rand_reflog(rng, 2000)
+    c.put("before", M, reg(before))
+    c.put("after", M, reg(before + rand_reflog(rng, 1500, last)[0], gen=1))
+    c.tag("git.reflog_read_at_bound")
+    c.tag("git.reflog_over_store_max_bytes")
+    out.append(c)
+
+    def cu(name, side, bad, mode="store"):
+        """One reflog, modified: `bad` on `side`, a small stored copy on the
+        other (a removed reflog needs no copy; an added one is random's)."""
+        c = Case(name, modes=(mode,))
+        good = reg(small(2)[0], gen=7)
+        c.put("before", L, bad(0) if side in ("before", "both") else good)
+        c.put("after", L, bad(1) if side in ("after", "both") else good)
+        return c
+
+    variants = {
+        # recorded without a copy, larger than the bound: too_large
+        "too_large_nostored": lambda w: reg(None, big=B + 1 + w, store="none", gen=w),
+        "too_large_unverified": lambda w: reg(None, unverified=True, gen=w),
+        # a copy larger than the bound: too_large, as for any interpreter
+        "too_large_stored": lambda w: reg(None, big=B + 3 + w, gen=w),
+        # no copy, at or under the bound: still missing
+        "missing_nostored_at_bound": lambda w: reg(None, big=B - w, store="none", gen=w),
+        "missing_nostored": lambda w: reg(small(2)[0], store="none", gen=w),
+        "missing_absent": lambda w: reg(small(2)[0], store="absent", gen=w),
+        "corrupt_content": lambda w: reg(small(2)[0], store="corrupt", gen=w),
+    }
+    for v, bad in variants.items():
+        for side in ("before", "after", "both"):
+            if v == "too_large_unverified" and side == "both":
+                continue                # unverified on both sides: unknown
+            c = cu("cu-git-%s-%s" % (v, side), side, bad)
+            c.tag("cu.git.%s.%s" % (v, side))
+            out.append(c)
+
+    # no store: the no-copy reasons come before no_store
+    c = cu("cu-git-too_large-before-no_store", "before", variants["too_large_nostored"],
+           mode="nostore")
+    c.tag("cu.git.too_large_before_no_store")
+    out.append(c)
+    c = cu("cu-git-missing-before-no_store", "before", variants["missing_nostored_at_bound"],
+           mode="nostore")
+    c.tag("cu.git.missing_before_no_store")
+    out.append(c)
+    return out
+
+
+def random_reflog(rng, c):
+    """Now and then, a reflog: appended, rewritten, added, removed; its copy
+    on a side kept or not, the side's size under, at or over the bound."""
+    p = rng.choice([REFLOG_HEAD, REFLOG_MAIN, b".git/logs/HEAD",
+                    b"proj/sub/.git/logs/refs/remotes/origin/main"])
+    store = lambda: rng.choice(["ok"] * 6 + ["none", "absent", "corrupt", "symlink"])
+    B = ref.REFLOG_BOUND
+    big = lambda w: reg(None, big=rng.choice([B - 1, B, B + 1, B + 9]), store="none", gen=w)
+    rc = lambda: rng.random() < 0.05
+    before, last = rand_reflog(rng, rng.randrange(1, 6))
+    op = rng.randrange(8)
+    if op == 0:                                  # appended
+        c.put("before", p, reg(before, store=store(), raced=rc()))
+        c.put("after", p, reg(before + rand_reflog(rng, rng.randrange(1, 9), last, 50)[0],
+                              store=store(), gen=1, raced=rc()))
+    elif op == 1:                                # rewritten
+        c.put("before", p, reg(before, store=store()))
+        c.put("after", p, reg(rand_reflog(rng, rng.randrange(1, 4))[0], store=store(), gen=1))
+    elif op == 2:                                # added
+        c.put("after", p, reg(before, store=store()))
+    elif op == 3:                                # removed
+        c.put("before", p, big(0) if rng.random() < 0.3 else reg(before, store=store()))
+    elif op == 4:                                # one side big without a copy
+        side = rng.choice(["before", "after"])
+        c.put(side, p, big(0))
+        c.put("after" if side == "before" else "before", p, reg(before, store=store(), gen=1))
+    elif op == 5:                                # added, unverified
+        c.put("after", p, reg(None, unverified=True))
+    elif op == 6:                                # mode only: metadata_only, nothing
+        c.put("before", p, reg(before))
+        c.put("after", p, reg(before, mode=0o100600, gen=1))
+    else:                                        # both big without a copy
+        c.put("before", p, big(0))
+        c.put("after", p, big(1))
 
 
 # ---------------------------------------------------------------- required cells
@@ -1509,7 +1691,7 @@ def cell_probes():
 def required_cases():
     return (cell_dpkg_simple() + cell_pip_simple() + cell_pip_e10() + cell_dpkg_e9_e10()
             + cell_p7() + cell_order() + cell_content_unavailable() + cell_paths_b64()
-            + cell_probes())
+            + cell_git_reflog() + cell_probes())
 
 
 def all_cases(n, seed):

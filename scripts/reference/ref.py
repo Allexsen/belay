@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
-"""An independent reference for diff.v1's dpkg and pip interpreters.
+"""An independent reference for diff.v1's dpkg and pip interpreters, and
+git's reflogs.
 
 Written from docs/spec/diff-v1.md ("Interpreters", "What each interpreter
 reports", the Kinds table and the event rules), docs/spec/manifest-v1.md, the
@@ -11,9 +12,12 @@ Python's csv module reads them), PEP 503 for names and PEP 440 for versions
 
 Given two manifests and a store directory (or none), it gives, for every path
 the diff reports (outcome not `unchanged`), the outcome as this file reads
-the rules, and for each path dpkg or pip claims the exact bytes of its
-`findings` array (None when absent); then the pip and dpkg event records, in
-order, byte for byte. Standard library only.
+the rules, and for each path dpkg, pip or (a reflog) git claims the exact
+bytes of its `findings` array (None when absent); then the pip and dpkg event
+records, in order, byte for byte (git has none: its kinds are path-level).
+Of git only the reflog is modelled ("What each interpreter reports", git; the
+bounds table's reflog row); its HEAD, refs, hooks and index are not claimed
+here. Standard library only.
 
 Where the prose is silent this file says so in a comment starting READING:
 those are the readings implemented, listed again in the harness's report.
@@ -32,6 +36,12 @@ import stat
 PIP_BOUND = 16 << 20        # spec: pip RECORD, 16 MiB ...
 PIP_ROWS = 262144           # ... and 262,144 rows
 DPKG_BOUND = 256 << 20      # spec: dpkg status, 256 MiB
+# spec (bounds table): git, a reflog, "16 MiB: a capture keeps a reflog up to
+# this whatever `store_max_bytes` says, and a side recorded without a copy
+# because it is larger is `content_unavailable`, reason `too_large`". The
+# same 16 MiB bounds the copy read.
+REFLOG_BOUND = 16 << 20
+FINDINGS_MAX = 4096         # "A record carries at most 4,096 findings"
 EVENT_BOUND = 65536         # E5
 STRING_MAX = 1024           # a string field's value, and a finding's text
 
@@ -43,6 +53,9 @@ KINDS = [
     "pip_version_changed", "pip_reinstalled",
     "dpkg_installed", "dpkg_removed", "dpkg_upgraded", "dpkg_downgraded",
     "dpkg_state_changed",
+    # git's kinds other than the reflog's are not modelled; these keep the
+    # table's relative order.
+    "git_reflog_appended", "git_reflog_move", "git_reflog_rewritten",
 ]
 KIND_INDEX = {k: i for i, k in enumerate(KINDS)}
 
@@ -67,6 +80,9 @@ KIND_ROWS = {
     "dpkg_downgraded": (["package", "arch", "from", "to"],
                         "downgraded {package}:{arch} {from} -> {to}"),
     "dpkg_state_changed": (["package", "arch", "from", "to"], "{package}:{arch} {from} -> {to}"),
+    "git_reflog_appended": (["ref", "entries"], "{ref}: {entries} reflog entries"),
+    "git_reflog_move": (["ref", "from", "to", "operation"], "{ref} {from} -> {to} by {operation}"),
+    "git_reflog_rewritten": (["ref"], "{ref}: reflog rewritten"),
 }
 
 # The optional fields (`?`) and the second template a kind gives, used when
@@ -88,6 +104,10 @@ DPKG_STATUS = b"*/var/lib/dpkg/status"
 DPKG_PATTERNS = [DPKG_STATUS, b"*/var/lib/dpkg/info/*.list", b"*/var/lib/dpkg/info/*.md5sums"]
 PIP_RECORD = b"*.dist-info/RECORD"
 PIP_PATTERNS = [PIP_RECORD, b"*.dist-info/METADATA"]
+# git claims "the reflogs `*/.git/logs/HEAD` and `*/.git/logs/refs/*`" (its
+# other claims are not modelled). READING: no path the corpus builds is
+# claimed by two interpreters, so the order of these checks is not tested.
+REFLOG_PATTERNS = [b"*/.git/logs/HEAD", b"*/.git/logs/refs/*"]
 
 
 class InterpFailure(Exception):
@@ -275,6 +295,9 @@ def claim(scope, path):
     for p in PIP_PATTERNS:
         if fnmatch.fnmatchcase(absp, p):
             return "pip"
+    for p in REFLOG_PATTERNS:
+        if fnmatch.fnmatchcase(absp, p):
+            return "git"
     return None
 
 
@@ -291,11 +314,22 @@ def record_row_count(data):
         return 0
 
 
-def fetch(store, entry, bound, rows_max=None):
-    """(reason, None) or (None, bytes): the stored copy of one side."""
+def fetch(store, entry, bound, rows_max=None, nocopy_too_large=False):
+    """(reason, None) or (None, bytes): the stored copy of one side.
+    nocopy_too_large: a reflog, kept by a capture up to `bound` whatever
+    store_max_bytes says."""
     s = entry.get("stored")
-    # spec: `missing` "is given before `no_store` when both apply".
+    # spec: "`missing` covers a path whose entry records no `stored` copy (a
+    # reflog over its 16 MiB bound excepted: `too_large`) as well as a copy
+    # the store lacks, and is given before `no_store` when both apply".
+    # READING: the reflog's too_large, which stands in that clause for
+    # `missing`, is given before `no_store` too: like `missing` it is known
+    # from the manifest alone. "Over" is strictly larger than the bound, the
+    # entry's `size` its size (an unverified entry included: it has a size
+    # and no copy).
     if not s:
+        if nocopy_too_large and entry["size"] > bound:
+            return "too_large", None
         return "missing", None
     if store is None:
         return "no_store", None
@@ -324,7 +358,8 @@ def is_reg(e):
 PROVEN = ("added", "removed", "modified", "type_changed")
 
 
-def needed_copies(store, b, a, bound, need_before, need_after, rows_max=None):
+def needed_copies(store, b, a, bound, need_before, need_after, rows_max=None,
+                  nocopy_too_large=False):
     """Reads the sides needed; returns (findings, unavailable list of
     (side, reason), contents dict)."""
     findings = []
@@ -333,7 +368,7 @@ def needed_copies(store, b, a, bound, need_before, need_after, rows_max=None):
     for side, e, need in (("before", b, need_before), ("after", a, need_after)):
         if not need:
             continue
-        reason, data = fetch(store, e, bound, rows_max)
+        reason, data = fetch(store, e, bound, rows_max, nocopy_too_large)
         if reason:
             # spec: before's finding first, then after's.
             findings.append(finding_json("content_unavailable",
@@ -641,12 +676,64 @@ def record_rows(data):
     return rows
 
 
+# ---------------------------------------------------------------- git: reflogs
+
+def reflog_ref(absp):
+    """spec: "A path is placed by the part after its `.git/` (the last one
+    that fits)"; "`logs/HEAD` is ref `HEAD`, `logs/refs/...` is `refs/...`"."""
+    starts = [i for i in range(len(absp)) if absp.startswith(b"/.git/", i)]
+    for i in reversed(starts):
+        rest = absp[i + len(b"/.git/"):]
+        if rest == b"logs/HEAD":
+            return b"HEAD"
+        if rest.startswith(b"logs/refs/") and len(rest) > len(b"logs/refs/"):
+            return rest[len(b"logs/"):]
+    raise AssertionError("not a reflog: %r" % absp)
+
+
+def lines_of(data):
+    """READING: a reflog's entries are lines as text's are: "the bytes up to
+    and including a newline, or the bytes after the last newline"."""
+    out = data.split(b"\n")
+    if out[-1] == b"":
+        out.pop()
+    return out
+
+
+def reflog_findings(ref, before, after):
+    """before: bytes, or None when absent ("an absent before is empty");
+    after: bytes, or None when the reflog was removed (no copy needed)."""
+    if after is None:
+        return [finding_json("git_reflog_rewritten", {"ref": ref})]
+    bb = before or b""
+    # "when before's bytes are a prefix of after's ending at a line's end"
+    if after.startswith(bb) and (bb == b"" or bb.endswith(b"\n") or bb == after):
+        new = lines_of(after[len(bb):])
+        out = [finding_json("git_reflog_appended", {"ref": ref, "entries": len(new)})]
+        for line in new:
+            # READING: an entry is "<old> <new> <ident>\t<message>"; from and
+            # to are its first two space-separated words. The corpus writes
+            # only such entries, each message holding a ':'.
+            head, _, msg = line.partition(b"\t")
+            words = head.split(b" ")
+            op = msg.split(b":", 1)[0]
+            if op in (b"commit", b"commit (initial)") or b"Fast-forward" in msg:
+                continue
+            out.append(finding_json("git_reflog_move", {"ref": ref, "from": words[0],
+                                                        "to": words[1], "operation": op}))
+        # READING: appended first, then each move in entry order. The
+        # corpus stays under 4,096 findings (and_more is not modelled here).
+        assert len(out) <= FINDINGS_MAX
+        return out
+    return [finding_json("git_reflog_rewritten", {"ref": ref})]
+
+
 # ---------------------------------------------------------------- the diff
 
 class Result:
     def __init__(self):
         self.outcomes = {}      # path -> outcome, every path not unchanged
-        self.claims = {}        # path -> "pip" | "dpkg" for those
+        self.claims = {}        # path -> "pip" | "dpkg" | "git" (a reflog) for those
         self.findings = {}      # path -> bytes of the findings array, or None
         self.events = []        # event lines (bytes), pip's then dpkg's
 
@@ -752,6 +839,22 @@ def interpret(before_fn, after_fn, store):
             else:
                 pip_names.append(path)
                 pip_pairs[path] = "A" if areg else "R"
+        elif who == "git" and oc in PROVEN and (breg or areg):
+            # git derives nothing from an unknown path (no events at all). A
+            # path regular on neither side (a directory under logs/refs/) is
+            # a reflog on neither: "not a regular file counts as absent".
+            ref = reflog_ref(absp)
+            if not areg:
+                # "or when the reflog was removed (no copy needed),
+                # git_reflog_rewritten".
+                findings = reflog_findings(ref, None, None)
+            else:
+                findings, u, contents = needed_copies(store, b, a, REFLOG_BOUND, breg, True,
+                                                      nocopy_too_large=True)
+                # READING: a reflog a needed side of which cannot be read
+                # carries its content_unavailable findings only.
+                if not u:
+                    findings = reflog_findings(ref, contents.get("before"), contents["after"])
         if oc == "unknown":
             findings = []           # no path finding on an unknown path
         res.findings[path] = (b"[" + b",".join(findings) + b"]") if findings else None
