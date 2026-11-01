@@ -917,6 +917,10 @@ INTERP_SCENARIOS = (
        'git hook: added, not a regular file on either side (dir)',
        'git reflog: added, not a regular file on either side (dir)',
        'git reflog: added, not a regular file on either side (lnk)',
+       'git reflog: added, a side with no stored copy, over 16 MiB',
+       'git reflog: removed, a side with no stored copy, over 16 MiB',
+       'git reflog: added, a side with no stored copy, of exactly 16 MiB',
+       'git reflog: modified, a side with no stored copy, over 16 MiB',
        'git hook: type_changed, reg -> lnk', 'git hook: type_changed, lnk -> reg',
        'git hook: type_changed, lnk -> dir',
        'text: a stored *.md5sums file outside var/lib/dpkg/info/, modified']
@@ -963,6 +967,13 @@ def interp_coverage(stem, tags):
                                                     else 'unchanged')
             if what in NEED_CONTENT and any('stored' not in e for e in regs):
                 tag += ', a side with no stored copy'
+                # A reflog's 16 MiB bound (diff-v1, the bounds table): no
+                # copy over it is `too_large`, at it `missing`.
+                big = [e['size'] for e in regs if 'stored' not in e]
+                if what == 'reflog' and max(big) > ref.REFLOG_BOUND:
+                    tag += ', over 16 MiB'
+                elif what == 'reflog' and max(big) == ref.REFLOG_BOUND:
+                    tag += ', of exactly 16 MiB'
             if o == 'type_changed':
                 tag += ', %s -> %s' % (b['type'], a['type'])
             if o == 'unknown' and regs:
