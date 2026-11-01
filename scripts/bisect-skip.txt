@@ -112,3 +112,9 @@
 # `make oracle` (a CI step of linux-x86_64; `make check` passes) fails at both.
 2026-11-01T11:37:58+04:00	diff: before and after values for every changed field (pin diff-values.md)
 2026-11-01T11:37:58+04:00	spec: the three reflog rules the separate authors had to infer
+
+# m1/values-pin (decisions 2026-11-01: 2-5), merged by rebase. The pin's V1, V2
+# and V6 sentences change before the oracle's author quotes them anew, so
+# `make oracle` (a CI step; `make check` passes) fails at both commits.
+2026-11-01T12:13:23+04:00	pins: diff values corrected; a raced swap carries V6; unreadable targets left out
+2026-11-01T12:20:51+04:00	diff: a target written on an unreadable link is carried; only "" is left out
