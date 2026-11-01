@@ -8,7 +8,8 @@
 # Runs the given seed (default 20261030) and then one random seed, printed
 # with the command that reproduces it. Exit 0 only when, for both, every pair
 # agrees on its header, every record and every count, in all four combinations
-# of manifest versions 1 and 2 (V2-R4), every pair of different scopes is
+# of manifest versions 1 and 2 (V2-R4; a manifest with exclusions has no v1
+# counterpart, so in those where it is v2), every pair of different scopes is
 # refused with no output file, and the coverage gate passes.
 set -euo pipefail
 HERE=$(cd "$(dirname "$0")" && pwd); REPO=$(cd "$HERE/../.." && pwd)

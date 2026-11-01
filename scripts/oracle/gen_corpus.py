@@ -27,14 +27,25 @@ the four combinations of versions 1 and 2 (cycled), and each of its two
 manifests also in the other version (.alt), so compare.py runs every pair in
 all four and checks its records do not depend on them (V2-R4). A v2 manifest
 is the v1 one plus the keys the pin's Lines table adds (read at run time, in
-its order, after v1's): `excluded` always `[]` -- how diff.v1 treats an
-excluded path is not decided, so none is modelled --, `walk_start_ns`
-(0 on every third side), and `trusted`, `reference`, `read_all` cycling over
-every kind of walk V2-5 and V2-6 name, consistent by the spec's agreement
-rule (v2_violations()). Those statements decide nothing in a diff (V2-R6) and
-vary freely; their numbers come from the writer's own random stream, so the
-trees a seed gives are those it gave before v2. manifest_versions() builds
-the gate's version items deterministically.
+its order, after v1's): `excluded`, the tree's exclusions (Tree.x, V2-2),
+`walk_start_ns` (0 on every third side), and `trusted`, `reference`,
+`read_all` cycling over every kind of walk V2-5 and V2-6 name, consistent by
+the spec's agreement rule (v2_violations()). Those statements decide nothing
+in a diff (V2-R6) and vary freely; their numbers come from the writer's own
+random stream. manifest_versions() builds the gate's version items
+deterministically.
+
+Exclusions (V2-2; docs/spec/manifest-v2.md, "Readers"): a tree's excluded
+paths have no entry, nothing below them is recorded (no entry, no other
+exclusion), and each one's parent is a directory that was listed -- neither
+unreadable nor a mount; it may be unstable (exclusion_violations()). A
+manifest with exclusions has no version 1 counterpart: version 1 cannot say
+what was not walked, and the same entries without `excluded` would claim a
+known absence ("nothing is ever excluded silently"). So such a side is
+written in version 2 only, with no .alt, and compare.py runs its pair in the
+combinations of versions whose files exist (Writer.write_both_versions).
+exclusions() builds the gate's exclusion items; random trees exclude entries
+too (the base of a random pair, and the `exclude`/`unexclude` mutations).
 
 The corpus has three parts:
   - targeted pairs, the same for every seed (only the values vary): for every
@@ -55,7 +66,8 @@ The corpus has three parts:
     one-sided raced entries, a regular file mounted on one side or both,
     `unverified` on the other side or not (pin O8), a mounted regular file
     whose type changes while raced on either side or both (O8 across a type
-    change), the trailer's walk counts, the root itself,
+    change), the trailer's walk counts, paths a v2 manifest excluded
+    (exclusions()), the root itself,
     names sorting before ".", non-UTF-8 and escaped names; and the
     interpreters with no store (interpreters()): text paths modified, added,
     removed, metadata_only and unknown, a file stored on one side only, dpkg
@@ -235,6 +247,20 @@ V2_READ_ALL = ['check', 'no checkpoint before', 'asked for (--full)', 'every N m
                "the previous walk's start is unknown and the scope's timestamps are coarse"]
 V2_FREE_REASON = 'the previous manifest could not be used: "caf\u00e9" \\ \u65e5'
 V2_REFERENCES = ['walk_start', 'newest_ctime', 'none']
+# V2-2's words this generator relies on: an `excluded` element's keys, in
+# order (`path_b64` for a path not UTF-8, as for entries), its reasons, the
+# order of the list, and what an excluded path leaves in the manifest.
+V2_EXCLUDED_WORDS = ['`{"path": string, "reason": string, "dev": int, "ino": int}`',
+                     '`path_b64` in place of `path` when not UTF-8, as for entries',
+                     'sorted by path bytes', '`"state_dir"`', '`"user"`',
+                     '`dev` and `ino` are those of what was there',
+                     'It has no entry, nor anything below it; its name still counts in its '
+                     "parent's listing"]
+EXCLUDED_REASONS = ['state_dir', 'user']
+# An element's keys, as enc_obj() takes them: `path` spelled as an entry's.
+EXCLUDED_KEYS = [next(k for k in KEYS['entry'] if k[0] == 'path')[:3] + ('required',),
+                 ('reason', ('reason',), 'string', 'required'),
+                 ('dev', ('dev',), 'int', 'required'), ('ino', ('ino',), 'int', 'required')]
 # The spec's agreement rule (manifest-v2.md, "The trailer"), which
 # v2_violations() implements.
 V2_AGREEMENT = ('The three agree, and a reader checks it: the prefilter was used exactly when '
@@ -271,6 +297,9 @@ def load_manifest_v2_pin():
     if '`[]` when none' not in text['excluded'] or \
             '`0` when that clock could not be read' not in text['walk_start_ns']:
         die('pin: V2-2 or V2-3 changed the words this generator relies on')
+    for words in V2_EXCLUDED_WORDS:
+        if words not in text['excluded']:
+            die('pin: V2-2 no longer says %r; review exclusion_violations() first' % words)
     if V2_AGREEMENT not in open(MANIFEST_V2_SPEC, encoding='utf-8').read():
         die('spec: manifest-v2.md changed its agreement rule; review v2_violations() first')
     return {k: KEYS[k] + v for k, v in keys.items()}
@@ -451,6 +480,10 @@ class Tree:
         self.store_max = rng.choice([0, 4096, 65536])
         self.vanished = 0
         self.e = {}
+        # Manifest v2's `excluded` (V2-2): {path bytes: {'reason', 'dev',
+        # 'ino'}}. Nothing at or below such a path is in self.e; its parent
+        # is a listed directory (exclusion_violations()).
+        self.x = {}
         rd = root_dev if root_dev is not None else rng.choice(ROOT_DEVS)
         self.e[b'.'] = new_entry(rng, self, b'.', 'dir', extras, dev=rd)
 
@@ -476,6 +509,31 @@ class Tree:
             del self.e[q]
 
 
+def covered_by(x, p):
+    """The path of x (exclusions) that p is at or below, or None."""
+    if p in x:
+        return p
+    for i in range(len(p) - 1, 0, -1):
+        if p[i:i + 1] == b'/' and p[:i] in x:
+            return p[:i]
+    return None
+
+
+def exclude(t, p, reason='user', dev=None, ino=None):
+    """t, as a walk that excluded p would record it (V2-2): no entry at or
+    below p, p in t.x with the device and inode of what was there (p's own
+    entry when t has one) -- and no exclusion below p, which that walk would
+    not have reached."""
+    e = t.e.pop(p, None)
+    t.drop_below(p)
+    for q in [q for q in t.x if q.startswith(p + b'/')]:
+        del t.x[q]
+    t.x[p] = {'reason': reason,
+              'dev': dev if dev is not None else e['dev'] if e else t.root_dev(),
+              'ino': ino if ino is not None else e['ino'] if e else 7 + len(p) * 131}
+    return t
+
+
 def parent_of(p):
     return p.rsplit(b'/', 1)[0] if b'/' in p else b'.'
 
@@ -494,10 +552,10 @@ def fresh_path(t, rng, parent=None):
         name = rng.choice(NAMES)
         if rng.random() < 0.3:
             name += b'%d' % rng.randrange(10)
-        if join(name) not in t.e:
+        if join(name) not in t.e and join(name) not in t.x:
             return join(name)
     i = 0
-    while join(b'n%d' % i) in t.e:
+    while join(b'n%d' % i) in t.e or join(b'n%d' % i) in t.x:
         i += 1
     return join(b'n%d' % i)
 
@@ -575,6 +633,15 @@ def fix(t, rng):
         fix_entry(t.e[p], t, rng)
     if root.get('unreadable'):                  # an unreadable root is the only entry
         t.e = {b'.': root}
+        t.x = {}
+    # Exclusions (V2-2): none below another; no entry at or below one.
+    kept = {}
+    for q in sorted(t.x, key=lambda q: (q.count(b'/'), q)):
+        if covered_by(kept, q) is None:
+            kept[q] = t.x[q]
+    t.x = kept
+    for p in [p for p in t.e if p != b'.' and covered_by(t.x, p) is not None]:
+        del t.e[p]
     # No orphans, nothing below an unreadable or mount directory: keep an
     # entry only when its parent is kept, is a directory, and is not sealed.
     keep = {}
@@ -587,6 +654,41 @@ def fix(t, rng):
             continue
         keep[p] = t.e[p]
     t.e = keep
+    # An exclusion's name counts in its parent's listing (V2-2): the parent
+    # is a directory that was listed, neither unreadable nor a mount.
+    t.x = {q: x for q, x in t.x.items() if listed_dir(t, parent_of(q))}
+
+
+def listed_dir(t, p):
+    e = t.e.get(p)
+    return e is not None and e['type'] == 'dir' and not e.get('unreadable') and \
+        not e.get('mount')
+
+
+def exclusion_violations(t):
+    """What makes t's exclusions invalid (test/expect/manifest-v2.md V2-2,
+    docs/spec/manifest-v2.md): each path canonical as an entry's and not the
+    root, within addendum A3, its parent a directory that was listed ("its
+    name still counts in its parent's listing": not unreadable, not a
+    mount), none at or below another ("Nothing below an excluded path is
+    recorded"), no entry at or below one ("It has no entry, nor anything
+    below it"), a reason V2-2 names, `dev` and `ino` integers."""
+    v = []
+    for q, x in t.x.items():
+        comps = q.split(b'/')
+        if q == b'.' or q.startswith(b'/') or any(c in (b'', b'.', b'..') for c in comps) or \
+                b'\0' in q or len(q) > ADDENDUM_MAX['path']:
+            v.append('excluded %r: not a canonical path' % q)
+        if not listed_dir(t, parent_of(q)):
+            v.append('excluded %r: its parent is not a listed directory' % q)
+        if covered_by({r: 1 for r in t.x if r != q}, q) is not None:
+            v.append('excluded %r: below another excluded path' % q)
+        if sorted(x) != ['dev', 'ino', 'reason'] or x['reason'] not in EXCLUDED_REASONS or \
+                any(type(x[k]) is not int or x[k] < 0 for k in ('dev', 'ino')):
+            v.append('excluded %r: %r' % (q, x))
+    v += ['%r: recorded at or below an excluded path' % p for p in t.e
+          if p != b'.' and covered_by(t.x, p) is not None]
+    return v
 
 
 def entry_violations(e, t):
@@ -684,7 +786,7 @@ def violations(t):
         if len(p) > ADDENDUM_MAX['path'] or len(e.get('link_target', b'')) > \
                 ADDENDUM_MAX['link_target']:
             v.append('%r: addendum A3/A4' % p)
-    return v
+    return v + exclusion_violations(t)
 
 
 def addendum_limits():
@@ -739,10 +841,9 @@ def enc_obj(keys, d):
             assert isinstance(v, list) and v and all(isinstance(x, str) for x in v), (canon, v)
             enc = '[' + ','.join(jstr(x) for x in v) + ']'
         elif kind == 'objects':
-            # v2's `excluded`: only `[]` here -- how diff.v1 treats an
-            # excluded path is not decided, so the corpus never excludes one.
-            assert v == [], (canon, v)
-            enc = '[]'
+            # v2's `excluded` (V2-2): flat objects, `[]` when none.
+            assert isinstance(v, list) and all(isinstance(x, dict) for x in v), (canon, v)
+            enc = '[' + ','.join(enc_obj(EXCLUDED_KEYS, x) for x in v) + ']'
         else:
             raise SystemExit('pin: unknown kind %r' % kind)
         parts.append('"%s":%s' % (name, enc))
@@ -771,10 +872,13 @@ def write_manifest(t, path, version=1, st=None):
         v = v2_violations(t, st)
         if v:
             die('generator bug: v2 statements %r: %s' % (st, v))
-        header.update((k, st[k]) for k in V2_IMPLEMENTED['header'])
-        trailer.update((k, st[k]) for k in V2_IMPLEMENTED['trailer'])
+        header.update((k, st[k]) for k in V2_STATED['header'])
+        header['excluded'] = excluded_list(t)
+        trailer.update((k, st[k]) for k in V2_STATED['trailer'])
     else:
-        assert version == 1, version
+        # A version 1 manifest cannot say what was not walked: a tree with
+        # exclusions is written in version 2 only (Writer.pair).
+        assert version == 1 and not t.x, (version, sorted(t.x))
     lines[0] = enc_obj(keys['header'], header)
     lines.append(enc_obj(keys['trailer'], trailer))
     for l in lines:
@@ -799,14 +903,25 @@ V2_WALKS = ([('', 'walk_start', 'some'), ('', 'newest_ctime', 'some'), ('', 'wal
             + [(r, 'none', 0) for r in V2_READ_ALL] + [(V2_FREE_REASON, 'none', 0)])
 
 
+# The v2 keys whose values are the capture's statements about itself (V2-3..
+# V2-6): they decide nothing (V2-R6) and vary freely. `excluded` (V2-2) is
+# not among them: it is the tree's (Tree.x), and decides what is compared.
+V2_STATED = {'header': [k for k in V2_IMPLEMENTED['header'] if k != 'excluded'],
+             'trailer': V2_IMPLEMENTED['trailer']}
+
+
+def excluded_list(t):
+    """The tree's exclusions as V2-2's elements, sorted by path bytes."""
+    return [dict({'path': q}, **t.x[q]) for q in sorted(t.x)]
+
+
 def v2_statements(t, rng, walk, ws_zero):
     read_all, reference, trusted = walk
     regs = sum(e['type'] == 'reg' for e in t.e.values())
     read_all = read_all.replace('every N', 'every %d' % rng.choice([2, 10, 64])) \
         .replace('newest N below the previous M', 'newest %d below the previous %d'
                  % (t.created - 10 ** 9, t.created - 10 ** 9 + rng.randrange(1, 10 ** 9)))
-    return {'excluded': [],
-            'walk_start_ns': 0 if ws_zero else t.created - rng.randrange(1, 10 ** 10),
+    return {'walk_start_ns': 0 if ws_zero else t.created - rng.randrange(1, 10 ** 10),
             'trusted': rng.randint(1, regs) if trusted == 'some' and regs else 0,
             'reference': reference, 'read_all': read_all}
 
@@ -815,10 +930,8 @@ def v2_violations(t, st):
     """What makes these v2 statements invalid for this tree: the pin's kinds
     and values (V2-2..V2-6) and the spec's agreement rule (V2_AGREEMENT)."""
     v = []
-    if sorted(st) != sorted(V2_IMPLEMENTED['header'] + V2_IMPLEMENTED['trailer']):
+    if sorted(st) != sorted(V2_STATED['header'] + V2_STATED['trailer']):
         v.append('keys %r' % sorted(st))
-    if st.get('excluded') != []:
-        v.append('excluded is not [] (not modelled)')
     if type(st.get('walk_start_ns')) is not int or st['walk_start_ns'] < 0:
         v.append('walk_start_ns')
     if type(st.get('trusted')) is not int or not 0 <= st['trusted'] <= len(t.e):
@@ -853,9 +966,17 @@ class Writer:
 
     def write_both_versions(self, t, path, version, st):
         """path in `version`, path.alt in the other one, with the same v2
-        statements."""
+        statements -- but a tree with exclusions has no version 1
+        counterpart (version 1 cannot say what was not walked, and the same
+        entries without `excluded` would claim a known absence, which V2-2
+        forbids: "nothing is ever excluded silently"): it is written in
+        version 2 only, with no .alt, and compare.py runs the pair in the
+        combinations of versions whose files exist."""
         write_manifest(t, path, version, st)
-        write_manifest(t, path + '.alt', 3 - version, st)
+        if not t.x:
+            write_manifest(t, path + '.alt', 3 - version, st)
+        else:
+            assert version == 2, version
 
     def pair(self, b, a, label, versions=None, statements=(None, None)):
         """One pair, in `versions` (before, after) or the next combination of
@@ -867,6 +988,10 @@ class Writer:
             if v:
                 die('generator bug (%s): %s' % (label, v[:5]))
         vb, va = versions or VERSION_PAIRS[self.k % len(VERSION_PAIRS)]
+        if versions is None:                    # a side with exclusions is version 2
+            vb, va = (2 if b.x else vb), (2 if a.x else va)
+        elif (b.x and vb != 2) or (a.x and va != 2):
+            die('generator bug (%s): exclusions in a version 1 manifest' % label)
         sb, sa = (self.statements(t) if st is None else st(t)
                   for st, t in zip(statements, (b, a)))
         stem = os.path.join(self.out, 'pair-%05d' % self.k)
@@ -2548,6 +2673,152 @@ def manifest_versions(w, rng):
                         'v2: every file read, another reason'])
 
 
+def exclusions(w, rng):
+    """Manifest v2's `excluded` (V2-2) and what the diff makes of it
+    (manifest-v2.md, "Readers": a path at or below a path one manifest
+    excluded, held by the other, is `unknown`, reason `not_captured`; a path
+    both excluded is in no record): compare.py's EXCLUDED_SCENARIOS. A side
+    with exclusions is written in version 2 only (Writer.pair). Every pair
+    is written both ways round, so each one-sided path is held before in one
+    and after in the other."""
+    def free(t, base):
+        """A name in the root that no path of t has, nor begins with."""
+        p = base
+        while any(q.startswith(p) for q in list(t.e) + list(t.x)):
+            p += b'0'
+        return p
+
+    def put(rng, t, p, typ):
+        t.e[p] = clear_flags(new_entry(rng, t, p, typ, extras=typ != 'dir'), t, rng)
+        return t.e[p]
+
+    # An excluded directory with entries one and two levels below it, an
+    # excluded regular file, both held on the other side; names that extend
+    # the directory's (d!x, d-x, d.x: they sort between d and d/...) on the
+    # other side only, which the exclusion does not cover; belay's state
+    # directory excluded on both sides; two paths excluded on both sides
+    # whose order by bytes (q!r < q/r) is not their order by components.
+    def build(rng):
+        t = unflagged_tree(rng)
+        d, f, sd, q = free(t, b'xd'), free(t, b'xf'), free(t, b'.belay'), free(t, b'xq')
+        for p, typ in ((d, 'dir'), (d + b'/c', 'reg'), (d + b'/s', 'dir'),
+                       (d + b'/s/g', random_type(rng)), (d + b'!x', 'dir'),
+                       (d + b'!x/y', 'reg'), (d + b'-x', 'reg'), (d + b'.x', 'fifo'),
+                       (f, 'reg'), (sd, 'dir'), (sd + b'/m', 'reg'), (q, 'dir'),
+                       (q + b'/r', 'reg'), (q + b'!r', 'reg')):
+            put(rng, t, p, typ)
+        a = t.copy()
+        exclude(t, d)
+        exclude(t, f)
+        for side in (t, a):
+            exclude(side, sd, 'state_dir')
+            exclude(side, q + b'/r')
+            exclude(side, q + b'!r')
+        t.drop_below(d + b'!x')
+        for p in (d + b'!x', d + b'-x'):
+            del t.e[p]
+        return t, a
+    w.targeted(rng, 'excluded: a directory and a file on one side, held on the other', build,
+               scenarios=['excluded on one side: a directory, held on the other with entries '
+                          'below it',
+                          'excluded on one side: a non-directory, held on the other',
+                          'excluded on one side: a path one level below it, held on the other',
+                          'excluded on one side: a path two or more levels below it, held on '
+                          'the other',
+                          'excluded on both sides: the same path',
+                          'excluded on one side: a path on one side only whose name extends it, '
+                          'not below it',
+                          'excluded: reason state_dir', 'excluded: reason user',
+                          'excluded: two paths whose order by bytes is not their order by '
+                          'components'],
+               version=['v2 with exclusions on both sides'])
+
+    # A directory whose name is not UTF-8 (path_b64), excluded on one side.
+    def build(rng):
+        t = unflagged_tree(rng)
+        n = free(t, b'xn\xff')
+        for p, typ in ((n, 'dir'), (n + b'/k', 'reg'), (n + b'/\xfe', 'dir'),
+                       (n + b'/\xfe/z', 'lnk')):
+            put(rng, t, p, typ)
+        a = t.copy()
+        exclude(t, n)
+        return t, a
+    w.targeted(rng, 'excluded: a directory not UTF-8 on one side, held on the other', build,
+               scenarios=['excluded on one side: a path not UTF-8 (path_b64), held on the other '
+                          'with entries below it'])
+
+    # The other one-sided rules (ambiguity X1, reference.one_sided): the
+    # excluded path's parent unstable on the excluding side (u/e; beside it
+    # u/f, not excluded, held on the other side only: listing_incomplete);
+    # a path held raced on the other side (r); held there as a mount root
+    # (m) and as an unreadable directory (z).
+    def build(rng):
+        t = unflagged_tree(rng)
+        u, r, m, z = free(t, b'xu'), free(t, b'xr'), free(t, b'xm'), free(t, b'xz')
+        for p, typ in ((u, 'dir'), (u + b'/e', 'reg'), (u + b'/f', 'reg'), (r, 'reg'),
+                       (m, 'dir'), (z, 'dir')):
+            put(rng, t, p, typ)
+        a = t.copy()
+        t.e[u]['unstable'] = True
+        del t.e[u + b'/f']
+        a.e[r]['raced'] = True
+        a.e[m] = in_context('mount', a.e[m], a, rng)
+        a.e[z]['unreadable'] = True
+        for p in (u + b'/e', r, m, z):
+            exclude(t, p)
+        return t, a
+    w.targeted(rng, 'excluded: held on the other side unstable-parented, raced, sealed', build,
+               scenarios=['excluded on one side, its parent there unstable: held on the other',
+                          'excluded on one side: held on the other, raced',
+                          'excluded on one side: held on the other as an unreadable or mount '
+                          'directory',
+                          'a child on one side only below an unstable directory'])
+
+    # Excluded on both sides at different depths: d on one, d/e on the other,
+    # which holds d and the rest of it.
+    def build(rng):
+        t = unflagged_tree(rng)
+        d = free(t, b'xd')
+        for p, typ in ((d, 'dir'), (d + b'/e', 'dir'), (d + b'/e/i', 'reg'), (d + b'/f', 'reg'),
+                       (d + b'/g', 'dir'), (d + b'/g/h', 'sock')):
+            put(rng, t, p, typ)
+        a = t.copy()
+        exclude(t, d)
+        exclude(a, d + b'/e')
+        return t, a
+    w.targeted(rng, 'excluded: a directory on one side, a path below it on the other', build,
+               scenarios=['excluded on one side, a path below it excluded on the other'],
+               version=['v2 with exclusions on both sides'])
+
+    # Excluded on one side, nothing there on the other: no record. The other
+    # side in version 1.
+    def build(rng):
+        t = unflagged_tree(rng)
+        g, h = free(t, b'xg'), free(t, b'xh')
+        a = t.copy()
+        exclude(t, g, 'user', dev=t.root_dev(), ino=rng.randrange(2, 1 << 40))
+        put(rng, a, h, 'reg')                   # and a path added
+        return t, a
+    w.targeted(rng, 'excluded: on one side, nothing there on the other (v1)', build,
+               versions=(2, 1),
+               scenarios=['excluded on one side: nothing at or below it on the other'],
+               version=['v2 with exclusions against v1', 'before v2, after v1',
+                        'before v1, after v2'])
+
+    # Paths interpreters claim below an excluded directory (a venv, a
+    # chroot): `unknown` records, from which pip and dpkg derive provisional
+    # events (diff-v1 "What each interpreter reports").
+    def build(rng):
+        rec, st = SITE[0] + b'foo-1.0.dist-info/RECORD', b'chroot/var/lib/dpkg/status'
+        t, a = build_items(rng, [(rec, 'added', {}), (st, 'added', {})])
+        for p in (b'venv', b'chroot'):          # build_items made them on both sides
+            exclude(t, p)
+        return t, a
+    w.targeted(rng, 'excluded: a venv and a chroot on one side, held on the other', build,
+               scenarios=['excluded on one side: held on the other, a path below it an '
+                          'interpreter claims'])
+
+
 # ---------------------------------------------------------------------------
 # Interpreters, with no store (diff-v1 "Interpreters"; the driver passes NULL
 # options). Paths an interpreter claims are built at the names the prose
@@ -3140,6 +3411,7 @@ def targeted(w, rng):
     values(w, rng)
     trailer_counts(w, rng)
     manifest_versions(w, rng)
+    exclusions(w, rng)
     interpreters(w, rng)
 
 
@@ -3149,7 +3421,7 @@ def targeted(w, rng):
 OPS = ['add', 'add', 'remove', 'content', 'size', 'mode', 'uid', 'gid', 'ino', 'dev', 'nlink',
        'ctime', 'mtime', 'type', 'flag', 'flag', 'unflag', 'iflags', 'caps', 'xattrs',
        'xattrs_sha256', 'xattrs_unknown', 'stored', 'limit', 'root_unstable', 'root_unreadable',
-       'link', 'rdev', 'seal', 'unseal', 'remount', 'vanished']
+       'link', 'rdev', 'seal', 'unseal', 'remount', 'vanished', 'exclude', 'unexclude']
 RANDOM_FLAGS = ['raced', 'unstable', 'unverified', 'unreadable', 'mount', 'xattrs_unknown']
 
 
@@ -3174,6 +3446,19 @@ def mutate_random(t, rng, nops):
                 root['unreadable'] = True
         elif op == 'remount':
             remount(t, rng, renumber_ino=rng.random() < 0.5)
+        elif op == 'unexclude':
+            # The exclusion dropped: that path is walked again, and holds
+            # something (a new entry, a directory with entries below it) or
+            # nothing.
+            if t.x:
+                q = rng.choice(sorted(t.x))
+                del t.x[q]
+                if rng.random() < 0.7:
+                    t.e[q] = new_entry(rng, t, q, random_type(rng))
+                    if t.e[q]['type'] == 'dir':
+                        for _ in range(rng.randrange(0, 3)):
+                            r = fresh_path(t, rng, q)
+                            t.e[r] = new_entry(rng, t, r, random_type(rng))
         elif not paths:
             continue
         else:
@@ -3244,6 +3529,8 @@ def mutate_random(t, rng, nops):
             elif op == 'unseal':
                 e.pop('unreadable', None)
                 e.pop('mount', None)
+            elif op == 'exclude':
+                exclude(t, p, 'state_dir' if rng.random() < 0.15 else 'user')
         fix(t, rng)
 
 
@@ -3253,6 +3540,12 @@ def randomized(w, rng, n):
         grow(base, rng, rng.randrange(3, 40))
         if rng.random() < 0.3:
             with_mounts(rng, base, rng.randrange(1, 3))
+        if rng.random() < 0.3:                  # exclusions every variant starts from
+            for _ in range(rng.randrange(1, 3)):
+                ps = sorted(p for p in base.e if p != b'.')
+                if ps:
+                    exclude(base, rng.choice(ps), rng.choice(EXCLUDED_REASONS))
+            fix(base, rng)
         variants = [base]
         for _ in range(4):
             v = base.copy()
