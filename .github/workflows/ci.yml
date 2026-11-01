@@ -40,6 +40,8 @@ jobs:
         run: make oracle
       - name: package reference (dpkg and pip against an independent reference)
         run: make reference
+      - name: dogfood hooks (scripted sessions)
+        run: make dogfood-test
 
   build-linux-arm64:
     name: linux-arm64

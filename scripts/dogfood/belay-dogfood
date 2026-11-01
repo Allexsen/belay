@@ -1,0 +1,76 @@
+#!/bin/sh
+#
+# belay-dogfood EVENT -- the M1.5 Claude Code hook (NOTES design: m1.5-structure;
+# decision-log rows 86-88). Installed outside the repository and run from the
+# user's settings, with the pinned release binary: nothing done in the working
+# tree changes the reviewer.
+#
+#   start   SessionStart              the session's base checkpoint
+#   pre     PreToolUse   (writing)    a checkpoint before the call
+#   post    PostToolUse(Failure)      a checkpoint after it
+#   stop    Stop                      a checkpoint; the turn's receipt; one line
+#                                     when something changed in the turn
+#   end     SessionEnd                a last checkpoint; the session's receipt,
+#                                     copied to NOTES/dogfood/ when interesting
+#
+# Reads the hook's JSON on stdin. Never fails a tool call: always exits 0,
+# and what goes wrong is logged and said at Stop. Environment:
+#   BELAY                the binary (default ~/.local/bin/belay)
+#   BELAY_DOGFOOD_SCOPE  the repository to watch; other projects are ignored
+#   BELAY_STATE_DIR      belay's state directory (default as belay's)
+#   BELAY_DOGFOOD_NOTES  where interesting receipts are copied (default
+#                        $BELAY_DOGFOOD_SCOPE/NOTES/dogfood)
+
+set -u
+t0=$(date +%s%N)
+ev=${1:-}
+BELAY=${BELAY:-$HOME/.local/bin/belay}
+SCOPE=${BELAY_DOGFOOD_SCOPE:-}
+STATE=${BELAY_STATE_DIR:-${XDG_STATE_HOME:-$HOME/.local/state}/belay}
+HERE=$(dirname "$0")
+in=$(cat)
+
+[ -n "$SCOPE" ] && [ "${CLAUDE_PROJECT_DIR:-}" = "$SCOPE" ] || exit 0     # this repository only (Q5)
+case $ev in start|pre|post|stop|end) ;; *) exit 0 ;; esac
+
+# One jq for the whole input (each process costs; a writing tool call runs
+# two hooks): the session, the call, and what the receipt calls it -- a
+# command's first line, a file, a tool's name -- already JSON-encoded.
+eval "$(printf '%s' "$in" | jq -r '@sh "sid=\(.session_id // "") tid=\(.tool_use_id // "") tool=\(.tool_name // "") agent=\(.agent_type // "") summary=\((.tool_input.command // .tool_input.file_path // .tool_input.notebook_path // .tool_input.description // "") | tostring | split("\n")[0] | .[0:200] | @json)"' 2>/dev/null)" || exit 0
+case ${sid:-} in ''|*[!A-Za-z0-9_-]*) exit 0 ;; esac                    # a name, never a path
+
+D=$STATE/dogfood
+mkdir -p "$D" 2>/dev/null && chmod 700 "$D" 2>/dev/null
+LOG=$D/$sid.jsonl
+
+# One line, one write, appended: concurrent hooks never interleave (each line
+# is far under PIPE_BUF). The checkpoint id orders events, not the log.
+log() { printf '%s\n' "$1" >> "$LOG"; }
+
+# A mark's checkpoint id, from `{"id":N,...}` without another process; ""
+# on failure, logged with belay's message.
+cp=
+if out=$("$BELAY" mark --scope "$SCOPE" --json 2>"$D/$sid.mark-err.$$"); then
+    cp=${out#\{\"id\":}
+    cp=${cp%%,*}
+    case $cp in ''|*[!0-9]*) cp= ;; esac
+fi
+if [ -z "$cp" ]; then
+    msg=$(head -c 300 "$D/$sid.mark-err.$$" 2>/dev/null | tr -d '\000-\037"\\')
+    log "{\"event\":\"error\",\"during\":\"$ev\",\"message\":\"$msg\"}"
+fi
+rm -f "$D/$sid.mark-err.$$"
+t1=$(date +%s%N)
+# Names from Claude Code are [A-Za-z0-9_] in practice; anything else is
+# dropped rather than escaped by hand. The summary arrives JSON-encoded.
+clean() { printf '%s' "$1" | tr -cd 'A-Za-z0-9_.:-'; }
+log "{\"event\":\"$ev\",\"cp\":${cp:-null},\"tool_use_id\":\"$(clean "$tid")\",\"tool\":\"$(clean "$tool")\",\"agent\":\"$(clean "$agent")\",\"summary\":${summary:-\"\"},\"t0\":$t0,\"t1\":$t1}"
+
+case $ev in
+stop)
+    python3 -I "$HERE/receipt.py" turn "$LOG" "$BELAY" "$SCOPE" "$D" 2>>"$D/$sid.err" ;;
+end)
+    python3 -I "$HERE/receipt.py" session "$LOG" "$BELAY" "$SCOPE" "$D" \
+        "${BELAY_DOGFOOD_NOTES:-$SCOPE/NOTES/dogfood}" 2>>"$D/$sid.err" >/dev/null ;;
+esac
+exit 0
