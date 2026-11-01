@@ -59,8 +59,9 @@ TEST(git_claims_refs_hooks_and_hashes_the_index) {
     EXPECT("/repo/.git/index", BELAY_INTERP_GIT, BELAY_KEEP_HASH);
 }
 
-/* Decided 2026-10-31 (Q3): the reflog is claimed, stored within the store
- * limit only (it grows without bound); other logs are not reflogs. */
+/* Decided 2026-10-31 (Q3): the reflog is claimed, stored only up to a bound
+ * (it grows without one) -- 16 MiB from 2026-11-01 (6); other logs are not
+ * reflogs. */
 TEST(git_claims_the_reflog_within_the_store_limit) {
     EXPECT("/repo/.git/logs/HEAD", BELAY_INTERP_GIT, BELAY_KEEP_STORE_BOUNDED);
     EXPECT("/repo/.git/logs/refs/heads/main", BELAY_INTERP_GIT, BELAY_KEEP_STORE_BOUNDED);

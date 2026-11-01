@@ -37,8 +37,9 @@ struct prev_info {
 
 /* Loads `path`, written for a scope whose root is on `root_dev`. 0; 1 when
  * the prefilter cannot be used (another scope, other limits, unreadable or
- * corrupt, the index over PREV_BYTES_MAX: *why says which); -1 with
- * belay_err (memory). */
+ * corrupt, the index over PREV_BYTES_MAX, or the previous walk's start
+ * unknown on coarse timestamps: *why says which); -1 with belay_err
+ * (memory). */
 struct fsops;
 int prev_load(const struct fsops *ops, const char *path, const char *scope, uint64_t root_dev,
               const struct belay_manifest_opts *opts, struct prev_index **out,

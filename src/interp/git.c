@@ -17,7 +17,7 @@
 
 #define GIT_REF_MAX    (64u * 1024u)            /* HEAD or a loose ref */
 #define GIT_PACKED_MAX (64u * 1024u * 1024u)    /* packed-refs */
-#define GIT_LOG_MAX    (64u * 1024u * 1024u)    /* a reflog (stored within the store limit) */
+#define GIT_LOG_MAX    BELAY_KEEP_BOUNDED_MAX   /* a reflog: kept up to 16 MiB, read in full within it */
 
 enum git_file { G_NONE, G_INDEX, G_HEAD, G_PACKED, G_REF, G_HOOK, G_LOG };
 
@@ -70,13 +70,20 @@ static bool reg(const struct belay_interp_input *in, int k) {
 
 /* Reads each side the path is a regular file on, saying content_unavailable
  * for each that cannot be read. */
-static void read_sides(const struct belay_interp_input *in, size_t max, struct belay_findings *out,
-                       struct sides *s) {
+/* Both sides' stored copies, at most `max` bytes each. With `kept_to_max`
+ * (a claim kept up to `max`, BELAY_KEEP_STORE_BOUNDED), a side recorded
+ * without a copy because it is larger is too_large, not missing (decision
+ * 2026-11-01, 6). */
+static void read_sides(const struct belay_interp_input *in, size_t max, bool kept_to_max,
+                       struct belay_findings *out, struct sides *s) {
     memset(s, 0, sizeof *s);
     s->ok = true;
     for (int k = SIDE_BEFORE; k <= SIDE_AFTER; k++) {
         if (!reg(in, k)) continue;
-        const enum stored_why w = stored_read(in, (enum side)k, max, &s->buf[k], &s->len[k]);
+        const struct belay_entry *e = side_entry(in, (enum side)k);
+        const enum stored_why w = kept_to_max && !e->has_stored && e->size > max
+                                      ? SW_TOO_LARGE
+                                      : stored_read(in, (enum side)k, max, &s->buf[k], &s->len[k]);
         if (w == SW_OK) continue;
         s->ok = false;
         if (w == SW_ERROR || stored_unavailable(out, w, (enum side)k) == -1) s->error = true;
@@ -97,7 +104,7 @@ static int ref_value(const struct sides *s, int k, const char **v, size_t *vl) {
 static enum belay_interp_result ref_file(const struct belay_interp_input *in, enum git_file f,
                                          const char *name, size_t nl, struct belay_findings *out) {
     struct sides s;
-    read_sides(in, GIT_REF_MAX, out, &s);
+    read_sides(in, GIT_REF_MAX, false, out, &s);
     enum belay_interp_result r = s.error ? BELAY_INTERP_ERROR : BELAY_INTERP_FINDINGS;
     const char *from, *to;
     size_t fl, tl;
@@ -170,7 +177,7 @@ static void pref_sort(struct prefs *p) {
 static enum belay_interp_result packed(const struct belay_interp_input *in,
                                        struct belay_findings *out) {
     struct sides s;
-    read_sides(in, GIT_PACKED_MAX, out, &s);
+    read_sides(in, GIT_PACKED_MAX, false, out, &s);
     enum belay_interp_result r = s.error ? BELAY_INTERP_ERROR : BELAY_INTERP_FINDINGS;
     struct prefs p[2] = { { 0 }, { 0 } };
     for (int k = 0; k < 2 && s.ok && r == BELAY_INTERP_FINDINGS; k++)
@@ -295,7 +302,7 @@ static enum belay_interp_result reflog(const struct belay_interp_input *in, cons
                                                                         : BELAY_INTERP_FINDINGS;
     }
     struct sides s;
-    read_sides(in, GIT_LOG_MAX, out, &s);
+    read_sides(in, GIT_LOG_MAX, true, out, &s);
     enum belay_interp_result r = s.error ? BELAY_INTERP_ERROR : BELAY_INTERP_FINDINGS;
     if (s.ok && r == BELAY_INTERP_FINDINGS) {
         const char *a = (const char *)s.buf[1];

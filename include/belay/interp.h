@@ -34,11 +34,17 @@ enum belay_interp_id {
     BELAY_INTERP_COUNT
 };
 
+/* The keep bound of BELAY_KEEP_STORE_BOUNDED: a reflog is kept, and read in
+ * full, up to this, whatever store_max_bytes says (decision 2026-11-01, 6:
+ * interpretation stopping at 64 KiB silently dropped history-rewrite
+ * evidence in long-lived repositories). Larger: too_large. */
+#define BELAY_KEEP_BOUNDED_MAX (16u * 1024u * 1024u)
+
 enum belay_keep {
     BELAY_KEEP_DEFAULT = 0,     /* store only if under the size threshold and text */
     BELAY_KEEP_HASH,            /* claimed, hash only, never stored */
     BELAY_KEEP_STORE,           /* claimed, always stored whatever its size */
-    BELAY_KEEP_STORE_BOUNDED    /* claimed, stored within the store limit, text or not */
+    BELAY_KEEP_STORE_BOUNDED    /* claimed, stored up to BELAY_KEEP_BOUNDED_MAX, text or not */
 };
 
 struct belay_claim {

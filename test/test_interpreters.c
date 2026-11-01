@@ -412,15 +412,19 @@ TEST(git_reflog_that_is_not_appended_to_is_rewritten) {
     r_free(&r);
 }
 
-/* A reflog over the store limit was never stored: said, never silent. */
+/* A reflog recorded without a copy: said, never silent. Kept up to 16 MiB
+ * (decision 2026-11-01, 6), so one larger is too_large; one within it with
+ * no copy (the store failed) is missing. */
 TEST(git_reflog_without_a_copy_is_content_unavailable) {
     struct run r;
     r_begin(&r, BELAY_INTERP_GIT, true);
-    const struct belay_entry b = file(NULL, 0), a = file(NULL, 0);
+    struct belay_entry b = file(NULL, 0), a = file(NULL, 0);
+    b.size = BELAY_KEEP_BOUNDED_MAX;                       /* within the bound: missing */
+    a.size = (uint64_t)BELAY_KEEP_BOUNDED_MAX + 1;         /* past it: too_large */
     ASSERT_EQ_STR(F1("{\"kind\":\"content_unavailable\",\"reason\":\"missing\",\"side\":\"before\","
                      "\"text\":\"content unavailable (before): missing\"},"
-                     "{\"kind\":\"content_unavailable\",\"reason\":\"missing\",\"side\":\"after\","
-                     "\"text\":\"content unavailable (after): missing\"}"),
+                     "{\"kind\":\"content_unavailable\",\"reason\":\"too_large\",\"side\":\"after\","
+                     "\"text\":\"content unavailable (after): too_large\"}"),
                   r_path(&r, "/s/r/.git/logs/HEAD", &b, &a, "modified"));
     r_free(&r);
 }
