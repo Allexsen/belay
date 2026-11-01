@@ -44,7 +44,9 @@ of those diffs must be the pair's own, byte for byte, but for
 `before_manifest_version`/`after_manifest_version` (the files' versions)
 and `before_sha256`/`after_sha256` (their bytes): "diff.v1 records and
 outcomes do not depend on the version", and the v2 statements decide
-nothing (test/expect/manifest-v2.md V2-R4, V2-R6).
+nothing (test/expect/manifest-v2.md V2-R4, V2-R6). A manifest with a
+non-empty `excluded` has no version 1 counterpart (gen_corpus.py writes no
+.alt for it): its pair runs only in the combinations where that side is v2.
 scope-NNNNN.before/.after (different scopes): the driver must fail and leave
 no output file, in each of the four combinations of versions.
 
@@ -83,8 +85,12 @@ the generator's labels (coverage(), required(), gate()):
     events of two interpreters, and a diff with findings but no event;
   - every manifest-version item (VERSION_SCENARIOS): the four combinations
     of versions, identical entries in two versions (V2-R4) and in v2 with
-    only the v2 statements different (V2-R6), and each kind of walk a v2
-    manifest's statements say (manifest-v2.md V2-3..V2-6).
+    only the v2 statements different (V2-R6), each kind of walk a v2
+    manifest's statements say (manifest-v2.md V2-3..V2-6), and a manifest
+    with exclusions against a v1 one and against one with its own;
+  - every exclusion item (EXCLUDED_SCENARIOS, among the scenarios): what a
+    path at or below one manifest's `excluded` gets where the other holds
+    it (manifest-v2.md, "Readers"; V2-2).
 gen_corpus.py builds every required item deterministically and checks each
 targeted pair, and then the targeted pairs alone, with these same functions;
 here the gate runs again over the whole corpus.
@@ -379,6 +385,11 @@ def compare_record(path, exp, got, trace, orders):
     return sorted(set(groups))
 
 
+def exists(stem, before, after):
+    """Whether both files of this combination of versions were written."""
+    return os.path.exists(stem + before) and os.path.exists(stem + after)
+
+
 def run_driver(driver, stem, before='.before', after='.after'):
     """(exit status, stderr, the output file's bytes or None)."""
     out = stem + '.diff' + before + after
@@ -413,7 +424,10 @@ def check_versions(stem, own, others):
     reference): [(combination, what, expected, got)]."""
     issues = []
     lines = own.split(b'\n')[:-1]
-    for (before, after), (rc, err, raw) in zip(OTHER_VERSIONS, others):
+    for (before, after), ran in zip(OTHER_VERSIONS, others):
+        if ran is None:                         # a side with exclusions: no v1 counterpart
+            continue
+        rc, err, raw = ran
         combo = 'v%d -> v%d' % (manifest_version(stem + before), manifest_version(stem + after))
         if rc != 0 or raw is None:
             issues.append((combo, 'the driver failed', 'a diff', '%s (exit %d)' % (err, rc)))
@@ -721,6 +735,35 @@ SCENARIOS = (['dev relation: an entry leaves the root device',
                 for f in ('caps', 'xattrs', 'xattrs_sha256')]
              + ['values: caps recorded on one side only, beside another difference',
                 'values: a record line over 64 KiB (V5)'])
+# Manifest v2's `excluded` (docs/spec/manifest-v2.md, "Readers": "A path at
+# or below a path one manifest excluded is not compared where that manifest
+# lacks it: a path the other manifest holds there is `unknown`, reason
+# `not_captured` -- as below a mount, never `removed` or `added`; a path both
+# manifests excluded appears in neither, and in no record"; V2-2): an
+# excluded directory and an excluded non-directory held on the other side,
+# paths below them, a path not UTF-8, the other one-sided rules it meets (an
+# unstable parent on the excluding side, `raced` or a sealed directory on the
+# other, ambiguity X1), an interpreter's path, excluded on both sides (the
+# same path, or one below the other's), excluded with nothing there on the
+# other side, a name that extends an excluded one without being below it,
+# both reasons, and the list's order by bytes.
+EXCLUDED_SCENARIOS = [
+    'excluded on one side: a directory, held on the other with entries below it',
+    'excluded on one side: a non-directory, held on the other',
+    'excluded on one side: a path one level below it, held on the other',
+    'excluded on one side: a path two or more levels below it, held on the other',
+    'excluded on one side: a path not UTF-8 (path_b64), held on the other with entries below it',
+    'excluded on one side, its parent there unstable: held on the other',
+    'excluded on one side: held on the other, raced',
+    'excluded on one side: held on the other as an unreadable or mount directory',
+    'excluded on one side: held on the other, a path below it an interpreter claims',
+    'excluded on one side, a path below it excluded on the other',
+    'excluded on one side: nothing at or below it on the other',
+    'excluded on both sides: the same path',
+    'excluded on one side: a path on one side only whose name extends it, not below it',
+    'excluded: reason state_dir', 'excluded: reason user',
+    'excluded: two paths whose order by bytes is not their order by components']
+SCENARIOS += EXCLUDED_SCENARIOS
 V5_LINE = 64 * 1024
 
 
@@ -818,8 +861,61 @@ def values_coverage(b, a, D, tags):
         tags.add('values: caps recorded on one side only, beside another difference')
 
 
+def excluded_coverage(scope, eb, ea, xb, xa, one, tags):
+    """The EXCLUDED_SCENARIOS of one pair, from its manifests."""
+    for p in one:
+        present, lacking, lx = (eb, ea, xa) if p in eb else (ea, eb, xb)
+        cov = ref.covering(lx, p)
+        e = present[p]
+        if cov is None:
+            anc = ref.nearest_ancestor(lacking, p)
+            if any(p != q and p.startswith(q) and not p.startswith(q + b'/') for q in lx) and \
+                    not e.get('raced') and anc['type'] == 'dir' and \
+                    not any(anc.get(k) for k in ('unstable', 'unreadable', 'mount')):
+                tags.add('excluded on one side: a path on one side only whose name extends it, '
+                         'not below it')
+            continue
+        below = [q for q in present if q.startswith(p + b'/')]
+        if p == cov:
+            if e['type'] != 'dir':
+                tags.add('excluded on one side: a non-directory, held on the other')
+            elif below:
+                tags.add('excluded on one side: a directory, held on the other with entries '
+                         'below it')
+            if not is_utf8(p) and below:
+                tags.add('excluded on one side: a path not UTF-8 (path_b64), held on the other '
+                         'with entries below it')
+            if ref.nearest_ancestor(lacking, p).get('unstable'):
+                tags.add('excluded on one side, its parent there unstable: held on the other')
+        else:
+            tags.add('excluded on one side: a path %s below it, held on the other'
+                     % ('one level' if p.count(b'/') - cov.count(b'/') == 1
+                        else 'two or more levels'))
+            if ref.claim(scope, p):
+                tags.add('excluded on one side: held on the other, a path below it an '
+                         'interpreter claims')
+        if e.get('raced'):
+            tags.add('excluded on one side: held on the other, raced')
+        if e['type'] == 'dir' and (e.get('unreadable') or e.get('mount')):
+            tags.add('excluded on one side: held on the other as an unreadable or mount '
+                     'directory')
+    for xs, xo, eo in ((xb, xa, ea), (xa, xb, eb)):
+        for q, d in xs.items():
+            tags.add('excluded: reason ' + d['reason'])
+            if q in xo:
+                tags.add('excluded on both sides: the same path')
+            elif any(r.startswith(q + b'/') for r in xo):
+                tags.add('excluded on one side, a path below it excluded on the other')
+            elif ref.covering(xo, q) is None and \
+                    not any(r == q or r.startswith(q + b'/') for r in eo):
+                tags.add('excluded on one side: nothing at or below it on the other')
+        qs = sorted(xs)
+        if any(x.split(b'/') > y.split(b'/') for x, y in zip(qs, qs[1:])):
+            tags.add('excluded: two paths whose order by bytes is not their order by components')
+
+
 def pair_coverage(stem, cells, optional, scen, fpairs):
-    hb, _, eb = ref.load(stem + '.before')
+    hb, scope, eb = ref.load(stem + '.before')
     ha, _, ea = ref.load(stem + '.after')
     rb, ra = eb[b'.']['dev'], ea[b'.']['dev']
     both, one = set(eb) & set(ea), set(eb) ^ set(ea)
@@ -1041,6 +1137,7 @@ def pair_coverage(stem, cells, optional, scen, fpairs):
                 if lacking.get(q, {}).get('unstable'):
                     tags.add('a one-sided path below a plain directory below an unstable one')
                     break
+    excluded_coverage(scope, eb, ea, ref.excluded(hb), ref.excluded(ha), one, tags)
     for tg in tags:
         scen[tg] += 1
     if not one and len(diffs) == 1:
@@ -1301,9 +1398,13 @@ def interp_coverage(stem, tags):
 # files: the four combinations; identical entries in two versions (V2-R4)
 # and, in v2 on both sides, with only the v2 statements different (V2-R6:
 # they decide nothing); and what a v2 manifest's statements say -- the keys
-# V2-2..V2-6 add, `excluded` always `[]` (how diff.v1 treats an excluded
-# path is not decided: not modelled).
-V2_KEYS = {'header': ('excluded', 'walk_start_ns'),
+# V2-3..V2-6 add. `excluded` (V2-2) is not one of those statements: it
+# decides what is compared (EXCLUDED_SCENARIOS), so the V2-R6 item asks for
+# the same `excluded` on both sides; and a manifest with exclusions has no
+# version 1 counterpart (gen_corpus.py, Writer.write_both_versions), so its
+# pair runs in the combinations where that side is version 2: against a v1
+# manifest, and against one with exclusions of its own.
+V2_KEYS = {'header': ('walk_start_ns',),
            'trailer': ('trusted', 'reference', 'read_all')}
 VERSION_SCENARIOS = (['before v%d, after v%d' % vv for vv in ((1, 1), (1, 2), (2, 1), (2, 2))]
                      + ['the versions differ, every entry the same (V2-R4)',
@@ -1315,7 +1416,8 @@ VERSION_SCENARIOS = (['before v%d, after v%d' % vv for vv in ((1, 1), (1, 2), (2
                         'v2: the prefilter used, trusted 0',
                         'v2: every file read, read_all check',
                         'v2: every file read, another reason',
-                        'v2: walk_start_ns 0', 'v2: walk_start_ns not 0'])
+                        'v2: walk_start_ns 0', 'v2: walk_start_ns not 0',
+                        'v2 with exclusions against v1', 'v2 with exclusions on both sides'])
 
 
 def version_coverage(stem, tags):
@@ -1325,14 +1427,19 @@ def version_coverage(stem, tags):
         t = ref.trailer_of(stem + side)[0]
         st = {k: (h if line == 'header' else t)[k] for line, ks in V2_KEYS.items() for k in ks} \
             if h['belay_manifest'] == 2 else None
-        sides.append((h['belay_manifest'], entries, st))
-    (vb, eb, sb), (va, ea, sa) = sides
+        sides.append((h['belay_manifest'], entries, st, h.get('excluded', [])))
+    (vb, eb, sb, xb), (va, ea, sa, xa) = sides
     tags.add('before v%d, after v%d' % (vb, va))
     if vb != va:
         tags.add('the versions differ, every entry the same (V2-R4)' if eb == ea else
                  'the versions differ, entries differ')
-    elif vb == 2 and eb == ea and not same(sorted(sb.items()), sorted(sa.items())):
+        if xb or xa:
+            tags.add('v2 with exclusions against v1')
+    elif vb == 2 and eb == ea and same(xb, xa) and not same(sorted(sb.items()),
+                                                             sorted(sa.items())):
         tags.add('v2 on both sides, every entry the same, only the v2 statements differ (V2-R6)')
+    if xb and xa:
+        tags.add('v2 with exclusions on both sides')
     for st in (sb, sa):
         if st is None:
             continue
@@ -1439,8 +1546,8 @@ def main():
     outcomes = collections.Counter()
     with concurrent.futures.ThreadPoolExecutor(max_workers=os.cpu_count() or 4) as pool:
         ran = list(pool.map(lambda s: run_driver(driver, s), stems))
-        others = list(pool.map(lambda s: [run_driver(driver, s, b, a) for b, a in OTHER_VERSIONS],
-                               stems))
+        others = list(pool.map(lambda s: [run_driver(driver, s, b, a) if exists(s, b, a) else None
+                                          for b, a in OTHER_VERSIONS], stems))
     version_issues = []
     for stem, (rc, _, raw), oth in zip(stems, ran, others):
         if rc == 0 and raw is not None:
@@ -1507,9 +1614,13 @@ def main():
         print('== driver failed: %s [%s] %s: %s' % ex)
     nver = sum(rc == 0 and raw is not None for rc, _, raw in ran)
     bad_pairs = len({i[0] for i in version_issues})
+    combos = collections.Counter(sum(o is not None for o in oth)
+                                 for (rc, _, raw), oth in zip(ran, others)
+                                 if rc == 0 and raw is not None)
     print('== manifest versions (V2-R4): %d pairs whose own diff succeeded, each also run in the '
-          'other three combinations of versions: %d agree in all three, %d do not'
-          % (nver, nver - bad_pairs, bad_pairs))
+          'other combinations of versions whose files exist (a side with exclusions is v2 '
+          'only): %d agree in all of them, %d do not; pairs by other combinations run: %s'
+          % (nver, nver - bad_pairs, bad_pairs, dict(sorted(combos.items()))))
     by_what = collections.defaultdict(list)
     for name, lab, combo, what, want, got in version_issues:
         by_what[what].append((name, lab, combo, want, got))
@@ -1542,6 +1653,8 @@ def main():
     bad_refusals = []
     for stem in refusals:                       # in all four combinations of versions
         for before, after in [('.before', '.after')] + OTHER_VERSIONS:
+            if not exists(stem, before, after):
+                continue
             out = stem + '.diff' + before + after
             if os.path.exists(out):
                 os.unlink(out)

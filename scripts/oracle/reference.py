@@ -35,7 +35,10 @@ Its only sources:
   - test/expect/manifest-v2.md V2-R4: the header ends with
     `before_manifest_version` and `after_manifest_version`, each manifest's
     `belay_manifest`; nothing else depends on the version (the entries are
-    v1's, and the keys v2 adds are not read: V2-R6).
+    v1's, and of the keys v2 adds only `excluded` is read: V2-R6);
+  - docs/spec/manifest-v2.md, PROSE ONLY: "Readers", the bullet on a path at
+    or below a path one manifest excluded (checked at start-up), with
+    test/expect/manifest-v2.md V2-2 (what an `excluded` element holds).
 Never the generated blocks of the spec, never src/ or include/.
 
 Ambiguities this file resolves one way (questions for the author) are
@@ -93,6 +96,23 @@ TRAILER_KEYS = (['belay_diff_end'] + OUTCOMES + [DIR_TIMESTAMPS_ONLY, EVENTS]
                 + ['provisional', 'before_sha256', 'after_sha256'])
 # One-sided reasons, from "Present on one side only".
 NOT_CAPTURED, LISTING_INCOMPLETE, RACED = 'not_captured', 'listing_incomplete', 'raced'
+# docs/spec/manifest-v2.md, "Readers": what a path one manifest excluded
+# means for the diff. Tied to the spec's words at start-up (excluded_rule()).
+MANIFEST_V2_SPEC = os.path.join(REPO, 'docs', 'spec', 'manifest-v2.md')
+EXCLUDED_RULE = ('A path at or below a path one manifest excluded is not compared where that '
+                 'manifest lacks it: a path the other manifest holds there is `unknown`, reason '
+                 '`not_captured` -- as below a mount, never `removed` or `added`; a path both '
+                 'manifests excluded appears in neither, and in no record.')
+
+
+def excluded_rule():
+    text = ' '.join(open(MANIFEST_V2_SPEC, encoding='utf-8').read().split())
+    if EXCLUDED_RULE not in text:
+        raise SystemExit('reference: docs/spec/manifest-v2.md no longer says %r; review '
+                         'one_sided() first' % EXCLUDED_RULE)
+
+
+excluded_rule()
 
 
 def shape_example_keys():
@@ -305,6 +325,26 @@ def trailer_of(path):
     return json.loads(raw.rstrip(b'\n').split(b'\n')[-1].decode('utf-8')), hashlib.sha256(raw).hexdigest()
 
 
+def excluded(header):
+    """A manifest's `excluded` (manifest-v2.md, V2-2), {path bytes: element}:
+    each element's `path` or `path_b64`, as an entry's; {} for a version 1
+    manifest, which has none."""
+    out = {}
+    for d in header.get('excluded', []):
+        out[b64(d['path_b64']) if 'path_b64' in d else d['path'].encode('utf-8')] = d
+    return out
+
+
+def covering(excl, p):
+    """The path of `excl` that p is at or below, or None."""
+    if p in excl:
+        return p
+    for i in range(len(p) - 1, 0, -1):
+        if p[i:i + 1] == b'/' and p[:i] in excl:
+            return p[:i]
+    return None
+
+
 def load(path, raw=None):
     """(header, scope bytes, {path bytes: entry}). An entry's `path` and
     `link_target` are bytes whichever spelling the manifest used. With `raw`
@@ -347,10 +387,27 @@ def nearest_ancestor(entries, p):
     return entries[b'.']
 
 
-def one_sided(p, present, lacking_entries, added):
-    """The four bullets of "Present on one side only", in their order."""
-    anc = nearest_ancestor(lacking_entries, p)
+def one_sided(p, present, lacking_entries, added, lacking_excluded):
+    """The four bullets of "Present on one side only", in their order --
+    after manifest v2's rule: "A path at or below a path one manifest
+    excluded is not compared where that manifest lacks it: a path the other
+    manifest holds there is `unknown`, reason `not_captured` -- as below a
+    mount, never `removed` or `added`" (manifest-v2.md, "Readers").
+
+    Ambiguity X1: diff-v1's ordered bullets do not name an exclusion, so
+    where it stands among them is decided here: FIRST, before the side that
+    lacks the path is looked at for an `unstable` ancestor directory
+    (listing_incomplete) and before `raced` on the side that has it. The
+    rule is unconditional ("never `removed` or `added`", one reason named),
+    and "as below a mount" puts it with the first bullet -- the excluded
+    path, had it been recorded, would be the nearest ancestor, deeper than
+    any directory above it, as a mount root is. A path that one side
+    excluded can lack no other way: nothing at or below it is recorded
+    there."""
     trace = ['one-sided']
+    if covering(lacking_excluded, p) is not None:
+        return 'unknown', [NOT_CAPTURED], trace + ['excluded']
+    anc = nearest_ancestor(lacking_entries, p)
     if anc['type'] == 'dir' and (anc.get('unreadable') or anc.get('mount')):
         return 'unknown', [NOT_CAPTURED], trace + ['not_captured']
     if anc['type'] == 'dir' and anc.get('unstable'):
@@ -1557,6 +1614,11 @@ def diff(before, after):
     ha, sa, ea = load(after, rawa)
     if sb != sa:
         return None
+    xb, xa = excluded(hb), excluded(ha)
+    for es, xs in ((eb, xb), (ea, xa)):         # V2-2: "It has no entry, nor anything below it"
+        bad = [p for p in es if covering(xs, p) is not None]
+        if bad:
+            raise ValueError('corpus error: %r recorded at or below an excluded path' % bad[0])
     root_b, root_a = eb[b'.']['dev'], ea[b'.']['dev']
     remounted = root_b != root_a
     ctx = dict(root_dev_b=root_b, root_dev_a=root_a, identity_compared=not remounted)
@@ -1579,10 +1641,10 @@ def diff(before, after):
         if b is not None and a is not None:
             out, changed, why, trace = both_sides(b, a, ctx)
         elif a is not None:
-            out, why, trace = one_sided(p, a, eb, added=True)
+            out, why, trace = one_sided(p, a, eb, True, xb)
             changed = []
         else:
-            out, why, trace = one_sided(p, b, ea, added=False)
+            out, why, trace = one_sided(p, b, ea, False, xa)
             changed = []
         check_o4(out, b, a)
         if out == 'unknown' and not why:
