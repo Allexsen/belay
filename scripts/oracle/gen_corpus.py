@@ -48,7 +48,8 @@ The corpus has three parts:
     installed, removed, upgraded, downgraded, version-changed, reinstalled,
     unknown (provisional; on both sides, a reinstall whose files are not
     counted), could_not_interpret events (E10) and invalid_finding events
-    (E9), git hooks, the index, HEAD, loose refs, packed-refs, reflogs, a
+    (E9), git hooks, the index, HEAD, loose refs, packed-refs, reflogs (at,
+    over and grown past their 16 MiB bound with no stored copy), a
     claimed directory, symlinked hooks (added, removed, retargeted, with no
     `executable`; a target not UTF-8, over 1,024 bytes, of 4,095 -- the
     manifest's limit, addendum A4, which the generator keeps to),
@@ -2188,10 +2189,11 @@ def trailer_counts(w, rng):
 # built once, and written both ways round: an `added` item is `removed` in
 # the reversed pair, an upgrade a downgrade.
 
-def interp_tree(rng):
+def interp_tree(rng, limit=None):
     """A tree for an interpreter pair: a few bystanders (unchanged on both
-    sides), and a hash limit within which a file can change size."""
-    return base_tree(rng, rng.randrange(0, 4), limit=size_limit(rng))
+    sides), and a hash limit within which a file can change size (`limit`
+    when given)."""
+    return base_tree(rng, rng.randrange(0, 4), limit=limit or size_limit(rng))
 
 
 def ensure_dirs(t, rng, path):
@@ -2250,8 +2252,12 @@ def build_items(rng, items):
     rewritten and not stored), `to_dir` / `to_lnk` (a directory or a
     symlink after). A symlink's target is `target` when given. `lnk_*` start
     from a symlink on both sides: `lnk_retarget` (to `to_target`), `lnk_uid`
-    (chown-ed), `lnk_to_dir` (a directory after)."""
-    t = interp_tree(rng)
+    (chown-ed), `lnk_to_dir` (a directory after). A file's size is `size`
+    when given, after's `to_size` (`modified`, `unstored`): synthetic, so a
+    large one costs nothing; the tree's hash limit is then 10**9, so the file
+    is still hashed."""
+    sized = any('size' in kw or 'to_size' in kw for _, _, kw in items)
+    t = interp_tree(rng, limit=10 ** 9 if sized else None)
     for path, how, kw in items:
         ensure_dirs(t, rng, parent_of(path) if kw.get('own_dir') else path)
     a = t.copy()
@@ -2267,6 +2273,9 @@ def build_items(rng, items):
                                            side, rng)
             else:
                 side.e[path] = file_at(rng, side, path, kw.get('stored', True), kw.get('mode'))
+                if 'size' in kw:
+                    side.e[path]['size'] = kw['size']
+                    settle_hash(side.e[path], side, rng)
                 if how == 'raced_added':        # unknown, reason raced
                     side.e[path]['raced'] = True
             continue
@@ -2285,6 +2294,9 @@ def build_items(rng, items):
             t.e[path], a.e[path] = e, e2
             continue
         e = file_at(rng, t, path, kw.get('stored', True), kw.get('mode'))
+        if 'size' in kw:
+            e['size'] = kw['size']
+            settle_hash(e, t, rng)
         if how == 'modified':
             e2 = rewritten(e, t, rng)
         elif how == 'unstored':
@@ -2306,6 +2318,11 @@ def build_items(rng, items):
             e2 = clear_flags(new_entry(rng, a, path, 'dir', extras=False), a, rng)
         else:
             die('generator bug: %r' % how)
+        if 'to_size' in kw:
+            if how not in ('modified', 'unstored'):
+                die('generator bug: to_size with %r' % how)
+            e2['size'] = kw['to_size']
+            settle_hash(e2, a, rng)
         t.e[path], a.e[path] = e, e2
     return t, a
 
@@ -2588,6 +2605,31 @@ def interpreters(w, rng):
         ['git reflog: modified'])
     one('git: a reflog added', lambda rng: [(g(rng, b'logs/refs/heads/main'), 'added', O)],
         ['git reflog: added', 'git reflog: removed'])
+    # "| git | a reflog | 16 MiB: a capture keeps a reflog up to this
+    # whatever `store_max_bytes` says, and a side recorded without a copy
+    # because it is larger is `content_unavailable`, reason `too_large` |";
+    # "`missing` covers a path whose entry records no `stored` copy (a reflog
+    # over its 16 MiB bound excepted: `too_large`)". At the bound exactly, no
+    # copy is `missing`; one byte over, `too_large`; removed, no copy needed.
+    # Appended past the bound: before stored (`no_store`), after not
+    # (`too_large`), and the other way round when reversed.
+    MIB16 = 16 * 1024 * 1024
+    one('git: a reflog over its 16 MiB bound added, no stored copy',
+        lambda rng: [(g(rng, b'logs/refs/heads/big'), 'added', S(stored=False,
+                                                                  size=MIB16 + 1))],
+        ['git reflog: added, a side with no stored copy, over 16 MiB',
+         'git reflog: removed, a side with no stored copy, over 16 MiB'])
+    one('git: a reflog of exactly 16 MiB added, no stored copy',
+        lambda rng: [(g(rng, b'logs/HEAD'), 'added', S(stored=False, size=MIB16))],
+        ['git reflog: added, a side with no stored copy, of exactly 16 MiB'])
+    one('git: a reflog appended past its 16 MiB bound, after with no stored copy',
+        lambda rng: [(g(rng, b'logs/HEAD'), 'unstored', S(size=MIB16 - 100,
+                                                          to_size=MIB16 + 4000))],
+        ['git reflog: modified, a side with no stored copy, over 16 MiB'])
+    one('git: a reflog grown past its 16 MiB bound, neither side with a stored copy',
+        lambda rng: [(g(rng, b'logs/refs/heads/main'), 'modified',
+                      S(stored=False, size=MIB16, to_size=MIB16 + 1))],
+        ['git reflog: modified, a side with no stored copy, over 16 MiB'])
     one('git: a directory below refs/ added',
         lambda rng: [(g(rng, b'refs/remotes'), 'dir_added', O)],
         ['git ref: added, not a regular file on either side (dir)'])

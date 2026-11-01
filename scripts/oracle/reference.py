@@ -782,8 +782,12 @@ def _check_claims():
               'events from an `unknown` path, each marked provisional.',
               'A side on which the path is not a regular file counts as absent (git hooks '
               'excepted: a symlink is a hook).',
-              '`missing` covers a path whose entry records no `stored` copy as well as a copy '
-              'the store lacks, and is given before `no_store` when both apply.',
+              '`missing` covers a path whose entry records no `stored` copy (a reflog over its '
+              '16 MiB bound excepted: `too_large`) as well as a copy the store lacks, and is '
+              'given before `no_store` when both apply.',
+              '| git | a reflog | 16 MiB: a capture keeps a reflog up to this whatever '
+              '`store_max_bytes` says, and a side recorded without a copy because it is larger '
+              'is `content_unavailable`, reason `too_large` |',
               "A record's `content_unavailable` findings come before side, then after",
               "an interpreter's `content_unavailable` events come one per reason, in the order "
               '`no_store`, `missing`, `too_large`, `corrupt`',
@@ -949,12 +953,28 @@ SIDES = ('before', 'after')
 REASONS = ['no_store', 'missing', 'too_large', 'corrupt']   # the pin's order
 
 
-def unavailable(e):
+REFLOG_BOUND = 16 * 1024 * 1024     # the bounds table: "| git | a reflog | 16 MiB: ..."
+
+
+def unavailable(e, interp, what):
     """Why the stored copy of e cannot be read in a diff with no store:
     `missing` when the entry records no `stored` copy ("`missing` covers a
-    path whose entry records no `stored` copy ..., and is given before
-    `no_store` when both apply"), else `no_store`."""
-    return 'missing' if 'stored' not in e else 'no_store'
+    path whose entry records no `stored` copy (a reflog over its 16 MiB bound
+    excepted: `too_large`) ..., and is given before `no_store` when both
+    apply"), else `no_store`. The exception: "a capture keeps a reflog up to
+    this whatever `store_max_bytes` says, and a side recorded without a copy
+    because it is larger is `content_unavailable`, reason `too_large`" --
+    larger than 16 MiB, read from the entry's `size`, so 16 MiB exactly with
+    no copy is still `missing`. The reflog's `too_large` takes `missing`'s
+    place, so it too comes before `no_store` (ambiguity I11: the prose orders
+    only `missing` against `no_store`). A reflog that does record a copy is
+    `no_store` here whatever its size, like every stored copy: with no store
+    nothing is read, so no copy is found over its bound."""
+    if 'stored' in e:
+        return 'no_store'
+    if (interp, what) == ('git', 'reflog') and e['size'] > REFLOG_BOUND:
+        return 'too_large'
+    return 'missing'
 
 
 def git_place(p):
@@ -1035,7 +1055,7 @@ def explain(interp, what, p, b, a, outcome, state, trace):
             # finding on the record.
             state['unknown'].add(p)
             for s in present:
-                r = unavailable(ent[s])
+                r = unavailable(ent[s], interp, what)
                 trace.append('event-unavailable-%s-%s' % (s, r))
                 state['unavailable'].append((r, s, p))
         elif (interp, what) == ('pip', 'RECORD'):
@@ -1117,7 +1137,7 @@ def explain(interp, what, p, b, a, outcome, state, trace):
             return [render('git_index_changed', {})]
     out = []
     for s in need:
-        r = unavailable(ent[s])
+        r = unavailable(ent[s], interp, what)
         trace.append('unavailable-%s-%s' % (s, r))
         out.append(render('content_unavailable', {'reason': r, 'side': s}))
         state['unavailable'].append((r, s, p))
