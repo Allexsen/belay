@@ -82,7 +82,7 @@ TEST(a_receipt_puts_events_then_privilege_then_changes) {
     w = (size_t)snprintf(want, sizeof want,
         "belay diff  /w  checkpoint 3 -> checkpoint 4\n"
         "  1 modified · 1 added · 3 metadata_only · 1 unknown    events: 2\n"
-        "  2 entries changed while they were read; running belay again settles them\n"
+        "  2 entries changed while they were read (checkpoint 4); running belay again settles them\n"
         "\n"
         "packages and files explained\n"
         "  pip   upgraded numpy 1 -> 2\n"
@@ -270,13 +270,41 @@ TEST(entries_that_changed_while_read_are_counted_in_one_line) {
         "\"before_vanished\":0,\"before_unstable\":0,\"before_raced\":1,\"after_vanished\":0,\"after_unstable\":0,"
         "\"after_raced\":0,\"provisional\":true,\"before_sha256\":\"x\",\"after_sha256\":\"y\"}\n", false));
     ASSERT_EQ_STR("belay diff  /w  checkpoint 3 -> checkpoint 4\n  no changes\n"
-                  "  1 entry changed while it was read; running belay again settles it\n", g_text);
+                  "  1 entry changed while it was read (checkpoint 3); a diff from a later checkpoint avoids it\n",
+                  g_text);
     ASSERT_EQ_INT(0, render(HEAD "{\"belay_diff_end\":9,\"unchanged\":1,\"added\":0,\"removed\":0,\"modified\":0,"
         "\"type_changed\":0,\"metadata_only\":0,\"unknown\":0,\"dir_timestamps_only\":0,\"events\":0,"
         "\"before_vanished\":0,\"before_unstable\":2,\"before_raced\":0,\"after_vanished\":0,\"after_unstable\":0,"
         "\"after_raced\":1,\"provisional\":true,\"before_sha256\":\"x\",\"after_sha256\":\"y\"}\n", false));
-    ASSERT_TRUE(strstr(g_text, "  3 entries changed while they were read; running belay again settles them\n") != NULL);
+    ASSERT_TRUE(strstr(g_text, "  1 entry changed while it was read (checkpoint 4); running belay again settles it;"
+                               " 2 entries changed while they were read (checkpoint 3); a diff from a later"
+                               " checkpoint avoids them\n") != NULL);
     ASSERT_TRUE(strstr(g_text, "provisional") == NULL);                 /* no banner */
+    /* Review 2026-11-01, D2: a hostile trailer's counts saturate, never wrap
+     * (the old sum overflowed int64 and printed nothing). */
+    ASSERT_EQ_INT(0, render(HEAD "{\"belay_diff_end\":9,\"unchanged\":1,\"added\":0,\"removed\":0,\"modified\":0,"
+        "\"type_changed\":0,\"metadata_only\":0,\"unknown\":0,\"dir_timestamps_only\":0,\"events\":0,"
+        "\"before_vanished\":9223372036854775807,\"before_unstable\":9223372036854775807,"
+        "\"before_raced\":9223372036854775807,\"after_vanished\":0,\"after_unstable\":0,"
+        "\"after_raced\":0,\"provisional\":true,\"before_sha256\":\"x\",\"after_sha256\":\"y\"}\n", false));
+    ASSERT_TRUE(strstr(g_text, "  18446744073709551615 entries changed while they were read (checkpoint 3)") != NULL);
+}
+
+/* Review 2026-11-01, D4: findings past the cap end in and_more, which
+ * stands for n more: "and N more" counts them. */
+TEST(and_more_findings_are_counted_in_the_receipt) {
+    static char diff[8192];
+    char findings[4096] = "";
+    size_t w = 0;
+    for (int i = 1; i <= 19; i++)
+        w += (size_t)snprintf(findings + w, sizeof findings - w, "%s{\"kind\":\"x\",\"text\":\"finding %d\"}",
+                              i > 1 ? "," : "", i);
+    snprintf(findings + w, sizeof findings - w, ",{\"kind\":\"and_more\",\"n\":1000,\"text\":\"and 1000 more\"}");
+    snprintf(diff, sizeof diff, HEAD "{\"path\":\"r\",\"outcome\":\"modified\",\"type\":\"reg\",\"changed\":[\"size\"],"
+             "\"findings\":[%s]}\n" TRAIL("1", "0", "0", "0", "0", "0", "0"), findings);
+    ASSERT_EQ_INT(0, render(diff, false));
+    ASSERT_TRUE(strstr(g_text, "      finding 15\n      and 1004 more\n") != NULL);
+    ASSERT_TRUE(strstr(g_text, "finding 16") == NULL);
 }
 
 int main(void) {
@@ -290,6 +318,7 @@ int main(void) {
     RUN(a_line_of_many_strings_is_read_in_linear_memory);
     RUN(invisible_and_invalid_bytes_are_shown_and_a_type_change_is_said);
     RUN(entries_that_changed_while_read_are_counted_in_one_line);
+    RUN(and_more_findings_are_counted_in_the_receipt);
     free(g_text);
     return belay_test_report();
 }

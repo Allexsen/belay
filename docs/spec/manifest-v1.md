@@ -242,8 +242,8 @@ Each rule below closes a way for a state the format records to be rendered as "n
   as changed during capture, not as unchanged.
 - **Non-zero `vanished`, `unstable` or `raced` in the trailer makes the whole result provisional**:
   the tree was changing while it was read. diff.v1 says so in its trailer (`provisional`); belay's
-  receipt names each flagged entry and counts, in one line, the entries that changed while they
-  were read, saying that running belay again settles them.
+  receipt names each flagged entry and counts, in one line and per side, the entries that changed
+  while they were read: the newer side's are settled by running belay again.
 - **`unstable`, `raced` and `unverified` map to the outcome `unknown`, never to "unchanged".** In the
   diff schema (diff.v1), `unknown` is a first-class outcome beside added, removed, modified,
   type-changed and metadata-only.

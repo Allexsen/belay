@@ -139,8 +139,11 @@ int prev_load(const struct fsops *ops, const char *path, const char *scope, uint
     int got, rc = 0;
     bool fine = false;                       /* some recorded ctime has a nanosecond part */
     while ((got = belay_manifest_next(rd, e)) == 1) {
-        if (e->ctime_ns % 1000000000 != 0) fine = true;
-        if (!e->raced && !e->unstable && !e->unreadable && e->ctime_ns > info->newest_validated_ns)
+        /* A mount root's times are the mounted filesystem's (manifest-v1):
+         * they say nothing of the scope's clock, as R or as its grain
+         * (review 2026-11-01, D1). */
+        if (!e->is_mount && e->ctime_ns % 1000000000 != 0) fine = true;
+        if (!e->is_mount && !e->raced && !e->unstable && !e->unreadable && e->ctime_ns > info->newest_validated_ns)
             info->newest_validated_ns = e->ctime_ns;
         if (e->type != BELAY_T_REG || !e->has_hash || e->raced || e->unstable) continue;
         struct prev_rec r = { e->dev, e->ino, e->size, e->mtime_ns, e->ctime_ns, e->mode,
@@ -166,8 +169,10 @@ int prev_load(const struct fsops *ops, const char *path, const char *scope, uint
      * else its newest validated ctime (decision Q2's fallback). That fallback
      * misses a same-size rewrite made during the previous walk in its file's
      * own tick, which needs coarse timestamps: when every recorded ctime has
-     * a zero nanosecond part, every file is read instead (decision
-     * 2026-11-01, 2). On fine-grained timestamps the fallback is sound. */
+     * a zero nanosecond part (whole seconds), every file is read instead
+     * (decision 2026-11-01, 2). Timestamps coarse at a kernel tick or 10 ms
+     * carry a nanosecond part and are not caught: there the fallback can
+     * still miss that rewrite (review 2026-11-01, D1; left to the author). */
     if (opts->previous_start_ns <= 0 && !fine) {
         prev_free(p);
         *why = "the previous walk's start is unknown and the scope's timestamps are coarse";

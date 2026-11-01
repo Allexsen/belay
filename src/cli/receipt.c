@@ -196,13 +196,23 @@ static int record(const struct jval *r, struct lines *priv, struct lines *other,
         if (ch != NULL && ch->n && !jget(r, "findings")) { sbf(&b, "   "); list(&b, ch); }
     }
     free(why.p);
+    /* A record past the 4,096-finding cap ends in an and_more finding
+     * standing for n more: counted, not shown as one (review 2026-11-01,
+     * D4: a 16 MiB reflog's "and 4081 more" was 114,096). */
     const struct jval *f = jget(r, "findings");
-    for (size_t i = 0; f != NULL && f->t == J_ARR && i < f->n && i < RECEIPT_FINDINGS; i++) {
+    size_t nf = f != NULL && f->t == J_ARR ? f->n : 0;
+    uint64_t beyond = 0;
+    if (nf > 0 && strcmp(jstr(&f->kids[nf - 1], "kind"), "and_more") == 0) {
+        const int64_t k = jint(&f->kids[nf - 1], "n", 0);
+        beyond = k > 0 ? (uint64_t)k : 0;
+        nf--;
+    }
+    for (size_t i = 0; i < nf && i < RECEIPT_FINDINGS; i++) {
         sbf(&b, "\n      ");
         escs(&b, jget(&f->kids[i], "text"));
     }
-    if (f != NULL && f->t == J_ARR && f->n > RECEIPT_FINDINGS)
-        sbf(&b, "\n      and %zu more", f->n - RECEIPT_FINDINGS);
+    const uint64_t hidden = (nf > RECEIPT_FINDINGS ? nf - RECEIPT_FINDINGS : 0) + beyond;
+    if (hidden > 0) sbf(&b, "\n      and %llu more", (unsigned long long)hidden);
     if (b.bad) { free(b.p); belay_err_set(BELAY_ERR_NOMEM, 0, "receipt: out of memory"); return -1; }
     /* Privilege never folds; nor does an entry belay could not capture
      * reliably: each is named on its own line (S7 2026-10-31, row 73). */
@@ -309,16 +319,32 @@ int receipt_render(FILE *diff, FILE *out, const struct receipt_opts *o) {
     else fprintf(out, "  %s%sevents: %lld\n", c.n ? c.p : "", c.n ? "    " : "", (long long)nev);
     free(c.p);
     /* No banner (decision 14.7); one actionable line counting what changed
-     * while it was read -- vanished, unstable or raced, either side -- and
-     * saying a re-run settles it (decision 2026-11-01, 7). */
-    int64_t moving = 0;
-    static const char *const MOVING[] = { "before_vanished", "before_unstable", "before_raced",
-                                          "after_vanished", "after_unstable", "after_raced" };
-    for (size_t i = 0; i < sizeof MOVING / sizeof MOVING[0]; i++) moving += jint(&trailer, MOVING[i], 0);
-    if (moving > 0)
-        fprintf(out, "  %lld %s changed while %s read; running belay again settles %s\n", (long long)moving,
-                moving == 1 ? "entry" : "entries", moving == 1 ? "it was" : "they were",
-                moving == 1 ? "it" : "them");
+     * while it was read -- vanished, unstable or raced -- per side, since
+     * only the after side is settled by running belay again: an earlier
+     * checkpoint's flags stay (decision 2026-11-01, 7; review 2026-11-01,
+     * D2, D3: the counts are summed saturating, a hostile trailer's
+     * included). */
+    uint64_t moving[2] = { 0, 0 };
+    static const char *const MOVING[2][3] = { { "before_vanished", "before_unstable", "before_raced" },
+                                              { "after_vanished", "after_unstable", "after_raced" } };
+    for (int sd = 0; sd < 2; sd++)
+        for (int i = 0; i < 3; i++) {
+            const int64_t k = jint(&trailer, MOVING[sd][i], 0);
+            if (k > 0) moving[sd] = (uint64_t)k > UINT64_MAX - moving[sd] ? UINT64_MAX : moving[sd] + (uint64_t)k;
+        }
+    if (moving[0] || moving[1]) {
+        fputs(" ", out);
+        for (int sd = 1; sd >= 0; sd--) {
+            if (!moving[sd]) continue;
+            const bool one = moving[sd] == 1;
+            fprintf(out, "%s %llu %s changed while %s read (%s); %s", sd == 0 && moving[1] ? ";" : "",
+                    (unsigned long long)moving[sd], one ? "entry" : "entries", one ? "it was" : "they were",
+                    sd ? (o->to ? o->to : "after") : (o->from ? o->from : "before"),
+                    sd ? (one ? "running belay again settles it" : "running belay again settles them")
+                       : (one ? "a diff from a later checkpoint avoids it" : "a diff from a later checkpoint avoids them"));
+        }
+        fputc('\n', out);
+    }
     const struct { const char *title; struct lines *l; } SEC[] = {
         { "packages and files explained", &ev }, { "privilege", &priv }, { "changes", &other },
     };

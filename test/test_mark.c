@@ -461,6 +461,100 @@ TEST(a_reflog_is_kept_past_the_store_limit) {
     ASSERT_TRUE(ls != NULL && ls < log_end);                      /* claimed: kept */
     ASSERT_TRUE(ps == NULL || ps > plain_end);                    /* unclaimed, over 4,096: not */
     free(b);
+    /* The bound itself (review 2026-11-01): exactly 16 MiB is kept, a byte
+     * more is not. */
+    snprintf(cmd, sizeof cmd, "mkdir -p '%s/r/.git/logs/refs/heads' && "
+             "head -c 16777216 /dev/zero | tr '\\0' x > '%s/r/.git/logs/refs/heads/at' && "
+             "head -c 16777217 /dev/zero | tr '\\0' x > '%s/r/.git/logs/refs/heads/over'", g_tree, g_tree, g_tree);
+    if (system(cmd) != 0) { /* the assertions say */ }
+    char store[300];
+    snprintf(store, sizeof store, "%s/store", g_dir);
+    const struct belay_manifest_opts cli = { .hash_max_bytes = BELAY_HASH_MAX_BYTES_DEFAULT,   /* the CLI's limits */
+                                             .store_max_bytes = 4096, .store_dir = store };
+    REQUIRE(capture_write(&g_ops, out, g_tree, &cli, &st) == 0);
+    b = body(out);
+    REQUIRE(b != NULL);
+    const char *at = strstr(b, "\"path\":\"r/.git/logs/refs/heads/at\""),
+               *over = strstr(b, "\"path\":\"r/.git/logs/refs/heads/over\"");
+    REQUIRE(at != NULL && over != NULL);
+    const char *at_s = strstr(at, "\"stored\""), *over_s = strstr(over, "\"stored\"");
+    ASSERT_TRUE(at_s != NULL && at_s < strchr(at, '\n'));
+    ASSERT_TRUE(over_s == NULL || over_s > strchr(over, '\n'));
+    free(b);
+}
+
+/* The edit the next test makes, in C (BSD sed has no portable -i): the
+ * line of path "m" gets a ctime with a nanosecond part, loses its iflags
+ * (a mount root carries none) and gains "mount":true; the trailer counts it.
+ * 0, or -1. */
+static int mount_edit(const char *path) {
+    FILE *in = fopen(path, "r");
+    if (in == NULL) return -1;
+    static char text[1 << 16], line[4096];
+    size_t w = 0;
+    int edited = 0;
+    while (fgets(line, sizeof line, in) != NULL) {
+        char *nl = strchr(line, '\n');
+        if (nl != NULL) *nl = '\0';
+        if (strstr(line, "\"path\":\"m\"") != NULL) {
+            char *c = strstr(line, "\"ctime_ns\":"), *f = strstr(line, ",\"iflags\":");
+            if (c == NULL) break;
+            c += strlen("\"ctime_ns\":");
+            char *end = c + strspn(c, "0123456789");
+            if (end - c < 9) break;
+            memcpy(end - 3, "123", 3);                       /* ...000000000 -> ...000000123 */
+            if (f != NULL) memmove(f, f + 1 + strcspn(f + 1, ",}"), strlen(f + 1 + strcspn(f + 1, ",}")) + 1);
+            const size_t l = strlen(line);
+            if (l == 0 || line[l - 1] != '}') break;
+            snprintf(line + l - 1, sizeof line - l + 1, ",\"mount\":true}");
+            edited++;
+        } else {
+            char *m = strstr(line, "\"mounts\":0");
+            if (m != NULL) { m[9] = '1'; edited++; }
+        }
+        w += (size_t)snprintf(text + w, sizeof text - w, "%s\n", line);
+        if (w >= sizeof text) break;
+    }
+    fclose(in);
+    if (edited != 2 || w >= sizeof text) return -1;
+    FILE *out = fopen(path, "w");
+    if (out == NULL) return -1;
+    const int ok = fwrite(text, 1, w, out) == w;
+    return fclose(out) == 0 && ok ? 0 : -1;
+}
+
+/* Review 2026-11-01, D1: a mount root's ctime is the mounted filesystem's,
+ * so a fine one does not make a coarse scope fine. The previous manifest is
+ * edited by hand: its leaf directory m becomes a mount root with a ctime
+ * that has a nanosecond part. */
+TEST(a_mount_root_does_not_make_a_coarse_scope_fine) {
+    char prev[400], next[400], cmd[2000];
+    snprintf(prev, sizeof prev, "%s/p.ndjson", g_dir);
+    snprintf(next, sizeof next, "%s/n.ndjson", g_dir);
+    struct belay_manifest_stats st;
+    g_round_ns = 1000000000L;
+    fresh_tree();
+    snprintf(cmd, sizeof cmd, "mkdir '%s/m'", g_tree);
+    if (system(cmd) != 0) { /* the assertions say */ }
+    next_tick(g_round_ns);
+    REQUIRE(capture(prev, NULL, &st) == 0);
+    REQUIRE(mount_edit(prev) == 0);
+    struct belay_manifest_reader *rd = NULL;                  /* still a valid manifest */
+    REQUIRE(belay_manifest_open(prev, &rd) == 0);
+    static struct belay_entry e;
+    int got;
+    while ((got = belay_manifest_next(rd, &e)) == 1) { }
+    belay_manifest_close(rd);
+    if (got != 0) { BELAY_FAIL("the edited manifest: %s", belay_err_msg()); belay_err_clear(); }
+    REQUIRE(got == 0);
+    snprintf(cmd, sizeof cmd, "grep -q '\"path\":\"m\".*000000123.*\"mount\":true' '%s'", prev);
+    REQUIRE(system(cmd) == 0);
+    g_last_start = 0;
+    REQUIRE(capture(next, prev, &st) == 0);
+    ASSERT_TRUE(!st.prefilter);
+    if (st.prefilter_skipped == NULL || strstr(st.prefilter_skipped, "coarse") == NULL)
+        BELAY_FAIL("not refused as coarse: %s", st.prefilter_skipped ? st.prefilter_skipped : "(used)");
+    g_round_ns = 0;
 }
 
 /* S3 (M3): a file rewritten at the same size with its mtime put back -- the
@@ -586,6 +680,7 @@ int main(void) {
     RUN(a_small_binary_file_without_a_copy_is_trusted);
     RUN(the_fallback_reads_everything_on_coarse_timestamps);
     RUN(a_reflog_is_kept_past_the_store_limit);
+    RUN(a_mount_root_does_not_make_a_coarse_scope_fine);
     RUN(an_unusable_previous_manifest_means_a_full_walk);
     RUN(the_walk_reports_the_newest_ctime_it_saw);
     RUN(an_excluded_directory_is_not_recorded);
