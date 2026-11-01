@@ -1,0 +1,86 @@
+name: release
+
+# A pre-release from a version tag (v*): the binaries built from the tagged
+# commit, each run end to end before it is attached, their SHA256SUMS, build
+# provenance, and the notes in docs/releases/<tag>.md. The release is created
+# as a DRAFT: it is published by hand after its assets are downloaded,
+# verified against SHA256SUMS and run. A tag is pushed only once main is green
+# at that commit, so the full test matrix (ci.yml) has already run there; this
+# workflow builds the shipped binaries and tests those.
+#
+# Linux binaries are static (glibc, -static: no NSS or dlopen calls, so
+# nothing resolves at run time). macOS has no static linking; its binary links
+# only libSystem.
+
+on:
+  push:
+    tags: ['v*']
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    name: build ${{ matrix.target }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: true
+      matrix:
+        include:
+          - { target: linux-x86_64, os: ubuntu-24.04, cflags: '-O2 -static' }
+          - { target: linux-arm64, os: ubuntu-24.04-arm, cflags: '-O2 -static' }
+          - { target: macos-arm64, os: macos-15, cflags: '-O2' }
+    permissions:
+      contents: read
+      id-token: write
+      attestations: write
+    steps:
+      - uses: actions/checkout@v5
+      - name: the tag is the version the binary reports
+        run: |
+          make CFLAGS='${{ matrix.cflags }}' bin/belay
+          want="belay ${GITHUB_REF_NAME#v} "
+          got=$(bin/belay --version)
+          case "$got" in "$want"*) echo "$got" ;; *) echo "tag $GITHUB_REF_NAME, binary says: $got" >&2; exit 1 ;; esac
+      - name: the shipped binary, end to end
+        run: sh scripts/e2e.sh bin/belay
+      - name: package
+        run: |
+          strip bin/belay
+          mkdir dist
+          cp bin/belay "dist/belay-${GITHUB_REF_NAME}-${{ matrix.target }}"
+          file "dist/belay-${GITHUB_REF_NAME}-${{ matrix.target }}"
+      - uses: actions/attest-build-provenance@v2
+        with:
+          subject-path: dist/*
+      - uses: actions/upload-artifact@v4
+        with:
+          name: belay-${{ matrix.target }}
+          path: dist/*
+          if-no-files-found: error
+
+  draft:
+    name: draft pre-release
+    needs: build
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+      - name: checksums
+        run: |
+          cd dist
+          sha256sum belay-* > SHA256SUMS
+          cat SHA256SUMS
+      - name: create the draft
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          notes="docs/releases/${GITHUB_REF_NAME}.md"
+          test -f "$notes"
+          gh release create "$GITHUB_REF_NAME" dist/* --draft --prerelease --verify-tag \
+            --title "belay ${GITHUB_REF_NAME} (pre-alpha)" --notes-file "$notes"
