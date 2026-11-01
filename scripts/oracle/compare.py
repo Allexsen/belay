@@ -38,8 +38,15 @@ must agree on
   (`unknown` too), under a key the manifest uses, never both `{}` (V2).
   Disagreements are grouped by the rule that explains them; OTHER is what no
   rule of the reference's trace explains.
+Every pair is also run in the other three combinations of manifest versions
+(.before.alt/.after.alt: the same manifests in the other version), and each
+of those diffs must be the pair's own, byte for byte, but for
+`before_manifest_version`/`after_manifest_version` (the files' versions)
+and `before_sha256`/`after_sha256` (their bytes): "diff.v1 records and
+outcomes do not depend on the version", and the v2 statements decide
+nothing (test/expect/manifest-v2.md V2-R4, V2-R6).
 scope-NNNNN.before/.after (different scopes): the driver must fail and leave
-no output file.
+no output file, in each of the four combinations of versions.
 
 Then the COVERAGE GATE, computed from the manifests of the pairs, never from
 the generator's labels (coverage(), required(), gate()):
@@ -73,12 +80,16 @@ the generator's labels (coverage(), required(), gate()):
   - every interpreter item (INTERP_SCENARIOS): which interpreter claims a
     path, what its entries hold and the outcome, with no store -- text,
     binary, dpkg, pip and git paths, the pip and dpkg end hooks' inputs,
-    events of two interpreters, and a diff with findings but no event.
+    events of two interpreters, and a diff with findings but no event;
+  - every manifest-version item (VERSION_SCENARIOS): the four combinations
+    of versions, identical entries in two versions (V2-R4) and in v2 with
+    only the v2 statements different (V2-R6), and each kind of walk a v2
+    manifest's statements say (manifest-v2.md V2-3..V2-6).
 gen_corpus.py builds every required item deterministically and checks each
 targeted pair, and then the targeted pairs alone, with these same functions;
 here the gate runs again over the whole corpus.
-Exit 0 only when every pair agrees, every refusal holds, the reasons have one
-order, and the gate passes.
+Exit 0 only when every pair agrees, in every combination of versions, every
+refusal holds, the reasons have one order, and the gate passes.
 """
 import base64, collections, concurrent.futures, glob, json, os, subprocess, sys
 
@@ -368,14 +379,68 @@ def compare_record(path, exp, got, trace, orders):
     return sorted(set(groups))
 
 
-def run_driver(driver, stem):
+def run_driver(driver, stem, before='.before', after='.after'):
     """(exit status, stderr, the output file's bytes or None)."""
-    out = stem + '.diff'
+    out = stem + '.diff' + before + after
     if os.path.exists(out):
         os.unlink(out)
-    r = subprocess.run([driver, stem + '.before', stem + '.after', out], capture_output=True)
+    r = subprocess.run([driver, stem + before, stem + after, out], capture_output=True)
     raw = open(out, 'rb').read() if os.path.exists(out) else None
     return r.returncode, r.stderr.decode('utf-8', 'replace').strip(), raw
+
+
+# Every pair is also written with each manifest in the other version
+# (gen_corpus.py: .before.alt, .after.alt), so the driver runs it in all four
+# combinations of versions. Its diff in the other three must be the pair's
+# own, byte for byte, but for what names the files given: the header's
+# `before_manifest_version` and `after_manifest_version` (the files'
+# `belay_manifest`) and the trailer's `before_sha256` and `after_sha256` (of
+# the files' bytes) -- "diff.v1 records and outcomes do not depend on the
+# version (the entries are v1's)" and the v2 statements "decide nothing"
+# (test/expect/manifest-v2.md V2-R4, V2-R6).
+OTHER_VERSIONS = [('.before.alt', '.after'), ('.before', '.after.alt'),
+                  ('.before.alt', '.after.alt')]
+
+
+def manifest_version(path):
+    with open(path, 'rb') as f:
+        return json.loads(f.readline().decode('utf-8'))['belay_manifest']
+
+
+def check_versions(stem, own, others):
+    """The issues of the pair's diff in the other three combinations of
+    versions, against its own diff `own` (already compared with the
+    reference): [(combination, what, expected, got)]."""
+    issues = []
+    lines = own.split(b'\n')[:-1]
+    for (before, after), (rc, err, raw) in zip(OTHER_VERSIONS, others):
+        combo = 'v%d -> v%d' % (manifest_version(stem + before), manifest_version(stem + after))
+        if rc != 0 or raw is None:
+            issues.append((combo, 'the driver failed', 'a diff', '%s (exit %d)' % (err, rc)))
+            continue
+        got = raw.split(b'\n')
+        if got[-1] != b'':
+            issues.append((combo, 'no final newline', None, None))
+            continue
+        got = got[:-1]
+        if len(got) != len(lines):
+            issues.append((combo, 'number of lines', len(lines), len(got)))
+        for i, (x, y) in enumerate(zip(lines[1:-1], got[1:-1])):
+            if x != y:
+                issues.append((combo, 'line %d (a record) differs' % (i + 2), x, y))
+                break
+        names = {'before_manifest_version': manifest_version(stem + before),
+                 'after_manifest_version': manifest_version(stem + after),
+                 'before_sha256': ref.trailer_of(stem + before)[1],
+                 'after_sha256': ref.trailer_of(stem + after)[1]}
+        for what, x, y in (('header', lines[0], got[0]), ('trailer', lines[-1], got[-1])):
+            want = [(k, names.get(k, v)) for k, v in json.loads(x, object_pairs_hook=list)]
+            have = json.loads(y, object_pairs_hook=list)
+            if not same(want, have):
+                diff = [k for k, v in want if not same(v, dict(have).get(k))]
+                issues.append((combo, '%s: %s' % (what, ', '.join(diff) or 'key order'),
+                               want, have))
+    return issues
 
 
 def run_pair(ran, stem, orders):
@@ -1232,7 +1297,60 @@ def interp_coverage(stem, tags):
         tags.add('events: none, though records carry findings')
 
 
-KINDS = ('cell', 'field pair', 'optional', 'scenario', 'interpreter')
+# Manifest versions (test/expect/manifest-v2.md), from each pair's own two
+# files: the four combinations; identical entries in two versions (V2-R4)
+# and, in v2 on both sides, with only the v2 statements different (V2-R6:
+# they decide nothing); and what a v2 manifest's statements say -- the keys
+# V2-2..V2-6 add, `excluded` always `[]` (how diff.v1 treats an excluded
+# path is not decided: not modelled).
+V2_KEYS = {'header': ('excluded', 'walk_start_ns'),
+           'trailer': ('trusted', 'reference', 'read_all')}
+VERSION_SCENARIOS = (['before v%d, after v%d' % vv for vv in ((1, 1), (1, 2), (2, 1), (2, 2))]
+                     + ['the versions differ, every entry the same (V2-R4)',
+                        'the versions differ, entries differ',
+                        'v2 on both sides, every entry the same, only the v2 statements differ '
+                        '(V2-R6)',
+                        'v2: the prefilter used, reference walk_start, trusted > 0',
+                        'v2: the prefilter used, reference newest_ctime',
+                        'v2: the prefilter used, trusted 0',
+                        'v2: every file read, read_all check',
+                        'v2: every file read, another reason',
+                        'v2: walk_start_ns 0', 'v2: walk_start_ns not 0'])
+
+
+def version_coverage(stem, tags):
+    sides = []
+    for side in ('.before', '.after'):
+        h, _, entries = ref.load(stem + side)
+        t = ref.trailer_of(stem + side)[0]
+        st = {k: (h if line == 'header' else t)[k] for line, ks in V2_KEYS.items() for k in ks} \
+            if h['belay_manifest'] == 2 else None
+        sides.append((h['belay_manifest'], entries, st))
+    (vb, eb, sb), (va, ea, sa) = sides
+    tags.add('before v%d, after v%d' % (vb, va))
+    if vb != va:
+        tags.add('the versions differ, every entry the same (V2-R4)' if eb == ea else
+                 'the versions differ, entries differ')
+    elif vb == 2 and eb == ea and not same(sorted(sb.items()), sorted(sa.items())):
+        tags.add('v2 on both sides, every entry the same, only the v2 statements differ (V2-R6)')
+    for st in (sb, sa):
+        if st is None:
+            continue
+        if st['read_all'] == '':
+            if st['reference'] == 'walk_start' and st['trusted'] > 0:
+                tags.add('v2: the prefilter used, reference walk_start, trusted > 0')
+            if st['reference'] == 'newest_ctime':
+                tags.add('v2: the prefilter used, reference newest_ctime')
+            if st['trusted'] == 0:
+                tags.add('v2: the prefilter used, trusted 0')
+        else:
+            tags.add('v2: every file read, read_all check' if st['read_all'] == 'check' else
+                     'v2: every file read, another reason')
+        tags.add('v2: walk_start_ns 0' if st['walk_start_ns'] == 0 else
+                 'v2: walk_start_ns not 0')
+
+
+KINDS = ('cell', 'field pair', 'optional', 'scenario', 'interpreter', 'manifest version')
 
 
 def coverage(stems):
@@ -1247,6 +1365,10 @@ def coverage(stems):
         interp_coverage(stem, tags)
         for t in tags:
             cov['interpreter'][t] += 1
+        tags = set()
+        version_coverage(stem, tags)
+        for t in tags:
+            cov['manifest version'][t] += 1
     return cov
 
 
@@ -1258,7 +1380,8 @@ def required():
             + [('field pair', fp) for fp in required_field_pairs(infeasible)]
             + [('optional', f) for f in OPTIONAL]
             + [('scenario', s) for s in SCENARIOS]
-            + [('interpreter', s) for s in INTERP_SCENARIOS])
+            + [('interpreter', s) for s in INTERP_SCENARIOS]
+            + [('manifest version', s) for s in VERSION_SCENARIOS])
     return need, infeasible
 
 
@@ -1279,7 +1402,8 @@ def print_gate(cov):
                                        '(the order of `changed`)'),
                         ('optional', 'optional fields on one side only'),
                         ('scenario', 'scenarios'),
-                        ('interpreter', 'interpreters, with no store')):
+                        ('interpreter', 'interpreters, with no store'),
+                        ('manifest version', 'manifest versions and v2 statements')):
         items = [i for k, i in need if k == kind]
         lack = [i for k, i in missing if k == kind]
         print('   %s: %d/%d, fewest pairs %d' % (title, len(items) - len(lack), len(items),
@@ -1315,6 +1439,13 @@ def main():
     outcomes = collections.Counter()
     with concurrent.futures.ThreadPoolExecutor(max_workers=os.cpu_count() or 4) as pool:
         ran = list(pool.map(lambda s: run_driver(driver, s), stems))
+        others = list(pool.map(lambda s: [run_driver(driver, s, b, a) for b, a in OTHER_VERSIONS],
+                               stems))
+    version_issues = []
+    for stem, (rc, _, raw), oth in zip(stems, ran, others):
+        if rc == 0 and raw is not None:
+            for issue in check_versions(stem, raw, oth):
+                version_issues.append((os.path.basename(stem), label(stem)) + issue)
     for stem, r in zip(stems, ran):
         res = run_pair(r, stem, orders)
         name = os.path.basename(stem)
@@ -1374,6 +1505,19 @@ def main():
         print('== trailer only: %s [%s] %s' % (name, lab, issues))
     for ex in rejected_examples:
         print('== driver failed: %s [%s] %s: %s' % ex)
+    nver = sum(rc == 0 and raw is not None for rc, _, raw in ran)
+    bad_pairs = len({i[0] for i in version_issues})
+    print('== manifest versions (V2-R4): %d pairs whose own diff succeeded, each also run in the '
+          'other three combinations of versions: %d agree in all three, %d do not'
+          % (nver, nver - bad_pairs, bad_pairs))
+    by_what = collections.defaultdict(list)
+    for name, lab, combo, what, want, got in version_issues:
+        by_what[what].append((name, lab, combo, want, got))
+    for what, items in sorted(by_what.items(), key=lambda kv: -len(kv[1])):
+        print('   %-60s %5d' % (what, len(items)))
+        for name, lab, combo, want, got in items[:2]:
+            print('      %s [%s] %s\n         expected %s\n         got      %s'
+                  % (name, lab, combo, want, got))
 
     # One order of the reasons over the whole run.
     before = collections.defaultdict(set)
@@ -1396,25 +1540,31 @@ def main():
 
     # Refusals.
     bad_refusals = []
-    for stem in refusals:
-        out = stem + '.diff'
-        if os.path.exists(out):
-            os.unlink(out)
-        r = subprocess.run([driver, stem + '.before', stem + '.after', out], capture_output=True)
-        ok_ref = ref.diff(stem + '.before', stem + '.after') is None
-        if r.returncode == 0 or os.path.exists(out) or not ok_ref:
-            bad_refusals.append((os.path.basename(stem), label(stem), r.returncode,
-                                 os.path.exists(out), ok_ref))
-    print('== scope refusal: %d/%d pairs of different scopes refused with no output file'
-          % (len(refusals) - len(bad_refusals), len(refusals)))
+    for stem in refusals:                       # in all four combinations of versions
+        for before, after in [('.before', '.after')] + OTHER_VERSIONS:
+            out = stem + '.diff' + before + after
+            if os.path.exists(out):
+                os.unlink(out)
+            r = subprocess.run([driver, stem + before, stem + after, out], capture_output=True)
+            ok_ref = ref.diff(stem + before, stem + after) is None
+            if r.returncode == 0 or os.path.exists(out) or not ok_ref:
+                bad_refusals.append((os.path.basename(stem), label(stem),
+                                     'v%d -> v%d' % (manifest_version(stem + before),
+                                                     manifest_version(stem + after)),
+                                     r.returncode, os.path.exists(out), ok_ref))
+    print('== scope refusal: %d/%d pairs of different scopes refused with no output file, in '
+          'each of the four combinations of versions'
+          % (len(refusals) - len({b[0] for b in bad_refusals}), len(refusals)))
     for b in bad_refusals:
-        print('   NOT REFUSED: %s [%s] exit %d, output file left: %s, reference refuses: %s' % b)
+        print('   NOT REFUSED: %s [%s] %s: exit %d, output file left: %s, reference refuses: %s'
+              % b)
 
     # The coverage gate, over every pair (gen_corpus.py has already checked it
     # over its targeted pairs alone).
     gate_ok = print_gate(coverage(stems))
 
-    ok = gate_ok and not (differ or rejected or header_only or bad_refusals or clash)
+    ok = gate_ok and not (differ or rejected or header_only or bad_refusals or clash
+                          or version_issues)
     sys.exit(0 if ok else 1)
 
 

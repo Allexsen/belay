@@ -31,7 +31,11 @@ Its only sources:
     test/expect/manifest-v1.md's Keys table (a key's spellings, `a|b`): the
     `before` and `after` objects of a record;
   - docs/spec/diff-v1.md "## Shape", PROSE ONLY, for V5's "stated in
-    diff-v1": no line has a fixed length bound.
+    diff-v1": no line has a fixed length bound;
+  - test/expect/manifest-v2.md V2-R4: the header ends with
+    `before_manifest_version` and `after_manifest_version`, each manifest's
+    `belay_manifest`; nothing else depends on the version (the entries are
+    v1's, and the keys v2 adds are not read: V2-R6).
 Never the generated blocks of the spec, never src/ or include/.
 
 Ambiguities this file resolves one way (questions for the author) are
@@ -66,7 +70,7 @@ SPEC = os.path.join(REPO, 'docs', 'spec', 'diff-v1.md')
 # is not UTF-8 (ambiguity A9).
 HEADER_KEYS = ['belay_diff', 'scopes', 'before_created_ns', 'after_created_ns',
                'before_hash_max_bytes', 'after_hash_max_bytes', 'scope_remounted',
-               'identity_compared']
+               'identity_compared', 'before_manifest_version', 'after_manifest_version']
 # The trailer's from the "### Trailer" paragraph: "`belay_diff_end` is the
 # number of records written. Then come one count per outcome, named as the
 # outcome, ... `unchanged` included" (in the example's order) ...
@@ -1561,7 +1565,9 @@ def diff(before, after):
               ('before_created_ns', hb['created_ns']), ('after_created_ns', ha['created_ns']),
               ('before_hash_max_bytes', hb['hash_max_bytes']),
               ('after_hash_max_bytes', ha['hash_max_bytes']),
-              ('scope_remounted', remounted), ('identity_compared', not remounted)]
+              ('scope_remounted', remounted), ('identity_compared', not remounted),
+              ('before_manifest_version', hb['belay_manifest']),
+              ('after_manifest_version', ha['belay_manifest'])]
     assert [('scopes' if k == 'scopes_b64' else k) for k, _ in header] == HEADER_KEYS
     records, counts, traces = [], collections.Counter(), {}
     states = {i: {'unavailable': [], 'moved': [], 'unnamed': [], 'reinstalled': [],
