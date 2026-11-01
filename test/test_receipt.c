@@ -82,7 +82,7 @@ TEST(a_receipt_puts_events_then_privilege_then_changes) {
     w = (size_t)snprintf(want, sizeof want,
         "belay diff  /w  checkpoint 3 -> checkpoint 4\n"
         "  1 modified · 1 added · 3 metadata_only · 1 unknown    events: 2\n"
-        "  0 entries vanished while the before walk ran, 2 while the after walk ran\n"
+        "  2 entries changed while they were read; running belay again settles them\n"
         "\n"
         "packages and files explained\n"
         "  pip   upgraded numpy 1 -> 2\n"
@@ -261,6 +261,24 @@ TEST(invisible_and_invalid_bytes_are_shown_and_a_type_change_is_said) {
     ASSERT_TRUE(strstr(g_text, "  A zw\\xe2\\x80\\x8bj\\xe2\\x80\\xa8x\\xef\\xbb\\xbf\n") != NULL);
 }
 
+/* Decision 2026-11-01, 7: no banner, but one line counting the entries that
+ * changed while they were read -- raced, unstable or vanished, either side
+ * -- saying a re-run settles them. */
+TEST(entries_that_changed_while_read_are_counted_in_one_line) {
+    ASSERT_EQ_INT(0, render(HEAD "{\"belay_diff_end\":9,\"unchanged\":1,\"added\":0,\"removed\":0,\"modified\":0,"
+        "\"type_changed\":0,\"metadata_only\":0,\"unknown\":0,\"dir_timestamps_only\":0,\"events\":0,"
+        "\"before_vanished\":0,\"before_unstable\":0,\"before_raced\":1,\"after_vanished\":0,\"after_unstable\":0,"
+        "\"after_raced\":0,\"provisional\":true,\"before_sha256\":\"x\",\"after_sha256\":\"y\"}\n", false));
+    ASSERT_EQ_STR("belay diff  /w  checkpoint 3 -> checkpoint 4\n  no changes\n"
+                  "  1 entry changed while it was read; running belay again settles it\n", g_text);
+    ASSERT_EQ_INT(0, render(HEAD "{\"belay_diff_end\":9,\"unchanged\":1,\"added\":0,\"removed\":0,\"modified\":0,"
+        "\"type_changed\":0,\"metadata_only\":0,\"unknown\":0,\"dir_timestamps_only\":0,\"events\":0,"
+        "\"before_vanished\":0,\"before_unstable\":2,\"before_raced\":0,\"after_vanished\":0,\"after_unstable\":0,"
+        "\"after_raced\":1,\"provisional\":true,\"before_sha256\":\"x\",\"after_sha256\":\"y\"}\n", false));
+    ASSERT_TRUE(strstr(g_text, "  3 entries changed while they were read; running belay again settles them\n") != NULL);
+    ASSERT_TRUE(strstr(g_text, "provisional") == NULL);                 /* no banner */
+}
+
 int main(void) {
     RUN(a_receipt_puts_events_then_privilege_then_changes);
     RUN(long_sections_fold_but_privilege_never_does);
@@ -271,6 +289,7 @@ int main(void) {
     RUN(a_diff_of_another_version_is_rejected_and_b64_scopes_shown);
     RUN(a_line_of_many_strings_is_read_in_linear_memory);
     RUN(invisible_and_invalid_bytes_are_shown_and_a_type_change_is_said);
+    RUN(entries_that_changed_while_read_are_counted_in_one_line);
     free(g_text);
     return belay_test_report();
 }

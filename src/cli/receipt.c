@@ -308,10 +308,17 @@ int receipt_render(FILE *diff, FILE *out, const struct receipt_opts *o) {
     if (c.n == 0 && nev == 0) fprintf(out, "  no changes\n");
     else fprintf(out, "  %s%sevents: %lld\n", c.n ? c.p : "", c.n ? "    " : "", (long long)nev);
     free(c.p);
-    const int64_t vb = jint(&trailer, "before_vanished", 0), va = jint(&trailer, "after_vanished", 0);
-    if (vb || va)
-        fprintf(out, "  %lld entries vanished while the before walk ran, %lld while the after walk ran\n",
-                (long long)vb, (long long)va);
+    /* No banner (decision 14.7); one actionable line counting what changed
+     * while it was read -- vanished, unstable or raced, either side -- and
+     * saying a re-run settles it (decision 2026-11-01, 7). */
+    int64_t moving = 0;
+    static const char *const MOVING[] = { "before_vanished", "before_unstable", "before_raced",
+                                          "after_vanished", "after_unstable", "after_raced" };
+    for (size_t i = 0; i < sizeof MOVING / sizeof MOVING[0]; i++) moving += jint(&trailer, MOVING[i], 0);
+    if (moving > 0)
+        fprintf(out, "  %lld %s changed while %s read; running belay again settles %s\n", (long long)moving,
+                moving == 1 ? "entry" : "entries", moving == 1 ? "it was" : "they were",
+                moving == 1 ? "it" : "them");
     const struct { const char *title; struct lines *l; } SEC[] = {
         { "packages and files explained", &ev }, { "privilege", &priv }, { "changes", &other },
     };

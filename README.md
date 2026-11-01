@@ -13,7 +13,7 @@ that may still change, and there are no releases. Nothing that changes your file
   need no privileges and only read the directory they are given; belay writes only under its own
   state directory.
 - Interpreters that explain changes to pip installs, dpkg's package database, git refs, hooks,
-  reflogs (up to the store limit, 64 KiB by default) and small text files
+  reflogs (kept and read in full up to 16 MiB each) and small text files
   ([docs/spec/diff-v1.md](docs/spec/diff-v1.md)).
 - The manifest format ([docs/spec/manifest-v1.md](docs/spec/manifest-v1.md)) and the diff format
   (diff.v1, a draft).

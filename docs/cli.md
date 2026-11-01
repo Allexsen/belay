@@ -70,6 +70,13 @@ the capture and the comparison then reach it by its path, which is why no one el
 write the state directory or anything above it. A capture that finds another belay working on
 the same scope says so on standard error and waits for it.
 
+**A known limit.** A process running as your own user while a capture runs can replace a
+directory under the state directory between belay's check and its use, and send that capture's
+writes elsewhere. That is outside belay's threat model: such a process can already write
+anything you can, belay's state included (where belay scans for others -- inside a sandbox after
+the watched processes are stopped, or as a host reader running as root -- no such process is
+there).
+
 Nothing in it is deleted by belay.
 
 ## mark: which files are read
@@ -86,18 +93,19 @@ the same).
 
 When the state directory is on another filesystem than the scope, that clock cannot be read; the
 reference point is then the newest ctime the previous checkpoint recorded, and the output says so
-(`"reference":"newest_ctime"` under `prefilter` in `--json`, `walk_start` otherwise). On a filesystem with
-coarse timestamps (1 or 2 seconds, or a kernel tick), a same-size rewrite made during the previous
-walk, after the file was read and within the tick of its previous write, can then be missed if
-another file changed later in that walk; keep the state directory on the scope's filesystem, or
-use `check`, where that matters.
+(`"reference":"newest_ctime"` under `prefilter` in `--json`, `walk_start` otherwise). That is
+sound on fine-grained timestamps. On coarse ones (1 or 2 seconds, or a kernel tick) it could miss
+a same-size rewrite made during the previous walk within its file's own tick, so when every ctime
+the previous checkpoint recorded has a zero nanosecond part, `mark` reads every file instead and
+says why.
 
 `mark` reads every file, and says why (`full_reason` under `prefilter` in `--json`), when there is
 no checkpoint before; with `--full`; every `N` prefiltered captures -- marks, and `diff`'s captures
 to now -- since the last full one (`--full-every N`, default 50; 0: never); when the newest ctime it
 sees is older than the newest the previous checkpoint recorded (the clock went backwards: the walk
-is done again in full); or when the previous checkpoint cannot be used -- unreadable, of another
-scope, taken with other limits, or too large to index (64 MiB, about 76 bytes a file). A
+is done again in full); when the previous walk's start is unknown on coarse timestamps (above);
+or when the previous checkpoint cannot be used -- unreadable, of another scope, taken with other
+limits, or too large to index (64 MiB, about 76 bytes a file). A
 previous manifest that is a symlink or a FIFO is corrupt state (exit 4).
 
 ## The receipt
@@ -106,7 +114,9 @@ Events first (packages installed, upgraded, removed), then every privilege chang
 inode flags, setuid, setgid or sticky bits, on a file changed, added or removed -- then the other
 changes by path. A record shows at most 15 of its findings, then "and N more". An entry belay could
 not capture reliably is named on its own line with the reason (`raced`, `unstable`, `unverified`,
-...); entries that vanished while a walk ran are counted. Sections of more than 50 entries fold to
+...). There is no "provisional" banner; when entries changed while they were read (raced, unstable
+or vanished, on either side), one line counts them and says that running belay again settles
+them. Sections of more than 50 entries fold to
 "and N more" (`--all` shows everything); privilege changes and unknown entries never fold.
 
 Every path and text is printed escaped -- in the receipt, in error lines, and whatever belay
