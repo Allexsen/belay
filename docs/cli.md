@@ -77,7 +77,9 @@ anything you can, belay's state included (where belay scans for others -- inside
 the watched processes are stopped, or as a host reader running as root -- no such process is
 there).
 
-Nothing in it is deleted by belay.
+Nothing in it is deleted by belay. The store keeps one copy of every version of every file it
+copies -- small text files, and up to 16 MiB for each git reflog -- so a busy repository's
+reflogs, changing between marks, grow it by up to their size each time.
 
 ## mark: which files are read
 
@@ -93,11 +95,14 @@ the same).
 
 When the state directory is on another filesystem than the scope, that clock cannot be read; the
 reference point is then the newest ctime the previous checkpoint recorded, and the output says so
-(`"reference":"newest_ctime"` under `prefilter` in `--json`, `walk_start` otherwise). That is
-sound on fine-grained timestamps. On coarse ones (1 or 2 seconds, or a kernel tick) it could miss
-a same-size rewrite made during the previous walk within its file's own tick, so when every ctime
-the previous checkpoint recorded has a zero nanosecond part, `mark` reads every file instead and
-says why.
+(`"reference":"newest_ctime"` under `prefilter` in `--json`, `walk_start` otherwise). That point
+can miss a same-size rewrite made during the previous walk within its file's own timestamp tick
+when another file changed later in that walk. On fine-grained timestamps there is no such tick.
+On whole-second ones (FAT, HFS+, some network filesystems) the miss is possible, so when every
+ctime the previous checkpoint recorded (mount roots aside) has a zero nanosecond part, `mark` reads
+every file instead and says why. Timestamps coarse at a kernel tick or 10 ms (Linux before 6.13,
+exFAT) carry a nanosecond part, are not recognised, and keep that risk: keep belay's state
+directory on the scope's filesystem, or use `check`, where it matters.
 
 `mark` reads every file, and says why (`full_reason` under `prefilter` in `--json`), when there is
 no checkpoint before; with `--full`; every `N` prefiltered captures -- marks, and `diff`'s captures
@@ -115,8 +120,8 @@ inode flags, setuid, setgid or sticky bits, on a file changed, added or removed 
 changes by path. A record shows at most 15 of its findings, then "and N more". An entry belay could
 not capture reliably is named on its own line with the reason (`raced`, `unstable`, `unverified`,
 ...). There is no "provisional" banner; when entries changed while they were read (raced, unstable
-or vanished, on either side), one line counts them and says that running belay again settles
-them. Sections of more than 50 entries fold to
+or vanished), one line counts them for each side: those of the newer side are settled by running
+belay again; those of an earlier checkpoint stay in any diff from it. Sections of more than 50 entries fold to
 "and N more" (`--all` shows everything); privilege changes and unknown entries never fold.
 
 Every path and text is printed escaped -- in the receipt, in error lines, and whatever belay
