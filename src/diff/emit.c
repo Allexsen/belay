@@ -121,7 +121,11 @@ static int put_values(struct emitter *em, enum diff_record_field key, const stru
         enum entry_field g = (enum entry_field)f;
         if (g == F_XATTRS && !(present & FBIT(F_XATTRS))) g = F_XATTRS_SHA256;
         if (!(present & FBIT(g))) continue;
-        if (g == F_LINK_TARGET && e->unreadable) continue;     /* not recorded: left out (V2) */
+        /* A target that could not be read is recorded as "" on an unreadable
+         * link: not recorded, so left out (V2; decision 2026-11-01, 4). A
+         * target written on an unreadable link (it kept changing while read)
+         * was recorded and is carried. */
+        if (g == F_LINK_TARGET && e->unreadable && e->link_target_len == 0) continue;
         if (!first) em->vals[w++] = ',';
         first = false;
         if (entry_put_field(e, g, em->vals, EMIT_VALUES_CAP - 1, &w) == -1) return -1;
