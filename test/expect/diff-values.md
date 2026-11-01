@@ -2,7 +2,9 @@
 
 **What this is.** A diff.v1 record names the compared fields that differ (`changed`); from this pin
 it also carries their values on each side (decision 2026-10-31, Q5: "receipts and graders need
-'mode 644 -> 4755', and diff.v1 is unpublished"). Written by hand for the author's approval.
+'mode 644 -> 4755', and diff.v1 is unpublished"). Written by hand; approved by the author
+2026-11-01 with V5 and V6 as they stand. The emitter does not carry the values yet: its
+implementation follows, with the oracle's update by its own author.
 
 **Changing it.** In its own PR, presented as a table, after the author's explicit OK.
 
@@ -10,11 +12,12 @@ it also carries their values on each side (decision 2026-10-31, Q5: "receipts an
 
 | id | rule |
 |---|---|
-| V1 shape | A record with `changed` also carries `"before": {...}` and `"after": {...}`, after `changed` and before `unknown`. Each holds, for every field `changed` names, in `changed`'s order, that side's value, under the key and in the encoding the manifest uses for it (manifest-v1, "Entries"). A record without `changed` carries neither. |
+| V1 shape | A record with `changed` also carries `"before": {...}` and `"after": {...}`, after `changed` and before `unknown`. Each holds, for every field `changed` names, in `changed`'s order, that side's value, under the key and in the encoding the manifest uses for it (manifest-v1, "Entries"). A record without `changed` carries neither, a `type_changed` record excepted (V6). |
 | V2 absent | A field that side's entry does not record (iflags not read, no caps, no xattrs) is absent from that side's object; the other side's value stands alone. Neither object is ever empty: a field in `changed` is recorded on at least one side. |
 | V3 alternates | A value the manifest writes under an alternate key keeps it: `link_target_b64` for a target that is not UTF-8; `xattrs_sha256` for an xattr set recorded as its digest only. Each side chooses its own spelling. |
 | V4 decides nothing | The values are carried, never compared again: the outcome and `changed` are decided as before (diff-fields.md). |
-| V5 bounds | A record's line has no fixed bound: two link targets (4,095 bytes each, A4) and two inline xattr sets (8,192 bytes each, A1), escaped, can exceed 64 KiB. A consumer reads lines of any length. |
+| V5 bounds | No line of diff.v1 has a fixed length bound -- a record's findings already make lines unbounded, and two link targets (4,095 bytes each, A4) and two inline xattr sets (8,192 bytes each, A1), escaped, exceed 64 KiB. Consumers MUST handle lines of any length (stated in diff-v1, "Shape"). (Decision 2026-11-01: no bound.) |
+| V6 type_changed | A `type_changed` record carries `"before"` and `"after"` (after `type_before`), each holding that side's `mode` and its type's content fields: `size` and `sha256` for `reg`, `link_target` (or `link_target_b64`) for `lnk`, `rdev` for `chr` and `blk`; `mode` alone for `dir`, `fifo` and `sock`. A field the side's entry does not record (a `sha256` not computed) is absent (V2). The values decide nothing (V4). (Decision 2026-11-01: a test file replaced by a symlink to a sensitive path is a tampering route, and the target is the fact that matters.) |
 
 ## The fields
 
@@ -36,4 +39,8 @@ it also carries their values on each side (decision 2026-10-31, Q5: "receipts an
 | rdev | int | |
 | link_target | string | or `link_target_b64` (V3) |
 
-Example: `{"path":"bin/tool","outcome":"metadata_only","type":"reg","changed":["mode","ctime_ns"],"before":{"mode":33188,"ctime_ns":1761000000000000000},"after":{"mode":35309,"ctime_ns":1761000600000000000}}`
+Examples:
+
+`{"path":"bin/tool","outcome":"metadata_only","type":"reg","changed":["mode","ctime_ns"],"before":{"mode":33188,"ctime_ns":1761000000000000000},"after":{"mode":35309,"ctime_ns":1761000600000000000}}`
+
+`{"path":"tests/test_auth.py","outcome":"type_changed","type":"lnk","type_before":"reg","before":{"mode":33188,"size":812,"sha256":"5d1c..."},"after":{"mode":41471,"link_target":"/etc/shadow"}}`
