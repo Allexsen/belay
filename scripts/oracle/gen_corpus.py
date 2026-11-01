@@ -55,6 +55,10 @@ The corpus has three parts:
     manifest's limit, addendum A4, which the generator keeps to),
     directories under hooks/, symlinks and directories under logs/refs/, a
     hook that becomes a symlink or back, and an unclaimed file below .git/;
+    and the values a record carries (values(), diff-values.md): link
+    targets not UTF-8 on both sides, a type change whose symlink's target
+    is not UTF-8 or unknown, or whose regular file has no hash, `caps`
+    added beside a mode change, and the longest record (V5);
   - random pairs: n-bases random trees, each with four mutated variants
     (several changes at once), compared in both directions and with
     themselves;
@@ -2137,6 +2141,100 @@ def xattrs_spellings(w, rng):
                        scenarios=[tag])
 
 
+def inline_xattr_set_near_limit(rng, tag):
+    """A set a writer records inline whose array body is as near its 8192
+    bytes as these names allow (addendum A1: "An inline `xattrs` array body
+    is at most 8192 bytes")."""
+    items, body = [], -1
+    while True:
+        x = 'user.%s%04d=%s' % (tag, len(items), hexs(rng))
+        if body + len(x) + 3 > 8192:
+            return items
+        items.append(x)
+        body += len(x) + 3                              # its quotes, and a comma
+
+
+def values(w, rng):
+    """What a record's `before` and `after` carry (test/expect/diff-values.md)
+    where the other targeted pairs do not build it deterministically: a link
+    target not UTF-8 on both sides (V3: each side its own spelling, both
+    `link_target_b64`); a type change whose symlink's target is not UTF-8,
+    or unknown (an unreadable link's empty target, V6); a type change from a
+    regular file with no hash (V6: "a `sha256` not computed is absent");
+    `caps` added beside a mode change (V2: the other side's value stands
+    alone, beside a field both sides record); and V5's longest record: two
+    link targets of 4,095 bytes (A4), every byte a control character the
+    encoding writes as six (`\\u0001`), and two inline xattr sets near
+    8,192 bytes (A1), one line over 64 KiB. Nothing else differs or is
+    flagged, unless named. Each is written both ways round."""
+    def lnk_targets(rng):
+        t = base_tree(rng)
+        e = clear_flags(subject(rng, t, 'lnk'), t, rng)
+        e['link_target'] = letters(rng, 4) + b'\xff'
+        e['size'] = len(e['link_target'])
+        set_outside(e, t)
+        e2 = dict(e, link_target=new_target(rng, e, 'non-utf8'))
+        set_outside(e2, t)
+        return with_subject(t, e, e2)
+    w.targeted(rng, 'values: a link target not UTF-8 on both sides, differing', lnk_targets,
+               scenarios=['values: a link target that differs, not UTF-8 on both sides'])
+
+    def reg_to_lnk(how):
+        def build(rng):
+            t = base_tree(rng)
+            e = clear_flags(subject(rng, t, 'reg'), t, rng)
+            if how == 'unverified':
+                e = in_context('unverified', e, t, rng)
+            e2 = change_type(e, 'fifo' if how == 'unverified' else 'lnk', t, rng)
+            if e2 is None:
+                return None
+            if how == 'non-utf8':
+                e2['link_target'] = e2['link_target'][:-1] + b'\xff'
+                set_outside(e2, t)
+            return with_subject(t, e, e2)
+        return build
+    w.targeted(rng, 'values: type reg -> lnk, its target not UTF-8', reg_to_lnk('non-utf8'),
+               scenarios=['values: a type change %s a symlink whose target is not UTF-8' % d
+                          for d in ('from', 'to')])
+    w.targeted(rng, 'values: type reg (unverified) -> fifo', reg_to_lnk('unverified'),
+               scenarios=['values: a type change %s a regular file with no sha256' % d
+                          for d in ('from', 'to')])
+
+    def unknown_target(rng):
+        t = base_tree(rng)
+        e = in_context('unreadable', clear_flags(subject(rng, t, 'lnk'), t, rng), t, rng)
+        e['link_target'] = b''                  # "target unknown"
+        e2 = change_type(e, 'reg', t, rng)
+        return with_subject(t, e, e2)
+    w.targeted(rng, 'values: type lnk (unreadable, target unknown) -> reg', unknown_target,
+               scenarios=['values: a type change %s an unreadable symlink whose target is '
+                          'unknown (empty)' % d for d in ('from', 'to')])
+
+    def caps_beside_mode(rng):
+        t = base_tree(rng)
+        e = clear_flags(subject(rng, t, 'reg'), t, rng)
+        e.pop('caps', None)
+        e2 = dict(e, caps=caps_hex(rng),
+                  mode=(e['mode'] & S_IFMT) | other(rng, PERMS, e['mode'] & 0o7777))
+        return with_subject(t, e, e2)
+    w.targeted(rng, 'values: caps added beside a mode change', caps_beside_mode,
+               scenarios=['values: caps recorded on one side only, beside another difference'])
+
+    def longest(rng):
+        t = base_tree(rng)
+        e = clear_flags(subject(rng, t, 'lnk'), t, rng)
+        e.pop('xattrs_sha256', None)
+        e['link_target'], e['size'] = b'\x01' * ADDENDUM_MAX['link_target'], \
+            ADDENDUM_MAX['link_target']
+        e['xattrs'] = inline_xattr_set_near_limit(rng, 'a')
+        set_outside(e, t)
+        e2 = dict(e, link_target=b'\x02' * ADDENDUM_MAX['link_target'],
+                  xattrs=inline_xattr_set_near_limit(rng, 'b'))
+        return with_subject(t, e, e2)
+    w.targeted(rng, 'values: the longest record, two 4,095-byte targets and two inline sets',
+               longest, scenarios=['values: a record line over 64 KiB (V5)'])
+
+
 def trailer_counts(w, rng):
     """What the trailer says about each walk ("### Trailer"): `vanished` on
     one side only with nothing flagged and every entry equal, so no record
@@ -2767,6 +2865,7 @@ def targeted(w, rng):
     mount_unverified(w, rng)
     mount_raced_type_changes(w, rng)
     xattrs_spellings(w, rng)
+    values(w, rng)
     trailer_counts(w, rng)
     interpreters(w, rng)
 

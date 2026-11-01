@@ -25,11 +25,17 @@ Its only sources:
     `content_unavailable`. What would need content (text_changed, a RECORD's
     rows, a status file's stanzas, refs) is not modelled: it cannot occur;
   - test/expect/manifest-v1-addendum.md A4 (a link target is at most 4,095
-    bytes), which finding-kinds.md cites as a `bytes` field's bound.
+    bytes), which finding-kinds.md cites as a `bytes` field's bound;
+  - test/expect/diff-values.md, READ AT RUN TIME (V1-V6 and its field table,
+    the words record_values() relies on checked at start-up), with
+    test/expect/manifest-v1.md's Keys table (a key's spellings, `a|b`): the
+    `before` and `after` objects of a record;
+  - docs/spec/diff-v1.md "## Shape", PROSE ONLY, for V5's "stated in
+    diff-v1": no line has a fixed length bound.
 Never the generated blocks of the spec, never src/ or include/.
 
 Ambiguities this file resolves one way (questions for the author) are
-marked "ambiguity I<n>" where they are decided.
+marked "ambiguity I<n>" where they are decided (VA<n> for diff-values.md).
 
 Deliberately naive: both manifests in memory as dictionaries, the union of
 their paths sorted, ancestors found by walking a path's prefixes.
@@ -43,7 +49,9 @@ What the prose leaves to generated tables:
   - the order of the outcome counts in the trailer ("in the order of the
     outcomes table") is the one the "Shape" example shows;
   - the order of a record's keys after `path`, `outcome` and `type` (the
-    record table is generated): compare.py does not check it.
+    record table is generated): compare.py does not check it -- except
+    where a pin states it in words: `before` and `after` "after `changed`
+    and before `unknown`" (diff-values V1), "after `type_before`" (V6).
 """
 import base64, collections, hashlib, json, os, re, sys
 
@@ -293,9 +301,12 @@ def trailer_of(path):
     return json.loads(raw.rstrip(b'\n').split(b'\n')[-1].decode('utf-8')), hashlib.sha256(raw).hexdigest()
 
 
-def load(path):
+def load(path, raw=None):
     """(header, scope bytes, {path bytes: entry}). An entry's `path` and
-    `link_target` are bytes whichever spelling the manifest used."""
+    `link_target` are bytes whichever spelling the manifest used. With `raw`
+    (a dict), raw[path bytes] is also the entry exactly as the manifest
+    wrote it: its keys (`link_target_b64`, `xattrs_sha256`) and values, for
+    the values a record carries (diff-values V1, V3)."""
     with open(path, 'rb') as f:
         lines = f.read().split(b'\n')
     if lines and lines[-1] == b'':
@@ -307,6 +318,8 @@ def load(path):
     entries = {}
     for d in body:
         e = dict(d)
+        if raw is not None:
+            raw[b64(d['path_b64']) if 'path_b64' in d else d['path'].encode('utf-8')] = d
         e['path'] = b64(e.pop('path_b64')) if 'path_b64' in e else e['path'].encode('utf-8')
         if 'link_target_b64' in e:
             e['link_target'] = b64(e.pop('link_target_b64'))
@@ -580,6 +593,168 @@ def check_o4(out, b, a):
     for f, s in FIELDS.items():
         if s.absent == 'unknown' and (f in b) != (f in a):
             raise AssertionError('reference bug: unchanged with %s on one side' % f)
+
+
+# ---------------------------------------------------------------------------
+# The values a record carries: test/expect/diff-values.md (V1-V6 and its field
+# table), read at run time, the words relied on checked here; the keys and
+# encodings are the manifest's own (test/expect/manifest-v1.md, Keys: `a|b`
+# is one spelling or the other). V4: "The values are carried, never compared
+# again" -- nothing here feeds both_sides().
+
+VALUES_PIN = os.path.join(REPO, 'test', 'expect', 'diff-values.md')
+BEFORE, AFTER = 'before', 'after'
+
+
+def load_values_pin():
+    text = open(VALUES_PIN, encoding='utf-8').read()
+    rules = {r['id'].split()[0]: r['rule'] for r in md_table(text, 'id')}
+    said = {
+        'V1': ['A record with `changed` also carries `"before": {...}` and `"after": {...}`, '
+               'after `changed` and before `unknown`',
+               "for every field `changed` names, in `changed`'s order, that side's value, under "
+               'the key and in the encoding the manifest uses for it',
+               'A record without `changed` carries neither, a `type_changed` record excepted '
+               '(V6)'],
+        'V2': ["A field that side's entry does not record (iflags not read, no caps, no "
+               "xattrs) is absent from that side's object; the other side's value stands "
+               'alone.',
+               # Read as VA1 below: the sentence that is false when the only
+               # field `changed` names is recorded on one side only.
+               'Neither object is ever empty: a field in `changed` is recorded on at least one '
+               'side.'],
+        'V3': ['`link_target_b64` for a target that is not UTF-8; `xattrs_sha256` for an xattr '
+               'set recorded as its digest only. Each side chooses its own spelling.'],
+        'V4': ['The values are carried, never compared again'],
+        'V5': ['No line of diff.v1 has a fixed length bound'],
+        'V6': ['A `type_changed` record carries `"before"` and `"after"` (after `type_before`), '
+               "each holding that side's `mode` and its type's content fields: `size` and "
+               '`sha256` for `reg`, `link_target` (or `link_target_b64`) for `lnk`, `rdev` for '
+               '`chr` and `blk`; `mode` alone for `dir`, `fifo` and `sock`.',
+               "A field the side's entry does not record (a `sha256` not computed) is absent "
+               '(V2).'],
+    }
+    for r, words in said.items():
+        for w in words:
+            if w not in rules.get(r, ''):
+                raise SystemExit('pin: diff-values %s no longer says what reference.py assumes: '
+                                 '%r' % (r, w))
+    # The field table: every field `changed` can name (a compared field, or
+    # `ctime_ns` under rule 5) has a row, and nothing else -- `type`, the one
+    # name `changed` holds across a type change, has none (ambiguity VA2).
+    fields = [r['field'] for r in md_table(text, 'field')]
+    can_change = [f for f, s in FIELDS.items() if s.cls in COMPARED_CLASSES + (CTIME,)]
+    if fields != can_change:
+        raise SystemExit('pin: diff-values field table %r is not the fields `changed` can name '
+                         '%r' % (fields, can_change))
+    # V5's "(stated in diff-v1, "Shape")".
+    spec = ' '.join(open(SPEC, encoding='utf-8').read().split())
+    if 'consumers MUST handle lines of any length' not in spec:
+        raise SystemExit('spec: "Shape" no longer says consumers handle lines of any length')
+    return rules
+
+
+def manifest_spellings():
+    """field -> the keys the manifest writes it under, in order: `a|b` in
+    test/expect/manifest-v1.md's Keys table, plus the digest spelling the
+    diff pin compares "as `xattrs`" (V3: `xattrs_sha256`)."""
+    rows = md_table(open(MANIFEST_PIN, encoding='utf-8').read(), 'line')
+    out = {}
+    for r in rows:
+        if r['line'] == 'entry':
+            keys = r['key'].split('|')
+            out[keys[0]] = keys
+    for f, alts in SPELLINGS.items():
+        out[f] = out[f] + alts
+    # V3 names exactly these alternates.
+    if [k for ks in out.values() for k in ks[1:] if k != 'path_b64'] != \
+            ['xattrs_sha256', 'link_target_b64']:
+        raise SystemExit('pin: the manifest\'s alternate keys are not V3\'s: %r' % out)
+    return out
+
+
+VALUE_RULES = load_values_pin()
+MANIFEST_KEYS = manifest_spellings()
+ALTERNATE_KEYS = {k for ks in MANIFEST_KEYS.values() for k in ks[1:]}
+# V6, word for word: a type's content fields, after `mode`, in the order V6
+# lists them (the manifest's order too).
+TYPE_VALUES = {'reg': ['mode', 'size', 'sha256'], 'lnk': ['mode', 'link_target'],
+               'chr': ['mode', 'rdev'], 'blk': ['mode', 'rdev'], 'dir': ['mode'],
+               'fifo': ['mode'], 'sock': ['mode']}
+if sorted(TYPE_VALUES) != sorted(TYPES):
+    raise SystemExit('pin: V6 names types %r, the manifest %r' % (sorted(TYPE_VALUES), TYPES))
+# For a symlink V6 lists `link_target` alone, though `size` is a content
+# field on `lnk` in diff-fields.md (the target's length): V6's list is
+# followed as written (ambiguity VA3).
+
+
+def side_values(raw, names):
+    """[(key, value)]: each field of `names` the side's entry records, under
+    the key the manifest wrote it with (V1, V3) and its value as written
+    there; a field it does not record is absent (V2)."""
+    out = []
+    for f in names:
+        for k in MANIFEST_KEYS.get(f, [f]):
+            if k in raw:
+                out.append((k, raw[k]))
+                break
+    return out
+
+
+def record_values(outcome, changed, rb, ra, trace):
+    """(before, after) as [(key, value)] each, or None when the record
+    carries neither.
+
+    V6: a `type_changed` record carries each side's `mode` and its type's
+    content fields (TYPE_VALUES) -- whatever `changed` holds; diff-v1 and pin
+    O7 give it `changed` ["type"], which V4 keeps ("`changed` ... decided as
+    before"), though V1's "a `type_changed` record excepted" and V6's
+    example write it with no `changed` (ambiguity VA4: `changed` is kept).
+
+    V1: otherwise, with `changed`, the fields it names, in its order. That
+    includes a path whose types differ while `raced` makes it `unknown`:
+    `changed` is ["type"] there (O7), V6 speaks of a `type_changed` record
+    only, so V1 applies as written -- `type` under the manifest's key and
+    encoding, {"type": "reg"} -- though the pin's field table has no `type`
+    row (ambiguity VA2).
+
+    V2: a field the side does not record is left out of that side's object.
+    When the only field `changed` names is recorded on one side only (`caps`
+    or an xattr set added or removed: absent means none where read, so it is
+    compared and differs), that side's object holds nothing: V2's "Neither
+    object is ever empty" cannot hold then -- its reason, "a field in
+    `changed` is recorded on at least one side", proves only that the two
+    are not both empty. V1 ("also carries `before` and `after`") is kept:
+    the object is written, empty, `{}` (ambiguity VA1).
+
+    An unreadable symlink whose target is unknown records `link_target` as
+    "" (manifest-v1: "Empty only on an `unreadable` link, meaning the target
+    is unknown"): the field is recorded, so V6 carries "" -- it is not "a
+    field the side's entry does not record" (ambiguity VA5). (`changed`
+    never names it there: the target is not compared when either side is
+    unreadable.)"""
+    if outcome == 'type_changed':
+        vb = side_values(rb, TYPE_VALUES[rb['type']])
+        va = side_values(ra, TYPE_VALUES[ra['type']])
+        trace.append('values:V6')
+        for side, raw, v in (('before', rb, vb), ('after', ra, va)):
+            if raw['type'] == 'reg' and 'sha256' not in raw:
+                trace.append('values:V6-no-sha256-' + side)
+            if raw['type'] == 'lnk' and raw.get('link_target') == '':
+                trace.append('values:V6-empty-target-' + side)
+    elif changed:
+        vb, va = side_values(rb, changed), side_values(ra, changed)
+        if changed == ['type']:
+            trace.append('values:type-not-type_changed')
+        if not vb or not va:
+            trace.append('values:VA1-empty-object')
+        elif len(vb) != len(changed) or len(va) != len(changed):
+            trace.append('values:V2-one-side')
+    else:
+        return None
+    if any(k in ALTERNATE_KEYS for k, _ in vb + va):
+        trace.append('values:V3-alternate')
+    return vb, va
 
 
 # ---------------------------------------------------------------------------
@@ -1349,8 +1524,9 @@ def diff(before, after):
 
     `before` is the first manifest given and `after` the second, "whatever
     their `created_ns` say" (diff-v1.md, after the "Shape" example)."""
-    hb, sb, eb = load(before)
-    ha, sa, ea = load(after)
+    rawb, rawa = {}, {}
+    hb, sb, eb = load(before, rawb)
+    ha, sa, ea = load(after, rawa)
     if sb != sa:
         return None
     root_b, root_a = eb[b'.']['dev'], ea[b'.']['dev']
@@ -1403,6 +1579,12 @@ def diff(before, after):
             rec['type_before'] = b['type']
         if changed:
             rec['changed'] = changed
+        # diff-values V1: `before` and `after` "after `changed` and before
+        # `unknown`"; V6: on a `type_changed` record "after `type_before`".
+        vals = (record_values(out, changed, rawb[p], rawa[p], traces[p])
+                if b is not None and a is not None else None)
+        if vals is not None:
+            rec['before'], rec['after'] = dict(vals[0]), dict(vals[1])
         if out == 'unknown':
             rec['unknown'] = why
         # "For a path that is not `unchanged`, the interpreter that claims it
@@ -1454,8 +1636,9 @@ def canonical(v):
         return str(v).encode('ascii')
     if isinstance(v, str):
         return canonical_string(v)
-    if isinstance(v, dict):
-        v = list(v.items())
+    if isinstance(v, dict):            # an object, empty or not (diff-values VA1: `{}`)
+        return b'{' + b','.join(canonical_string(k) + b':' + canonical(x)
+                                for k, x in v.items()) + b'}'
     if v and all(isinstance(x, tuple) and len(x) == 2 and isinstance(x[0], str) for x in v):
         return b'{' + b','.join(canonical_string(k) + b':' + canonical(x) for k, x in v) + b'}'
     if isinstance(v, list):

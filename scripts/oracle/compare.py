@@ -13,6 +13,10 @@ must agree on
     records' order;
   - every record's `findings`, exactly: each finding's keys in order, values
     and JSON types, and the bytes `"findings":[...]` in the record's line;
+  - every record's `before` and `after` (test/expect/diff-values.md), exactly:
+    keys in order, values and JSON types, the bytes `"before":{...}` and
+    `"after":{...}` in the record's line, and where they stand ("after
+    `changed` and before `unknown`", V1; "after `type_before`", V6);
   - the event records (E1: after the path records, before the trailer),
     byte for byte against the reference's rendering;
   - the trailer: every key, its value and their order (belay_diff_end, the
@@ -28,7 +32,9 @@ must agree on
   Every record of the driver is also checked against itself, whatever the
   reference says: `modified` needs a content field in `changed`,
   `metadata_only` a non-content one, `type_changed` is exactly ["type"],
-  `unknown` appears only on an `unknown` outcome (rules 3 and 4).
+  `unknown` appears only on an `unknown` outcome (rules 3 and 4), `before`
+  and `after` appear together exactly on a record with `changed` (V1),
+  each naming only what V1 or V6 allows, under a key the manifest uses.
   Disagreements are grouped by the rule that explains them; OTHER is what no
   rule of the reference's trace explains.
 scope-NNNNN.before/.after (different scopes): the driver must fail and leave
@@ -53,7 +59,13 @@ the generator's labels (coverage(), required(), gate()):
     or stops being a mount root, or is one on both sides, with `unverified`
     on the mount side and on the other or not (O8), a mounted regular file
     whose type changes while raced on either side or both (O8 across a type
-    change), the trailer's walk counts, ...;
+    change), the trailer's walk counts, ...; and the values a record carries
+    (diff-values.md): a type change for every ordered pair of types, raced
+    on neither side (V6), from and to a regular file with no hash and a
+    symlink whose target is not UTF-8 or unknown, link targets and xattr
+    sets in each side's own spelling (V3), `caps`, `xattrs` or
+    `xattrs_sha256` recorded on one side only (V2, ambiguity VA1), and a
+    record line over 64 KiB (V5);
   - every interpreter item (INTERP_SCENARIOS): which interpreter claims a
     path, what its entries hold and the outcome, with no store -- text,
     binary, dpkg, pip and git paths, the pip and dpkg end hooks' inputs,
@@ -142,6 +154,15 @@ G_RACED_ANC = 'one side only, below a raced non-directory: unknown, raced'
 G_TYPE_BEFORE = 'type_before on every path whose types differ, raced or not'
 G_DIGEST = 'xattrs: an inline set against a digest, by the formula (manifest-v1)'
 G_O8 = 'unverified on a side that also carries mount: no reason; on the other side its own (O8)'
+# diff-values.md: the values of a record that otherwise agrees, by what the
+# reference's trace says about them.
+G_VALUES = {'values:V6': 'VALUES: a type_changed record, mode and content fields (V6)',
+            'values:type-not-type_changed': 'VALUES: `changed` ["type"] on an unknown record '
+                                            '(V1 as written, ambiguity VA2)',
+            'values:VA1-empty-object': 'VALUES: the only changed field recorded on one side '
+                                       '(V2, ambiguity VA1: `{}`)',
+            'values:V2-one-side': 'VALUES: a changed field recorded on one side only (V2)',
+            'values:V3-alternate': 'VALUES: an alternate key (V3)'}
 
 
 def group_changed(f, trace, typ):
@@ -199,6 +220,27 @@ def contradicts_itself(g):
         return 'unknown with no reason'
     if o != 'unknown' and 'unknown' in g:
         return '%s with reasons' % o
+    # diff-values V1: `before` and `after` together, exactly on a record with
+    # `changed` (every `type_changed` has ["type"], above); each a JSON
+    # object whose keys are, in order, the fields V6 or `changed` names,
+    # each under one of its manifest keys.
+    if ('before' in g) != bool(ch) or ('after' in g) != bool(ch):
+        return 'before/after %s on a record whose changed is %s' % (
+            [k for k in ('before', 'after') if k in g], ch)
+    for side in ('before', 'after'):
+        v = g.get(side)
+        if v is None:
+            continue
+        if not isinstance(v, list) or any(not isinstance(x, tuple) for x in v):
+            return '%s is not an object' % side
+        names = ref.TYPE_VALUES.get(g.get('type_before' if side == 'before' else 'type'), []) \
+            if o == 'type_changed' else ch
+        keys = [k for k, _ in v]
+        it = iter(names)
+        if not all(any(k in ref.MANIFEST_KEYS.get(f, [f]) for f in it) for k in keys):
+            return '%s holds %s, not among %s in order' % (side, keys, names)
+        if o == 'type_changed' and keys[:1] != ['mode']:
+            return '%s of a type_changed record without mode' % side
     # "Interpreters": `findings` is "absent when none"; "for a path whose
     # outcome is `unknown` or `metadata_only` it adds nothing (a git hook's
     # executable bit excepted, which is metadata)".
@@ -237,9 +279,14 @@ def compare_record(path, exp, got, trace, orders):
         if keys[:3] != [want_spelling, 'outcome', 'type'] or len(set(keys)) != len(keys):
             groups.append('OTHER: record keys %s' % keys)
         extra = set(keys) - {want_spelling, 'outcome', 'type', 'type_before', 'changed',
-                             'unknown', 'findings'}
+                             'before', 'after', 'unknown', 'findings'}
         if extra:
             groups.append('OTHER: record has %s' % sorted(extra))
+        # V1: "after `changed` and before `unknown`"; V6: "after
+        # `type_before`"; `before`, then `after`.
+        at = [k for k in ('type_before', 'changed', 'before', 'after', 'unknown') if k in keys]
+        if [k for k in keys if k in at] != at:
+            groups.append('OTHER: record key order %s (diff-values V1, V6)' % keys)
         if not same(exp.get('type'), g.get('type')):
             groups.append('OTHER: type')
         if not same(exp.get('type_before'), g.get('type_before')):
@@ -282,6 +329,20 @@ def compare_record(path, exp, got, trace, orders):
                                              ','.join(t for t in trace if t.startswith(
                                                  ('unavailable-', 'hook-', 'index-', 'reflog-',
                                                   'interp-'))) or '-'))
+    # Values (diff-values.md): exactly, keys in order and JSON types (run_pair
+    # checks the bytes too). Blamed on what the reference's trace says of
+    # them; values of a record whose outcome or `changed` already differs
+    # follow from that.
+    if not missing:
+        for side in ('before', 'after'):
+            ev, gv = exp.get(side), g.get(side)
+            if not same(None if ev is None else list(ev.items()), gv):
+                why = [G_VALUES[t] for t in trace if t in G_VALUES]
+                if exp['outcome'] == g.get('outcome') and same(ce, cg):
+                    groups.append(' + '.join(why) if why else 'VALUES (V1)')
+                else:
+                    unexplained.append('%s values' % side)
+                break
     if exp['outcome'] != g.get('outcome'):
         if 'raced-ancestor' in trace:
             groups.append(G_RACED_ANC)
@@ -339,12 +400,20 @@ def run_pair(ran, stem, orders):
     # A record's findings, byte for byte: `"findings":` and the reference's
     # rendering of the list, in the record's line.
     exp_findings = {r['path']: r['findings'] for r in records if 'findings' in r}
+    exp_values = {r['path']: r for r in records if 'before' in r}
     for rec, line in zip(got_records, raw_records):
         p, _ = rec_path(dict(rec))
         if p in exp_findings and \
                 b'"findings":' + ref.canonical(exp_findings[p]) not in line:
             result['events'].append(('the bytes of the findings of %r' % p,
                                      ref.canonical(exp_findings[p]), line))
+        # diff-values V1: "under the key and in the encoding the manifest
+        # uses" -- the manifest's encoding is canonical, so these bytes.
+        if p in exp_values:
+            want = b'"before":%s,"after":%s' % (ref.canonical(exp_values[p]['before']),
+                                                 ref.canonical(exp_values[p]['after']))
+            if want not in line:
+                result['events'].append(('the bytes of the values of %r' % p, want, line))
     # header
     gk = [k for k, _ in got_header]
     ek = [k for k, _ in header]
@@ -547,7 +616,27 @@ SCENARIOS = (['dev relation: an entry leaves the root device',
              + ['vanished on one side only, nothing flagged and no record',
                 'every walk count differs between the two manifests',
                 'provisional false: every walk count is 0',
-                'the first manifest was created after the second'])
+                'the first manifest was created after the second']
+             # test/expect/diff-values.md: what `before` and `after` carry. V6
+             # for every type change the corpus can build, raced on neither
+             # side (a `type_changed` record), from and to a regular file with
+             # no hash, a symlink whose target is not UTF-8 (V3) or unknown;
+             # V3 each side's own spelling; V2 a field recorded on one side
+             # only, alone (ambiguity VA1) and beside another; V5 a line over
+             # 64 KiB.
+             + ['values: a type change %s -> %s, not raced' % (t1, t2)
+                for t1 in ref.TYPES for t2 in ref.TYPES if t1 != t2]
+             + ['values: a type change %s %s' % (d, w) for w in (
+                 'a regular file with no sha256', 'a symlink whose target is not UTF-8',
+                 'an unreadable symlink whose target is unknown (empty)') for d in ('from', 'to')]
+             + ['values: a link target that differs, UTF-8 on one side, not on the other',
+                'values: a link target that differs, not UTF-8 on both sides',
+                'values: xattrs inline on one side, xattrs_sha256 on the other, the sets differ']
+             + ['values: %s recorded on one side only, the only difference' % f
+                for f in ('caps', 'xattrs', 'xattrs_sha256')]
+             + ['values: caps recorded on one side only, beside another difference',
+                'values: a record line over 64 KiB (V5)'])
+V5_LINE = 64 * 1024
 
 
 def only_field_cell(b, a, D):
@@ -596,6 +685,45 @@ def two_field_pair(b, a, D):
     return (b['type'], f1, f2)
 
 
+def values_coverage(b, a, D, tags):
+    """The diff-values.md items of one path on both sides, from its entries."""
+    raced = b.get('raced') or a.get('raced')
+    if b['type'] != a['type']:
+        if raced:
+            return
+        tags.add('values: a type change %s -> %s, not raced' % (b['type'], a['type']))
+        for e, d in ((b, 'from'), (a, 'to')):
+            if e['type'] == 'reg' and 'sha256' not in e:
+                tags.add('values: a type change %s a regular file with no sha256' % d)
+            if e['type'] == 'lnk' and not is_utf8(e['link_target']):
+                tags.add('values: a type change %s a symlink whose target is not UTF-8' % d)
+            if e['type'] == 'lnk' and e.get('unreadable') and e['link_target'] == b'':
+                tags.add('values: a type change %s an unreadable symlink whose target is '
+                         'unknown (empty)' % d)
+        return
+    if b['type'] == 'lnk' and b['link_target'] != a['link_target'] and \
+            not (b.get('unreadable') or a.get('unreadable')):
+        n = is_utf8(b['link_target']) + is_utf8(a['link_target'])
+        if n == 1:
+            tags.add('values: a link target that differs, UTF-8 on one side, not on the other')
+        if n == 0:
+            tags.add('values: a link target that differs, not UTF-8 on both sides')
+    read = not any(e.get(k) for e in (b, a) for k in ('xattrs_unknown', 'mount'))
+    if not read:
+        return
+    xb, xa = ref.value(b, 'xattrs'), ref.value(a, 'xattrs')
+    if xb and xa and xb[0] != xa[0] and ref.as_digest(xb) != ref.as_digest(xa):
+        tags.add('values: xattrs inline on one side, xattrs_sha256 on the other, the sets '
+                 'differ')
+    # Only f differs, and it is on one side: the other side records no set
+    # in either spelling (else D would hold that spelling too), no caps.
+    for f in ('caps', 'xattrs', 'xattrs_sha256'):
+        if (f in b) != (f in a) and D == {f}:
+            tags.add('values: %s recorded on one side only, the only difference' % f)
+    if ('caps' in b) != ('caps' in a) and (D - {'caps'}) & ALWAYS:
+        tags.add('values: caps recorded on one side only, beside another difference')
+
+
 def pair_coverage(stem, cells, optional, scen, fpairs):
     hb, _, eb = ref.load(stem + '.before')
     ha, _, ea = ref.load(stem + '.after')
@@ -608,6 +736,7 @@ def pair_coverage(stem, cells, optional, scen, fpairs):
         D = {k for k in set(b) | set(a) if not same(b.get(k), a.get(k))}
         if D:
             diffs[p] = D
+        values_coverage(b, a, D, tags)
         for f in OPTIONAL:
             if (f in b) != (f in a):
                 optional[f] += 1
@@ -745,6 +874,10 @@ def pair_coverage(stem, cells, optional, scen, fpairs):
                     if any(q != p and (p == b'.' or q.startswith(p + b'/')) for q in es2):
                         tags.add('a directory sealed on one side, with entries below it '
                                  'on the other')
+    res = ref_diff(stem)
+    if res is not None and any(len(ref.canonical(ref.encode_record(r))) > V5_LINE
+                               for r in res[1]):
+        tags.add('values: a record line over 64 KiB (V5)')
     if rb != ra:
         tags.add('scope remount')
         if all(eb[p]['dev'] != ea[p]['dev'] for p in both):
@@ -1202,7 +1335,7 @@ def main():
                 print('         got      %s' % (json.dumps(unpairs(g), ensure_ascii=False)
                                                 if g else '(no record)'))
     if event_issues:
-        print('== event records or the bytes of findings disagree in %d pairs:'
+        print('== event records or the bytes of findings or values disagree in %d pairs:'
               % len(event_issues))
         for name, lab, issues in event_issues[:6]:
             print('   %s [%s]' % (name, lab))
