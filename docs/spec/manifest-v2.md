@@ -75,6 +75,10 @@ that holds an array still requires a non-empty array of strings.
   reject a version it does not know).
 - A reader that knows version 2 reads `1` and `2`, each by its own key set, strictly: a v2 line
   missing a v2 key, a v1 line carrying one, or any unknown key is rejected.
+- A path at or below a path one manifest excluded is not compared where that manifest lacks
+  it: a path the other manifest holds there is `unknown`, reason `not_captured` -- as below a
+  mount, never `removed` or `added`; a path both manifests excluded appears in neither, and in no
+  record.
 - Two manifests of different versions compare: diff.v1's records and outcomes do not depend on
   the version. The diff header names both (`before_manifest_version`, `after_manifest_version`),
   as provenance only.

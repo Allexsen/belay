@@ -226,7 +226,7 @@ one side only.
 | `xattrs_unknown` | Extended attributes could not be read. |
 | `iflags_unknown` | Inode flags recorded on one side only: absent means they could not be read. |
 | `listing_incomplete` | Absent on a side whose nearest recorded ancestor directory is `unstable`: possibly present. |
-| `not_captured` | Absent on a side whose nearest recorded ancestor directory is `unreadable` or a `mount`: nothing below it was captured. |
+| `not_captured` | Absent on a side whose nearest recorded ancestor directory is `unreadable` or a `mount`, or that excluded the path or a directory above it (manifest v2's `excluded`): nothing there was captured. |
 <!-- END GENERATED: diff-reasons -->
 
 ## How each manifest field is compared

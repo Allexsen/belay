@@ -221,7 +221,7 @@ TEST(the_state_directory_inside_the_scope_is_excluded_and_said) {
     const int rc = belay("check", "--scope", g_scope, NULL);
     setenv("BELAY_STATE_DIR", g_state, 1);
     ASSERT_EQ_INT(0, rc);
-    ASSERT_TRUE(strstr(g_out, "not recorded: belay's own state directory") != NULL);
+    ASSERT_TRUE(strstr(g_out, "not recorded: .state (belay's own state directory)") != NULL);
     char man[2400];
     snprintf(man, sizeof man, "tail -n +2 %s/scopes/*/checkpoints/1/manifest.ndjson | grep -c '\"path\":\".state' > %s/count; "
              "head -1 %s/scopes/*/checkpoints/1/manifest.ndjson | grep -c '\"excluded\":\\[{\"path\":\".state\",\"reason\":\"state_dir\"' >> %s/count",
@@ -439,14 +439,14 @@ TEST(diff_says_what_its_capture_left_out) {
     setenv("BELAY_STATE_DIR", inside, 1);
     int rc1 = belay("check", "--scope", g_scope, NULL);
     int rc2 = belay("diff", "--scope", g_scope, "--since", "1", NULL);
-    const bool said = g_out != NULL && strstr(g_out, "not recorded: belay's own state directory") != NULL;
+    const bool said = g_out != NULL && strstr(g_out, "\nnot compared\n  .state   belay's own state directory\n") != NULL;
     int rc3 = belay("diff", "--scope", g_scope, "--since", "1", "--json", NULL);
     setenv("BELAY_STATE_DIR", g_state, 1);
     ASSERT_EQ_INT(0, rc1);
     ASSERT_EQ_INT(0, rc2);
     ASSERT_EQ_INT(0, rc3);
     ASSERT_TRUE(said);
-    ASSERT_TRUE(strstr(g_err, "not recorded: belay's own state directory") != NULL);
+    ASSERT_TRUE(strstr(g_err, "not recorded: .state (belay's own state directory)") != NULL);
     ASSERT_TRUE(strstr(g_out, "not recorded") == NULL);
 }
 
@@ -658,6 +658,60 @@ TEST(ids_run_out_and_a_failed_diff_leaves_nothing) {
     ASSERT_TRUE(empty_dir(g_state));
 }
 
+/* User excludes (decision 2026-11-01, 3): configured per scope, refused
+ * when not a canonical relative path, at most 31. */
+TEST(excludes_are_configured_per_scope) {
+    fresh();
+    ASSERT_EQ_INT(0, belay("exclude", "--scope", g_scope, NULL));
+    ASSERT_TRUE(strstr(g_out, "no excludes") != NULL);
+    ASSERT_EQ_INT(0, belay("exclude", "--scope", g_scope, "--add", "node_modules", NULL));
+    ASSERT_EQ_INT(0, belay("exclude", "--scope", g_scope, "--add", "a/b", NULL));
+    ASSERT_EQ_STR("node_modules\na/b\n", g_out);
+    ASSERT_EQ_INT(0, belay("exclude", "--scope", g_scope, "--remove", "node_modules", NULL));
+    ASSERT_EQ_STR("a/b\n", g_out);
+    static const char *const bad[] = { "/abs", "a/../b", "./a", "a/", "", "a//b", ".." };
+    for (size_t i = 0; i < sizeof bad / sizeof bad[0]; i++)
+        if (belay("exclude", "--scope", g_scope, "--add", bad[i], NULL) != 2) BELAY_FAIL("accepted: \"%s\"", bad[i]);
+    ASSERT_EQ_INT(2, belay("check", "--scope", g_scope, "--add", "x", NULL));
+    ASSERT_EQ_INT(2, belay("exclude", "--scope", g_scope, "--json", NULL));
+    char p[32];
+    for (int i = 0; i < 30; i++) {
+        snprintf(p, sizeof p, "x%d", i);
+        REQUIRE(belay("exclude", "--scope", g_scope, "--add", p, NULL) == 0);
+    }
+    ASSERT_EQ_INT(2, belay("exclude", "--scope", g_scope, "--add", "one-too-many", NULL));
+    char d[700];
+    scope_dir(d, sizeof d);
+    sh("printf '/abs\\n' > '%s/excludes'", d);
+    ASSERT_EQ_INT(4, belay("check", "--scope", g_scope, NULL));        /* corrupt: not what belay wrote */
+}
+
+/* An excluded path is not walked, named in the manifest and the output;
+ * a diff across it reports it not compared -- never removed or added. */
+TEST(an_exclude_is_named_and_never_reads_as_removed) {
+    fresh();
+    sh("mkdir -p '%s/node_modules/pkg' && printf 'x\\n' > '%s/node_modules/pkg/i.js'", g_scope, g_scope);
+    ASSERT_EQ_INT(0, belay("check", "--scope", g_scope, NULL));
+    ASSERT_EQ_INT(0, belay("exclude", "--scope", g_scope, "--add", "node_modules", NULL));
+    ASSERT_EQ_INT(0, belay("mark", "--scope", g_scope, NULL));
+    ASSERT_TRUE(strstr(g_out, "not recorded: node_modules (excluded for this scope)") != NULL);
+    char d[700], cmd[4000];
+    scope_dir(d, sizeof d);
+    snprintf(cmd, sizeof cmd, "head -1 '%s/checkpoints/2/manifest.ndjson' | grep -q '\"excluded\":\\[{\"path\":\"node_modules\",\"reason\":\"user\"' "
+             "&& [ \"$(tail -n +2 '%s/checkpoints/2/manifest.ndjson' | grep -c '\"path\":\"node_modules')\" = 0 ]", d, d);
+    ASSERT_EQ_INT(0, system(cmd));
+    ASSERT_EQ_INT(0, belay("diff", "--scope", g_scope, "--since", "1", "--to", "2", "--json", NULL));
+    ASSERT_TRUE(strstr(g_out, "\"path\":\"node_modules\",\"outcome\":\"unknown\"") != NULL);
+    ASSERT_TRUE(strstr(g_out, "\"path\":\"node_modules/pkg/i.js\",\"outcome\":\"unknown\",\"type\":\"reg\",\"unknown\":[\"not_captured\"]") != NULL);
+    ASSERT_TRUE(strstr(g_out, "\"outcome\":\"removed\"") == NULL);
+    ASSERT_EQ_INT(0, belay("diff", "--scope", g_scope, "--since", "1", "--to", "2", NULL));
+    ASSERT_TRUE(strstr(g_out, "\nnot compared\n  node_modules   excluded for this scope\n") != NULL);
+    /* both sides excluding it: nothing about it at all */
+    sh("printf 'y\\n' >> '%s/node_modules/pkg/i.js'", g_scope);
+    ASSERT_EQ_INT(0, belay("diff", "--scope", g_scope, "--since", "2", "--json", "--exit-code", NULL));
+    ASSERT_TRUE(strstr(g_out, "node_modules") == NULL);
+}
+
 int main(void) {
     snprintf(g_dir, sizeof g_dir, "/tmp/belay_cli_%d", (int)getpid());
     mkdir(g_dir, 0700);
@@ -693,6 +747,8 @@ int main(void) {
     RUN(a_state_root_others_could_swap_is_refused);
     RUN(nothing_printed_back_forges_a_line);
     RUN(ids_run_out_and_a_failed_diff_leaves_nothing);
+    RUN(excludes_are_configured_per_scope);
+    RUN(an_exclude_is_named_and_never_reads_as_removed);
     free(g_out);
     free(g_err);
     char cmd[800];

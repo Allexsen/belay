@@ -29,6 +29,8 @@ static const char USAGE[] =
     "  diff  --scope DIR --since ID [--to ID] [--full-every N] [--json] [--exit-code] [--all]\n"
     "                                        what changed from checkpoint ID to ID (or to now, kept as a checkpoint)\n"
     "  log   --scope DIR [--json]            the scope's checkpoints\n"
+    "  exclude --scope DIR [--add PATH | --remove PATH]\n"
+    "                                        paths the scope's captures do not walk (each one named in every manifest)\n"
     "  help [command]                        this, or one command's options\n"
     "  --version\n"
     "\n"
@@ -51,6 +53,11 @@ static const struct { const char *cmd, *text; } HELP[] = {
                "  --json       print diff.v1 (docs/spec/diff-v1.md) instead of a receipt\n"
                "  --exit-code  exit 1 when any path is not unchanged (unknown included)\n"
                "  --all        show every line of the receipt, nothing folded\n" },
+    { "exclude", "usage: belay exclude --scope DIR [--add PATH | --remove PATH]\n"
+               "  The paths, relative to DIR, that this scope's captures do not walk -- for speed\n"
+               "  (node_modules), never for noise: each one is a blind spot, named in every\n"
+               "  manifest's header and every receipt. Lists them; --add or --remove one first.\n"
+               "  Matched exactly; at most 31.\n" },
     { "log",   "usage: belay log --scope DIR [--json]\n"
                "  The scope's checkpoints: id, kind, time, entries.\n"
                "  --json  one checkpoint a line (schema/checkpoint.v1.json)\n" },
@@ -84,7 +91,7 @@ static int failed(FILE *err) {
 /* ---- options ---- */
 
 struct opts {
-    const char *scope, *since, *to;
+    const char *scope, *since, *to, *add, *remove;
     bool json, full, exit_code, all, full_every_set;
     long full_every;
 };
@@ -102,6 +109,8 @@ static int parse(int argc, char **argv, struct opts *o, FILE *err) {
         else if (!strcmp(a, "--scope")) val = &o->scope;
         else if (!strcmp(a, "--since")) val = &o->since;
         else if (!strcmp(a, "--to")) val = &o->to;
+        else if (!strcmp(a, "--add")) val = &o->add;
+        else if (!strcmp(a, "--remove")) val = &o->remove;
         else if (!strcmp(a, "--full-every")) {
             const char *v = i + 1 < argc ? argv[++i] : "";
             const size_t vl = strlen(v);
@@ -167,16 +176,77 @@ static void json_checkpoint(FILE *out, const struct state *st, const struct chec
 
 /* What a capture must say on every capture (Q6, never silent): it raced,
  * or skipped belay's own state directory. */
+/* What a manifest's header says was not walked, one line each (Q6;
+ * decision 2026-11-01, 3: every exclude is named, never silent). */
+static void excluded_notes(FILE *out, const struct belay_manifest_header *h, const char *verb) {
+    for (size_t i = 0; i < h->n_excluded; i++) {
+        const struct belay_excluded *x = &h->excluded[i];
+        fprintf(out, "  %s: ", verb);
+        receipt_fputs(out, x->path);
+        fputs(x->reason == BELAY_EXCLUDE_STATE_DIR ? " (belay's own state directory)\n"
+                                                   : " (excluded for this scope)\n", out);
+    }
+}
+
 static void capture_notes(FILE *out, const struct state *st, const struct checkpoint *c) {
     if (c->raced || c->unstable || c->vanished)
         fprintf(out, "  changing while captured: %llu raced, %llu unstable, %llu vanished\n",
                 (unsigned long long)c->raced, (unsigned long long)c->unstable, (unsigned long long)c->vanished);
-    /* Q6: never silent -- the walk skipped belay's own state directory. */
-    if (c->excluded) {
-        fputs("  not recorded: belay's own state directory ", out);
-        receipt_fputs(out, st->root);
-        fputs(" (inside the scope)\n", out);
+    if (!c->excluded) return;
+    /* The names, from the manifest's own header: it is what was recorded. */
+    char man[PATH_MAX + 160];
+    struct belay_manifest_reader *r = NULL;
+    state_manifest(st, c->id, man, sizeof man);
+    if (state_check_manifest(st, c->id) == 0 && belay_manifest_open(man, &r) == 0) {
+        excluded_notes(out, belay_manifest_header(r), "not recorded");
+        belay_manifest_close(r);
+    } else {
+        belay_err_clear();
+        fprintf(out, "  not recorded: %llu excluded paths (the manifest cannot be read to name them)\n",
+                (unsigned long long)c->excluded);
     }
+}
+
+static int open_scope(const struct opts *o, bool create, struct state *st, FILE *err);
+
+static int cmd_exclude(const struct opts *o, FILE *out, FILE *err) {
+    if (o->add != NULL && o->remove != NULL) return usage(err, "--add and --remove, one at a time");
+    const char *p = o->add != NULL ? o->add : o->remove;
+    if (p != NULL && !state_exclude_valid(p))
+        return usage(err, "an exclude is a path relative to the scope, without '.', '..' or empty parts");
+    struct state st;
+    int rc = open_scope(o, p != NULL, &st, err);
+    if (rc) return rc;
+    static struct excludes x;
+    if (state_excludes_read(&st, &x) == -1) {
+        rc = failed(err);
+        goto done;
+    }
+    size_t at = x.n;
+    for (size_t i = 0; p != NULL && i < x.n; i++) if (!strcmp(x.path[i], p)) at = i;
+    if (o->add != NULL && at == x.n) {
+        if (x.n == STATE_EXCLUDES_MAX) {
+            fprintf(err, "belay: at most %d excludes\n", STATE_EXCLUDES_MAX);
+            rc = EXIT_USAGE;
+            goto done;
+        }
+        snprintf(x.path[x.n++], PATH_MAX, "%s", o->add);
+    } else if (o->remove != NULL && at < x.n) {
+        memmove(x.path[at], x.path[at + 1], (x.n - at - 1) * sizeof x.path[0]);
+        x.n--;
+    }
+    if (p != NULL && state_excludes_write(&st, &x) == -1) {
+        rc = failed(err);
+        goto done;
+    }
+    for (size_t i = 0; i < x.n; i++) {
+        receipt_fputs(out, x.path[i]);
+        fputc('\n', out);
+    }
+    if (x.n == 0) fputs("no excludes: every path in the scope is walked\n", out);
+done:
+    state_close(&st);
+    return rc;
 }
 
 static void text_checkpoint(FILE *out, const struct state *st, const struct checkpoint *c) {
@@ -346,10 +416,31 @@ static int cmd_diff(const struct opts *o, FILE *out, FILE *err) {
         for (int s = 0; s < 2; s++) m.side[s].got = belay_manifest_next(m.side[s].r, &m.side[s].e);
         const struct receipt_opts ro = { label_a, label_b, o->all, mode_of, &m };
         if (receipt_render(in, out, &ro) == -1) { rc = failed(err); goto done; }
-        if (now.id != 0 && (now.raced || now.unstable || now.vanished || now.excluded)) {
+        if (now.id != 0 && (now.raced || now.unstable || now.vanished)) {
             fprintf(out, "\ncheckpoint %ld, captured now\n", now.id);
-            capture_notes(out, &st, &now);
+            capture_notes(out, &st, &(struct checkpoint){ .id = now.id, .raced = now.raced,
+                                                          .unstable = now.unstable, .vanished = now.vanished });
         }
+        /* Every path either side did not walk, once: not compared, whatever
+         * the other side holds there (decision 2026-11-01, 3). */
+        const struct belay_manifest_header *hs[2] = { belay_manifest_header(m.side[0].r),
+                                                      belay_manifest_header(m.side[1].r) };
+        bool heading = false;
+        for (int sd = 0; sd < 2; sd++)
+            for (size_t i = 0; i < hs[sd]->n_excluded; i++) {
+                const struct belay_excluded *x = &hs[sd]->excluded[i];
+                bool seen = false;
+                for (size_t j = 0; sd == 1 && j < hs[0]->n_excluded; j++)
+                    seen |= hs[0]->excluded[j].path_len == x->path_len &&
+                            memcmp(hs[0]->excluded[j].path, x->path, x->path_len) == 0;
+                if (seen) continue;
+                if (!heading) fputs("\nnot compared\n", out);
+                heading = true;
+                fputs("  ", out);
+                receipt_fputs(out, x->path);
+                fputs(x->reason == BELAY_EXCLUDE_STATE_DIR ? "   belay's own state directory\n"
+                                                           : "   excluded for this scope\n", out);
+            }
     }
     if (o->exit_code && ds.records > 0) rc = EXIT_CHANGES;
 done:
@@ -381,7 +472,8 @@ static int run(int argc, char **argv, FILE *out, FILE *err) {
             for (size_t k = 0; k < sizeof HELP / sizeof HELP[0]; k++)
                 if (!strcmp(cmd, HELP[k].cmd)) { fputs(HELP[k].text, out); return EXIT_DONE; }
     struct opts o;
-    const bool known = !strcmp(cmd, "check") || !strcmp(cmd, "mark") || !strcmp(cmd, "diff") || !strcmp(cmd, "log");
+    const bool known = !strcmp(cmd, "check") || !strcmp(cmd, "mark") || !strcmp(cmd, "diff") || !strcmp(cmd, "log") ||
+                       !strcmp(cmd, "exclude");
     if (!known) {
         char why[256];
         snprintf(why, sizeof why, "unknown command %.200s", cmd);
@@ -392,8 +484,11 @@ static int run(int argc, char **argv, FILE *out, FILE *err) {
     if (strcmp(cmd, "diff") && (o.since || o.to || o.exit_code || o.all))
         return usage(err, "--since, --to, --exit-code and --all are diff's");
     if (strcmp(cmd, "mark") && o.full) return usage(err, "--full is mark's");
-    if ((!strcmp(cmd, "check") || !strcmp(cmd, "log")) && o.full_every_set)
+    if ((!strcmp(cmd, "check") || !strcmp(cmd, "log") || !strcmp(cmd, "exclude")) && o.full_every_set)
         return usage(err, "--full-every is mark's and diff's");
+    if (strcmp(cmd, "exclude") && (o.add || o.remove)) return usage(err, "--add and --remove are exclude's");
+    if (!strcmp(cmd, "exclude") && o.json) return usage(err, "exclude has no --json");
+    if (!strcmp(cmd, "exclude")) return cmd_exclude(&o, out, err);
     if (!strcmp(cmd, "check")) return cmd_capture(&o, "check", out, err);
     if (!strcmp(cmd, "mark")) return cmd_capture(&o, "mark", out, err);
     if (!strcmp(cmd, "diff")) return cmd_diff(&o, out, err);
