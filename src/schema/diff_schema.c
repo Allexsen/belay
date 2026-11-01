@@ -150,6 +150,14 @@ const struct line_field_def DIFF_RECORD_FIELDS[DF_COUNT] = {
         "`type_changed`, and an `unknown` whose type also changed (`raced`)." },
     [DF_CHANGED] = { "changed", NULL, "array",
         "The compared fields that differ, in the manifest's field order; absent when none." },
+    [DF_BEFORE] = { "before", NULL, "object",
+        "With `changed`: each field it names, the before side's value under the manifest's key and "
+        "encoding (`link_target_b64`, `xattrs_sha256` where the manifest spells it so); a field that "
+        "side does not record is left out. On `type_changed`: that side's `mode` and its type's "
+        "content fields (`size`, `sha256` for `reg`; `link_target` for `lnk`; `rdev` for `chr`, "
+        "`blk`). Carried, never compared: the outcome does not depend on it "
+        "(`test/expect/diff-values.md`)." },
+    [DF_AFTER] = { "after", NULL, "object", "As `before`, for the after side." },
     [DF_UNKNOWN] = { "unknown", NULL, "array",
         "For `unknown` only: the reasons, in the order of the reasons table." },
     [DF_FINDINGS] = { "findings", NULL, "array",

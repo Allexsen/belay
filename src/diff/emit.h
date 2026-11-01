@@ -16,7 +16,8 @@
 
 struct emitter {
     FILE *f;
-    char *line;                 /* EMIT_LINE_CAP */
+    char *line;                 /* EMIT_LINE_CAP: a record up to its values */
+    char *vals;                 /* EMIT_VALUES_CAP: one side's values */
     size_t count[D_OUTCOME_COUNT];
     size_t dir_timestamps;      /* of count[D_UNCHANGED] */
     size_t records;
