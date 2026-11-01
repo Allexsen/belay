@@ -5,6 +5,8 @@
 
 Writes, and prints the number of, pairs:
   pair-NNNNN.before / .after   two manifests of one scope, for compare.py;
+  pair-NNNNN.before.alt /      the same two manifests, each in the other
+             .after.alt        manifest version (see below);
   pair-NNNNN.label             what the pair was built to exercise -- for
                                messages only: compare.py computes coverage
                                from the manifests themselves;
@@ -19,6 +21,20 @@ the prose's structural rules (the root `.` -- a directory, never a mount, the
 only entry when unreadable --, nothing below an unreadable or mount directory,
 sorted paths, trailer counts) and the decided reader changes: NO orphans and
 NO unknown keys. Every tree is validated before it is written.
+
+Manifest versions (test/expect/manifest-v2.md): a pair is written in one of
+the four combinations of versions 1 and 2 (cycled), and each of its two
+manifests also in the other version (.alt), so compare.py runs every pair in
+all four and checks its records do not depend on them (V2-R4). A v2 manifest
+is the v1 one plus the keys the pin's Lines table adds (read at run time, in
+its order, after v1's): `excluded` always `[]` -- how diff.v1 treats an
+excluded path is not decided, so none is modelled --, `walk_start_ns`
+(0 on every third side), and `trusted`, `reference`, `read_all` cycling over
+every kind of walk V2-5 and V2-6 name, consistent by the spec's agreement
+rule (v2_violations()). Those statements decide nothing in a diff (V2-R6) and
+vary freely; their numbers come from the writer's own random stream, so the
+trees a seed gives are those it gave before v2. manifest_versions() builds
+the gate's version items deterministically.
 
 The corpus has three parts:
   - targeted pairs, the same for every seed (only the values vary): for every
@@ -199,6 +215,68 @@ def load_diff_pin():
 
 
 CELL_FIELDS = load_diff_pin()          # field -> the types the pin compares it on
+
+# Manifest version 2 (test/expect/manifest-v2.md): a v1 manifest plus header
+# and trailer keys, "v1's keys in v1's order, then the new keys in the order
+# of this table", every one always present. Read from the pin's Lines table at
+# run time; the statements this generator writes for them are tied to the
+# pin's words below (a changed pin stops the generator).
+MANIFEST_V2_PIN = os.path.join(REPO, 'test', 'expect', 'manifest-v2.md')
+MANIFEST_V2_SPEC = os.path.join(REPO, 'docs', 'spec', 'manifest-v2.md')
+V2_KINDS = {'int': 'int', 'string': 'string', 'array of objects': 'objects'}
+# The keys v2 adds, as this generator writes them (V2-2..V2-6).
+V2_IMPLEMENTED = {'header': ['excluded', 'walk_start_ns'],
+                  'trailer': ['trusted', 'reference', 'read_all']}
+# `read_all`'s values, V2-6 word for word; N and M are the pin's placeholders
+# for numbers, filled in when written. The pin's last case, "why the previous
+# manifest could not be used", is free text: V2_FREE_REASON.
+V2_READ_ALL = ['check', 'no checkpoint before', 'asked for (--full)', 'every N marks',
+               'ctime went backwards: newest N below the previous M',
+               "the previous walk's start is unknown and the scope's timestamps are coarse"]
+V2_FREE_REASON = 'the previous manifest could not be used: "caf\u00e9" \\ \u65e5'
+V2_REFERENCES = ['walk_start', 'newest_ctime', 'none']
+# The spec's agreement rule (manifest-v2.md, "The trailer"), which
+# v2_violations() implements.
+V2_AGREEMENT = ('The three agree, and a reader checks it: the prefilter was used exactly when '
+                '`read_all` is `""`;\nthen `reference` is `walk_start` or `newest_ctime`; '
+                'otherwise it is `none` and `trusted` is `0`.\n`trusted` is at most the number '
+                'of entries.')
+
+
+def load_manifest_v2_pin():
+    rows = md_table(open(MANIFEST_V2_PIN, encoding='utf-8').read(), 'id')
+    keys = {'header': [], 'trailer': []}
+    v1 = {k[0] for line in KEYS.values() for k in line}
+    for r in rows:
+        key = r['key'].strip('`')
+        if key == 'belay_manifest':
+            if r['value'] != '`2`':
+                die('pin: v2\'s belay_manifest is %r' % r['value'])
+            continue
+        if key in v1 or r['line'] not in keys or r['type'] not in V2_KINDS \
+                or not r['when'].startswith('always'):
+            die('pin: manifest-v2.md row %s is not one this generator writes: %r' % (r['id'], r))
+        keys[r['line']].append((key, (key,), V2_KINDS[r['type']], 'required (v2)'))
+    if {k: [x[0] for x in v] for k, v in keys.items()} != V2_IMPLEMENTED:
+        die('pin: manifest-v2.md adds %r; this generator writes %r' % (keys, V2_IMPLEMENTED))
+    text = {r['key'].strip('`'): r['value'] for r in rows}
+    for reason in V2_READ_ALL + ['`""` when the prefilter was used']:
+        if ('`%s`' % reason if not reason.startswith('`') else reason) not in text['read_all']:
+            die('pin: V2-6 no longer names `%s`' % reason)
+    if 'why the previous manifest could not be used' not in text['read_all']:
+        die('pin: V2-6 no longer names a free-text reason')
+    for ref_ in V2_REFERENCES:
+        if '`%s`' % ref_ not in text['reference']:
+            die('pin: V2-5 no longer names `%s`' % ref_)
+    if '`[]` when none' not in text['excluded'] or \
+            '`0` when that clock could not be read' not in text['walk_start_ns']:
+        die('pin: V2-2 or V2-3 changed the words this generator relies on')
+    if V2_AGREEMENT not in open(MANIFEST_V2_SPEC, encoding='utf-8').read():
+        die('spec: manifest-v2.md changed its agreement rule; review v2_violations() first')
+    return {k: KEYS[k] + v for k, v in keys.items()}
+
+
+KEYS_V2 = load_manifest_v2_pin()       # the v2 header's and trailer's keys, in order
 
 # ---------------------------------------------------------------------------
 # Values.
@@ -660,6 +738,11 @@ def enc_obj(keys, d):
         elif kind == 'array':
             assert isinstance(v, list) and v and all(isinstance(x, str) for x in v), (canon, v)
             enc = '[' + ','.join(jstr(x) for x in v) + ']'
+        elif kind == 'objects':
+            # v2's `excluded`: only `[]` here -- how diff.v1 treats an
+            # excluded path is not decided, so the corpus never excludes one.
+            assert v == [], (canon, v)
+            enc = '[]'
         else:
             raise SystemExit('pin: unknown kind %r' % kind)
         parts.append('"%s":%s' % (name, enc))
@@ -668,10 +751,13 @@ def enc_obj(keys, d):
     return '{' + ','.join(parts) + '}'
 
 
-def write_manifest(t, path):
-    header = {'belay_manifest': 1, 'created_ns': t.created, 'scopes': [t.scope],
+def write_manifest(t, path, version=1, st=None):
+    """The tree as a manifest of `version` 1 or 2; a v2 one carries the
+    statements `st` (v2_statements()) under the keys V2-2..V2-6 add."""
+    keys = KEYS if version == 1 else KEYS_V2
+    header = {'belay_manifest': version, 'created_ns': t.created, 'scopes': [t.scope],
               'hash': 'sha256', 'hash_max_bytes': t.limit, 'store_max_bytes': t.store_max}
-    lines = [enc_obj(KEYS['header'], header)]
+    lines = [None]
     n = {'unreadable': 0, 'unstable': 0, 'mount': 0, 'raced': 0}
     for p in sorted(t.e):
         e = t.e[p]
@@ -681,37 +767,125 @@ def write_manifest(t, path):
     trailer = {'belay_manifest_end': len(t.e), 'vanished': t.vanished,
                'unreadable': n['unreadable'], 'unstable': n['unstable'], 'mounts': n['mount'],
                'raced': n['raced']}
-    lines.append(enc_obj(KEYS['trailer'], trailer))
+    if version == 2:
+        v = v2_violations(t, st)
+        if v:
+            die('generator bug: v2 statements %r: %s' % (st, v))
+        header.update((k, st[k]) for k in V2_IMPLEMENTED['header'])
+        trailer.update((k, st[k]) for k in V2_IMPLEMENTED['trailer'])
+    else:
+        assert version == 1, version
+    lines[0] = enc_obj(keys['header'], header)
+    lines.append(enc_obj(keys['trailer'], trailer))
     for l in lines:
         assert len(l.encode('utf-8')) < 65536 and '\0' not in l
     with open(path, 'wb') as f:
         f.write(('\n'.join(lines) + '\n').encode('utf-8'))
 
+# ---------------------------------------------------------------------------
+# Manifest versions (test/expect/manifest-v2.md). Every pair is written in one
+# combination of versions (.before/.after, cycled over the four) and each side
+# also in the other version (.before.alt/.after.alt), so compare.py runs every
+# pair in all four and checks the records do not depend on them (V2-R4). The
+# v2 statements decide nothing in a diff (V2-R6), so they vary freely: the
+# kind of walk cycles over V2_WALKS, its numbers come from the writer's own
+# random stream (the trees' stream is left as it was).
+
+VERSION_PAIRS = [(1, 1), (1, 2), (2, 1), (2, 2)]
+# (read_all, reference, trusted: 'some' (1 up to the regular files) or 0).
+# "every N marks" and "... newest N below the previous M": numbers filled in.
+V2_WALKS = ([('', 'walk_start', 'some'), ('', 'newest_ctime', 'some'), ('', 'walk_start', 0),
+             ('', 'newest_ctime', 0)]
+            + [(r, 'none', 0) for r in V2_READ_ALL] + [(V2_FREE_REASON, 'none', 0)])
+
+
+def v2_statements(t, rng, walk, ws_zero):
+    read_all, reference, trusted = walk
+    regs = sum(e['type'] == 'reg' for e in t.e.values())
+    read_all = read_all.replace('every N', 'every %d' % rng.choice([2, 10, 64])) \
+        .replace('newest N below the previous M', 'newest %d below the previous %d'
+                 % (t.created - 10 ** 9, t.created - 10 ** 9 + rng.randrange(1, 10 ** 9)))
+    return {'excluded': [],
+            'walk_start_ns': 0 if ws_zero else t.created - rng.randrange(1, 10 ** 10),
+            'trusted': rng.randint(1, regs) if trusted == 'some' and regs else 0,
+            'reference': reference, 'read_all': read_all}
+
+
+def v2_violations(t, st):
+    """What makes these v2 statements invalid for this tree: the pin's kinds
+    and values (V2-2..V2-6) and the spec's agreement rule (V2_AGREEMENT)."""
+    v = []
+    if sorted(st) != sorted(V2_IMPLEMENTED['header'] + V2_IMPLEMENTED['trailer']):
+        v.append('keys %r' % sorted(st))
+    if st.get('excluded') != []:
+        v.append('excluded is not [] (not modelled)')
+    if type(st.get('walk_start_ns')) is not int or st['walk_start_ns'] < 0:
+        v.append('walk_start_ns')
+    if type(st.get('trusted')) is not int or not 0 <= st['trusted'] <= len(t.e):
+        v.append('trusted is not between 0 and the number of entries')
+    if st.get('reference') not in V2_REFERENCES or not isinstance(st.get('read_all'), str):
+        v.append('reference or read_all')
+    elif (st['read_all'] == '') != (st['reference'] in ('walk_start', 'newest_ctime')):
+        v.append('the prefilter used, but reference %r' % st['reference'])
+    elif st['read_all'] != '' and st['trusted'] != 0:
+        v.append('every file read, but trusted %d' % st['trusted'])
+    return v
+
 
 class Writer:
-    def __init__(self, out):
+    def __init__(self, out, seed):
         self.out, self.k, self.s = out, 0, 0
         self.targeted_stems = []        # which alone must pass the coverage gate
+        self.vrng = random.Random('manifest v2 statements %d' % seed)
+        self.sides = 0                  # v2 statements written, for V2_WALKS' cycle
 
-    def pair(self, b, a, label):
+    def statements(self, t, walk=None, ws_zero=None):
+        """v2 statements for one side: the next kind of walk in the cycle, the
+        start unknown on every third side, unless given."""
+        n, self.sides = self.sides, self.sides + 1
+        return v2_statements(t, self.vrng, V2_WALKS[n % len(V2_WALKS)] if walk is None else walk,
+                             n % 3 == 0 if ws_zero is None else ws_zero)
+
+    def statements_for(self, walk, ws_zero):
+        """Given statements (a kind of walk, the start unknown or not), for
+        pair(): made for the side's tree when it is written."""
+        return lambda t: v2_statements(t, self.vrng, walk, ws_zero)
+
+    def write_both_versions(self, t, path, version, st):
+        """path in `version`, path.alt in the other one, with the same v2
+        statements."""
+        write_manifest(t, path, version, st)
+        write_manifest(t, path + '.alt', 3 - version, st)
+
+    def pair(self, b, a, label, versions=None, statements=(None, None)):
+        """One pair, in `versions` (before, after) or the next combination of
+        the cycle; statements: each side's v2 statements, or None for the
+        next of the cycle."""
         assert b.scope == a.scope
         for t in (b, a):
             v = violations(t)
             if v:
                 die('generator bug (%s): %s' % (label, v[:5]))
+        vb, va = versions or VERSION_PAIRS[self.k % len(VERSION_PAIRS)]
+        sb, sa = (self.statements(t) if st is None else st(t)
+                  for st, t in zip(statements, (b, a)))
         stem = os.path.join(self.out, 'pair-%05d' % self.k)
-        write_manifest(b, stem + '.before')
-        write_manifest(a, stem + '.after')
+        self.write_both_versions(b, stem + '.before', vb, sb)
+        self.write_both_versions(a, stem + '.after', va, sa)
         with open(stem + '.label', 'w', encoding='utf-8') as f:
             f.write(label + '\n')
         self.k += 1
         return stem
 
-    def both_ways(self, b, a, label):
-        return [self.pair(b, a, label), self.pair(a, b, label + ' (reversed)')]
+    def both_ways(self, b, a, label, versions=None, statements=(None, None)):
+        """The pair and its reverse; given versions and statements go with
+        their manifest."""
+        return [self.pair(b, a, label, versions, statements),
+                self.pair(a, b, label + ' (reversed)', versions and versions[::-1],
+                          statements[::-1])]
 
     def targeted(self, rng, label, build, cells=(), pairs=(), optional=(), scenarios=(),
-                 interp=()):
+                 interp=(), version=(), versions=None, statements=(None, None)):
         """One targeted pair: built ONCE -- no retries; build(rng) is written
         so that it cannot fail -- written both ways round, and checked to show
         what it was built for, as compare.py's coverage gate sees it: its
@@ -719,18 +893,20 @@ class Writer:
         present on one side only, named scenarios, and interpreter items.
         Anything else stops the generator, naming the pair."""
         unknown = [s for s in scenarios if s not in compare.SCENARIOS] + \
-            [s for s in interp if s not in compare.INTERP_SCENARIOS]
+            [s for s in interp if s not in compare.INTERP_SCENARIOS] + \
+            [s for s in version if s not in compare.VERSION_SCENARIOS]
         if unknown:
             die('%r names scenarios the gate does not have: %s' % (label, unknown))
         r = build(rng)
         if r is None:
             die('could not build the targeted pair %r' % label)
-        stems = self.both_ways(r[0], r[1], label)
+        stems = self.both_ways(r[0], r[1], label, versions, statements)
         self.targeted_stems += stems
         cov = compare.coverage(stems)
         want = ([('cell', c) for c in cells] + [('field pair', p) for p in pairs]
                 + [('optional', f) for f in optional] + [('scenario', s) for s in scenarios]
-                + [('interpreter', s) for s in interp])
+                + [('interpreter', s) for s in interp]
+                + [('manifest version', s) for s in version])
         lacking = [x for x in want if not cov[x[0]][x[1]]]
         if lacking:
             die('the pair built for %r (%s) does not show %s' % (label, stems[0], lacking))
@@ -749,8 +925,9 @@ class Writer:
             if v:
                 raise SystemExit('generator bug (%s): %s' % (label, v[:5]))
         stem = os.path.join(self.out, 'scope-%05d' % self.s)
-        write_manifest(b, stem + '.before')
-        write_manifest(a, stem + '.after')
+        vb, va = VERSION_PAIRS[self.s % len(VERSION_PAIRS)]
+        self.write_both_versions(b, stem + '.before', vb, self.statements(b))
+        self.write_both_versions(a, stem + '.after', va, self.statements(a))
         with open(stem + '.label', 'w', encoding='utf-8') as f:
             f.write(label + '\n')
         self.s += 1
@@ -2318,6 +2495,59 @@ def trailer_counts(w, rng):
                           'the first manifest was created after the second'])
 
 
+def manifest_versions(w, rng):
+    """Manifest versions (test/expect/manifest-v2.md): the four combinations
+    of versions, each side also written in the other version for compare.py
+    (V2-R4); identical entries in two versions, and in v2 with only the v2
+    statements different (V2-R6: they decide nothing); each kind of walk the
+    statements can say. Versions and statements are given here, so no
+    required item depends on the cycle."""
+    def tree_with_a_file(rng):
+        t = unflagged_tree(rng)
+        x = clear_flags(subject(rng, t, 'reg'), t, rng)
+        t.e[x['path']] = x
+        return t
+
+    def same_entries(rng):
+        t = tree_with_a_file(rng)
+        return t, t.copy()
+
+    def modified(rng):
+        t = tree_with_a_file(rng)
+        a = t.copy()
+        y = clear_flags(subject(rng, a, 'fifo'), a, rng)
+        a.e[y['path']] = y
+        for e in a.e.values():
+            if e['type'] == 'reg':
+                e['mode'] = (e['mode'] & S_IFMT) | other(rng, PERMS, e['mode'] & 0o7777)
+        return t, a
+
+    walk_start = ('', 'walk_start', 'some')
+    w.targeted(rng, 'v2 on both sides, the same entries, only the v2 statements differ',
+               same_entries, versions=(2, 2),
+               statements=(w.statements_for(walk_start, False),
+                           w.statements_for(('check', 'none', 0), True)),
+               version=['before v2, after v2',
+                        'v2 on both sides, every entry the same, only the v2 statements differ '
+                        '(V2-R6)',
+                        'v2: the prefilter used, reference walk_start, trusted > 0',
+                        'v2: every file read, read_all check',
+                        'v2: walk_start_ns 0', 'v2: walk_start_ns not 0'])
+    w.targeted(rng, 'v1 and v2, the same entries', same_entries, versions=(1, 2),
+               statements=(None, w.statements_for(('', 'newest_ctime', 0), False)),
+               version=['before v1, after v2', 'before v2, after v1',
+                        'the versions differ, every entry the same (V2-R4)',
+                        'v2: the prefilter used, reference newest_ctime',
+                        'v2: the prefilter used, trusted 0'])
+    w.targeted(rng, 'v1 on both sides, entries differ', modified, versions=(1, 1),
+               version=['before v1, after v1'])
+    w.targeted(rng, 'v2 and v1, entries differ', modified, versions=(2, 1),
+               statements=(w.statements_for(('every N marks', 'none', 0), True), None),
+               version=['before v2, after v1', 'before v1, after v2',
+                        'the versions differ, entries differ',
+                        'v2: every file read, another reason'])
+
+
 # ---------------------------------------------------------------------------
 # Interpreters, with no store (diff-v1 "Interpreters"; the driver passes NULL
 # options). Paths an interpreter claims are built at the names the prose
@@ -2909,6 +3139,7 @@ def targeted(w, rng):
     xattrs_spellings(w, rng)
     values(w, rng)
     trailer_counts(w, rng)
+    manifest_versions(w, rng)
     interpreters(w, rng)
 
 
@@ -3053,7 +3284,7 @@ def main():
     out, n, seed = sys.argv[1], int(sys.argv[2]), int(sys.argv[3])
     os.makedirs(out, exist_ok=True)
     rng = random.Random(seed)
-    w = Writer(out)
+    w = Writer(out, seed)
     targeted(w, rng)
     w.check_gate()          # the targeted pairs alone: the random ones add variety only
     randomized(w, rng, n)
