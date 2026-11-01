@@ -223,14 +223,18 @@ TEST(the_state_directory_inside_the_scope_is_excluded_and_said) {
     ASSERT_EQ_INT(0, rc);
     ASSERT_TRUE(strstr(g_out, "not recorded: belay's own state directory") != NULL);
     char man[2400];
-    snprintf(man, sizeof man, "grep -c '\"path\":\".state' %s/scopes/*/checkpoints/1/manifest.ndjson > %s/count", inside, g_dir);
+    snprintf(man, sizeof man, "tail -n +2 %s/scopes/*/checkpoints/1/manifest.ndjson | grep -c '\"path\":\".state' > %s/count; "
+             "head -1 %s/scopes/*/checkpoints/1/manifest.ndjson | grep -c '\"excluded\":\\[{\"path\":\".state\",\"reason\":\"state_dir\"' >> %s/count",
+             inside, g_dir, inside, g_dir);
     sh("%s; true", man);
     char cnt[1200];
     snprintf(cnt, sizeof cnt, "%s/count", g_dir);
     FILE *f = fopen(cnt, "r");
     int n = -1;
-    if (f) { if (fscanf(f, "%d", &n) != 1) n = -1; fclose(f); }
-    ASSERT_EQ_INT(0, n);
+    int named = -1;
+    if (f) { if (fscanf(f, "%d %d", &n, &named) != 2) n = -1; fclose(f); }
+    ASSERT_EQ_INT(0, n);                        /* no entry */
+    ASSERT_EQ_INT(1, named);                    /* and named in the v2 header, reason state_dir */
 }
 
 /* Q3, Q4: diff --since keeps its capture; --exit-code is 1 on any record. */

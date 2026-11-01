@@ -153,13 +153,15 @@ int emit_header(struct emitter *em, const struct belay_manifest_header *hb,
         if (belay_base64_encode(b.p + b.w, EMIT_LINE_CAP - b.w, hb->scope, sl) == -1) return -1;
         b.w += strlen(b.p + b.w);
     }
-    if (ap(&b, "\"],\"%s\":%lld,\"%s\":%lld,\"%s\":%llu,\"%s\":%llu,\"%s\":%s,\"%s\":%s}",
+    if (ap(&b, "\"],\"%s\":%lld,\"%s\":%lld,\"%s\":%llu,\"%s\":%llu,\"%s\":%s,\"%s\":%s,\"%s\":%llu,\"%s\":%llu}",
            H[DH_BEFORE_CREATED].name, (long long)hb->created_ns,
            H[DH_AFTER_CREATED].name, (long long)ha->created_ns,
            H[DH_BEFORE_HASH_MAX].name, (unsigned long long)hb->hash_max_bytes,
            H[DH_AFTER_HASH_MAX].name, (unsigned long long)ha->hash_max_bytes,
            H[DH_SCOPE_REMOUNTED].name, scope_remounted ? "true" : "false",
-           H[DH_IDENTITY_COMPARED].name, scope_remounted ? "false" : "true") == -1)
+           H[DH_IDENTITY_COMPARED].name, scope_remounted ? "false" : "true",
+           H[DH_BEFORE_MANIFEST_VERSION].name, (unsigned long long)hb->version,
+           H[DH_AFTER_MANIFEST_VERSION].name, (unsigned long long)ha->version) == -1)
         return -1;
     return put_line(em, &b);
 }

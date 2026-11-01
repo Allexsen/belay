@@ -401,31 +401,120 @@ int decode_entry(const struct obj *o, struct belay_entry *e) {
     return entry_check(e, present_fields(o));
 }
 
-int decode_trailer(const struct obj *o, uint64_t v[TR_COUNT]) {
-    const char *keys[TR_COUNT];
-    for (size_t i = 0; i < TR_COUNT; i++) keys[i] = TRAILER_FIELDS[i].name;
-    if (lex_order(o, keys, TR_COUNT) == -1) return -1;
-    for (size_t i = 0; i < TR_COUNT; i++)
-        if (get_u64(o, keys[i], true, &v[i], NULL) == -1) return -1;
+/* A short UTF-8 string value, no NUL, into out (cap). */
+static int get_text(const struct obj *o, const char *key, char *out, size_t cap) {
+    const struct pair *p = lex_get(o, key);
+    size_t n;
+    if (p == NULL) {
+        belay_err_set(BELAY_ERR_CORRUPT, 0, "manifest: missing %s", key);
+        return -1;
+    }
+    if (p->kind != V_STR) return bad_kind(key, "a string");
+    if (lex_decode_string(p->val, p->vlen, out, cap - 1, &n) == -1) return -1;
+    if (memchr(out, '\0', n) != NULL || !belay_utf8_valid(out, n)) return bad_kind(key, "UTF-8 text");
+    out[n] = '\0';
     return 0;
 }
 
-int decode_header(const struct obj *o, struct belay_manifest_header *h) {
+int decode_trailer(const struct obj *o, uint64_t version, uint64_t v[TR_COUNT], struct belay_manifest_stats *t) {
+    const char *keys[TR_COUNT + TR2_COUNT];
+    size_t n = 0;
+    for (size_t i = 0; i < TR_COUNT; i++) keys[n++] = TRAILER_FIELDS[i].name;
+    if (version >= 2)
+        for (size_t i = 0; i < TR2_COUNT; i++) keys[n++] = TRAILER2_FIELDS[i].name;
+    if (lex_order(o, keys, n) == -1) return -1;
+    for (size_t i = 0; i < TR_COUNT; i++)
+        if (get_u64(o, keys[i], true, &v[i], NULL) == -1) return -1;
+    if (version < 2) return 0;
+    /* Every v2 key always present (test/expect/manifest-v2.md); and the three
+     * agree: the prefilter was used exactly when read_all is "", and only
+     * then can files have been trusted or a reference be other than none. */
+    uint64_t trusted;
+    if (get_u64(o, TRAILER2_FIELDS[TR2_TRUSTED].name, true, &trusted, NULL) == -1 ||
+        get_text(o, TRAILER2_FIELDS[TR2_REFERENCE].name, t->reference, sizeof t->reference) == -1 ||
+        get_text(o, TRAILER2_FIELDS[TR2_READ_ALL].name, t->read_all, sizeof t->read_all) == -1)
+        return -1;
+    t->trusted = (size_t)trusted;
+    const bool none = strcmp(t->reference, "none") == 0;
+    if (!none && strcmp(t->reference, "walk_start") != 0 && strcmp(t->reference, "newest_ctime") != 0)
+        return lex_corrupt("trailer reference is not walk_start, newest_ctime or none");
+    if (none != (t->read_all[0] != '\0'))
+        return lex_corrupt("trailer reference and read_all disagree");
+    if (none && trusted != 0) return lex_corrupt("trailer trusts files without a reference");
+    if (trusted > v[TR_ENTRIES]) return lex_corrupt("trailer trusts more files than entries");
+    return 0;
+}
+
+/* One `excluded` element (v2). */
+static int decode_excluded(const struct obj *o, struct belay_excluded *x) {
+    const char *keys[] = { EXCLUDED_FIELDS[EX_PATH].name, EXCLUDED_FIELDS[EX_PATH].alt,
+                           EXCLUDED_FIELDS[EX_REASON].name, EXCLUDED_FIELDS[EX_DEV].name,
+                           EXCLUDED_FIELDS[EX_INO].name };
+    if (lex_order(o, keys, sizeof keys / sizeof keys[0]) == -1) return -1;
+    bool have;
+    if (get_bytes(o, EXCLUDED_FIELDS[EX_PATH].name, EXCLUDED_FIELDS[EX_PATH].alt, x->path, sizeof x->path,
+                  &x->path_len, &have) == -1)
+        return -1;
+    if (!have) return lex_corrupt("an excluded entry has no path");
+    if (x->path_len == 0 || x->path[0] == '/' || check_canonical(x->path, x->path_len) == -1) {
+        belay_err_clear();
+        return lex_corrupt("an excluded path is not a canonical relative path");
+    }
+    x->path[x->path_len] = '\0';
+    char reason[16];
+    if (get_text(o, EXCLUDED_FIELDS[EX_REASON].name, reason, sizeof reason) == -1) return -1;
+    if (strcmp(reason, "state_dir") == 0) x->reason = BELAY_EXCLUDE_STATE_DIR;
+    else if (strcmp(reason, "user") == 0) x->reason = BELAY_EXCLUDE_USER;
+    else return lex_corrupt("an excluded reason is not state_dir or user");
+    return get_u64(o, EXCLUDED_FIELDS[EX_DEV].name, true, &x->dev, NULL) == -1 ||
+                   get_u64(o, EXCLUDED_FIELDS[EX_INO].name, true, &x->ino, NULL) == -1
+               ? -1 : 0;
+}
+
+int decode_header(const struct obj *o, struct belay_manifest_header *h, struct belay_excluded *excluded) {
     memset(h, 0, sizeof *h);
     uint64_t ver;
     bool present;
     if (get_u64(o, HEADER_FIELDS[H_VERSION].name, false, &ver, &present) == -1) return -1;
     if (!present) return lex_corrupt("missing header");
-    if (ver != BELAY_MANIFEST_VERSION) {
+    if (ver < BELAY_MANIFEST_VERSION_MIN || ver > BELAY_MANIFEST_VERSION) {
         /* Refused rather than read: a newer writer may use fields whose
          * absence an older reader would read as "unchanged". */
-        belay_err_set(BELAY_ERR_UNSUPPORTED, 0, "manifest: format version %llu, expected %d",
-                      (unsigned long long)ver, BELAY_MANIFEST_VERSION);
+        belay_err_set(BELAY_ERR_UNSUPPORTED, 0, "manifest: format version %llu, expected %d to %d",
+                      (unsigned long long)ver, BELAY_MANIFEST_VERSION_MIN, BELAY_MANIFEST_VERSION);
         return -1;
     }
     h->version = ver;
-    const char *keys[2 * H_COUNT];
-    if (lex_order(o, keys, header_keys(keys)) == -1) return -1;
+    /* Each version by its own key set: a v1 header carrying a v2 key is
+     * refused as an unknown key, a v2 header missing one below. */
+    const char *keys[2 * H_COUNT + H2_COUNT];
+    size_t nk = header_keys(keys);
+    if (ver >= 2)
+        for (size_t i = 0; i < H2_COUNT; i++) keys[nk++] = HEADER2_FIELDS[i].name;
+    if (lex_order(o, keys, nk) == -1) return -1;
+    if (ver >= 2) {
+        if (get_i64(o, HEADER2_FIELDS[H2_WALK_START].name, &h->walk_start_ns) == -1) return -1;
+        if (h->walk_start_ns < 0) return lex_corrupt("walk_start_ns is negative");
+        const struct pair *xp = lex_get(o, HEADER2_FIELDS[H2_EXCLUDED].name);
+        if (xp == NULL) return lex_corrupt("missing excluded");
+        if (!(xp->kind == V_OBJS || (xp->kind == V_ARR && xp->nelem == 0)))
+            return bad_kind(HEADER2_FIELDS[H2_EXCLUDED].name, "an array of objects");
+        if (xp->nelem > BELAY_EXCLUDED_MAX) return lex_corrupt("too many excluded entries");
+        for (size_t i = 0; i < xp->nelem; i++) {
+            struct obj eo;
+            if (lex_elem(xp, i, &eo) == -1 || decode_excluded(&eo, &excluded[i]) == -1) return -1;
+            /* Sorted by path bytes, each once: one spelling per header. */
+            if (i > 0) {
+                const struct belay_excluded *a = &excluded[i - 1], *b = &excluded[i];
+                const size_t m = a->path_len < b->path_len ? a->path_len : b->path_len;
+                const int c = memcmp(a->path, b->path, m);
+                if (c > 0 || (c == 0 && a->path_len >= b->path_len))
+                    return lex_corrupt("excluded entries out of order");
+            }
+        }
+        h->excluded = excluded;
+        h->n_excluded = xp->nelem;
+    }
 
     if (get_i64(o, HEADER_FIELDS[H_CREATED].name, &h->created_ns) == -1 ||
         get_u64(o, HEADER_FIELDS[H_HASH_MAX].name, true, &h->hash_max_bytes, NULL) == -1 ||

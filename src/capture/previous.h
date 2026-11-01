@@ -31,6 +31,7 @@ struct prev_index;
 struct prev_info {
     int64_t newest_validated_ns;    /* the newest ctime_ns of an entry validation passed */
     int64_t reference_ns;           /* R: the previous walk's start, else newest_validated_ns */
+    int64_t walk_start_ns;          /* the previous header's walk_start_ns; 0: unknown (v1, or not read) */
     uint64_t hash_max_bytes, store_max_bytes;
     size_t files;                   /* regular files indexed */
 };

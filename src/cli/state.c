@@ -504,7 +504,6 @@ static int read_meta(const struct state *st, const char *name, long id, struct c
     c->unstable = (uint64_t)jint(&v, "unstable", 0);
     c->vanished = (uint64_t)jint(&v, "vanished", 0);
     c->excluded = (uint64_t)jint(&v, "excluded", 0);
-    c->walk_start_ns = jint(&v, "walk_start_ns", 0);
     const struct jval *p = jget(&v, "provisional");
     c->provisional = p != NULL && p->t == J_BOOL && p->b;
     const struct jval *used = jget(pf, "used");
@@ -637,11 +636,10 @@ static int write_meta(const struct state *st, int dfd, const struct checkpoint *
     const int n = snprintf(buf, sizeof buf,
             "{\"id\":%ld,\"kind\":\"%s\",\"created_ns\":%lld,%s,\"entries\":%llu,"
             "\"raced\":%llu,\"unstable\":%llu,\"vanished\":%llu,\"provisional\":%s,\"excluded\":%llu,"
-            "\"walk_start_ns\":%lld,"
             "\"prefilter\":{\"used\":%s,\"reference\":\"%s\",\"trusted\":%llu,\"racy\":%llu,\"full_reason\":\"%s\"}}\n",
             c->id, c->kind, (long long)c->created_ns, scope, (unsigned long long)c->entries,
             (unsigned long long)c->raced, (unsigned long long)c->unstable, (unsigned long long)c->vanished,
-            c->provisional ? "true" : "false", (unsigned long long)c->excluded, (long long)c->walk_start_ns,
+            c->provisional ? "true" : "false", (unsigned long long)c->excluded,
             c->full ? "false" : "true", state_reference(c), (unsigned long long)c->trusted,
             (unsigned long long)c->racy, why);
     if (n < 0 || (size_t)n >= sizeof buf) {
@@ -692,7 +690,6 @@ int state_capture(struct state *st, const struct capture_req *req, struct checkp
     /* Prefilter against the latest checkpoint unless a full walk is due
      * (Q8): asked for, none before, or N marks since the last full one. */
     const char *previous = NULL;
-    int64_t previous_start = 0;
     if (req->prefilter && n > 0) {
         long since_full = 0;
         for (size_t i = n; i-- > 0 && !list[i].full;) since_full++;
@@ -709,7 +706,6 @@ int state_capture(struct state *st, const struct capture_req *req, struct checkp
             }
             state_manifest(st, list[n - 1].id, prev, sizeof prev);
             previous = prev;
-            previous_start = list[n - 1].walk_start_ns;
         }
     } else if (req->prefilter) {
         snprintf(c.full_reason, sizeof c.full_reason, "no checkpoint before");
@@ -718,7 +714,8 @@ int state_capture(struct state *st, const struct capture_req *req, struct checkp
 
     struct belay_manifest_opts o = {
         .hash_max_bytes = BELAY_HASH_MAX_BYTES_DEFAULT, .store_max_bytes = BELAY_STORE_MAX_BYTES_DEFAULT,
-        .store_dir = st->store, .previous = previous, .previous_start_ns = previous_start,
+        .store_dir = st->store, .previous = previous,
+        .full_reason = c.full_reason[0] != '\0' ? c.full_reason : NULL,   /* the trailer's read_all */
         .exclude = st->root_ino != 0, .exclude_dev = st->root_dev, .exclude_ino = st->root_ino,
         .expect_root = true, .root_dev = st->scope.dev, .root_ino = st->scope.ino,
     };
@@ -736,19 +733,19 @@ int state_capture(struct state *st, const struct capture_req *req, struct checkp
                  "ctime went backwards: newest %lld below the previous %lld",
                  (long long)s.newest_ctime_ns, (long long)s.previous_newest_ns);
         o.previous = NULL;
+        o.full_reason = c.full_reason;
         if (belay_manifest_write(manifest, st->scope.path, &o, &s) == -1) goto out;
     } else if (previous != NULL) {
         c.full = false;
         c.trusted = s.trusted;
         c.racy = s.racy;
-        c.walk_start_reference = previous_start > 0;
+        c.walk_start_reference = strcmp(s.reference, "walk_start") == 0;   /* as the trailer says */
     }
     c.entries = s.entries;
     c.raced = s.raced;
     c.unstable = s.unstable;
     c.vanished = s.vanished;
     c.excluded = s.excluded;
-    c.walk_start_ns = s.walk_start_ns;
     c.provisional = s.raced || s.unstable || s.vanished;
     if (write_meta(st, dfd, &c) == -1) goto out;
     *out = c;

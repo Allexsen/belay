@@ -122,6 +122,7 @@ int prev_load(const struct fsops *ops, const char *path, const char *scope, uint
         goto refuse;
     }
     info->hash_max_bytes = h->hash_max_bytes;
+    info->walk_start_ns = h->walk_start_ns;              /* v2's header; 0 for v1 (one source) */
     info->store_max_bytes = h->store_max_bytes;
     struct prev_index *p = calloc(1, sizeof *p);
     if (p == NULL) {
@@ -165,7 +166,7 @@ int prev_load(const struct fsops *ops, const char *path, const char *scope, uint
         if (rc == 1 && *why == NULL) *why = "the previous checkpoint is too large to index";
         return rc;
     }
-    /* R: the previous walk's start on the scope's clock, when known (opts);
+    /* R: the previous walk's start on the scope's clock, when its header says (v2);
      * else its newest validated ctime (decision Q2's fallback). That fallback
      * misses a same-size rewrite made during the previous walk in its file's
      * own tick, which needs coarse timestamps: when every recorded ctime has
@@ -173,12 +174,12 @@ int prev_load(const struct fsops *ops, const char *path, const char *scope, uint
      * (decision 2026-11-01, 2). Timestamps coarse at a kernel tick or 10 ms
      * carry a nanosecond part and are not caught: there the fallback can
      * still miss that rewrite (review 2026-11-01, D1; left to the author). */
-    if (opts->previous_start_ns <= 0 && !fine) {
+    if (info->walk_start_ns <= 0 && !fine) {
         prev_free(p);
         *why = "the previous walk's start is unknown and the scope's timestamps are coarse";
         return 1;
     }
-    info->reference_ns = opts->previous_start_ns > 0 ? opts->previous_start_ns : info->newest_validated_ns;
+    info->reference_ns = info->walk_start_ns > 0 ? info->walk_start_ns : info->newest_validated_ns;
     *out = p;
     return 0;
 refuse:

@@ -15,8 +15,9 @@ that may still change, and there are no releases. Nothing that changes your file
 - Interpreters that explain changes to pip installs, dpkg's package database, git refs, hooks,
   reflogs (kept and read in full up to 16 MiB each) and small text files
   ([docs/spec/diff-v1.md](docs/spec/diff-v1.md)).
-- The manifest format ([docs/spec/manifest-v1.md](docs/spec/manifest-v1.md)) and the diff format
-  (diff.v1, a draft).
+- The manifest format, version 2 ([docs/spec/manifest-v2.md](docs/spec/manifest-v2.md), built on
+  [version 1](docs/spec/manifest-v1.md), which belay still reads) and the diff format (diff.v1, a
+  draft).
 - Tests on Linux (x86_64, arm64), on macOS, and inside a Docker container as an unprivileged user,
   in CI on every change.
 

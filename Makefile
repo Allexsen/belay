@@ -154,7 +154,7 @@ e2e: $(BIN)
 # The fuzz target's invariants are hand-written from test/expect/manifest-v1.md
 # instead (audit 2026-10, M4), so nothing that checks the code derives from it.
 GEN_TOOL	= $(BUILD)/tools/gen_schema
-GEN_SPEC	= docs/spec/manifest-v1.md docs/spec/diff-v1.md
+GEN_SPEC	= docs/spec/manifest-v1.md docs/spec/manifest-v2.md docs/spec/diff-v1.md
 
 $(GEN_TOOL): tools/gen_schema.c $(CORE_OBJ)
 	@mkdir -p $(dir $@)

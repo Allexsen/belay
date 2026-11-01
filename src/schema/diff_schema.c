@@ -138,6 +138,11 @@ const struct line_field_def DIFF_HEADER_FIELDS[DH_COUNT] = {
     [DH_IDENTITY_COMPARED] = { "identity_compared", NULL, "bool",
         "Whether `ino` was compared: never across a remount of the scope root, since an inode "
         "number means something only within one device. Content still compares by hash." },
+    [DH_BEFORE_MANIFEST_VERSION] = { "before_manifest_version", NULL, "int",
+        "The before manifest's format version (`belay_manifest`): provenance only; the outcomes "
+        "do not depend on it (test/expect/manifest-v2.md, V2-R4)." },
+    [DH_AFTER_MANIFEST_VERSION] = { "after_manifest_version", NULL, "int",
+        "The after manifest's format version, likewise." },
 };
 
 const struct line_field_def DIFF_RECORD_FIELDS[DF_COUNT] = {

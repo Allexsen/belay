@@ -82,7 +82,6 @@ struct checkpoint {
     bool full;                  /* every file read (no prefilter) */
     char full_reason[160];      /* why a mark read every file */
     uint64_t trusted, racy;
-    int64_t walk_start_ns;      /* when its walk began, on the scope's clock; 0: unknown (previous.h) */
     bool walk_start_reference;  /* prefiltered against the previous walk's start, not its newest ctime */
 };
 

@@ -130,6 +130,9 @@ static void line_table(const struct line_field_def *d, size_t n) {
 }
 static void header_block(void) { line_table(HEADER_FIELDS, H_COUNT); }
 static void trailer_block(void) { line_table(TRAILER_FIELDS, TR_COUNT); }
+static void header_v2_block(void) { line_table(HEADER2_FIELDS, H2_COUNT); }
+static void trailer_v2_block(void) { line_table(TRAILER2_FIELDS, TR2_COUNT); }
+static void excluded_block(void) { line_table(EXCLUDED_FIELDS, EX_COUNT); }
 
 /* "`a`, `b`|`b_b64`, ..." for a header or trailer key order. */
 static void line_order(char *buf, size_t cap, const struct line_field_def *d, size_t n) {
@@ -297,6 +300,9 @@ static const struct {
     { "header", "manifest-v1.md", "src/schema/entry.c", header_block },
     { "trailer", "manifest-v1.md", "src/schema/entry.c", trailer_block },
     { "schema", "manifest-v1.md", "src/schema/entry.c", schema_block },
+    { "header-v2", "manifest-v2.md", "src/schema/entry.c", header_v2_block },
+    { "trailer-v2", "manifest-v2.md", "src/schema/entry.c", trailer_v2_block },
+    { "excluded", "manifest-v2.md", "src/schema/entry.c", excluded_block },
     { "diff-header", "diff-v1.md", "src/schema/diff_schema.c", diff_header_block },
     { "diff-record", "diff-v1.md", "src/schema/diff_schema.c", diff_record_block },
     { "diff-trailer", "diff-v1.md", "src/schema/diff_schema.c", diff_trailer_block },

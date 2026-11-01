@@ -810,12 +810,12 @@ TEST(sweep_header_and_trailer_are_exposed) {
     if (t) ASSERT_EQ_INT(2, (int)t->entries);
     belay_manifest_close(r);
 
-    /* A header without a usable scope is rejected outright -- by the lexer,
-     * which refuses an empty array before the decoder can name it. */
+    /* A header without a usable scope is rejected outright. Since v2 the lexer
+     * reads `[]` (an empty `excluded`); the decoder refuses it for scopes. */
     g_n = 0;
     write_raw("{\"belay_manifest\":1,\"created_ns\":0,\"scopes\":[],\"hash\":\"sha256\","
               "\"hash_max_bytes\":1,\"store_max_bytes\":1}\n");
-    EXPECT_REJECT("no scope", belay_manifest_read(g_path, collect, NULL), "array element is not a string");
+    EXPECT_REJECT("no scope", belay_manifest_read(g_path, collect, NULL), "header must name exactly one scope");
 }
 
 /* R8. Blank lines are not part of the format. */
@@ -1242,7 +1242,7 @@ TEST(w6_reader_accepts_exactly_the_canonical_extended_metadata) {
         { "non-canonical escape in an element",
           HDR REG_LINE("f", ",\"xattrs\":[\"user.\\u0061=" XH "\"]" SHA_F), -1, "non-canonical \\u escape" },
         { "empty array",                  HDR REG_LINE("f", ",\"xattrs\":[]" SHA_F), -1,
-          "array element is not a string" },                    /* the lexer refuses [] */
+          "\"xattrs\" must be a non-empty array" },           /* the lexer reads [] (v2); xattrs refuses it */
         { "both inline and digest",       HDR REG_LINE("f", ",\"xattrs\":[\"user.a=" XH "\"],\"xattrs_sha256\":\"" XH "\"" SHA_F), -1,
           "both xattrs and xattrs_sha256" },
         { "unknown with attributes",      HDR REG_LINE("f", ",\"xattrs\":[\"user.a=" XH "\"],\"xattrs_unknown\":true" SHA_F), -1,
@@ -1349,6 +1349,104 @@ TEST(decoder_reads_every_schema_field_once) {
     for (size_t f = 0; f < F_COUNT; f++) ASSERT_EQ_INT(1, seen[f]);
 }
 
+/* ---------- version 2 (test/expect/manifest-v2.md) ---------- */
+
+#define H2_PRE "{\"belay_manifest\":2,\"created_ns\":0,\"scopes\":[\"/s\"],\"hash\":\"sha256\"," \
+               "\"hash_max_bytes\":67108864,\"store_max_bytes\":65536"
+#define H2 H2_PRE ",\"excluded\":[],\"walk_start_ns\":5}\n"
+#define T1 "{\"belay_manifest_end\":1,\"vanished\":0,\"unreadable\":0,\"unstable\":0,\"mounts\":0,\"raced\":0"
+#define T2 T1 ",\"trusted\":0,\"reference\":\"none\",\"read_all\":\"check\"}\n"
+
+static int read_raw(const char *content) {
+    g_n = 0;
+    write_raw(content);
+    return belay_manifest_read(g_path, collect, NULL);
+}
+
+/* V2-1..6: a v2 manifest's header and trailer are read and exposed. */
+TEST(v2_header_and_trailer_are_read_and_exposed) {
+    write_raw(H2_PRE ",\"excluded\":[{\"path\":\".belay\",\"reason\":\"state_dir\",\"dev\":1,\"ino\":2},"
+          "{\"path_b64\":\"bm9kZV9tb2R1bGVz/w==\",\"reason\":\"user\",\"dev\":1,\"ino\":3}],\"walk_start_ns\":123}\n"
+          ROOT_E
+          T1 ",\"trusted\":1,\"reference\":\"walk_start\",\"read_all\":\"\"}\n");
+    struct belay_manifest_reader *r = NULL;
+    REQUIRE(belay_manifest_open(g_path, &r) == 0);
+    const struct belay_manifest_header *h = belay_manifest_header(r);
+    ASSERT_EQ_INT(2, (int)h->version);
+    ASSERT_TRUE(h->walk_start_ns == 123);
+    ASSERT_EQ_INT(2, (int)h->n_excluded);
+    ASSERT_EQ_STR(".belay", h->excluded[0].path);
+    ASSERT_TRUE(h->excluded[0].reason == BELAY_EXCLUDE_STATE_DIR && h->excluded[0].ino == 2);
+    ASSERT_TRUE(h->excluded[1].path_len == 13 && memcmp(h->excluded[1].path, "node_modules\xff", 13) == 0);
+    ASSERT_TRUE(h->excluded[1].reason == BELAY_EXCLUDE_USER);
+    struct belay_entry e;
+    ASSERT_EQ_INT(1, belay_manifest_next(r, &e));
+    ASSERT_EQ_INT(0, belay_manifest_next(r, &e));
+    const struct belay_manifest_stats *t = belay_manifest_trailer(r);
+    REQUIRE(t != NULL);
+    ASSERT_EQ_INT(1, (int)t->trusted);
+    ASSERT_EQ_STR("walk_start", t->reference);
+    ASSERT_EQ_STR("", t->read_all);
+    belay_manifest_close(r);
+    /* and a v1 manifest still reads, with no v2 values */
+    ASSERT_EQ_INT(0, read_it(HDR));
+}
+
+/* V2-R1, R2: each version by its own key set, strictly; every v2 key always
+ * present; the v2 values well formed and agreeing with each other. */
+TEST(v2_is_read_strictly) {
+    static const struct { const char *name, *m, *reason; } cases[] = {
+        { "version 3", "{\"belay_manifest\":3,\"created_ns\":0}\n" ROOT_E T2, "format version 3" },
+        { "a v1 header with a v2 key", "{\"belay_manifest\":1,\"created_ns\":0,\"scopes\":[\"/s\"],\"hash\":\"sha256\","
+          "\"hash_max_bytes\":67108864,\"store_max_bytes\":65536,\"excluded\":[]}\n" ROOT_E T1 "}\n",
+          "unknown key \"excluded\"" },
+        { "a v1 trailer with a v2 key", HDR ROOT_E T1 ",\"trusted\":0}\n", "unknown key \"trusted\"" },
+        { "v2 without walk_start_ns", H2_PRE ",\"excluded\":[]}\n" ROOT_E T2, "missing walk_start_ns" },
+        { "v2 without excluded", H2_PRE ",\"walk_start_ns\":5}\n" ROOT_E T2, "missing excluded" },
+        { "v2 trailer without read_all", H2 ROOT_E T1 ",\"trusted\":0,\"reference\":\"none\"}\n", "missing read_all" },
+        { "a v1 trailer under a v2 header", H2 ROOT_E T1 "}\n", "missing trusted" },
+        { "excluded out of order", H2_PRE ",\"excluded\":[{\"path\":\"b\",\"reason\":\"user\",\"dev\":1,\"ino\":2},"
+          "{\"path\":\"a\",\"reason\":\"user\",\"dev\":1,\"ino\":3}],\"walk_start_ns\":5}\n" ROOT_E T2,
+          "excluded entries out of order" },
+        { "excluded twice", H2_PRE ",\"excluded\":[{\"path\":\"a\",\"reason\":\"user\",\"dev\":1,\"ino\":2},"
+          "{\"path\":\"a\",\"reason\":\"user\",\"dev\":1,\"ino\":3}],\"walk_start_ns\":5}\n" ROOT_E T2,
+          "excluded entries out of order" },
+        { "an unknown reason", H2_PRE ",\"excluded\":[{\"path\":\"a\",\"reason\":\"why\",\"dev\":1,\"ino\":2}],"
+          "\"walk_start_ns\":5}\n" ROOT_E T2, "reason is not state_dir or user" },
+        { "an absolute excluded path", H2_PRE ",\"excluded\":[{\"path\":\"/a\",\"reason\":\"user\",\"dev\":1,\"ino\":2}],"
+          "\"walk_start_ns\":5}\n" ROOT_E T2, "not a canonical relative path" },
+        { "a dot-dot excluded path", H2_PRE ",\"excluded\":[{\"path\":\"a/../b\",\"reason\":\"user\",\"dev\":1,\"ino\":2}],"
+          "\"walk_start_ns\":5}\n" ROOT_E T2, "not a canonical relative path" },
+        { "excluded keys out of order", H2_PRE ",\"excluded\":[{\"reason\":\"user\",\"path\":\"a\",\"dev\":1,\"ino\":2}],"
+          "\"walk_start_ns\":5}\n" ROOT_E T2, "fields out of canonical order" },
+        { "excluded missing ino", H2_PRE ",\"excluded\":[{\"path\":\"a\",\"reason\":\"user\",\"dev\":1}],"
+          "\"walk_start_ns\":5}\n" ROOT_E T2, "missing ino" },
+        { "a nested value in excluded", H2_PRE ",\"excluded\":[{\"path\":\"a\",\"reason\":true,\"dev\":1,\"ino\":2}],"
+          "\"walk_start_ns\":5}\n" ROOT_E T2, "malformed value in an array element" },
+        { "objects where strings belong", HDR REG_LINE("f", ",\"xattrs\":[{\"a\":1}]" SHA_F),
+          "\"xattrs\" must be a non-empty array" },
+        { "a trailing comma in excluded", H2_PRE ",\"excluded\":[{\"path\":\"a\",\"reason\":\"user\",\"dev\":1,\"ino\":2},]"
+          ",\"walk_start_ns\":5}\n" ROOT_E T2, "malformed array" },
+        { "a negative walk start", H2_PRE ",\"excluded\":[],\"walk_start_ns\":-1}\n" ROOT_E T2, "walk_start_ns is negative" },
+        { "an unknown reference", H2 ROOT_E T1 ",\"trusted\":0,\"reference\":\"soon\",\"read_all\":\"check\"}\n",
+          "trailer reference is not" },
+        { "prefiltered but read_all says why", H2 ROOT_E T1 ",\"trusted\":0,\"reference\":\"walk_start\",\"read_all\":\"check\"}\n",
+          "reference and read_all disagree" },
+        { "no reference and no reason", H2 ROOT_E T1 ",\"trusted\":0,\"reference\":\"none\",\"read_all\":\"\"}\n",
+          "reference and read_all disagree" },
+        { "trusted without a reference", H2 ROOT_E T1 ",\"trusted\":3,\"reference\":\"none\",\"read_all\":\"check\"}\n",
+          "trusts files without a reference" },
+        { "trusted past the entries", H2 ROOT_E T1 ",\"trusted\":9,\"reference\":\"walk_start\",\"read_all\":\"\"}\n",
+          "trusts more files than entries" },
+    };
+    for (size_t i = 0; i < sizeof cases / sizeof cases[0]; i++) {
+        const int rc = strstr(cases[i].m, "xattrs") != NULL ? read_it(cases[i].m) : read_raw(cases[i].m);
+        EXPECT_REJECT(cases[i].name, rc, cases[i].reason);
+        belay_err_clear();
+    }
+    ASSERT_EQ_INT(0, read_raw(H2 ROOT_E T2));                            /* the well-formed one */
+}
+
 int main(void) {
     RUN(reads_a_well_formed_entry);
     RUN(every_schema_rule_has_a_witness_rejected_for_that_rule);
@@ -1412,6 +1510,8 @@ int main(void) {
     RUN(every_flag_is_decoded);
     RUN(the_digest_is_of_the_bytes_read_and_a_rewind_rereads_them);
     RUN(decoder_reads_every_schema_field_once);
+    RUN(v2_header_and_trailer_are_read_and_exposed);
+    RUN(v2_is_read_strictly);
 
     unlink(g_path);
     return belay_test_report();

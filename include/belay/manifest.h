@@ -18,7 +18,20 @@
 #include <stddef.h>
 #include <stdint.h>
 
-#define BELAY_MANIFEST_VERSION 1
+/* The version belay writes; its reader reads 1 and 2, each by its own key
+ * set (test/expect/manifest-v2.md, V2-R1..R3). */
+#define BELAY_MANIFEST_VERSION 2
+#define BELAY_MANIFEST_VERSION_MIN 1
+
+/* What a capture did not walk (v2's `excluded`). */
+enum belay_exclude_reason { BELAY_EXCLUDE_STATE_DIR, BELAY_EXCLUDE_USER };
+#define BELAY_EXCLUDED_MAX 32       /* the state directory and 31 configured excludes */
+struct belay_excluded {
+    char     path[4096];            /* relative to the scope; path_len bytes */
+    size_t   path_len;
+    enum belay_exclude_reason reason;
+    uint64_t dev, ino;
+};
 
 /* Defaults; overridable per run. */
 #define BELAY_XATTRS_INLINE_MAX 8192u   /* larger sets: digest only */
@@ -183,15 +196,14 @@ struct belay_manifest_opts {
      *  index): a full walk, said in stats->prefilter_skipped.
      */
     const char *previous;
-    /* The time the previous walk began, on the scope filesystem's clock
-     * (stats->walk_start_ns of that capture); 0 when unknown. A file is
-     * trusted only with a ctime before it: any write after that walk began
-     * -- during it too, after the file was read -- has a ctime at or past
-     * it (review 2026-10-31, Phase 5, 5). 0: the previous manifest's newest
-     * validated ctime is used instead, which a write during the previous
-     * walk, within its file's own ctime tick, can pass on a filesystem with
-     * coarse timestamps. */
-    int64_t  previous_start_ns;
+    /* Why every file is read, when `previous` is NULL, for the trailer's
+     * `read_all` ("asked for (--full)", "every 50 marks", ...); NULL: a full
+     * check, "check". The previous walk's start is read from the previous
+     * manifest's header (v2's `walk_start_ns`, its one source); a v1
+     * previous manifest has none, and the newest validated ctime is used,
+     * which a write during that walk within its file's own ctime tick can
+     * pass on coarse timestamps. */
+    const char *full_reason;
 
     /*
      *  A directory not walked: belay's own state directory inside the scope
@@ -200,6 +212,11 @@ struct belay_manifest_opts {
      */
     bool     exclude;
     uint64_t exclude_dev, exclude_ino;
+    /* Paths relative to the scope not walked, configured for it (v2's
+     * `excluded`, reason `user`): each matched exactly, named in the header
+     * when something was there. At most BELAY_EXCLUDED_MAX - 1. */
+    const char *const *exclude_paths;
+    size_t   n_exclude_paths;
 
     /*
      *  The scope root the caller resolved (§5.1.1): the walk refuses
@@ -225,8 +242,12 @@ struct belay_manifest_stats {
                              store failed to keep; those entries are recorded
                              without `stored` */
 
-    /* Capture only, not in the trailer (the format is frozen): */
-    size_t excluded;      /* directories not walked (opts->exclude) */
+    /* Version 2's trailer (from a reader: as read; 0 / "" for v1): */
+    char   reference[16]; /* "walk_start", "newest_ctime", "none" */
+    char   read_all[256]; /* why every file was read; "" when the prefilter was used */
+
+    /* Capture only, not in the trailer: */
+    size_t excluded;      /* entries not walked (opts->exclude, opts->exclude_paths) */
     bool   prefilter;     /* the previous manifest was used (opts->previous) */
     const char *prefilter_skipped;  /* why it was not, when one was given */
     size_t trusted;       /* files not read: unchanged by the prefilter rule */
@@ -281,11 +302,15 @@ struct belay_manifest_reader;
 
 /* The manifest's header line. Available as soon as open succeeds. */
 struct belay_manifest_header {
-    uint64_t version;
+    uint64_t version;           /* 1 or 2 */
     int64_t  created_ns;
     char     scope[4096];       /* the resolved scope root, NUL-terminated */
     uint64_t hash_max_bytes;
     uint64_t store_max_bytes;
+    /* Version 2 (0 and empty for a v1 manifest): */
+    int64_t  walk_start_ns;
+    const struct belay_excluded *excluded;   /* the reader's; n_excluded of them */
+    size_t   n_excluded;
 };
 
 /*

@@ -11,6 +11,8 @@
  *    pair    := key ':' value              (no whitespace anywhere)
  *    key     := '"' [a-z0-9_]+ '"'
  *    value   := string | integer | 'true' | '[' string (',' string)* ']'
+ *             | '[' ']' | '[' flat (',' flat)* ']'        -- version 2
+ *    flat    := '{' key ':' (string | integer) (',' key ':' (string | integer))* '}'
  *    string  := '"' (byte >= 0x20 except '"' '\' | escape)* '"'
  *    escape  := '\"' | '\\' | '\b' | '\f' | '\n' | '\r' | '\t'
  *             | '\u00' hex hex   -- lowercase, only for control bytes that
@@ -40,13 +42,13 @@
 #define LINE_MAX_BYTES (64u * 1024u)
 #define MAX_PAIRS      32
 
-enum vkind { V_STR, V_INT, V_TRUE, V_ARR };
+enum vkind { V_STR, V_INT, V_TRUE, V_ARR, V_OBJS };   /* V_ARR: strings (or none); V_OBJS: flat objects */
 
 struct pair {
     const char *key;  size_t klen;
     enum vkind kind;
     const char *val;  size_t vlen;     /* raw span: string body, digits, or array body */
-    size_t nelem;                      /* V_ARR: number of strings */
+    size_t nelem;                      /* V_ARR, V_OBJS: number of elements */
 };
 
 struct obj {
@@ -66,6 +68,10 @@ int lex_object(const char *s, size_t len, struct obj *o);
 
 /* Known keys in the order of `order`; unknown keys only after every known one. */
 int lex_order(const struct obj *o, const char *const *order, size_t n);
+
+/* The `i`th element of a V_OBJS value as an object (by lex_object's
+ * grammar, flat: string and integer values only). 0, or -1. */
+int lex_elem(const struct pair *arr, size_t i, struct obj *out);
 
 /* The pair with this key, or NULL. */
 const struct pair *lex_get(const struct obj *o, const char *key);
