@@ -118,3 +118,8 @@
 # `make oracle` (a CI step; `make check` passes) fails at both commits.
 2026-11-01T12:13:23+04:00	pins: diff values corrected; a raced swap carries V6; unreadable targets left out
 2026-11-01T12:20:51+04:00	diff: a target written on an unreadable link is carried; only "" is left out
+
+# m1/manifest-v2 (decision 2026-11-01, rows 81 and 89), merged by rebase. The diff
+# header gains its version keys one commit before the oracle's author models
+# them, so `make oracle` (a CI step; `make check` passes) fails at it.
+2026-11-01T12:42:15+04:00	manifest: version 2, written and read (pin test/expect/manifest-v2.md)
