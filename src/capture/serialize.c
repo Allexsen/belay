@@ -41,8 +41,8 @@ static int ap_bytes(char *buf, size_t cap, size_t *w, const char *key,
 
 /* One field, key included. Fields are encoded in the schema's order
  * (entry.c); byte strings use their base64 spelling when not UTF-8. */
-static int put_field(const struct belay_entry *e, enum entry_field f, char *buf, size_t cap,
-                     size_t *w) {
+int entry_put_field(const struct belay_entry *e, enum entry_field f, char *buf, size_t cap,
+                    size_t *w) {
     const char *k = ENTRY_FIELDS[f].name, *alt = ENTRY_FIELDS[f].alt;
     switch (f) {
     case F_PATH:   return ap_bytes(buf, cap, w, k, alt, e->path, e->path_len);
@@ -82,7 +82,7 @@ int entry_serialize(const struct belay_entry *e, char *buf, size_t cap, size_t *
     for (int f = 0; f < F_COUNT; f++) {
         if (!(present & FBIT(f))) continue;
         if (f > 0 && ap(buf, cap, &w, ",") == -1) return -1;
-        if (put_field(e, (enum entry_field)f, buf, cap, &w) == -1) return -1;
+        if (entry_put_field(e, (enum entry_field)f, buf, cap, &w) == -1) return -1;
     }
     if (ap(buf, cap, &w, "}\n") == -1) return -1;
     *len = w;

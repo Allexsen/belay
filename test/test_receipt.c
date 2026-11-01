@@ -307,6 +307,20 @@ TEST(and_more_findings_are_counted_in_the_receipt) {
     ASSERT_TRUE(strstr(g_text, "finding 16") == NULL);
 }
 
+/* Decision 2026-11-01, 5: a receipt shows the values diff.v1 carries where a
+ * person reads them -- a mode in octal, an owner, a size, a link target --
+ * and the other changed fields by name. */
+TEST(a_receipt_shows_the_values_a_person_reads) {
+    ASSERT_EQ_INT(0, render(HEAD
+        "{\"path\":\"etc/conf\",\"outcome\":\"metadata_only\",\"type\":\"reg\",\"changed\":[\"mode\",\"uid\",\"ctime_ns\"],"
+        "\"before\":{\"mode\":33188,\"uid\":1000,\"ctime_ns\":1},\"after\":{\"mode\":33152,\"uid\":0,\"ctime_ns\":2}}\n"
+        "{\"path\":\"l\",\"outcome\":\"modified\",\"type\":\"lnk\",\"changed\":[\"link_target\"],"
+        "\"before\":{\"link_target\":\"a\"},\"after\":{\"link_target\":\"/etc/\\u001bshadow\"}}\n"
+        TRAIL("1", "0", "1", "0", "0", "0", "0"), false));
+    ASSERT_TRUE(strstr(g_text, "  ~ etc/conf   mode 0644 -> 0600, uid 1000 -> 0, ctime_ns\n") != NULL);
+    ASSERT_TRUE(strstr(g_text, "  M l   link_target a -> /etc/\\x1bshadow\n") != NULL);
+}
+
 int main(void) {
     RUN(a_receipt_puts_events_then_privilege_then_changes);
     RUN(long_sections_fold_but_privilege_never_does);
@@ -319,6 +333,7 @@ int main(void) {
     RUN(invisible_and_invalid_bytes_are_shown_and_a_type_change_is_said);
     RUN(entries_that_changed_while_read_are_counted_in_one_line);
     RUN(and_more_findings_are_counted_in_the_receipt);
+    RUN(a_receipt_shows_the_values_a_person_reads);
     free(g_text);
     return belay_test_report();
 }

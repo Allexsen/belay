@@ -1,5 +1,6 @@
 #include "emit.h"
 
+#include "capture/serialize.h"
 #include "interp/findings_internal.h"
 
 #include "belay/error.h"
@@ -15,6 +16,12 @@
  * bytes a byte and every field name. Findings, up to 4,096 structured objects,
  * are written after it straight to the file. */
 #define EMIT_LINE_CAP (64u * 1024u)
+
+/* One side's values: at most every field of one entry -- a 4,095-byte link
+ * target escaped at six bytes a byte, an 8,192-byte inline xattr set, the
+ * rest small. The values go straight to the file after the record's head,
+ * so a record's line has no fixed bound (pin diff-values.md, V5). */
+#define EMIT_VALUES_CAP (64u * 1024u)
 
 struct buf { char *p; size_t w; };
 
@@ -64,7 +71,11 @@ int emit_open(struct emitter *em, FILE *f) {
     memset(em, 0, sizeof *em);
     em->f = f;
     em->line = malloc(EMIT_LINE_CAP);
-    if (em->line == NULL) {
+    em->vals = malloc(EMIT_VALUES_CAP);
+    if (em->line == NULL || em->vals == NULL) {
+        free(em->line);
+        free(em->vals);
+        em->line = em->vals = NULL;
         belay_err_set(BELAY_ERR_NOMEM, 0, "diff: out of memory");
         return -1;
     }
@@ -73,7 +84,52 @@ int emit_open(struct emitter *em, FILE *f) {
 
 void emit_close(struct emitter *em) {
     free(em->line);
-    em->line = NULL;
+    free(em->vals);
+    em->line = em->vals = NULL;
+}
+
+/* The fields a side's values carry (pin diff-values.md). With `changed`:
+ * those it names (V1). On type_changed: the side's mode and its type's
+ * content fields (V6). */
+static uint32_t value_fields(const struct verdict *v, const struct belay_entry *e) {
+    if (v->outcome != D_TYPE_CHANGED) return v->changed;
+    uint32_t f = FBIT(F_MODE);
+    switch (e->type) {
+    case BELAY_T_REG: f |= FBIT(F_SIZE) | FBIT(F_SHA256); break;
+    case BELAY_T_LNK: f |= FBIT(F_LINK_TARGET); break;
+    case BELAY_T_CHR: case BELAY_T_BLK: f |= FBIT(F_RDEV); break;
+    case BELAY_T_DIR: case BELAY_T_FIFO: case BELAY_T_SOCK: break;
+    }
+    return f;
+}
+
+/* ,"before":{...} or ,"after":{...}, written to the file: each wanted field
+ * the side records, in the manifest's field order, as the manifest writes
+ * it; xattrs as xattrs_sha256 where only the digest was recorded (V3). A
+ * field the side does not record is left out (V2). */
+static int put_values(struct emitter *em, enum diff_record_field key, const struct belay_entry *e,
+                      uint32_t want) {
+    const uint32_t present = entry_present(e);
+    size_t w = 0;
+    const int n = snprintf(em->vals, EMIT_VALUES_CAP, ",\"%s\":{", DIFF_RECORD_FIELDS[key].name);
+    if (n < 0) return -1;
+    w = (size_t)n;
+    bool first = true;
+    for (int f = 0; f < F_COUNT; f++) {
+        if (!(want & FBIT(f))) continue;
+        enum entry_field g = (enum entry_field)f;
+        if (g == F_XATTRS && !(present & FBIT(F_XATTRS))) g = F_XATTRS_SHA256;
+        if (!(present & FBIT(g))) continue;
+        if (!first) em->vals[w++] = ',';
+        first = false;
+        if (entry_put_field(e, g, em->vals, EMIT_VALUES_CAP - 1, &w) == -1) return -1;
+    }
+    em->vals[w++] = '}';
+    if (fwrite(em->vals, 1, w, em->f) != w) {
+        belay_err_set(BELAY_ERR_IO, errno, "diff: write failed");
+        return -1;
+    }
+    return 0;
 }
 
 int emit_header(struct emitter *em, const struct belay_manifest_header *hb,
@@ -131,6 +187,18 @@ int emit_path(struct emitter *em, const struct belay_entry *before,
             sep = ",";
         }
         if (ap(&b, "]") == -1) return -1;
+    }
+    /* The values (pin diff-values.md): after `changed`, before `unknown`.
+     * The head so far goes first; the values follow it in the file. */
+    if (v->changed || (v->outcome == D_TYPE_CHANGED && before != NULL && after != NULL)) {
+        if (fwrite(b.p, 1, b.w, em->f) != b.w) {
+            belay_err_set(BELAY_ERR_IO, errno, "diff: write failed");
+            return -1;
+        }
+        b.w = 0;
+        if (put_values(em, DF_BEFORE, before, value_fields(v, before)) == -1 ||
+            put_values(em, DF_AFTER, after, value_fields(v, after)) == -1)
+            return -1;
     }
     if (v->outcome == D_UNKNOWN && v->reasons) {
         if (ap(&b, ",\"%s\":[", R[DF_UNKNOWN].name) == -1) return -1;

@@ -36,7 +36,10 @@ struct me {
     long long mtime, ctime;
     unsigned mode;                       /* permission bits; type bits added */
     const char *sha;                     /* reg: NULL means unverified */
-    const char *target;                  /* lnk */
+    const char *target;                  /* lnk: as written, JSON-escaped */
+    size_t target_len;                   /* its decoded length, when escapes make it shorter */
+    const char *target_b64;              /* lnk: link_target_b64 instead */
+    const char *xattrs_sha;              /* xattrs_sha256 (a set recorded by digest) */
     const char *stored;                  /* reg: the stored copy's hash */
     bool unstable, unreadable, mount, raced, xattrs_unknown;
     unsigned long long dev;              /* 0: 1 */
@@ -69,7 +72,7 @@ static void m_entry(struct me e) {
     const bool sock = strcmp(e.type, "sock") == 0;
     const unsigned tbits = reg ? 0100000 : dir ? 0040000 : lnk ? 0120000 : chr ? 0020000
                          : blk ? 0060000 : sock ? 0140000 : 0010000;
-    if (lnk && e.target != NULL && !e.unreadable) e.size = strlen(e.target);
+    if (lnk && e.target != NULL && !e.unreadable) e.size = e.target_len ? e.target_len : strlen(e.target);
     fprintf(g_f, "{\"path\":\"%s\",\"type\":\"%s\",\"mode\":%u,\"uid\":1,\"gid\":1,\"size\":%llu,"
                  "\"mtime_ns\":%lld,\"ctime_ns\":%lld,\"ino\":%llu,\"dev\":%llu,\"nlink\":1",
             e.path, e.type, tbits | (e.mode ? e.mode : 0644), e.size, e.mtime ? e.mtime : 1,
@@ -77,11 +80,13 @@ static void m_entry(struct me e) {
     if (e.has_iflags) fprintf(g_f, ",\"iflags\":%llu", e.iflags);
     if (e.caps) fprintf(g_f, ",\"caps\":\"%s\"", e.caps);
     if (e.xattrs) fprintf(g_f, ",\"xattrs\":[%s]", e.xattrs);
+    if (e.xattrs_sha) fprintf(g_f, ",\"xattrs_sha256\":\"%s\"", e.xattrs_sha);
     if (e.xattrs_unknown) fprintf(g_f, ",\"xattrs_unknown\":true");
     if (reg) fprintf(g_f, e.sha ? ",\"sha256\":\"%s\"" : ",\"unverified\":true", e.sha);
     if (e.unstable) fprintf(g_f, ",\"unstable\":true");
     if (chr || blk) fprintf(g_f, ",\"rdev\":%llu", e.rdev ? e.rdev : 3);
-    if (lnk) fprintf(g_f, ",\"link_target\":\"%s\"", e.target ? e.target : "");
+    if (lnk && e.target_b64) fprintf(g_f, ",\"link_target_b64\":\"%s\"", e.target_b64);
+    else if (lnk) fprintf(g_f, ",\"link_target\":\"%s\"", e.target ? e.target : "");
     if (e.stored) fprintf(g_f, ",\"stored\":\"%s\"", e.stored);
     if (e.mount) fprintf(g_f, ",\"mount\":true");
     if (e.unreadable) fprintf(g_f, ",\"unreadable\":true");
@@ -250,8 +255,10 @@ TEST(a_mount_roots_unread_attributes_are_not_compared) {
         m_begin(way ? "before" : "after", "/s", 1000); ROOT();
         E(.path = "m", .type = "dir", .mount = true, .dev = 2); m_end();
         REQUIRE(run() == 0);
-        ASSERT_TRUE(has("m", "\"outcome\":\"unknown\",\"type\":\"dir\",\"changed\":[\"dev\"],"
-                             "\"unknown\":[\"mount\"]}"));
+        char want[200];                       /* with the values (pin diff-values.md) */
+        snprintf(want, sizeof want, "\"outcome\":\"unknown\",\"type\":\"dir\",\"changed\":[\"dev\"],"
+                 "\"before\":{\"dev\":%d},\"after\":{\"dev\":%d},\"unknown\":[\"mount\"]}", way ? 2 : 1, way ? 1 : 2);
+        ASSERT_TRUE(has("m", want));
     }
 }
 
@@ -265,8 +272,10 @@ TEST(a_mounted_file_is_unknown_for_mount_not_unverified) {
         m_begin(way ? "before" : "after", "/s", 1000); ROOT();
         E(.path = "f", .type = "reg", .size = 3, .mount = true, .dev = 2); m_end();
         REQUIRE(run() == 0);
-        ASSERT_TRUE(has("f", "\"outcome\":\"unknown\",\"type\":\"reg\",\"changed\":[\"dev\"],"
-                             "\"unknown\":[\"mount\"]}"));
+        char want[200];
+        snprintf(want, sizeof want, "\"outcome\":\"unknown\",\"type\":\"reg\",\"changed\":[\"dev\"],"
+                 "\"before\":{\"dev\":%d},\"after\":{\"dev\":%d},\"unknown\":[\"mount\"]}", way ? 2 : 1, way ? 1 : 2);
+        ASSERT_TRUE(has("f", want));
     }
     /* the other side unverified for its own reason: larger than its hash limit */
     m_begin("before", "/s", 1000); ROOT(); E(.path = "f", .type = "reg", .size = 3000); m_end();
@@ -884,7 +893,8 @@ TEST(a_directorys_own_timestamps_are_counted_never_emitted) {
     ASSERT_TRUE(record("a") == NULL && record("c") == NULL && record("m") == NULL);
     ASSERT_TRUE(record("f") == NULL && record("s") == NULL);
     ASSERT_TRUE(has("a/x", "\"outcome\":\"added\""));
-    ASSERT_TRUE(has("p", "\"outcome\":\"metadata_only\",\"type\":\"dir\",\"changed\":[\"mode\"]}"));
+    ASSERT_TRUE(has("p", "\"outcome\":\"metadata_only\",\"type\":\"dir\",\"changed\":[\"mode\"],"
+                         "\"before\":{\"mode\":16804},\"after\":{\"mode\":16832}}"));
     ASSERT_TRUE(has("q", "\"outcome\":\"unknown\",\"type\":\"dir\",\"unknown\":[\"unstable\"]}"));
     ASSERT_TRUE(strstr(g_text, "\"unchanged\":6,\"added\":1,\"removed\":0,\"modified\":0,"
                                "\"type_changed\":0,\"metadata_only\":1,\"unknown\":1,"
@@ -914,7 +924,8 @@ TEST(a_raced_type_change_names_the_type_before) {
     m_begin("after", "/s", 1000); ROOT(); E(.path = "x", .type = "lnk", .target = "t", .raced = true); m_end();
     REQUIRE(run() == 0);
     ASSERT_TRUE(has("x", "\"outcome\":\"unknown\",\"type\":\"lnk\",\"type_before\":\"reg\","
-                         "\"changed\":[\"type\"],\"unknown\":[\"raced\"]}"));
+                         "\"changed\":[\"type\"],\"before\":{\"type\":\"reg\"},\"after\":{\"type\":\"lnk\"},"
+                         "\"unknown\":[\"raced\"]}"));
     /* raced on the other side, the same */
     m_begin("before", "/s", 1000); ROOT(); E(.path = "x", .type = "reg", .size = 3, .sha = HA, .raced = true); m_end();
     m_begin("after", "/s", 1000); ROOT(); E(.path = "x", .type = "lnk", .target = "t"); m_end();
@@ -939,7 +950,8 @@ TEST(raced_is_unknown_even_when_a_field_differs) {
     m_end();
     ASSERT_EQ_INT(0, run());
     ASSERT_TRUE(has("r", "\"outcome\":\"unknown\""));
-    ASSERT_TRUE(has("r", "\"changed\":[\"sha256\"],\"unknown\":[\"raced\"]"));
+    ASSERT_TRUE(has("r", "\"changed\":[\"sha256\"],\"before\":{\"sha256\":\"" HA "\"},"
+                         "\"after\":{\"sha256\":\"" HB "\"},\"unknown\":[\"raced\"]"));
 }
 
 /* Rule 3 and 4 with xattrs_unknown: metadata unknown unless content proves
@@ -1195,6 +1207,98 @@ TEST(no_flag_combination_on_either_side_is_unchanged) {
     ASSERT_TRUE(checked > 20000);
 }
 
+/* ---- before and after values (test/expect/diff-values.md) ---- */
+
+/* V1: every field `changed` names, on each side, in the manifest's field
+ * order and encoding; V2: a field a side does not record is left out. */
+TEST(values_carry_each_changed_field_on_each_side) {
+    m_begin("before", "/s", 1000); ROOT();
+    E(.path = "a", .type = "reg", .size = 3, .sha = HA, .mode = 0644, .mtime = 5);
+    E(.path = "c", .type = "reg", .size = 3, .sha = HA);
+    m_end();
+    m_begin("after", "/s", 1000); ROOT();
+    E(.path = "a", .type = "reg", .size = 3, .sha = HA, .mode = 04755, .mtime = 9);
+    E(.path = "c", .type = "reg", .size = 3, .sha = HA, .caps = "0100000200200000");
+    m_end();
+    REQUIRE(run() == 0);
+    ASSERT_TRUE(has("a", "\"changed\":[\"mode\",\"mtime_ns\"],\"before\":{\"mode\":33188,\"mtime_ns\":5},"
+                         "\"after\":{\"mode\":35309,\"mtime_ns\":9}}"));
+    /* caps on one side only: the side without them carries nothing (V2) */
+    ASSERT_TRUE(has("c", "\"changed\":[\"caps\"],\"before\":{},\"after\":{\"caps\":\"0100000200200000\"}}"));
+}
+
+/* V3: a value the manifest spells another way keeps that spelling, each
+ * side its own. */
+TEST(values_keep_the_manifests_alternate_spellings) {
+    m_begin("before", "/s", 1000); ROOT();
+    E(.path = "l", .type = "lnk", .target = "t");
+    E(.path = "x", .type = "reg", .size = 3, .sha = HA, .xattrs = "\"user.a=" HA "\"");
+    m_end();
+    m_begin("after", "/s", 1000); ROOT();
+    E(.path = "l", .type = "lnk", .target = "x", .target_len = 1, .target_b64 = "/w==");
+    E(.path = "x", .type = "reg", .size = 3, .sha = HA, .xattrs_sha = HB);
+    m_end();
+    REQUIRE(run() == 0);
+    ASSERT_TRUE(has("l", "\"before\":{\"link_target\":\"t\"},\"after\":{\"link_target_b64\":\"/w==\"}"));
+    ASSERT_TRUE(has("x", "\"before\":{\"xattrs\":[\"user.a=" HA "\"]},\"after\":{\"xattrs_sha256\":\"" HB "\"}"));
+}
+
+/* V6: a type change carries each side's mode and its type's content
+ * fields -- a test file replaced by a symlink names the target. */
+TEST(a_type_change_carries_each_sides_content_fields) {
+    m_begin("before", "/s", 1000); ROOT();
+    E(.path = "d", .type = "dir");
+    E(.path = "t", .type = "reg", .size = 3, .sha = HA);
+    E(.path = "u", .type = "reg", .size = 2000);                       /* over hash_max: no sha256 */
+    m_end();
+    m_begin("after", "/s", 1000); ROOT();
+    E(.path = "d", .type = "chr", .rdev = 7);
+    E(.path = "t", .type = "lnk", .target = "fixtures/real.py");
+    E(.path = "u", .type = "dir");
+    m_end();
+    REQUIRE(run() == 0);
+    ASSERT_TRUE(has("t", "\"outcome\":\"type_changed\",\"type\":\"lnk\",\"type_before\":\"reg\","
+                         "\"changed\":[\"type\"],\"before\":{\"mode\":33188,\"size\":3,\"sha256\":\"" HA "\"},"
+                         "\"after\":{\"mode\":41380,\"link_target\":\"fixtures/real.py\"}}"));
+    ASSERT_TRUE(has("d", "\"before\":{\"mode\":16804},\"after\":{\"mode\":8612,\"rdev\":7}}"));
+    ASSERT_TRUE(has("u", "\"before\":{\"mode\":33188,\"size\":2000},\"after\":{\"mode\":16804}}"));
+}
+
+/* V5: a record's line has no fixed bound: two 4,095-byte targets of
+ * control bytes (escaped six bytes a byte) and two inline xattr sets of
+ * about 8 KB pass the old 64 KiB cap. */
+TEST(a_record_line_has_no_fixed_bound) {
+    static char tb[4095 * 6 + 1], ta[4095 * 6 + 1], xb[8192], xa[8192], name[100 * 6 + 1];
+    name[0] = 'z';                                                    /* after "." in path order */
+    for (int i = 0; i < 99; i++) memcpy(name + 1 + 6 * i, "\\u0003", 6);
+    for (int i = 0; i < 4095; i++) {
+        memcpy(tb + 6 * i, "\\u0001", 6);
+        memcpy(ta + 6 * i, "\\u0002", 6);
+    }
+    size_t wb = 0, wa = 0;
+    for (int i = 0; i < 106; i++) {                                   /* 8,161 bytes, within A1 */
+        wb += (size_t)snprintf(xb + wb, sizeof xb - wb, "%s\"user.a%03d=" HA "\"", i ? "," : "", i);
+        wa += (size_t)snprintf(xa + wa, sizeof xa - wa, "%s\"user.a%03d=" HB "\"", i ? "," : "", i);
+    }
+    m_begin("before", "/s", 1000); ROOT();
+    E(.path = name, .type = "lnk", .target = tb, .target_len = 4095, .xattrs = xb); m_end();
+    m_begin("after", "/s", 1000); ROOT();
+    E(.path = name, .type = "lnk", .target = ta, .target_len = 4095, .xattrs = xa); m_end();
+    char b[400], a[400];
+    snprintf(b, sizeof b, "%s/before", g_dir);
+    snprintf(a, sizeof a, "%s/after", g_dir);
+    REQUIRE(belay_diff(b, a, g_out, NULL, &g_st) == 0);
+    FILE *f = fopen(g_out, "rb");
+    REQUIRE(f != NULL);
+    char *line = NULL;
+    size_t cap = 0, longest = 0;
+    ssize_t got;
+    while ((got = getline(&line, &cap, f)) > 0) if ((size_t)got > longest) longest = (size_t)got;
+    free(line);
+    fclose(f);
+    ASSERT_TRUE(longest > 65536);                                      /* past the old cap */
+}
+
 int main(void) {
     snprintf(g_dir, sizeof g_dir, "/tmp/belay_diff_%d", (int)getpid());
     snprintf(g_out, sizeof g_out, "%s/diff.ndjson", g_dir);
@@ -1246,6 +1350,10 @@ int main(void) {
     RUN(absence_below_a_file_is_known);
     RUN(absence_below_a_raced_non_directory_is_unknown);
     RUN(no_flag_combination_on_either_side_is_unchanged);
+    RUN(values_carry_each_changed_field_on_each_side);
+    RUN(values_keep_the_manifests_alternate_spellings);
+    RUN(a_type_change_carries_each_sides_content_fields);
+    RUN(a_record_line_has_no_fixed_bound);
     snprintf(cmd, sizeof cmd, "rm -rf '%s'", g_dir);
     if (system(cmd) != 0) { /* best effort */ }
     return belay_test_report();

@@ -128,6 +128,41 @@ static const char *sym(const char *outcome) {
     return "?";
 }
 
+/* One side's value of `field` from the record's before/after object, as a
+ * person reads it: a mode's permission bits in octal, a number, a string
+ * escaped. 0 when shown; -1 when that side carries none. */
+static int value(struct sb *b, const struct jval *side, const char *field) {
+    const struct jval *v = jget(side, field);
+    if (v == NULL) return -1;
+    if (v->t == J_NUM && strcmp(field, "mode") == 0) sbf(b, "%04llo", (unsigned long long)v->i & 07777);
+    else if (v->t == J_NUM) sbf(b, "%lld", (long long)v->i);
+    else if (v->t == J_STR) escs(b, v);
+    else return -1;
+    return 0;
+}
+
+/* The changed fields, each with its values where a person reads them as
+ * such -- "mode 0644 -> 0600", "uid 1000 -> 0" (decision 2026-11-01, 5:
+ * receipts need them) -- the others by name: hashes and times say nothing
+ * more than "changed". */
+static void changed_values(struct sb *b, const struct jval *r, const struct jval *ch) {
+    static const char *const SHOWN[] = { "mode", "uid", "gid", "size", "link_target", "nlink" };
+    const struct jval *bf = jget(r, "before"), *af = jget(r, "after");
+    for (size_t i = 0; i < ch->n; i++) {
+        if (ch->kids[i].t != J_STR) continue;
+        const char *f = ch->kids[i].s;
+        sbf(b, "%s", i ? ", " : "");
+        escs(b, &ch->kids[i]);
+        bool shown = false;
+        for (size_t k = 0; k < sizeof SHOWN / sizeof SHOWN[0]; k++) shown |= strcmp(f, SHOWN[k]) == 0;
+        if (!shown || jget(bf, f) == NULL || jget(af, f) == NULL) continue;
+        sbf(b, " ");
+        value(b, bf, f);
+        sbf(b, " -> ");
+        value(b, af, f);
+    }
+}
+
 /* What makes a record a privilege change, said; nothing when it is none.
  * The special mode bits and file capabilities are compared across the two
  * sides whatever the outcome: a file added setuid, or removed with caps, is
@@ -193,7 +228,7 @@ static int record(const struct jval *r, struct lines *priv, struct lines *other,
         escs(&b, jget(r, "type"));
     } else if (strcmp(outcome, "metadata_only") == 0 || strcmp(outcome, "modified") == 0) {
         const struct jval *ch = jget(r, "changed");
-        if (ch != NULL && ch->n && !jget(r, "findings")) { sbf(&b, "   "); list(&b, ch); }
+        if (ch != NULL && ch->n && !jget(r, "findings")) { sbf(&b, "   "); changed_values(&b, r, ch); }
     }
     free(why.p);
     /* A record past the 4,096-finding cap ends in an and_more finding
