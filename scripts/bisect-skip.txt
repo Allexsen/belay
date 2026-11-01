@@ -106,3 +106,9 @@
 # the oracle's update by its own author follows it, so `make oracle` (a CI
 # step of linux-x86_64; `make check` itself passes) fails at that one commit.
 2026-11-01T10:19:47+04:00	docs: the four spec sentences resolved as built; receipts count what moved
+
+# m1/diff-values (decisions 2026-11-01: 5, 6), merged by rebase. The emitter
+# carries the values two commits before the oracle's author models them, so
+# `make oracle` (a CI step of linux-x86_64; `make check` passes) fails at both.
+2026-11-01T11:37:58+04:00	diff: before and after values for every changed field (pin diff-values.md)
+2026-11-01T11:37:58+04:00	spec: the three reflog rules the separate authors had to infer
