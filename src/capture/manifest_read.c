@@ -237,6 +237,16 @@ int belay_manifest_next(struct belay_manifest_reader *r, struct belay_entry *e) 
 
     if (decode_entry(&o, e) == -1) return fail(r);
     if (entry_check_header(&r->header, e) == -1) return fail(r);
+    /* v2: nothing at or below an excluded path is recorded (V2-2); a
+     * manifest that records one is not what a writer writes. */
+    for (size_t i = 0; i < r->header.n_excluded; i++) {
+        const struct belay_excluded *x = &r->header.excluded[i];
+        if (e->path_len >= x->path_len && memcmp(e->path, x->path, x->path_len) == 0 &&
+            (e->path_len == x->path_len || e->path[x->path_len] == '/')) {
+            lex_corrupt("an entry at or below an excluded path");
+            return fail(r);
+        }
+    }
 
     if (stream_entry(&r->st, e) == -1) return fail(r);
     return 1;

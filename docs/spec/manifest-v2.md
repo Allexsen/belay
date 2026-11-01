@@ -37,7 +37,8 @@ Each element of `excluded` is a flat object with these keys, in this order:
 An excluded path is relative to the scope and canonical, as entry paths are (base64 as
 `path_b64` when not UTF-8); the elements are sorted by path bytes, each path once. Nothing below
 an excluded path is recorded. A path configured for exclusion that was not there is not listed:
-nothing was hidden.
+nothing was hidden. A reader rejects a manifest that records an entry at or below one of its
+excluded paths.
 
 ## The trailer
 
