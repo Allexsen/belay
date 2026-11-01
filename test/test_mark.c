@@ -411,6 +411,58 @@ TEST(a_small_binary_file_without_a_copy_is_trusted) {
     free(b);
 }
 
+/* Decision 2026-11-01, 2: without the previous walk's start (belay's
+ * state on another filesystem), mark falls back to the newest recorded
+ * ctime -- sound on fine-grained timestamps, not on coarse ones. When every
+ * recorded ctime has a zero nanosecond part, it reads every file, and says
+ * why. */
+TEST(the_fallback_reads_everything_on_coarse_timestamps) {
+    char prev[400], next[400];
+    snprintf(prev, sizeof prev, "%s/p.ndjson", g_dir);
+    snprintf(next, sizeof next, "%s/n.ndjson", g_dir);
+    struct belay_manifest_stats st;
+    g_round_ns = 1000000000L;
+    fresh_tree();
+    next_tick(g_round_ns);
+    REQUIRE(capture(prev, NULL, &st) == 0);
+    g_last_start = 0;                                   /* the walk's start unknown */
+    REQUIRE(capture(next, prev, &st) == 0);
+    ASSERT_TRUE(!st.prefilter);
+    ASSERT_TRUE(st.prefilter_skipped != NULL && strstr(st.prefilter_skipped, "coarse") != NULL);
+    g_round_ns = 0;
+    fresh_tree();
+    const struct timespec tick = { 0, 50000000L };
+    nanosleep(&tick, NULL);
+    REQUIRE(capture(prev, NULL, &st) == 0);
+    g_last_start = 0;
+    REQUIRE(capture(next, prev, &st) == 0);
+    ASSERT_TRUE(st.prefilter);                          /* fine-grained: the fallback stands */
+    ASSERT_TRUE(st.reference_ns == st.previous_newest_ns);
+}
+
+/* Decision 2026-11-01, 6: a reflog is kept up to 16 MiB, whatever
+ * store_max_bytes says (4,096 here): a 100,000-byte reflog is stored. */
+TEST(a_reflog_is_kept_past_the_store_limit) {
+    g_round_ns = 0;
+    fresh_tree();
+    char cmd[1400], out[400];
+    snprintf(cmd, sizeof cmd, "mkdir -p '%s/r/.git/logs' && head -c 100000 /dev/zero | tr '\\0' x > '%s/r/.git/logs/HEAD' "
+             "&& head -c 100000 /dev/zero | tr '\\0' y > '%s/r/plain.txt'", g_tree, g_tree, g_tree);
+    if (system(cmd) != 0) { /* the assertions say */ }
+    snprintf(out, sizeof out, "%s/c.ndjson", g_dir);
+    struct belay_manifest_stats st;
+    REQUIRE(capture(out, NULL, &st) == 0);
+    char *b = body(out);
+    REQUIRE(b != NULL);
+    const char *log = strstr(b, "\"path\":\"r/.git/logs/HEAD\""), *plain = strstr(b, "\"path\":\"r/plain.txt\"");
+    REQUIRE(log != NULL && plain != NULL);
+    const char *log_end = strchr(log, '\n'), *plain_end = strchr(plain, '\n');
+    const char *ls = strstr(log, "\"stored\""), *ps = strstr(plain, "\"stored\"");
+    ASSERT_TRUE(ls != NULL && ls < log_end);                      /* claimed: kept */
+    ASSERT_TRUE(ps == NULL || ps > plain_end);                    /* unclaimed, over 4,096: not */
+    free(b);
+}
+
 /* S3 (M3): a file rewritten at the same size with its mtime put back -- the
  * classic case only ctime reveals -- is read, and its new hash recorded. */
 TEST(a_same_size_rewrite_with_its_mtime_restored_is_read) {
@@ -532,6 +584,8 @@ int main(void) {
     RUN(a_rewrite_during_the_walk_after_its_read_is_read_by_every_mark);
     RUN(a_mark_keeps_the_copies_a_full_capture_would);
     RUN(a_small_binary_file_without_a_copy_is_trusted);
+    RUN(the_fallback_reads_everything_on_coarse_timestamps);
+    RUN(a_reflog_is_kept_past_the_store_limit);
     RUN(an_unusable_previous_manifest_means_a_full_walk);
     RUN(the_walk_reports_the_newest_ctime_it_saw);
     RUN(an_excluded_directory_is_not_recorded);

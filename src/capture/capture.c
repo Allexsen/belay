@@ -398,7 +398,9 @@ int cap_read_file(int pfd, const char *name, const struct stat *st, const char *
         }
     }
     bool want = wc->store != NULL && claim.keep != BELAY_KEEP_HASH &&
-                (claim.keep == BELAY_KEEP_STORE || e->size <= wc->opts->store_max_bytes);
+                (claim.keep == BELAY_KEEP_STORE || e->size <= (claim.keep == BELAY_KEEP_STORE_BOUNDED
+                                                                   ? (uint64_t)BELAY_KEEP_BOUNDED_MAX
+                                                                   : wc->opts->store_max_bytes));
 
     /* mark's prefilter: unchanged since the previous manifest, by the rule
      * (previous.h), so not read -- its hash is the previous entry's. It is

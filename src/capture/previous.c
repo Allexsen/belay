@@ -137,7 +137,9 @@ int prev_load(const struct fsops *ops, const char *path, const char *scope, uint
         return -1;
     }
     int got, rc = 0;
+    bool fine = false;                       /* some recorded ctime has a nanosecond part */
     while ((got = belay_manifest_next(rd, e)) == 1) {
+        if (e->ctime_ns % 1000000000 != 0) fine = true;
         if (!e->raced && !e->unstable && !e->unreadable && e->ctime_ns > info->newest_validated_ns)
             info->newest_validated_ns = e->ctime_ns;
         if (e->type != BELAY_T_REG || !e->has_hash || e->raced || e->unstable) continue;
@@ -161,7 +163,16 @@ int prev_load(const struct fsops *ops, const char *path, const char *scope, uint
         return rc;
     }
     /* R: the previous walk's start on the scope's clock, when known (opts);
-     * else its newest validated ctime (decision Q2's fallback). */
+     * else its newest validated ctime (decision Q2's fallback). That fallback
+     * misses a same-size rewrite made during the previous walk in its file's
+     * own tick, which needs coarse timestamps: when every recorded ctime has
+     * a zero nanosecond part, every file is read instead (decision
+     * 2026-11-01, 2). On fine-grained timestamps the fallback is sound. */
+    if (opts->previous_start_ns <= 0 && !fine) {
+        prev_free(p);
+        *why = "the previous walk's start is unknown and the scope's timestamps are coarse";
+        return 1;
+    }
     info->reference_ns = opts->previous_start_ns > 0 ? opts->previous_start_ns : info->newest_validated_ns;
     *out = p;
     return 0;
