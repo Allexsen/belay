@@ -153,7 +153,8 @@ const struct line_field_def DIFF_RECORD_FIELDS[DF_COUNT] = {
     [DF_BEFORE] = { "before", NULL, "object",
         "With `changed`: each field it names, the before side's value under the manifest's key and "
         "encoding (`link_target_b64`, `xattrs_sha256` where the manifest spells it so); a field that "
-        "side does not record is left out. On `type_changed`: that side's `mode` and its type's "
+        "side does not record is left out. Where the type differs (`type_changed`, or `unknown` with "
+        "`type_before`): that side's `mode` and its type's "
         "content fields (`size`, `sha256` for `reg`; `link_target` for `lnk`; `rdev` for `chr`, "
         "`blk`). Carried, never compared: the outcome does not depend on it "
         "(`test/expect/diff-values.md`)." },
