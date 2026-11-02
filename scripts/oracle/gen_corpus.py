@@ -10,6 +10,8 @@ Writes, and prints the number of, pairs:
   pair-NNNNN.label             what the pair was built to exercise -- for
                                messages only: compare.py computes coverage
                                from the manifests themselves;
+  pair-NNNNN.store/            for a pair given a store (git's events): the
+                               copies, at `<2 hex>/<62 hex>` of their sha256;
   scope-NNNNN.before / .after  two manifests of different scopes, which the
                                diff must refuse.
 
@@ -92,6 +94,19 @@ The corpus has three parts:
     manifest's limit, addendum A4, which the generator keeps to),
     directories under hooks/, symlinks and directories under logs/refs/, a
     hook that becomes a symlink or back, and an unclaimed file below .git/;
+    git's repository-level events with a store (git_events(), diff-events
+    E12): branches created (by their reflog's zeros, by packed-refs without
+    them), moved with no evidence of before, deleted (packed-refs not a path
+    of this diff, or one without them; only in packed-refs), packed at the
+    same commits, renamed (with HEAD on them; another branch between the two
+    names), commits added (counted, or not with a fast-forward or merge),
+    each rewrite and several, reflogs that do not chain or gained none,
+    another operation, HEAD switched, detached and attached, a detached
+    HEAD moved, four repositories nested and side by side, `unknown` refs
+    and packed-refs read from their copies (provisional) or with none,
+    a reflog that cannot be read, a packed-refs touched but unchanged, a ref
+    that cannot be parsed, tags and remote-tracking refs, and copies
+    missing, corrupt (other bytes, a symlink) and over a loose ref's bound;
     and the values a record carries (values(), diff-values.md): link
     targets not UTF-8 on both sides, a type change whose symlink's target
     is not UTF-8, unknown or written on an unreadable link, or whose
@@ -955,6 +970,22 @@ def v2_violations(t, st):
     return v
 
 
+def write_store(path, store):
+    """A store directory: each copy at `<store>/<the first two hex digits of
+    its sha256>/<the other 62>` (diff-v1, "Content"); a copy given as
+    ('symlink', target) is a symbolic link there."""
+    for name, data in sorted(store.items()):
+        d = os.path.join(path, name[:2])
+        os.makedirs(d, exist_ok=True)
+        f = os.path.join(d, name[2:])
+        if isinstance(data, tuple):
+            os.symlink(data[1], f)
+        else:
+            with open(f, 'wb') as fh:
+                fh.write(data)
+    os.makedirs(path, exist_ok=True)
+
+
 class Writer:
     def __init__(self, out, seed):
         self.out, self.k, self.s = out, 0, 0
@@ -988,10 +1019,12 @@ class Writer:
         else:
             assert version == 2, version
 
-    def pair(self, b, a, label, versions=None, statements=(None, None)):
+    def pair(self, b, a, label, versions=None, statements=(None, None), store=None):
         """One pair, in `versions` (before, after) or the next combination of
         the cycle; statements: each side's v2 statements, or None for the
-        next of the cycle."""
+        next of the cycle; store: {name: bytes, or ('symlink', target)}, the
+        copies of the store the diff is given (pair-NNNNN.store/, laid out as
+        diff-v1 "Content" says), or None for a diff given no store."""
         assert b.scope == a.scope
         for t in (b, a):
             v = violations(t)
@@ -1009,15 +1042,17 @@ class Writer:
         self.write_both_versions(a, stem + '.after', va, sa)
         with open(stem + '.label', 'w', encoding='utf-8') as f:
             f.write(label + '\n')
+        if store is not None:
+            write_store(stem + '.store', store)
         self.k += 1
         return stem
 
-    def both_ways(self, b, a, label, versions=None, statements=(None, None)):
+    def both_ways(self, b, a, label, versions=None, statements=(None, None), store=None):
         """The pair and its reverse; given versions and statements go with
-        their manifest."""
-        return [self.pair(b, a, label, versions, statements),
+        their manifest; both are given the same store."""
+        return [self.pair(b, a, label, versions, statements, store),
                 self.pair(a, b, label + ' (reversed)', versions and versions[::-1],
-                          statements[::-1])]
+                          statements[::-1], store)]
 
     def targeted(self, rng, label, build, cells=(), pairs=(), optional=(), scenarios=(),
                  interp=(), version=(), versions=None, statements=(None, None)):
@@ -1035,7 +1070,8 @@ class Writer:
         r = build(rng)
         if r is None:
             die('could not build the targeted pair %r' % label)
-        stems = self.both_ways(r[0], r[1], label, versions, statements)
+        stems = self.both_ways(r[0], r[1], label, versions, statements,
+                               r[2] if len(r) > 2 else None)
         self.targeted_stems += stems
         cov = compare.coverage(stems)
         want = ([('cell', c) for c in cells] + [('field pair', p) for p in pairs]
@@ -3520,6 +3556,368 @@ def interpreters(w, rng):
         ['events: from pip and dpkg in one diff'])
 
 
+# ---------------------------------------------------------------------------
+# git's repository-level events (test/expect/diff-events.md E12), with a
+# store: pairs whose HEAD, loose refs, packed-refs and reflogs have copies in
+# the store the diff is given, so git reads them. Only git's paths are stored
+# there (a text, pip or dpkg copy the reference does not compute is never in
+# a store). The content is git's own format, as git writes it.
+
+GIT_ZERO = '0' * 40
+GIT_IDENT = 'A U Thor <a@example.com> %d +0000'
+
+
+def git_packed(*refs):
+    """packed-refs: its header, then `<id> <name>` lines (a `^<id>` peeled
+    line after a tag given as (id, name, peeled))."""
+    out = b'# pack-refs with: peeled fully-peeled sorted \n'
+    for r in refs:
+        out += ('%s %s\n' % (r[0], r[1])).encode()
+        if len(r) > 2:
+            out += ('^%s\n' % r[2]).encode()
+    return out
+
+
+def git_reflog(*entries):
+    """A reflog: `<old> <new> <identity> <time> <zone>\\t<message>` lines."""
+    return b''.join(('%s %s %s\t%s\n' % (old, new, GIT_IDENT % (1761000000 + i), msg)).encode()
+                    for i, (old, new, msg) in enumerate(entries))
+
+
+def git_loose(oid):
+    return (oid + '\n').encode()
+
+
+def git_head(target):
+    """HEAD: `ref: refs/heads/<branch>` for a branch name (str), else the
+    commit it is detached at."""
+    if len(target) == 40 and all(c in '0123456789abcdef' for c in target):
+        return git_loose(target)
+    return ('ref: refs/heads/%s\n' % target).encode()
+
+
+def content_entry(rng, t, path, data, base=None):
+    """A regular file holding `data`: hashed (the tree's limit holds it),
+    `stored` -- its copy named by its sha256 -- and, given `base` (the same
+    path before), the same inode, owner and mode, later times."""
+    e = file_at(rng, t, path, stored=True, mode=0o644)
+    e['size'] = len(data)
+    e['sha256'] = e['stored'] = hashlib.sha256(data).hexdigest()
+    if base is not None:
+        for k in ('mode', 'uid', 'gid', 'ino', 'dev', 'nlink'):
+            e[k] = base[k]
+        e['mtime_ns'] = base['mtime_ns'] + rng.randrange(1, 10 ** 9)
+        e['ctime_ns'] = base['ctime_ns'] + rng.randrange(1, 10 ** 9)
+    return e
+
+
+def git_build(rng, files):
+    """(before, after, store) from files [(path, before bytes or None, after
+    bytes or None, options)]. Equal bytes on both sides are one unchanged
+    entry. Options: raced -- the after entry `raced` (unknown, read from its
+    copy); iflags -- iflags on the after side only (unknown on both sides);
+    unstored -- that side's entry records no `stored` copy (`missing`);
+    (iflags on one side only makes an unchanged file unknown, a changed one
+    stays modified: content proves the change, so it is not used here);
+    lacking -- that side's copy is stored but not in the store (`missing`);
+    chmod -- equal bytes, after's mode changed (metadata_only);
+    corrupt -- the store holds other bytes under that side's name;
+    symlink -- the store holds a symlink there (`corrupt` both)."""
+    t = interp_tree(rng, limit=10 ** 9)
+    for path, _, _, _ in files:
+        ensure_dirs(t, rng, path)
+    a = t.copy()
+    store = {}
+    for path, xb, xa, kw in files:
+        eb = ea = None
+        if xb is not None:
+            eb = t.e[path] = content_entry(rng, t, path, xb)
+        if xa is not None:
+            if xa == xb and kw.get('chmod'):
+                ea = dict(eb, mode=eb['mode'] ^ 0o040, ctime_ns=eb['ctime_ns'] + 1)
+            elif xa == xb and not kw.get('raced') and not kw.get('iflags'):
+                ea = dict(eb)
+            else:
+                ea = content_entry(rng, a, path, xa, base=eb)
+            if kw.get('raced'):
+                ea['raced'] = True
+            if kw.get('iflags'):
+                ea['iflags'] = rng.choice(IFLAGS[1:])
+                ea.pop('xattrs_unknown', None)
+            a.e[path] = ea
+        for side, e, x in (('before', eb, xb), ('after', ea, xa)):
+            if e is None:
+                continue
+            if kw.get('unstored') == side:
+                e.pop('stored')
+            elif kw.get('lacking') == side:
+                pass
+            elif kw.get('corrupt') == side:
+                store[e['stored']] = x + b'corrupt\n'
+            elif kw.get('symlink') == side:
+                store[e['stored']] = ('symlink', '../' + e['stored'][:2] + '/elsewhere')
+            else:
+                store[e['stored']] = x
+    return t, a, store
+
+
+def git_events(w, rng):
+    """E12's rules, each in a pair (and its reverse, which Writer.targeted
+    writes too: a creation's reverse is a deletion, an attach's a detach)."""
+    oid = lambda: hexs(rng, 40)
+    Z, O = GIT_ZERO, {}
+    S = lambda **kw: kw
+    repo = lambda rng: rng.choice([b'', b'repo/', b'work/src/proj/']) + b'.git/'
+
+    def one(label, files, interp):
+        w.targeted(rng, label, lambda rng: git_build(rng, files(rng)), interp=interp)
+
+    def ev(x):
+        return ['git events: ' + i for i in x]
+
+    # Created: absent before by its reflog's first old id (zeros), or by
+    # packed-refs, a path of this diff, without it; moved with no from
+    # without that evidence. Their reverses: deleted, packed-refs not a path
+    # of this diff, or a path of it without the branch.
+    def created_by_reflog(rng):
+        r, c1 = repo(rng), oid()
+        return [(r + b'refs/heads/feat', None, git_loose(c1), O),
+                (r + b'logs/refs/heads/feat', None,
+                 git_reflog((Z, c1, 'branch: Created from HEAD')), O)]
+    one('git: a branch created, its reflog from zeros', created_by_reflog,
+        ev(['a branch created, absent before by its reflog (zeros)',
+            'a branch deleted, packed-refs not a path of this diff']))
+
+    def created_by_packed(rng):
+        r, c0, c2, t1 = repo(rng), oid(), oid(), oid()
+        return [(r + b'packed-refs', git_packed((c0, 'refs/heads/main')),
+                 git_packed((c0, 'refs/heads/main'), (t1, 'refs/tags/v1', c0)), O),
+                (r + b'refs/heads/topic', None, git_loose(c2), O)]
+    one('git: a branch created, packed-refs without it', created_by_packed,
+        ev(['a branch created, absent before by packed-refs',
+            'a branch deleted, packed-refs a path of this diff without it']))
+
+    def moved_no_evidence(rng):
+        r = repo(rng)
+        return [(r + b'refs/heads/dev', None, git_loose(oid()), O)]
+    one('git: a ref appears with no evidence of before', moved_no_evidence,
+        ev(['a branch moved with no evidence of before (no from)']))
+
+    def packed_only(rng):
+        r, c0, c4 = repo(rng), oid(), oid()
+        return [(r + b'packed-refs', git_packed((c0, 'refs/heads/main'), (c4, 'refs/heads/old')),
+                 git_packed((c0, 'refs/heads/main')), O)]
+    one('git: a branch only in packed-refs, deleted', packed_only,
+        ev(['a branch deleted from packed-refs, no loose ref']))
+
+    def pack_refs(rng):
+        r, c5, c6 = repo(rng), oid(), oid()
+        return [(r + b'refs/heads/main', git_loose(c5), None, O),
+                (r + b'refs/heads/dev', git_loose(c6), None, O),
+                (r + b'packed-refs', None,
+                 git_packed((c6, 'refs/heads/dev'), (c5, 'refs/heads/main')), O)]
+    # packed-refs rewritten with the same bytes (metadata_only): not read, so
+    # no evidence of before ("an unchanged `packed-refs` is never read").
+    def touched_packed(rng):
+        r, p = repo(rng), git_packed((oid(), 'refs/heads/main'))
+        return [(r + b'refs/heads/dev', None, git_loose(oid()), O),
+                (r + b'packed-refs', p, p, S(chmod=True))]
+    one('git: a ref appears, packed-refs touched but not changed', touched_packed,
+        ev(['packed-refs metadata_only, not read: no evidence of before']))
+    one('git: refs packed, at the same commits', pack_refs,
+        ev(['a branch at the same commit on both sides, from another place']))
+
+    # Renamed: the new branch's reflog says `Branch: renamed`; with HEAD on
+    # it, HEAD names another branch too. The reverse is a creation and a
+    # deletion (the old name's reflog says nothing of a rename).
+    def renamed(rng, head):
+        r, c7, c6 = repo(rng), oid(), oid()
+        log = [(Z, c7, 'branch: Created from HEAD')]
+        msg = 'Branch: renamed refs/heads/old to refs/heads/new'
+        f = [(r + b'refs/heads/old', git_loose(c7), None, O),
+             (r + b'refs/heads/new', None, git_loose(c7), O),
+             (r + b'logs/refs/heads/old', git_reflog(*log), None, O),
+             (r + b'logs/refs/heads/new', None, git_reflog(*(log + [(c7, c7, msg)])), O)]
+        if head:
+            hl = [(Z, c6, 'commit (initial): root'), (c6, c7, 'checkout: moving from main to old')]
+            f += [(r + b'HEAD', git_head('old'), git_head('new'), O),
+                  (r + b'logs/HEAD', git_reflog(*hl), git_reflog(*(hl + [(c7, c7, msg)])), O)]
+        else:                                   # `nz`: between `new` and `old`
+            f.append((r + b'refs/heads/nz', None, git_loose(c6), O))
+        return f
+    one('git: a branch renamed, another branch between its names', lambda rng: renamed(rng, False),
+        ev(['a branch renamed', 'a rename in its from\'s place']))
+    one('git: the branch HEAD names renamed', lambda rng: renamed(rng, True),
+        ev(['a branch renamed', 'HEAD switched to another branch']))
+
+    # A branch on both sides at different commits, by the entries its reflog
+    # gained: commits added (counted, or not with a fast-forward or merge),
+    # each rewrite, several, entries that do not chain, another operation,
+    # none (the reflog not a path of this diff). Each reverse: the reflog
+    # is not a prefix -- it gained none.
+    def moved(rng, entries_of, branch=b'main'):
+        r, c = repo(rng), [oid() for _ in range(7)]
+        base = [(Z, c[0], 'commit (initial): root')]
+        new, last = entries_of(c)
+        name = branch.decode()
+        f = [(r + b'refs/heads/' + branch, git_loose(c[0]), git_loose(c[last]), O)]
+        if new is not None:
+            f.append((r + b'logs/refs/heads/' + branch, git_reflog(*base),
+                      git_reflog(*(base + new)), O))
+        return f
+    one('git: commits added, counted',
+        lambda rng: moved(rng, lambda c: ([(c[0], c[1], 'commit: one'),
+                                           (c[1], c[2], 'cherry-pick: two'),
+                                           (c[2], c[3], 'commit (merge): Merge branch x')], 3))
+        + moved(rng, lambda c: ([(c[0], c[1], 'revert: Revert "one"'),
+                                 (c[1], c[2], 'am: a patch')], 2), b'dev'),
+        ev(['commits added, counted', 'a branch moved, its reflog gained none']))
+    one('git: commits added by a fast-forward and merges, not counted',
+        lambda rng: moved(rng, lambda c: ([(c[0], c[1], 'commit: one'),
+                                           (c[1], c[2], 'merge topic: Fast-forward'),
+                                           (c[2], c[3], "pull: Merge made by the 'ort' "
+                                                        "strategy.")], 3))
+        + moved(rng, lambda c: ([(c[0], c[1], "merge feature: Merge made by the 'ort' "
+                                              "strategy.")], 1), b'dev'),
+        ev(['commits added, not counted']))
+    for trigger, msgs in [('reset', ['reset: moving to HEAD~1']),
+                          ('commit (amend)', ['commit (amend): fix the typo']),
+                          ('rebase', ['rebase (pick): one', 'rebase (finish): refs/heads/main '
+                                                            'onto 1234']),
+                          ('branch: Reset to', ['branch: Reset to topic']),
+                          ('forced-update', ['fetch origin: forced-update'])]:
+        one('git: history rewritten by %s' % trigger,
+            lambda rng, msgs=msgs: moved(rng, lambda c: (
+                [(c[i], c[i + 1], m) for i, m in enumerate(msgs)], len(msgs))),
+            ev(['history rewritten by ' + trigger]))
+    one('git: history rewritten by several operations',
+        lambda rng: moved(rng, lambda c: ([(c[0], c[1], 'commit: one'),
+                                           (c[1], c[2], 'reset: moving to HEAD~2'),
+                                           (c[2], c[3], 'commit (amend): two'),
+                                           (c[3], c[4], 'reset: moving to HEAD@{1}'),
+                                           (c[4], c[5], 'pull --rebase (finish): x')], 5)),
+        ev(['history rewritten by several operations']))
+    one('git: a reflog whose entries do not lead to the value after',
+        lambda rng: moved(rng, lambda c: ([(c[0], c[1], 'commit: one')], 2))
+        + moved(rng, lambda c: ([(c[5], c[1], 'commit: one')], 1), b'dev')
+        + moved(rng, lambda c: ([(c[0], c[1], 'commit: one'), (c[4], c[2], 'commit: two')], 2),
+                b'gap'),
+        ev(['a branch moved, its reflog entries not leading from before to after']))
+    one('git: a branch moved by another operation',
+        lambda rng: moved(rng, lambda c: ([(c[0], c[1], 'commit (initial): again')], 1)),
+        ev(['a branch moved by another operation']))
+    one('git: a branch moved, its reflog not a path of this diff',
+        lambda rng: moved(rng, lambda c: (None, 1)),
+        ev(['a branch moved, no reflog entries']))
+
+    # HEAD: to another branch, detached (its reverse: attached), and
+    # detached on both sides at different commits: the branch HEAD.
+    def head(rng, frm, to, entries):
+        r, c = repo(rng), [oid() for _ in range(4)]
+        base = [(Z, c[0], 'commit (initial): root')]
+        frm, to = (x(c) if callable(x) else x for x in (frm, to))
+        return [(r + b'HEAD', git_head(frm), git_head(to), O),
+                (r + b'logs/HEAD', git_reflog(*base), git_reflog(*(base + entries(c))), O)]
+    one('git: HEAD switched to another branch',
+        lambda rng: head(rng, 'main', 'dev', lambda c: [(c[0], c[1], 'checkout: moving from '
+                                                                       'main to dev')]),
+        ev(['HEAD switched to another branch']))
+    one('git: HEAD detached',
+        lambda rng: head(rng, 'main', lambda c: c[1],
+                         lambda c: [(c[0], c[1], 'checkout: moving from main to ' + c[1])]),
+        ev(['HEAD detached', 'HEAD attached']))
+    one('git: a detached HEAD moved by commits',
+        lambda rng: head(rng, lambda c: c[0], lambda c: c[2],
+                         lambda c: [(c[0], c[1], 'commit: one'), (c[1], c[2], 'commit: two')]),
+        ev(['a detached HEAD moved (the branch HEAD)', 'commits added, counted']))
+    one('git: a detached HEAD reset',
+        lambda rng: head(rng, lambda c: c[0], lambda c: c[1],
+                         lambda c: [(c[0], c[1], 'reset: moving to HEAD~1')]),
+        ev(['a detached HEAD moved (the branch HEAD)', 'history rewritten by reset']))
+
+    # Repositories, nested and side by side, in their order (E4): the root's,
+    # `g-h/` (`-` before `/`), `g/` and `g/h/` inside its working tree (names
+    # no bystander of interp_tree() takes); in `g/`, HEAD's event before
+    # branch `A` (which sorts before `HEAD`).
+    def repos(rng):
+        c = [oid() for _ in range(6)]
+        return [(b'.git/refs/heads/zz', None, git_loose(c[0]), O),
+                (b'.git/logs/refs/heads/zz', None,
+                 git_reflog((Z, c[0], 'branch: Created from HEAD')), O),
+                (b'g-h/.git/HEAD', git_head('main'), git_head('dev'), O),
+                (b'g/.git/HEAD', git_head('main'), git_head('A'), O),
+                (b'g/.git/refs/heads/A', None, git_loose(c[1]), O),
+                (b'g/.git/logs/refs/heads/A', None,
+                 git_reflog((Z, c[1], 'branch: Created from HEAD')), O),
+                (b'g/h/.git/refs/heads/aa', None, git_loose(c[2]), O)]
+    one('git: four repositories, nested', repos,
+        ev(['events of two repositories', 'HEAD before a branch that sorts before it']))
+
+    # An unknown ref: read where its copy can be (provisional events); with
+    # no copy, a provisional content_unavailable event and nothing else.
+    def raced(rng, **kw):
+        r, c1 = repo(rng), oid()
+        return [(r + b'refs/heads/hot', None, git_loose(c1), dict(raced=True, **kw)),
+                (r + b'logs/refs/heads/hot', None,
+                 git_reflog((Z, c1, 'branch: Created from main')), O)]
+    one('git: a branch created, its ref raced', raced,
+        ev(['an unknown ref read from its copy: provisional']))
+    one('git: a branch created, its ref raced, no stored copy',
+        lambda rng: raced(rng, unstored='after'),
+        ev(['an unknown ref with no copy: a provisional content_unavailable event']))
+    one('git: commits added, the ref raced on both sides',
+        lambda rng: [(f[0], f[1], f[2], S(raced=True) if b'/logs/' not in b'/' + f[0] else f[3])
+                     for f in moved(rng, lambda c: ([(c[0], c[1], 'commit: one')], 1))],
+        ev(['an unknown ref read from its copy: provisional']))
+
+    # packed-refs raced: the creation it is the evidence of is provisional.
+    one('git: a branch created, packed-refs without it but raced',
+        lambda rng: [(f[0], f[1], f[2], S(raced=True) if f[0].endswith(b'packed-refs') else f[3])
+                     for f in created_by_packed(rng)],
+        ev(['an unknown packed-refs read from its copy: provisional']))
+    # A reflog that cannot be read decides nothing: no evidence of before.
+    one('git: a branch created, its reflog\'s copy missing',
+        lambda rng: [(f[0], f[1], f[2], S(lacking='after') if b'logs/' in f[0] else f[3])
+                     for f in created_by_reflog(rng)],
+        ev(['a branch whose reflog cannot be read: no evidence of before']))
+
+    # A ref that is no ref: could_not_interpret, its record and one event.
+    one('git: a ref that cannot be parsed',
+        lambda rng: [(repo(rng) + b'refs/heads/bad', None, b'not an object id\n', O)],
+        ev(['a ref that cannot be parsed']))
+
+    # Tags and remote-tracking refs: their path findings, no event.
+    def tags(rng):
+        r, c = repo(rng), [oid() for _ in range(4)]
+        return [(r + b'refs/tags/v2', None, git_loose(c[0]), O),
+                (r + b'refs/remotes/origin/main', git_loose(c[1]), git_loose(c[2]), O),
+                (r + b'logs/refs/remotes/origin/main',
+                 git_reflog((Z, c[1], 'fetch: storing head')),
+                 git_reflog((Z, c[1], 'fetch: storing head'), (c[1], c[2], 'fetch: fast-forward')),
+                 O),
+                (r + b'packed-refs', git_packed((c[3], 'refs/tags/v0')),
+                 git_packed((c[3], 'refs/tags/v0'), (c[0], 'refs/tags/v1', c[1])), O)]
+    one('git: tags and remote-tracking refs', tags,
+        ev(['tags and remote-tracking refs read: no event']))
+
+    # Copies the store cannot give: missing, corrupt (other bytes, a
+    # symlink), over a loose ref's 64 KiB bound; one event per reason,
+    # before a branch's own event.
+    def unreadable(rng):
+        r, c = repo(rng), [oid() for _ in range(6)]
+        big = git_loose(c[5])[:-1] + b' ' * (64 * 1024 - 40) + b'\n'
+        return [(r + b'refs/heads/w', git_loose(c[0]), git_loose(c[1]), S(lacking='after')),
+                (r + b'refs/heads/x', git_loose(c[0]), git_loose(c[2]), S(corrupt='after')),
+                (r + b'refs/heads/y', None, git_loose(c[3]), S(symlink='after')),
+                (r + b'refs/heads/z', None, big, O),
+                (r + b'refs/heads/new', None, git_loose(c[4]), O),
+                (r + b'logs/refs/heads/new', None,
+                 git_reflog((Z, c[4], 'branch: Created from HEAD')), O)]
+    one('git: copies the store cannot give', unreadable,
+        ev(['content_unavailable, missing', 'content_unavailable, corrupt',
+            'content_unavailable, too_large', 'events with no name before the named']))
+
+
 def targeted(w, rng):
     cells(w, rng)
     field_pairs(w, rng)
@@ -3538,6 +3936,7 @@ def targeted(w, rng):
     manifest_versions(w, rng)
     exclusions(w, rng)
     interpreters(w, rng)
+    git_events(w, rng)
 
 
 # ---------------------------------------------------------------------------

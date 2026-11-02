@@ -20,10 +20,21 @@ Its only sources:
   - docs/spec/diff-v1.md "Interpreters" and "What each interpreter reports",
     PROSE ONLY, with test/expect/finding-kinds.md (the kinds, read at run
     time) and test/expect/diff-events.md (E1-E8): the findings a record
-    carries and the event records, in the oracle's setting -- a diff given
-    no store, so every stored copy an interpreter needs is
-    `content_unavailable`. What would need content (text_changed, a RECORD's
-    rows, a status file's stanzas, refs) is not modelled: it cannot occur;
+    carries and the event records, in the oracle's setting -- mostly a diff
+    given no store, so every stored copy an interpreter needs is
+    `content_unavailable`. What would need text, pip or dpkg content
+    (text_changed, a RECORD's rows, a status file's stanzas) is not
+    modelled: no pair's store holds such a copy (read_copy() asserts it);
+  - git's content, from a store the pair gives the diff ("Content": the
+    store's layout, a copy hashed against its name): diff-v1's "**git.**"
+    paragraph (HEAD, loose refs, packed-refs, reflogs) and the paragraph
+    after it, with test/expect/diff-events.md E4 (git's order) and E12
+    (repository-level events: a branch's value on each side, created,
+    deleted, renamed, commits added, history rewritten, moved, HEAD
+    switched, `unknown` paths read and their events provisional, one
+    `content_unavailable` event per reason) and finding-kinds.md's seven git
+    event kinds (decisions 126, 132), each sentence relied on checked at
+    start-up. git's file formats are git's own (git_explain());
   - test/expect/manifest-v1-addendum.md A4 (a link target is at most 4,095
     bytes), which finding-kinds.md cites as a `bytes` field's bound;
   - test/expect/diff-values.md, READ AT RUN TIME (V1-V6 and its field table,
@@ -54,7 +65,26 @@ that quotes a spec reads it through spec_prose(), which withholds them
 (decision 119); a check that quotes a pin reads that pin.
 
 Ambiguities this file resolves one way (questions for the author) are
-marked "ambiguity I<n>" where they are decided (VA<n> for diff-values.md).
+marked "ambiguity I<n>" where they are decided (VA<n> for diff-values.md,
+G<n> for git's events, E12; G1 and G4 are settled by the prose, which now
+says "pip, dpkg and git emit one `could_not_interpret` event naming it
+(E10)" and "git names only the paths it derives events from (HEAD,
+branches, `packed-refs`, their reflogs), and a reflog removed needs no
+copy"):
+  G2 `repo` is the path of the directory named `.git` (`.git` at the root);
+  G3 a reflog that is not a prefix of its after gained no entries;
+  G5 a ref or packed-refs that cannot be read or parsed leaves its
+     branch's value unknown, and the branch has no event; a reflog that
+     cannot be read gives no evidence: the value before "cannot be told";
+  G6 a rename takes its `from`'s place in E4's "then branch";
+  G7 a both-sides event is derived from the reflog only when its entries
+     lead from before to after;
+  G8 an event's `paths` are those its values came from: the loose ref,
+     packed-refs where its line or its absence gave a value (a creation's
+     or deletion's evidence), the reflog where it gave the value before or
+     the rename -- never a removed reflog, which gives nothing;
+  G9 a packed-refs absent on a side, being a path of this diff, is
+     "packed-refs without it" there.
 
 Deliberately naive: both manifests in memory as dictionaries, the union of
 their paths sorted, ancestors found by walking a path's prefixes.
@@ -947,10 +977,12 @@ def record_values(rb, ra, changed, trace):
 
 
 # ---------------------------------------------------------------------------
-# Interpreters, in the oracle's setting: the driver passes NULL options, so
-# the diff has NO store ("Content": reason `no_store`, "the diff was given no
-# store"). Only what an interpreter can say without content is modelled;
-# whatever needs a stored copy is `content_unavailable`. Sources, PROSE ONLY:
+# Interpreters, in the oracle's setting: for most pairs the driver passes NULL
+# options, so the diff has NO store ("Content": reason `no_store`, "the diff
+# was given no store"), and whatever needs a stored copy is
+# `content_unavailable`. git's event pairs give the diff a store of their own
+# (gen_corpus.py, git_events()): git's copies are read (git_explain()); no
+# other interpreter's copy is ever in a store. Sources, PROSE ONLY:
 # docs/spec/diff-v1.md "Interpreters" ("Which interpreter", "Content",
 # "Findings", "Event records") and "What each interpreter reports"; the pins
 # test/expect/finding-kinds.md (the kinds: fields, order, template, read at
@@ -1031,9 +1063,20 @@ def load_kinds():
               'file; absent for a symlink, whose own mode says nothing about its target '
               '(decision 2026-10-31, a).',
               'target and executable as in git_hook_added, after.',
-              'pip and dpkg, which emit events from that content, also emit one '
+              # The row now names git too (decisions 126, 132): git_end()
+              # emits these events as pip_end() and dpkg's do.
+              'pip, dpkg and git, which emit events from that content, also emit one '
               '`content_unavailable` event per reason, with side `before` or `after` when all '
-              'its paths share it, else `both`, naming the paths']:
+              'its paths share it, else `both`, naming the paths',
+              # The git event kinds' meanings git_end() implements.
+              '`HEAD` names another branch, or became or stopped being detached: from and to '
+              'are the branch (`main`) or, detached, the commit (diff-events E12).',
+              'In place of a deletion and a creation at the same commit, when the new branch\'s '
+              'reflog of this diff says `Branch: renamed refs/heads/{from} to refs/heads/{to}`.',
+              'count: one per `commit`, `commit (merge)`, `cherry-pick`, `revert` or `am` entry, '
+              'present only when every entry is one of those.',
+              'how: those entries\' operations, each once, in order, joined by `, `.',
+              'from absent when its value before cannot be told (E12).']:
         if w not in text:
             raise SystemExit('pin: finding-kinds.md no longer says what reference.py assumes: '
                              '%r' % w)
@@ -1056,7 +1099,25 @@ def load_kinds():
                                  ['git']),
             'git_hook_executable_changed': ([('hook', S), ('executable', B)], ['git']),
             'git_index_changed': ([], ['git']),
-            'git_reflog_rewritten': ([('ref', S)], ['git'])}
+            'git_reflog_rewritten': ([('ref', S)], ['git']),
+            'git_head_changed': ([('from', S), ('to', S)], ['git']),
+            'git_ref_created': ([('ref', S), ('to', S)], ['git']),
+            'git_ref_deleted': ([('ref', S), ('from', S)], ['git']),
+            'git_ref_moved': ([('ref', S), ('from', S), ('to', S)], ['git']),
+            'git_reflog_appended': ([('ref', S), ('entries', I)], ['git']),
+            'git_reflog_move': ([('ref', S), ('from', S), ('to', S), ('operation', S)],
+                                ['git']),
+            # E12's kinds (decisions 126, 132), event level.
+            'git_head_switched': ([('repo', S), ('from', S), ('to', S)], ['git']),
+            'git_branch_created': ([('repo', S), ('branch', S), ('at', S)], ['git']),
+            'git_branch_deleted': ([('repo', S), ('branch', S), ('was', S)], ['git']),
+            'git_branch_renamed': ([('repo', S), ('from', S), ('to', S), ('at', S)], ['git']),
+            'git_commits_added': ([('repo', S), ('branch', S), ('count', I + '?'), ('to', S)],
+                                  ['git']),
+            'git_history_rewritten': ([('repo', S), ('branch', S), ('how', S), ('from', S),
+                                       ('to', S)], ['git']),
+            'git_branch_moved': ([('repo', S), ('branch', S), ('from', S + '?'), ('to', S)],
+                                 ['git'])}
     for k, (fields, interps) in need.items():
         if k not in kinds or kinds[k].fields != fields or kinds[k].interps != interps:
             raise SystemExit('pin: kind %r no longer has what reference.py assumes' % k)
@@ -1064,7 +1125,17 @@ def load_kinds():
     for k in ('could_not_interpret', 'invalid_finding', 'and_more'):
         if kinds[k].levels != ['path', 'event']:
             raise SystemExit('pin: kind %r is no longer path and event level' % k)
+    for k in GIT_EVENT_KINDS:
+        if kinds[k].levels != ['event']:
+            raise SystemExit('pin: kind %r is no longer event level' % k)
     return kinds
+
+
+# E12's kinds, in the Kinds table's order (checked against it at start-up):
+# the order "then kind" of E4 among one branch's events.
+GIT_EVENT_KINDS = ['git_head_switched', 'git_branch_created', 'git_branch_deleted',
+                   'git_branch_renamed', 'git_commits_added', 'git_history_rewritten',
+                   'git_branch_moved']
 
 
 def load_event_rules():
@@ -1080,7 +1151,48 @@ def load_event_rules():
                'derived from has the outcome `unknown`'],
         'E3': ['sorted bytewise, each once', '`paths_b64` instead -- every element base64 -- '
                'when any is not valid UTF-8'],
-        'E4': ['By interpreter, in the order text, pip, dpkg, git'],
+        'E4': ['By interpreter, in the order text, pip, dpkg, git',
+               'git by repository, then `HEAD` before every branch, then branch, then kind '
+               '(decision 126)'],
+        # E12 (decisions 126, 132), each sentence git_explain() and git_end()
+        # rely on.
+        'E12': ['git\'s end hook derives repository-level events from the paths of this diff '
+                'it explained -- loose refs, `packed-refs`, `HEAD`, reflogs -- per repository '
+                '(a directory named `.git`; `repo` its path in the scope).',
+                'A branch is a ref `refs/heads/<branch>`, named without `refs/heads/`.',
+                'Its value on a side: its loose ref there; else its line in `packed-refs` when '
+                '`packed-refs` is a path of this diff; else, before only, the old id of the '
+                'first entry its reflog gained in this diff (all zeros: absent).',
+                'One event per branch whose existence or commit differs: absent before by that '
+                'evidence and present after, `git_branch_created`; present after with no '
+                'evidence of before, `git_branch_moved` with no `from`; its loose ref removed '
+                'and `packed-refs` without it (a path of this diff, or not -- git removes a '
+                'branch from both), `git_branch_deleted`; a deletion and a creation at the same '
+                'commit whose new reflog says `Branch: renamed`, one `git_branch_renamed`.',
+                'A branch on both sides at different commits is decided by the entries its '
+                'reflog gained in this diff, when they lead from its value before to its value '
+                'after (each entry\'s old id the previous one\'s new, the first\'s old the value '
+                'before, the last\'s new the value after): any `reset`, `commit (amend)`, '
+                'operation containing `rebase`, message starting `branch: Reset to`, or message '
+                'containing `forced-update` -- `git_history_rewritten`; else only commits '
+                '(`commit`, `commit (merge)`, `cherry-pick`, `revert`, `am`) and fast-forwards '
+                'or merges (a message containing `Fast-forward`; an operation starting with '
+                '`merge` or `pull`) -- `git_commits_added`; else, or with no such entries, '
+                '`git_branch_moved`.',
+                '`HEAD` naming another branch, or detaching or attaching: `git_head_switched`; '
+                '`HEAD` detached on both sides at different commits is the branch `HEAD`, '
+                'decided by `logs/HEAD` as above.',
+                'Remote-tracking refs and tags derive no event (their path findings stand).',
+                'A path whose outcome is `unknown` adds no finding to its record (P8) but is '
+                'read like any other where its copy can be read, as dpkg reads a status',
+                'every event derived from it is provisional (E2), so a branch whose ref raced '
+                'is never silent.',
+                'A ref, `packed-refs` or reflog git needs and cannot read decides nothing; the '
+                'record of one whose outcome is not `unknown` carries `content_unavailable`, '
+                'and one `content_unavailable` event per reason names those paths (provisional '
+                'when one of them is `unknown`).',
+                '`paths`: every ref, `packed-refs`, `HEAD` and reflog path it was derived '
+                'from.'],
         'E9': ['is replaced, in its place, by `{"event": "invalid_finding", "interp": ..., '
                '"text": "invalid finding", "paths": [<its paths>]}`; the interpreter\'s other '
                'events stand'],
@@ -1159,9 +1271,9 @@ def _check_claims():
     for w in ['An unclaimed path is **text** when its entry is `stored` on every side it exists '
               'on', 'any other is **binary**, which adds nothing',
               "to a path whose outcome is `unknown` or `metadata_only` it adds none (a git "
-              "hook's executable bit excepted, which is metadata). pip and dpkg still derive "
-              'events from an `unknown` path, each marked provisional -- but none from a path '
-              '`unknown` only as `not_captured`, which no interpreter is given (E11).',
+              "hook's executable bit excepted, which is metadata). pip, dpkg and git still "
+              'derive events from an `unknown` path, each marked provisional -- but none from a '
+              'path `unknown` only as `not_captured`, which no interpreter is given (E11).',
               # "Event records" (E11 in the prose): explain() is not called
               # for such a path, so it derives no event of any kind.
               'An event derived from a path whose outcome is `unknown` says `"provisional": '
@@ -1182,9 +1294,17 @@ def _check_claims():
               'A `bool` field renders in `text` as `true` or `false`.',
               'Where an interpreter fails on a path (a file it claims cannot be parsed, a '
               "dist-info cannot be named), that path's record carries `could_not_interpret` "
-              '(R11) unless its outcome is `unknown`, nothing more is read from it, and pip and '
-              'dpkg emit one `could_not_interpret` event naming it (E10); their other events '
-              'stand.',
+              '(R11) unless its outcome is `unknown`, nothing more is read from it, and pip, '
+              'dpkg and git emit one `could_not_interpret` event naming it (E10); their other '
+              'events stand.',
+              # "Content", git_explain(): which paths git's content_unavailable
+              # event names, and a removed reflog's.
+              'It never declines silently there: pip, dpkg and git, whose package and '
+              'repository facts come from that content, also emit a `content_unavailable` event '
+              'naming the paths, so a consumer never reads "no packages changed" or "no branch '
+              'moved" where the change could not be read. git names only the paths it derives '
+              'events from (HEAD, branches, `packed-refs`, their reflogs), and a reflog removed '
+              'needs no copy.',
               'Events with no name -- `could_not_interpret` for a file, `content_unavailable` '
               '-- come before every named event, in the Kinds table\'s order, then by path '
               '(`content_unavailable`, one per reason, in the reasons\' order).',
@@ -1225,6 +1345,34 @@ def _check_claims():
               'bytes, and `target_b64` instead when it is not UTF-8: a planted hook is always '
               'reported.',
               'The index: `git_index_changed` when it is added, removed or its content changed',
+              # With a store (read_copy(), git_explain(), git_end()).
+              "Interpreters read the stored copies through the store given to the diff "
+              "(`belay_diff`'s options): the directory a capture keeps copies in, each at "
+              "`<store>/<the first two hex digits of its sha256>/<the other 62>`, named by the "
+              "manifest entry's `stored`. Every copy read is hashed and must match its name, so "
+              "a stale, planted or truncated copy is never read as content; one that is not a "
+              "regular file (a symlink included) is `corrupt`.",
+              '| git | `HEAD`, a loose ref | 64 KiB |', '| git | `packed-refs` | 64 MiB |',
+              'Where an interpreter keeps the first of two equal keys (a package, a RECORD path, '
+              'a packed ref), "first" is in file order.',
+              'A path is placed by the part after its `.git/` (the last one that fits). `HEAD`: '
+              "`git_head_changed`, from and to being the symbolic ref's name or the object id "
+              '(empty on a side where it is absent); nothing when the two are equal. A loose ref '
+              'or a line of `packed-refs` (in ref order): `git_ref_created`, `git_ref_deleted`, '
+              '`git_ref_moved` (only when the value differs), the ref being its full name '
+              '(`refs/heads/main`).',
+              "A reflog (`logs/HEAD` is ref `HEAD`, `logs/refs/...` is `refs/...`): when "
+              "before's bytes are a prefix of after's ending at a line's end (an absent before "
+              'is empty), `git_reflog_appended` counts the entries after it, and each of those '
+              'that is not a plain commit (operation `commit` or `commit (initial)`) or a '
+              'fast-forward (its message contains `Fast-forward`) is a `git_reflog_move`, its '
+              'operation being the message before its first `:`; otherwise, or when the reflog '
+              'was removed (no copy needed), `git_reflog_rewritten`.',
+              'git sees only the paths that changed, so an unchanged `packed-refs` is never '
+              'read: a branch is created only by evidence that it was absent before, and a ref '
+              'that appeared without that evidence is moved, with no `from`.',
+              'A path whose outcome is `unknown` is read where its copy can be read, and every '
+              'event from it is provisional. Tags and remote-tracking refs derive no event.',
               '(an absent before is empty)',
               'or when the reflog was removed (no copy needed), `git_reflog_rewritten`']:
         if w not in text:
@@ -1352,25 +1500,67 @@ REASONS = ['no_store', 'missing', 'too_large', 'corrupt']   # the pin's order
 REFLOG_BOUND = 16 * 1024 * 1024     # the bounds table: "| git | a reflog | 16 MiB: ..."
 
 
-def unavailable(e, interp, what):
-    """Why the stored copy of e cannot be read in a diff with no store:
-    `missing` when the entry records no `stored` copy ("`missing` covers a
-    path whose entry records no `stored` copy (a reflog over its 16 MiB bound
-    excepted: `too_large`) ..., and is given before `no_store` when both
-    apply"), else `no_store`. The exception: "a capture keeps a reflog up to
-    this whatever `store_max_bytes` says, and a side recorded without a copy
-    because it is larger is `content_unavailable`, reason `too_large`" --
-    larger than 16 MiB, read from the entry's `size`, so 16 MiB exactly with
-    no copy is still `missing`. The reflog's `too_large` takes `missing`'s
-    place, so it too comes before `no_store` (ambiguity I11: the prose orders
-    only `missing` against `no_store`). A reflog that does record a copy is
-    `no_store` here whatever its size, like every stored copy: with no store
-    nothing is read, so no copy is found over its bound."""
-    if 'stored' in e:
-        return 'no_store'
-    if (interp, what) == ('git', 'reflog') and e['size'] > REFLOG_BOUND:
-        return 'too_large'
-    return 'missing'
+# The bounds table ("What each interpreter reports"): what each interpreter
+# reads at most of a stored copy; "a larger one is `content_unavailable`,
+# reason `too_large`". Only git's are used: no copy of another interpreter's
+# path is ever readable in this corpus (read_copy()).
+BOUNDS = {('git', 'HEAD'): 64 * 1024, ('git', 'ref'): 64 * 1024,
+          ('git', 'packed-refs'): 64 * 1024 * 1024, ('git', 'reflog'): REFLOG_BOUND}
+
+
+def read_copy(e, interp, what, store):
+    """(the copy's bytes, None), or (None, why it cannot be read).
+
+    Without a store: `missing` when the entry records no `stored` copy
+    ("`missing` covers a path whose entry records no `stored` copy (a reflog
+    over its 16 MiB bound excepted: `too_large`) ..., and is given before
+    `no_store` when both apply"), else `no_store`. The exception: "a capture
+    keeps a reflog up to this whatever `store_max_bytes` says, and a side
+    recorded without a copy because it is larger is `content_unavailable`,
+    reason `too_large`" -- larger than 16 MiB, read from the entry's `size`,
+    so 16 MiB exactly with no copy is still `missing`. The reflog's
+    `too_large` takes `missing`'s place, so it too comes before `no_store`
+    (ambiguity I11, now the prose's own rule: "the reflog's `too_large`
+    stands where `missing` would").
+
+    With a store ("Content"): the copy at `<store>/<the first two hex digits
+    of its sha256>/<the other 62>`, named by the entry's `stored`: absent,
+    `missing` ("as well as a copy the store lacks"); not a regular file (a
+    symlink included), `corrupt`; larger than the interpreter's bound,
+    `too_large`; not hashing to its name, `corrupt`. The corpus never makes
+    a copy both over its bound and corrupt, whose order the prose does not
+    give. Only git's copies are ever readable here: the corpus stores no
+    copy of a text, pip or dpkg path in a store, whose content this model
+    does not compute (text_changed, a RECORD's rows, a status's stanzas)."""
+    if 'stored' not in e:
+        if (interp, what) == ('git', 'reflog') and e['size'] > REFLOG_BOUND:
+            return None, 'too_large'
+        return None, 'missing'
+    if store is None:
+        return None, 'no_store'
+    f = os.path.join(store, e['stored'][:2], e['stored'][2:])
+    if not os.path.lexists(f):
+        return None, 'missing'
+    if os.path.islink(f) or not os.path.isfile(f):
+        return None, 'corrupt'
+    if (interp, what) not in BOUNDS:
+        raise AssertionError('reference: the content of a %s %s path is not modelled; the '
+                             'corpus must not store it' % (interp, what))
+    if os.path.getsize(f) > BOUNDS[(interp, what)]:
+        return None, 'too_large'
+    with open(f, 'rb') as fh:
+        data = fh.read()
+    if hashlib.sha256(data).hexdigest() != e['stored']:
+        return None, 'corrupt'
+    return data, None
+
+
+def unavailable(e, interp, what, store=None):
+    """Why the copy of e cannot be read, for a path whose content this model
+    does not compute (text, pip, dpkg): read_copy() must say it cannot."""
+    data, r = read_copy(e, interp, what, store)
+    assert r is not None
+    return r
 
 
 def git_place(p):
@@ -1440,8 +1630,8 @@ def explain(interp, what, p, b, a, outcome, state, trace):
     # "An interpreter adds findings only to a path whose content is proven
     # changed (added, removed, modified, type_changed): to a path whose
     # outcome is `unknown` or `metadata_only` it adds none (a git hook's
-    # executable bit excepted, which is metadata). pip and dpkg still derive
-    # events from an `unknown` path, each marked provisional -- but none
+    # executable bit excepted, which is metadata). pip, dpkg and git still
+    # derive events from an `unknown` path, each marked provisional -- but none
     # from a path `unknown` only as `not_captured`, which no interpreter is
     # given (E11)": diff() never calls this for one.
     if outcome == 'unknown':
@@ -1453,9 +1643,15 @@ def explain(interp, what, p, b, a, outcome, state, trace):
             # finding on the record.
             state['unknown'].add(p)
             for s in present:
-                r = unavailable(ent[s], interp, what)
+                r = unavailable(ent[s], interp, what, state['store'])
                 trace.append('event-unavailable-%s-%s' % (s, r))
                 state['unavailable'].append((r, s, p))
+        elif interp == 'git' and what in GIT_CONTENT:
+            # E12: "A path whose outcome is `unknown` adds no finding to its
+            # record (P8) but is read like any other where its copy can be
+            # read ...: every event derived from it is provisional (E2)".
+            state['unknown'].add(p)
+            git_explain(what, p, b, a, outcome, state, trace)
         elif (interp, what) == ('pip', 'RECORD'):
             # "A RECORD whose outcome is `unknown` pairs like any other, by
             # its directory's name, and every event it takes part in is
@@ -1486,9 +1682,10 @@ def explain(interp, what, p, b, a, outcome, state, trace):
                            {'hook': hook_name(p), 'executable': executable(a)})]
         trace.append('interp-metadata-only')
         return []
+    if interp == 'git' and what in GIT_CONTENT:
+        return git_explain(what, p, b, a, outcome, state, trace)
     need = []                                   # the sides whose content is needed
-    if interp == TEXT or (interp, what) in (('dpkg', 'status'), ('git', 'HEAD'),
-                                            ('git', 'ref'), ('git', 'packed-refs')):
+    if interp == TEXT or (interp, what) == ('dpkg', 'status'):
         need = present
     elif (interp, what) == ('pip', 'RECORD'):
         if (bs or as_) and dist_info(p) is None:
@@ -1505,12 +1702,6 @@ def explain(interp, what, p, b, a, outcome, state, trace):
             need = present                      # a reinstall reads both RECORDs
         elif bs or as_:
             pip_moved(p, 'removed' if bs else 'added', state, trace)
-    elif (interp, what) == ('git', 'reflog'):
-        if as_:
-            need = present                      # appended or rewritten: read
-        elif bs:                                # "or when the reflog was removed"
-            trace.append('reflog-removed')
-            return [render('git_reflog_rewritten', {'ref': reflog_ref(p)})]
     elif (interp, what) == ('git', 'hook'):     # "from the manifest alone"
         h, hb, ha = hook_name(p), is_hook(b), is_hook(a)
         if ha and not hb:
@@ -1535,7 +1726,7 @@ def explain(interp, what, p, b, a, outcome, state, trace):
             return [render('git_index_changed', {})]
     out = []
     for s in need:
-        r = unavailable(ent[s], interp, what)
+        r = unavailable(ent[s], interp, what, state['store'])
         trace.append('unavailable-%s-%s' % (s, r))
         out.append(render('content_unavailable', {'reason': r, 'side': s}))
         state['unavailable'].append((r, s, p))
@@ -1724,6 +1915,521 @@ def pip_end(state, trace):
     return unnamed + unavailable_events('pip', state) + [e for _, e in named]
 
 
+# ---------------------------------------------------------------------------
+# git's content: HEAD, loose refs, packed-refs and reflogs, read from a store
+# (diff-v1 "**git.**" and the paragraph after it; diff-events E12; the kinds
+# of finding-kinds.md). Without a store every copy is `content_unavailable`
+# and git derives no event but those (E12: "A ref, `packed-refs` or reflog
+# git needs and cannot read decides nothing").
+#
+# The formats are git's own, which the prose does not restate: a loose ref is
+# an object id and a newline; HEAD is that or `ref: <name>` and a newline;
+# packed-refs is lines `<id> <name>`, its `#` header and `^<id>` peeled lines
+# naming no ref; a reflog entry is `<old> <new> <identity>\t<message>` and a
+# newline. An object id is 40 or 64 lowercase hex digits. Anything else
+# cannot be parsed: "Where an interpreter fails on a path (a file it claims
+# cannot be parsed, ...), that path's record carries `could_not_interpret`
+# (R11) unless its outcome is `unknown`, nothing more is read from it, and
+# pip, dpkg and git emit one `could_not_interpret` event naming it (E10)". The
+# corpus writes only content git writes, and refs that are no ref at all
+# (git's own parser may accept more: the documents do not define the
+# formats, so the corpus stays within what git writes).
+
+GIT_CONTENT = ('HEAD', 'ref', 'packed-refs', 'reflog')
+
+
+class _Mark:
+    def __init__(self, name):
+        self.name = name
+
+    def __repr__(self):
+        return self.name
+
+
+ABSENT = _Mark('ABSENT')                # not a regular file on that side, or no line for it
+UNREADABLE = _Mark('UNREADABLE')        # content_unavailable: "decides nothing"
+UNPARSED = _Mark('UNPARSED')            # could_not_interpret: "nothing more is read from it"
+NO_EVIDENCE = _Mark('NO_EVIDENCE')      # no value can be told on that side
+_OID = rb'(?:[0-9a-f]{40}|[0-9a-f]{64})'
+
+
+def git_repo(p):
+    """(the repository, the place): "per repository (a directory named
+    `.git`; `repo` its path in the scope)" -- the path of the directory named
+    `.git` itself, `.git` at the scope's root (ambiguity G2: not the
+    working tree above it) -- and "A path is placed by the part after its
+    `.git/` (the last one that fits)"."""
+    place = git_place(p)
+    return p[:len(p) - len(place) - 1], place
+
+
+def parse_git(what, data):
+    """The parsed copy, or None when it cannot be parsed."""
+    if what in ('HEAD', 'ref'):
+        m = re.fullmatch(b'(' + _OID + b')\n', data)
+        if m:
+            return ('oid', m.group(1).decode('ascii')) if what == 'HEAD' \
+                else m.group(1).decode('ascii')
+        m = re.fullmatch(rb'ref: ([^\n]+)\n', data) if what == 'HEAD' else None
+        return ('sym', m.group(1)) if m else None
+    if data and not data.endswith(b'\n'):
+        return None
+    lines = data.split(b'\n')[:-1]
+    if what == 'packed-refs':
+        refs = collections.OrderedDict()
+        for line in lines:
+            if line.startswith(b'#') or re.fullmatch(b'\\^' + _OID, line):
+                continue
+            m = re.fullmatch(b'(' + _OID + rb') ([^\n]+)', line)
+            if not m:
+                return None
+            # "Where an interpreter keeps the first of two equal keys (..., a
+            # packed ref), "first" is in file order."
+            refs.setdefault(m.group(2), m.group(1).decode('ascii'))
+        return refs
+    entries = []                                # a reflog
+    for line in lines:
+        m = re.fullmatch(b'(' + _OID + b') (' + _OID + rb') [^\t\n]*\t([^\n]*)', line)
+        if not m:
+            return None
+        msg = m.group(3)
+        # "its operation being the message before its first `:`"
+        entries.append((m.group(1).decode('ascii'), m.group(2).decode('ascii'), msg,
+                        msg.split(b':', 1)[0]))
+    return entries
+
+
+def gained(before, after):
+    """The entries a reflog gained: "when before's bytes are a prefix of
+    after's ending at a line's end (an absent before is empty)", those after
+    it; else None (git_reflog_rewritten: it gained none -- ambiguity G3)."""
+    if after.startswith(before) and (before == b'' or before.endswith(b'\n')):
+        return parse_git('reflog', after[len(before):])
+    return None
+
+
+def as_string(v):
+    """A `string` field's value from bytes or str, or None when it is not one
+    (not UTF-8, over 1,024 bytes, a NUL)."""
+    if isinstance(v, bytes):
+        try:
+            v = v.decode('utf-8')
+        except UnicodeDecodeError:
+            return None
+    return v if string_ok(v) else None
+
+
+def git_finding(kind, values, trace):
+    """A path finding of git's, or `invalid_finding` in its place when a value
+    is not a string field's value or its text is over 1,024 bytes ("a finding
+    that breaks the row ... is replaced by `invalid_finding`")."""
+    vs = collections.OrderedDict()
+    for n, v in values.items():
+        if dict(KINDS[kind].fields)[n].rstrip('?') == 'string' and v is not None:
+            v = as_string(v)
+            if v is None:
+                trace.append('git-invalid-finding')
+                return render('invalid_finding', {})
+        vs[n] = v
+    if len(fill(kind, vs).encode('utf-8')) > 1024:
+        trace.append('git-invalid-finding')
+        return render('invalid_finding', {})
+    return render(kind, vs)
+
+
+def plain_or_fast_forward(entry):
+    """git_reflog_move's complement: "a plain commit (operation `commit` or
+    `commit (initial)`) or a fast-forward (its message contains
+    `Fast-forward`)"."""
+    return entry[3] in (b'commit', b'commit (initial)') or b'Fast-forward' in entry[2]
+
+
+def git_explain(what, p, b, a, outcome, state, trace):
+    """The findings of a HEAD, loose ref, packed-refs or reflog record, and
+    what E12 needs of it, kept in state['git'][repo].
+
+    Each side on which the path is a regular file is read ("A side on which
+    the path is not a regular file counts as absent") -- but a removed
+    reflog, whose finding needs no copy ("or when the reflog was removed (no
+    copy needed), `git_reflog_rewritten`"). A path whose outcome is `unknown`
+    is read too and adds no finding (E12, P8); one git does not need is not
+    read: a tag's or a remote-tracking ref's, or their reflogs', whose only
+    use is a path finding that an `unknown` record does not carry. A side
+    whose copy cannot be read is `content_unavailable`: a finding (not on an
+    `unknown` record), and that path decides nothing. The per-reason event
+    names it only when git derives events from that content -- HEAD,
+    packed-refs, a branch's loose ref or reflog, `logs/HEAD` -- not a tag's
+    or a remote-tracking ref's, whose record alone says it ("Content": "git
+    names only the paths it derives events from (HEAD, branches,
+    `packed-refs`, their reflogs), and a reflog removed needs no copy")."""
+    store, unknown = state['store'], outcome == 'unknown'
+    repo, place = git_repo(p)
+    R = state['git'].setdefault(repo, {'HEAD': None, 'logs/HEAD': None, 'packed-refs': None,
+                                       'loose': {}, 'logs': {}})
+    if what == 'HEAD' or what == 'packed-refs':
+        slot = (what, None)
+    elif what == 'ref':
+        slot = ('loose', place[len(b'refs/heads/'):]) if place.startswith(b'refs/heads/') \
+            else None
+    elif place == b'logs/HEAD':
+        slot = ('logs/HEAD', None)
+    else:
+        slot = ('logs', place[len(b'logs/refs/heads/'):]) \
+            if place.startswith(b'logs/refs/heads/') else None
+    if slot is None:
+        trace.append('git-no-branch')           # tags, remote-tracking refs, ...
+        if unknown:
+            return []
+    ent = {'before': b, 'after': a}
+    regs = [s for s, e in zip(SIDES, (b, a)) if is_reg(e)]
+    if not regs:                                # a directory or a symlink: nothing
+        return []
+    if what == 'reflog' and not is_reg(a):     # removed: no copy needed, no entries gained
+        trace.append('reflog-removed')
+        return [] if unknown else [render('git_reflog_rewritten', {'ref': reflog_ref(p)})]
+    out, raw, cannot = [], {}, False
+    for s in regs:
+        data, r = read_copy(ent[s], 'git', what, store)
+        if r is not None:
+            trace.append(('event-unavailable-%s-%s' if unknown else 'unavailable-%s-%s')
+                         % (s, r))
+            if not unknown:
+                out.append(render('content_unavailable', {'reason': r, 'side': s}))
+            if slot is not None:
+                state['unavailable'].append((r, s, p))
+            else:
+                trace.append('git-unavailable-no-event')
+            cannot = True
+        else:
+            raw[s] = data
+    if cannot:
+        trace.append('git-decides-nothing')
+        if slot is not None:
+            put_slot(R, slot, {'path': p, 'before': UNREADABLE, 'after': UNREADABLE,
+                               'gained': None, 'read': False})
+        return out
+    trace.append('git-read' + ('-unknown' if unknown else ''))
+    parsed = {s: parse_git(what, raw[s]) for s in regs}
+    if any(v is None for v in parsed.values()):
+        trace.append('git-cannot-parse')
+        state['cni'].append(p)
+        if slot is not None:
+            put_slot(R, slot, {'path': p, 'before': UNPARSED, 'after': UNPARSED,
+                               'gained': None, 'read': False})
+        return [] if unknown else [render('could_not_interpret', {})]
+    pb, pa = parsed.get('before', ABSENT), parsed.get('after', ABSENT)
+    g = gained(raw.get('before', b''), raw['after']) if what == 'reflog' else None
+    if slot is not None:
+        put_slot(R, slot, {'path': p, 'before': pb, 'after': pa, 'gained': g, 'read': True})
+    if unknown:
+        return []
+    if what == 'HEAD':
+        hv = lambda v: '' if v is ABSENT else v[1]
+        if hv(pb) == hv(pa):
+            trace.append('git-head-equal')
+            return []
+        return [git_finding('git_head_changed', collections.OrderedDict(
+            [('from', hv(pb)), ('to', hv(pa))]), trace)]
+    if what == 'ref':
+        refs_b = {} if pb is ABSENT else {place: pb}
+        refs_a = {} if pa is ABSENT else {place: pa}
+    elif what == 'packed-refs':
+        refs_b = {} if pb is ABSENT else pb
+        refs_a = {} if pa is ABSENT else pa
+    else:
+        ref = reflog_ref(p)
+        if g is None:
+            trace.append('git-reflog-rewritten')
+            return [render('git_reflog_rewritten', {'ref': ref})]
+        trace.append('git-reflog-appended')
+        fs = [git_finding('git_reflog_appended', collections.OrderedDict(
+            [('ref', ref), ('entries', len(g))]), trace)]
+        for e in g:
+            if not plain_or_fast_forward(e):
+                trace.append('git-reflog-move')
+                fs.append(git_finding('git_reflog_move', collections.OrderedDict(
+                    [('ref', ref), ('from', e[0]), ('to', e[1]), ('operation', e[3])]), trace))
+        return fs
+    # "A loose ref or a line of `packed-refs` (in ref order)": by the ref's
+    # full name, bytewise.
+    fs = []
+    for name in sorted(set(refs_b) | set(refs_a)):
+        vb, va = refs_b.get(name), refs_a.get(name)
+        if vb is None:
+            fs.append(git_finding('git_ref_created', collections.OrderedDict(
+                [('ref', name), ('to', va)]), trace))
+        elif va is None:
+            fs.append(git_finding('git_ref_deleted', collections.OrderedDict(
+                [('ref', name), ('from', vb)]), trace))
+        elif vb != va:
+            fs.append(git_finding('git_ref_moved', collections.OrderedDict(
+                [('ref', name), ('from', vb), ('to', va)]), trace))
+    if what == 'packed-refs' and len(fs) > 1:
+        trace.append('git-packed-several')
+    return fs
+
+
+def put_slot(R, slot, v):
+    kind, name = slot
+    if name is None:
+        R[kind] = v
+    else:
+        R[kind][name] = v
+
+
+def short_branch(v):
+    """git_head_switched's from and to: "the branch (`main`) or, detached, the
+    commit"."""
+    if v[0] == 'oid':
+        return v[1]
+    return v[1][len(b'refs/heads/'):] if v[1].startswith(b'refs/heads/') else v[1]
+
+
+REWRITES = ('reset', 'commit (amend)', 'rebase', 'branch: Reset to', 'forced-update')
+
+
+def rewrite_trigger(e):
+    """Which of E12's rewrites an entry is, or None: "any `reset`, `commit
+    (amend)`, operation containing `rebase`, message starting `branch: Reset
+    to`, or message containing `forced-update`"."""
+    old, new, msg, op = e
+    if op == b'reset':
+        return 'reset'
+    if op == b'commit (amend)':
+        return 'commit (amend)'
+    if b'rebase' in op:
+        return 'rebase'
+    if msg.startswith(b'branch: Reset to'):
+        return 'branch: Reset to'
+    if b'forced-update' in msg:
+        return 'forced-update'
+    return None
+
+
+COMMITS = (b'commit', b'commit (merge)', b'cherry-pick', b'revert', b'am')
+
+
+def adds(e):
+    """"only commits (`commit`, `commit (merge)`, `cherry-pick`, `revert`,
+    `am`) and fast-forwards or merges (a message containing `Fast-forward`;
+    an operation starting with `merge` or `pull`)"."""
+    return e[3] in COMMITS or b'Fast-forward' in e[2] or e[3].startswith(b'merge') or \
+        e[3].startswith(b'pull')
+
+
+def classify(branch, vb, va, G, trace):
+    """A branch on both sides at different commits, "decided by the entries
+    its reflog gained in this diff, when they lead from its value before to
+    its value after". (kind, values, whether the event is derived from the
+    reflog.) It is when its entries lead from before to after, whatever
+    they say -- the move then is theirs; not when it gained none or they do
+    not lead there: the prose's "the reflog only says how a branch moved
+    (...), and only when its entries of this diff lead from the value before
+    to the value after" (ambiguity G7)."""
+    entries = G['gained'] if G is not None and G['read'] else None
+    moved = lambda why, said=False: (trace.append('git-ev:moved:' + why) or
+                                     ('git_branch_moved', collections.OrderedDict(
+                                         [('branch', branch), ('from', vb), ('to', va)]), said))
+    if not entries:
+        return moved('no entries' if G is None or not G['read'] else
+                     'a reflog that gained none')
+    if entries[0][0] != vb or entries[-1][1] != va or \
+            any(x[0] != y[1] for y, x in zip(entries, entries[1:])):
+        return moved('entries that do not lead from before to after')
+    hits = [(rewrite_trigger(e), e) for e in entries]
+    if any(t for t, _ in hits):
+        ops = []
+        for t, e in hits:
+            if t:
+                trace.append('git-ev:rewritten:' + t)
+                if e[3] not in ops:
+                    ops.append(e[3])
+        if len(ops) > 1:
+            trace.append('git-ev:rewritten:several operations')
+        return ('git_history_rewritten', collections.OrderedDict(
+            [('branch', branch), ('how', b', '.join(ops)), ('from', vb), ('to', va)]), True)
+    if all(adds(e) for e in entries):
+        counted = all(e[3] in COMMITS for e in entries)
+        trace.append('git-ev:commits added:' + ('counted' if counted else 'not counted'))
+        return ('git_commits_added', collections.OrderedDict(
+            [('branch', branch), ('count', len(entries) if counted else None), ('to', va)]),
+            True)
+    return moved('another operation', True)
+
+
+def git_event(kind, repo, values, paths, unk, trace):
+    """E2's record of one git event, `repo` first; E9: one whose value is not a
+    string field's value, or whose text would exceed 1,024 bytes, is one
+    `invalid_finding` event naming its paths, in its place."""
+    vs = collections.OrderedDict([('repo', repo)])
+    vs.update(values)
+    for n, v in list(vs.items()):
+        if v is not None and dict(KINDS[kind].fields)[n].rstrip('?') == 'string':
+            vs[n] = as_string(v)
+            if vs[n] is None:
+                trace.append('git-ev:invalid')
+                return render_event('git', 'invalid_finding', {}, paths, unk)
+    if len(fill(kind, vs).encode('utf-8')) > 1024:
+        trace.append('git-ev:invalid')
+        return render_event('git', 'invalid_finding', {}, paths, unk)
+    if any(x in unk for x in paths):
+        trace.append('git-ev:provisional:' + kind)
+    return render_event('git', kind, vs, paths, unk)
+
+
+def side_value(R, br, side):
+    """E12: "Its value on a side: its loose ref there; else its line in
+    `packed-refs` when `packed-refs` is a path of this diff; else, before
+    only, the old id of the first entry its reflog gained in this diff (all
+    zeros: absent)". And a loose ref removed with `packed-refs` not a path of
+    this diff is absent after: "its loose ref removed and `packed-refs`
+    without it (a path of this diff, or not -- git removes a branch from
+    both)". (value, the paths it came from, which source.) A path of this
+    diff that could not be read or parsed gives UNREADABLE or UNPARSED: it
+    "decides nothing", and neither does the branch (ambiguity G5). "packed-refs
+    without it" counts an absent `packed-refs` too (ambiguity G9). The paths
+    returned are the event's `paths` from that side (ambiguity G8: "`paths`:
+    every ref, `packed-refs`, `HEAD` and reflog path it was derived from" --
+    packed-refs is the evidence of a creation or deletion it gives)."""
+    L, P, G = R['loose'].get(br), R['packed-refs'], R['logs'].get(br)
+    if L is not None and L[side] is not ABSENT:
+        return L[side], [L['path']], 'loose'
+    if P is not None:
+        v = P[side]
+        if isinstance(v, dict):
+            v = v.get(b'refs/heads/' + br, ABSENT)
+        return v, [P['path']], 'packed-refs'
+    if side == 'before' and G is not None and G['read'] and G['gained']:
+        old = G['gained'][0][0]
+        return (ABSENT if set(old) == {'0'} else old), [G['path']], 'reflog'
+    if side == 'after' and L is not None:
+        return ABSENT, [L['path']], 'loose removed'
+    return NO_EVIDENCE, [], None
+
+
+def repo_events(repo, R, unk, trace):
+    """One repository's events: [(sort key, record)]. E4: "git by repository,
+    then `HEAD` before every branch, then branch, then kind"."""
+    out, kind_ix = [], GIT_EVENT_KINDS.index
+    H = R['HEAD']
+    if H is not None and H['read'] and H['before'] is not ABSENT and \
+            H['after'] is not ABSENT and H['before'] != H['after']:
+        hb, ha = H['before'], H['after']
+        if hb[0] == 'oid' and ha[0] == 'oid':
+            # "`HEAD` detached on both sides at different commits is the
+            # branch `HEAD`, decided by `logs/HEAD` as above."
+            trace.append('git-ev:detached HEAD moved')
+            kind, values, read = classify(b'HEAD', hb[1], ha[1], R['logs/HEAD'], trace)
+            paths = [H['path']] + ([R['logs/HEAD']['path']] if read else [])
+        else:
+            trace.append('git-ev:HEAD ' + ('detached' if ha[0] == 'oid' else 'attached'
+                                           if hb[0] == 'oid' else 'switched'))
+            kind, paths = 'git_head_switched', [H['path']]
+            values = collections.OrderedDict([('from', short_branch(hb)),
+                                              ('to', short_branch(ha))])
+        out.append(((repo, 0, b'', kind_ix(kind)), git_event(kind, repo, values, paths, unk,
+                                                             trace)))
+    elif H is not None and not H['read']:
+        trace.append('git-ev:HEAD decides nothing')
+    P = R['packed-refs']
+    names = set(R['loose']) | set(R['logs'])
+    if P is not None:
+        for v in (P['before'], P['after']):
+            if isinstance(v, dict):
+                names |= {n[len(b'refs/heads/'):] for n in v if n.startswith(b'refs/heads/')}
+    ev = {}
+    for br in sorted(names):
+        vb, pb, how_b = side_value(R, br, 'before')
+        va, pa, how_a = side_value(R, br, 'after')
+        paths = pb + pa
+        if any(v is UNREADABLE or v is UNPARSED for v in (vb, va)):
+            trace.append('git-ev:a branch that decides nothing')
+            continue
+        if vb is ABSENT and isinstance(va, str):
+            trace.append('git-ev:created, absent before by ' + how_b)
+            ev[br] = ('git_branch_created', collections.OrderedDict(
+                [('branch', br), ('at', va)]), paths)
+        elif vb is NO_EVIDENCE and isinstance(va, str):
+            trace.append('git-ev:moved, no evidence of before')
+            G = R['logs'].get(br)
+            if G is not None and not G['read']:
+                # Its reflog "decides nothing": the value before "cannot be
+                # told" (git_branch_moved's row), so no `from` (ambiguity G5).
+                trace.append('git-ev:moved, its reflog unreadable')
+            ev[br] = ('git_branch_moved', collections.OrderedDict(
+                [('branch', br), ('from', None), ('to', va)]), paths)
+        elif isinstance(vb, str) and va is ABSENT:
+            trace.append('git-ev:deleted, ' + {
+                'loose removed': 'packed-refs not a path of this diff',
+                'packed-refs': 'packed-refs a path of this diff without it'}[how_a]
+                + ('' if how_b == 'loose' else ', packed only'))
+            ev[br] = ('git_branch_deleted', collections.OrderedDict(
+                [('branch', br), ('was', vb)]), paths)
+        elif isinstance(vb, str) and isinstance(va, str) and vb != va:
+            G = R['logs'].get(br)
+            kind, values, read = classify(br, vb, va, G, trace)
+            ev[br] = (kind, values, paths + ([G['path']] if read else []))
+        elif vb == va and isinstance(vb, str):
+            trace.append('git-ev:a branch at the same commit')
+    # "a deletion and a creation at the same commit whose new reflog says
+    # `Branch: renamed`, one `git_branch_renamed`" -- "when the new branch's
+    # reflog of this diff says `Branch: renamed refs/heads/{from} to
+    # refs/heads/{to}`": an entry it gained in this diff with that message.
+    for to in sorted(ev):
+        if to not in ev or ev[to][0] != 'git_branch_created':
+            continue
+        G = R['logs'].get(to)
+        for e in (G['gained'] or []) if G is not None and G['read'] else []:
+            m = re.fullmatch(rb'Branch: renamed refs/heads/(.+) to refs/heads/(.+)', e[2])
+            frm = m.group(1) if m and m.group(2) == to else None
+            if frm in ev and ev[frm][0] == 'git_branch_deleted' and \
+                    ev[frm][1]['was'] == ev[to][1]['at']:
+                trace.append('git-ev:renamed')
+                ev[frm] = ('git_branch_renamed', collections.OrderedDict(
+                    [('from', frm), ('to', to), ('at', ev[to][1]['at'])]),
+                    ev[frm][2] + ev[to][2] + [G['path']])
+                del ev[to]
+                break
+    # The rename's place: "then branch" -- its `from`, the branch its text
+    # names first ("branch {from} renamed to {to}"; ambiguity G6).
+    for br, (kind, values, paths) in ev.items():
+        if kind == 'git_branch_renamed' and any(values['to'] < x < br for x in ev):
+            trace.append("git-ev:a rename in its from's place")
+        out.append(((repo, 1, br, kind_ix(kind)), git_event(kind, repo, values, paths, unk,
+                                                            trace)))
+    return out
+
+
+def git_end(state, trace):
+    """git's events: those with no name first -- a `could_not_interpret` for
+    each file that cannot be parsed, by path, then the `content_unavailable`
+    events, one per reason -- then the repositories' (E4). "Events with no
+    name -- `could_not_interpret` for a file, `content_unavailable` -- come
+    before every named event, in the Kinds table's order, then by path"."""
+    unk = state['unknown']
+    named = []
+    for repo, R in state['git'].items():
+        named += repo_events(repo, R, unk, trace)
+    if len({k[0] for k, _ in named}) > 1:
+        trace.append('git-ev:two repositories')
+    heads = {k[0] for k, _ in named if k[1] == 0}
+    if any(k[1] == 1 and k[0] in heads and k[2] < b'HEAD' for k, _ in named):
+        trace.append('git-ev:HEAD before a branch that sorts before it')
+    named.sort(key=lambda x: x[0])
+    unnamed = [render_event('git', 'could_not_interpret', {}, [p], unk)
+               for p in sorted(state['cni'])]
+    if unnamed:
+        trace.append('git-ev:could_not_interpret')
+    ev = unavailable_events('git', state)
+    for e in ev:
+        d = dict(e)
+        trace.append('git-ev:content_unavailable:%s%s' % (
+            d['reason'], ', provisional' if d.get('provisional') else ''))
+    if (unnamed or ev) and named:
+        trace.append('git-ev:events with no name before the named')
+    return unnamed + ev + [e for _, e in named]
+
+
 def end(interp, state, trace):
     """An interpreter's events. The end hook fails as a whole (E6) only when
     "the interpreter's per-diff state would exceed 64 MiB, memory runs out,
@@ -1744,10 +2450,12 @@ def end(interp, state, trace):
         if any(dict(e).get('provisional') for e in ev):
             trace.append('dpkg-provisional-unavailable')
         return ev
+    if interp == 'git':
+        return git_end(state, trace)
     return []
 
 
-def diff(before, after):
+def diff(before, after, store=None):
     """None when the scopes differ (refused). Otherwise (header, records,
     events, trailer, traces): header and trailer as [(key, value)], records
     as dicts with `path` as bytes (`findings` a list of [(key, value)]),
@@ -1784,7 +2492,7 @@ def diff(before, after):
     assert [('scopes' if k == 'scopes_b64' else k) for k, _ in header] == HEADER_KEYS
     records, counts, traces = [], collections.Counter(), {}
     states = {i: {'unavailable': [], 'moved': [], 'unnamed': [], 'reinstalled': [],
-                  'unknown': set()}
+                  'unknown': set(), 'store': store, 'git': {}, 'cni': []}
               for i in INTERP_ORDER}
     paths = sorted(set(eb) | set(ea))
     for p in paths:
@@ -1906,7 +2614,11 @@ def canonical(v):
 
 
 if __name__ == '__main__':
-    res = diff(sys.argv[1], sys.argv[2])
+    store = None
+    if sys.argv[1] == '--store':
+        store = sys.argv[2]
+        del sys.argv[1:3]
+    res = diff(sys.argv[1], sys.argv[2], store)
     if res is None:
         print('refused: the manifests have different scopes', file=sys.stderr)
         sys.exit(1)

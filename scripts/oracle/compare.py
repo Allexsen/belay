@@ -4,8 +4,9 @@
     compare.py <driver> <corpus-dir>
     compare.py --gate <corpus-dir>     the coverage gate alone, no driver
 
-pair-NNNNN.before/.after (same scope): the driver's diff and reference.diff()
-must agree on
+pair-NNNNN.before/.after (same scope), with pair-NNNNN.store/ when the pair
+gives the diff a store (the driver's --store; reference.diff()'s `store`):
+the driver's diff and reference.diff() must agree on
   - the header: every key, its value and their order (the "Shape" example's,
     which the reference checks at start-up, then V2-R7's `before_excluded`
     and `after_excluded`); and those two as bytes: each manifest's
@@ -85,7 +86,12 @@ the generator's labels (coverage(), required(), gate()):
   - every interpreter item (INTERP_SCENARIOS): which interpreter claims a
     path, what its entries hold and the outcome, with no store -- text,
     binary, dpkg, pip and git paths, the pip and dpkg end hooks' inputs,
-    events of two interpreters, and a diff with findings but no event; a
+    events of two interpreters, and a diff with findings but no event; git's
+    repository-level events (diff-events E12) in pairs given a store: each
+    kind and each way to it, the reflog's evidence chaining or not, HEAD,
+    repositories nested and their order, `unknown` refs read or not, refs
+    that cannot be parsed, tags and remote-tracking refs, each reason a copy
+    cannot be read (GIT_EVENT_ITEMS, GIT_INPUT_ITEMS); a
     RECORD and a dpkg status not captured (excluded, below an unreadable
     directory, below a mount), alone and beside ones read, which derive no
     event (E11), and ones unknown on one side for another reason
@@ -128,11 +134,18 @@ def same(x, y):
 _REF = {}
 
 
+def store_of(stem):
+    """The pair's store (gen_corpus.py: pair-NNNNN.store/), or None: the diff
+    is given no store."""
+    s = stem + '.store'
+    return s if os.path.isdir(s) else None
+
+
 def ref_diff(stem):
-    """reference.diff() of the pair at stem, computed once per process (the
-    comparison and the coverage gate both read it)."""
+    """reference.diff() of the pair at stem, with its store, computed once per
+    process (the comparison and the coverage gate both read it)."""
     if stem not in _REF:
-        _REF[stem] = ref.diff(stem + '.before', stem + '.after')
+        _REF[stem] = ref.diff(stem + '.before', stem + '.after', store_of(stem))
     return _REF[stem]
 
 
@@ -405,7 +418,9 @@ def run_driver(driver, stem, before='.before', after='.after'):
     out = stem + '.diff' + before + after
     if os.path.exists(out):
         os.unlink(out)
-    r = subprocess.run([driver, stem + before, stem + after, out], capture_output=True)
+    st = store_of(stem)
+    r = subprocess.run([driver] + (['--store', st] if st else []) + [stem + before, stem + after,
+                                                                     out], capture_output=True)
     raw = open(out, 'rb').read() if os.path.exists(out) else None
     return r.returncode, r.stderr.decode('utf-8', 'replace').strip(), raw
 
@@ -1175,6 +1190,96 @@ def pair_coverage(stem, cells, optional, scen, fpairs):
             scen['three or more compared fields differ on one entry'] += 1
 
 
+# git's repository-level events (diff-events E12), in pairs given a store
+# (gen_corpus.py, git_events()) and, with no store, the content_unavailable
+# event alone: the situations git's end hook meets, from its tags
+# (reference.git_end), as the pip and dpkg items are pip_end's.
+GIT_EVENT_ITEMS = collections.OrderedDict([
+    ('git-ev:created, absent before by reflog',
+     'a branch created, absent before by its reflog (zeros)'),
+    ('git-ev:created, absent before by packed-refs',
+     'a branch created, absent before by packed-refs'),
+    ('git-ev:moved, no evidence of before',
+     'a branch moved with no evidence of before (no from)'),
+    ('git-ev:moved, its reflog unreadable',
+     'a branch whose reflog cannot be read: no evidence of before'),
+    ('git-ev:deleted, packed-refs not a path of this diff',
+     'a branch deleted, packed-refs not a path of this diff'),
+    ('git-ev:deleted, packed-refs a path of this diff without it',
+     'a branch deleted, packed-refs a path of this diff without it'),
+    ('git-ev:deleted, packed-refs a path of this diff without it, packed only',
+     'a branch deleted from packed-refs, no loose ref'),
+    ('git-ev:a branch at the same commit',
+     'a branch at the same commit on both sides, from another place'),
+    ('git-ev:renamed', 'a branch renamed'),
+    ('git-ev:a rename in its from\'s place', 'a rename in its from\'s place'),
+    ('git-ev:commits added:counted', 'commits added, counted'),
+    ('git-ev:commits added:not counted', 'commits added, not counted'),
+    ('git-ev:rewritten:reset', 'history rewritten by reset'),
+    ('git-ev:rewritten:commit (amend)', 'history rewritten by commit (amend)'),
+    ('git-ev:rewritten:rebase', 'history rewritten by rebase'),
+    ('git-ev:rewritten:branch: Reset to', 'history rewritten by branch: Reset to'),
+    ('git-ev:rewritten:forced-update', 'history rewritten by forced-update'),
+    ('git-ev:rewritten:several operations', 'history rewritten by several operations'),
+    ('git-ev:moved:entries that do not lead from before to after',
+     'a branch moved, its reflog entries not leading from before to after'),
+    ('git-ev:moved:another operation', 'a branch moved by another operation'),
+    ('git-ev:moved:no entries', 'a branch moved, no reflog entries'),
+    ('git-ev:moved:a reflog that gained none', 'a branch moved, its reflog gained none'),
+    ('git-ev:HEAD switched', 'HEAD switched to another branch'),
+    ('git-ev:HEAD detached', 'HEAD detached'),
+    ('git-ev:HEAD attached', 'HEAD attached'),
+    ('git-ev:detached HEAD moved', 'a detached HEAD moved (the branch HEAD)'),
+    ('git-ev:two repositories', 'events of two repositories'),
+    ('git-ev:HEAD before a branch that sorts before it',
+     'HEAD before a branch that sorts before it'),
+    ('git-ev:could_not_interpret', 'a ref that cannot be parsed'),
+    ('git-ev:content_unavailable:no_store', 'content_unavailable, no_store'),
+    ('git-ev:content_unavailable:missing', 'content_unavailable, missing'),
+    ('git-ev:content_unavailable:corrupt', 'content_unavailable, corrupt'),
+    ('git-ev:content_unavailable:too_large', 'content_unavailable, too_large'),
+    ('git-ev:events with no name before the named', 'events with no name before the named')])
+# From the input as the reference reads it: an unknown branch ref read from
+# its copy beside a provisional event; one with no copy, a provisional
+# content_unavailable event; a tag's or remote-tracking ref's copy read.
+GIT_INPUT_ITEMS = ['an unknown ref read from its copy: provisional',
+                   'an unknown packed-refs read from its copy: provisional',
+                   'packed-refs metadata_only, not read: no evidence of before',
+                   'an unknown ref with no copy: a provisional content_unavailable event',
+                   'tags and remote-tracking refs read: no event']
+
+
+def git_coverage(records, traces, tags):
+    end = traces[b'']
+    for t, item in GIT_EVENT_ITEMS.items():
+        if t in end:
+            tags.add('git events: ' + item)
+    for rec in records:
+        p, tr = rec['path'], traces[rec['path']]
+        if 'interp:git:packed-refs' in tr and rec['outcome'] == 'metadata_only' and \
+                'git-ev:moved, no evidence of before' in end:
+            tags.add('git events: packed-refs metadata_only, not read: no evidence of before')
+        if 'interp:git:packed-refs' in tr and rec['outcome'] == 'unknown' and \
+                'git-read-unknown' in tr and any(t.startswith('git-ev:provisional:')
+                                                 for t in end):
+            tags.add('git events: an unknown packed-refs read from its copy: provisional')
+        if 'interp:git:ref' not in tr and 'interp:git:reflog' not in tr:
+            continue
+        place = ref.git_place(p)
+        if rec['outcome'] == 'unknown' and place.startswith(b'refs/heads/'):
+            if 'git-read-unknown' in tr and any(t.startswith('git-ev:provisional:')
+                                                for t in end):
+                tags.add('git events: an unknown ref read from its copy: provisional')
+            if 'git-decides-nothing' in tr and any(
+                    t.startswith('git-ev:content_unavailable:') and t.endswith(', provisional')
+                    for t in end):
+                tags.add('git events: an unknown ref with no copy: a provisional '
+                         'content_unavailable event')
+        if 'git-read' in tr and 'git-no-branch' in tr and \
+                (b'/tags/' in place or b'/remotes/' in place):
+            tags.add('git events: tags and remote-tracking refs read: no event')
+
+
 # The interpreters in the oracle's setting, a diff given no store (diff-v1
 # "Interpreters", "What each interpreter reports"; pins finding-kinds.md and
 # diff-events.md). Each item names a situation of the INPUT -- which
@@ -1286,7 +1391,9 @@ INTERP_SCENARIOS = (
        'dpkg events: a status not captured beside one that is read: that one alone (E11)',
        'events: none, every claimed path not captured (E11)']
     + ['%s: unknown, one side only, %s: provisional events (E2)' % (w, r)
-       for w in ('pip RECORD', 'dpkg status') for r in ('listing_incomplete', 'raced')])
+       for w in ('pip RECORD', 'dpkg status') for r in ('listing_incomplete', 'raced')]
+    + ['git events: ' + i for i in GIT_EVENT_ITEMS.values()]
+    + ['git events: ' + i for i in GIT_INPUT_ITEMS])
 NEED_CONTENT = ('status', 'RECORD', 'HEAD', 'ref', 'packed-refs', 'reflog')
 
 
@@ -1468,6 +1575,7 @@ def interp_coverage(stem, tags):
     if (e11['RECORD'] or e11['status']) and not read['RECORD'] and not read['status'] \
             and not events:
         tags.add('events: none, every claimed path not captured (E11)')
+    git_coverage(records, traces, tags)
 
 
 # Manifest versions (test/expect/manifest-v2.md), from each pair's own two
@@ -1620,7 +1728,7 @@ def print_gate(cov):
                                        '(the order of `changed`)'),
                         ('optional', 'optional fields on one side only'),
                         ('scenario', 'scenarios'),
-                        ('interpreter', 'interpreters, with no store'),
+                        ('interpreter', 'interpreters, with no store; git\'s events with one'),
                         ('manifest version', 'manifest versions and v2 statements')):
         items = [i for k, i in need if k == kind]
         lack = [i for k, i in missing if k == kind]
