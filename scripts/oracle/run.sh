@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
 # The diff oracle: belay_diff against an independent reference (written from
 # the prose of docs/spec/diff-v1.md and the pins in test/expect/) on a
-# generated corpus of valid manifest pairs.
+# generated corpus of valid manifest pairs -- with no store, or, for git's
+# events, a store of the pair's own (pair-NNNNN.store/).
 #
 #   scripts/oracle/run.sh [n-bases] [seed]
 #
