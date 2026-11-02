@@ -969,10 +969,21 @@ static enum belay_interp_result explain(void *state, const struct belay_interp_i
                                                                        : BELAY_INTERP_FINDINGS;
     }
     case G_HEAD:
-    case G_REF:    return content ? ref_file(in, f, name, nl, out) : BELAY_INTERP_DECLINE;
+    case G_REF:
+    case G_LOG: {
+        const enum belay_interp_result r = !content ? BELAY_INTERP_DECLINE
+                                         : f == G_LOG ? reflog(in, name, nl, out) : ref_file(in, f, name, nl, out);
+        /* A tag's or a remote-tracking ref's file, or its reflog, derives
+         * no event, but git claims it: one it cannot interpret is said by a
+         * could_not_interpret event too (E10), as collect() says the rest. */
+        const bool branch = f == G_HEAD || (nl == 4 && memcmp(name, "HEAD", 4) == 0) ||
+                            (nl > 11 && memcmp(name, "refs/heads/", 11) == 0);
+        if (r == BELAY_INTERP_ERROR && !branch && g != NULL && !g->failed && unav(g, SW_ERROR, SIDE_AFTER, in, false) == -1)
+            g->failed = true;
+        return r;
+    }
     case G_PACKED: return content ? packed(in, out) : BELAY_INTERP_DECLINE;
     case G_HOOK:   return hook(in, name, nl, out);
-    case G_LOG:    return content ? reflog(in, name, nl, out) : BELAY_INTERP_DECLINE;
     case G_NONE:   break;
     }
     return BELAY_INTERP_ERROR;                  /* dispatch claimed what this cannot place */

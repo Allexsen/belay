@@ -709,8 +709,16 @@ TEST(git_a_ref_that_cannot_be_parsed_is_one_could_not_interpret_event) {
     r_begin(&r, BELAY_INTERP_GIT, true);
     const struct belay_entry a = file(put(OA "\n"), 0), junk = file(put("not a ref\n"), 0);
     r_path(&r, "/s/.git/refs/heads/bad", &a, &junk, "modified");
+    /* a tag or a remote-tracking ref derives no event, but git claims it:
+     * one it cannot parse is still said (E10; the reference's author) */
+    r_path(&r, "/s/.git/refs/tags/v1", &a, &junk, "modified");
+    r_path(&r, "/s/.git/refs/remotes/origin/main", NULL, &junk, "added");
     ASSERT_EQ_STR("{\"event\":\"could_not_interpret\",\"interp\":\"git\",\"text\":\"could not interpret\","
-                  "\"paths\":[\".git/refs/heads/bad\"]}\n", r_end(&r));
+                  "\"paths\":[\".git/refs/heads/bad\"]}\n"
+                  "{\"event\":\"could_not_interpret\",\"interp\":\"git\",\"text\":\"could not interpret\","
+                  "\"paths\":[\".git/refs/remotes/origin/main\"]}\n"
+                  "{\"event\":\"could_not_interpret\",\"interp\":\"git\",\"text\":\"could not interpret\","
+                  "\"paths\":[\".git/refs/tags/v1\"]}\n", r_end(&r));
     r_free(&r);
 }
 
