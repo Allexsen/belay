@@ -140,6 +140,7 @@
 # Decision 121: the E6 causes sentence changes one commit before the oracle's author quotes it (make oracle stops).
 2026-11-02T20:48:40+04:00	spec: a failed end hook's three causes, in both places diff-v1 lists them
 # #47 (git events, decisions 126 and 132): the pins fail test_pins until the schema follows; the code, its fixes and the oracle's commit fail make oracle or make reference until the oracle's and the reference's authors follow.
+# (and every #47 commit before the receipt's fails make dogfood-test, whose summary expects git's events once belay emits them)
 2026-11-02T21:23:59+04:00	pins: git events -- branches created, deleted, renamed, moved; HEAD switched; commits added; history rewritten (proposed)
 2026-11-02T21:53:04+04:00	pins: git events approved; an event from an unknown path is provisional, not dropped
 2026-11-02T22:03:38+04:00	git: repository-level events from the end hook (diff-events E12)
@@ -147,3 +148,5 @@
 2026-11-02T22:42:35+04:00	git: an event names only the paths it was derived from; a removed reflog needs no copy
 2026-11-02T22:37:10+04:00	oracle: git's repository-level events (E12), read from a store of the pair's own
 2026-11-02T22:57:54+04:00	git: a tag or remote ref it cannot interpret is a could_not_interpret event too (E10)
+2026-11-02T22:52:43+04:00	reference: git's repository-level events (E12), its refs and HEAD, and listed readings
+2026-11-02T22:58:33+04:00	bisect: #47's commits before the reference's author follows
