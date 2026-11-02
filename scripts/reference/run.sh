@@ -6,8 +6,7 @@
 #
 # N random cases (default 300) besides the required cells, seeded by `seed`
 # (default 1). Builds the driver first. Exit 0 only when belay and the
-# reference agree on every pair (or differ only as a listed reading of
-# ref.ALT_READINGS explains in full) and every cell was hit.
+# reference agree on every pair and every cell was hit.
 set -eu
 cd "$(dirname "$0")/../.."
 N=${1:-300}

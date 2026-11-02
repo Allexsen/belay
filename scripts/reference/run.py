@@ -10,13 +10,7 @@ coverage: every cell a builder declares must be hit at least once.
 
 Exit 0 when every pair agrees and every cell was hit; 1 otherwise. A failing
 case's directory is kept under DIR with a `report.txt` beside its manifests.
-
-A pair that differs is run again under belay's readings where the documents
-can be read two ways (ref.ALT_READINGS). When they remove every difference,
-the pair is a listed disagreement, not a failure: the smallest set of
-readings that explains it is counted, and its first difference (both
-outputs) is written to DIR/disagreements.txt. A difference no listed reading
-explains fails.
+Any difference fails: no reading of belay's is listed against this file's.
 """
 
 import argparse
@@ -223,11 +217,17 @@ def check_e12(cell, mine):
         and len(N) == 2,
         "git.e12.moved.no_from": lambda: moved_no_from("a/.git", "feat")
         and ev("a/.git", branch="feat")["paths"] == ["a/.git/refs/heads/feat"],
+        # E12: "a reflog only when its entries were used" -- one that gained
+        # nothing (rewritten) is not listed
         "git.e12.moved.no_from_reflog_rewritten": lambda: moved_no_from("b/.git", "feat")
-        and ev("b/.git", branch="feat")["paths"] == ["b/.git/logs/refs/heads/feat",
-                                                     "b/.git/refs/heads/feat"],
+        and ev("b/.git", branch="feat")["paths"] == ["b/.git/refs/heads/feat"],
         "git.e12.before_from_reflog": lambda: (ev("c/.git", "git_commits_added", "feat")
-                                               or {}).get("count") == 1,
+                                               or {}).get("count") == 1
+        and ev("c/.git")["paths"] == ["c/.git/logs/refs/heads/feat", "c/.git/refs/heads/feat"],
+        "git.e12.before_from_reflog_not_chaining": lambda: (
+            ev("d/.git", "git_branch_moved", "feat") or {}).get("from") == X
+        and ev("d/.git")["to"] == Y
+        and ev("d/.git")["paths"] == ["d/.git/logs/refs/heads/feat", "d/.git/refs/heads/feat"],
         "git.e12.deleted.loose": lambda: (ev("a/.git", "git_branch_deleted", "old")
                                           or {}).get("paths") == ["a/.git/refs/heads/old"],
         "git.e12.deleted.loose_and_packed": lambda: (ev("b/.git", "git_branch_deleted", "old")
@@ -257,13 +257,16 @@ def check_e12(cell, mine):
         "git.e12.rewritten.branch_reset": lambda: rewritten("r-branch-reset", "branch"),
         "git.e12.rewritten.forced_update": lambda: rewritten("r-forced", "update by push"),
         "git.e12.rewritten.how_each_once": lambda: rewritten("r-mixed", "reset, commit (amend)"),
-        "git.e12.not_chaining.first": lambda: moved_from(P, "n-first"),
-        "git.e12.not_chaining.gap": lambda: moved_from(P, "n-gap"),
-        "git.e12.not_chaining.last": lambda: moved_from(P, "n-last"),
-        "git.e12.other_operation": lambda: moved_from(P, "n-other"),
+        # a reflog whose entries do not lead from before to after is not
+        # listed, nor one whose entries do but say not how (E12: "entries
+        # that lead from before to after but say not how are not used")
+        "git.e12.not_chaining.first": lambda: moved_from(P, "n-first", [P + "/refs/heads/n-first"]),
+        "git.e12.not_chaining.gap": lambda: moved_from(P, "n-gap", [P + "/refs/heads/n-gap"]),
+        "git.e12.not_chaining.last": lambda: moved_from(P, "n-last", [P + "/refs/heads/n-last"]),
+        "git.e12.other_operation": lambda: moved_from(P, "n-other", [P + "/refs/heads/n-other"]),
         "git.e12.moved.no_reflog": lambda: moved_from(P, "n-none", [P + "/refs/heads/n-none"]),
         "git.e12.moved.reflog_rewritten": lambda: moved_from(
-            P, "n-rewritten", [P + "/logs/refs/heads/n-rewritten", P + "/refs/heads/n-rewritten"]),
+            P, "n-rewritten", [P + "/refs/heads/n-rewritten"]),
         "git.e12.head.switch": lambda: ev("h1/.git", "git_head_switched", None, **{
             "from": "main", "to": "topic"}) is not None,
         "git.e12.head.detach": lambda: ev("h2/.git", "git_head_switched", None, **{
@@ -304,25 +307,110 @@ def check_e12(cell, mine):
             for e in E) and kinds_of("r/.git") == [("git_branch_moved", "good")]
         and rec("r/.git/refs/heads/bad") == [{"kind": "could_not_interpret",
                                               "text": "could not interpret"}],
+        # packed-refs not interpreted gives no value on either side: the
+        # branch it would date is moved, no `from`
         "git.e12.unparseable_packed": lambda: any(
             e["event"] == "could_not_interpret" and e["paths"] == ["p/.git/packed-refs"]
-            for e in E) and kinds_of("p/.git") == [("git_branch_moved", "loose-both")],
+            for e in E) and kinds_of("p/.git") == [("git_branch_moved", "loose-both"),
+                                                   ("git_branch_moved", "needs-packed")]
+        and moved_no_from("p/.git", "needs-packed")
+        and ev("p/.git", branch="needs-packed")["paths"] == ["p/.git/refs/heads/needs-packed"],
+        "git.e12.unparseable_ref_before": lambda: any(
+            e["event"] == "could_not_interpret" and e["paths"] == ["s/.git/refs/heads/bad-before"]
+            for e in E) and not repo_events("s/.git"),
         "git.e12.unparseable_head": lambda: any(
             e["event"] == "could_not_interpret" and e["paths"] == ["q/.git/HEAD"] for e in E)
         and not repo_events("q/.git"),
         "git.e12.tags_remotes_nothing": lambda: not E and rec(P + "/packed-refs") is not None
         and rec(P + "/refs/tags/v2") is not None,
+        # decision 137: what cannot be read reduces the claim, never the fact
         "git.e12.cu.ref": lambda: any(
             e["event"] == "content_unavailable" and e["reason"] == "missing"
             and e["paths"] == ["r/.git/refs/heads/lost"] for e in E)
         and rec("r/.git/refs/heads/lost") == [cu("missing", "before")]
-        and kinds_of("r/.git") == [("git_branch_moved", "fine")],
+        and kinds_of("r/.git") == [("git_branch_moved", "fine"), ("git_branch_moved", "lost")]
+        and moved_no_from("r/.git", "lost")
+        and ev("r/.git", branch="lost")["paths"] == ["r/.git/refs/heads/lost"],
         "git.e12.cu.packed": lambda: any(
             e["event"] == "content_unavailable" and e["reason"] == "corrupt"
             and e["paths"] == ["p/.git/packed-refs"] for e in E)
-        and kinds_of("p/.git") == [("git_branch_moved", "loose-both")],
-        "git.e12.cu.reflog_classify": lambda: K == ["content_unavailable"]
-        and E[0]["paths"] == [P + "/logs/refs/heads/dev"],
+        and kinds_of("p/.git") == [("git_branch_moved", "loose-both"),
+                                   ("git_branch_created", "needs-packed")]
+        and created("p/.git", "needs-packed", ["p/.git/packed-refs", "p/.git/refs/heads/needs-packed"]),
+        "git.e12.cu.reflog_classify": lambda: K == ["content_unavailable", "git_branch_moved"]
+        and E[0]["paths"] == [P + "/logs/refs/heads/dev"]
+        and moved_from(P, "dev", [P + "/refs/heads/dev"]),
+        "git.e12.unread.ref_before_dated": lambda: kinds_of("a/.git") == [
+            ("git_commits_added", "dated")] and ev("a/.git")["count"] == 1
+        and ev("a/.git")["paths"] == ["a/.git/logs/refs/heads/dated", "a/.git/refs/heads/dated"],
+        "git.e12.unread.ref_before_reflog_zeros": lambda: kinds_of("b/.git") == [
+            ("git_branch_moved", "zeros")] and moved_no_from("b/.git", "zeros")
+        and ev("b/.git")["paths"] == ["b/.git/refs/heads/zeros"],
+        "git.e12.unread.ref_before_removed": lambda: not repo_events("c/.git") and any(
+            e["event"] == "content_unavailable" and "c/.git/refs/heads/gone" in e["paths"]
+            for e in E),
+        # "(a branch only in `packed-refs` too)": read after only, now at
+        "git.e12.unread.packed_before_only_packed": lambda: K[0] == "content_unavailable"
+        and E[0]["paths"] == [P + "/packed-refs"] and kinds_of(P) == [
+            ("git_branch_deleted", "gone"), ("git_branch_moved", "kept"),
+            ("git_branch_moved", "later"), ("git_commits_added", "moved-dated"),
+            ("git_branch_created", "new-dated"), ("git_branch_moved", "undated")]
+        and moved_no_from(P, "kept") and ev(P, branch="kept")["to"] == X
+        and ev(P, branch="kept")["paths"] == [P + "/packed-refs"],
+        "git.e12.unread.packed_before_reflog_absent": lambda: created(
+            P, "new-dated", [P + "/logs/refs/heads/new-dated", P + "/refs/heads/new-dated"]),
+        "git.e12.unread.packed_before_reflog_value": lambda: (
+            ev(P, "git_commits_added", "moved-dated") or {}).get("paths") == [
+            P + "/logs/refs/heads/moved-dated", P + "/refs/heads/moved-dated"],
+        "git.e12.unread.packed_before_no_evidence": lambda: moved_no_from(P, "undated")
+        and ev(P, branch="undated")["paths"] == [P + "/refs/heads/undated"],
+        "git.e12.unread.packed_after_side_used": lambda: (
+            ev(P, "git_branch_moved", "later") or {}).get("from") == X
+        and ev(P, branch="later")["to"] == Z
+        and ev(P, branch="later")["paths"] == [P + "/packed-refs", P + "/refs/heads/later"]
+        and ev(P, "git_branch_deleted", "gone")["paths"] == [P + "/packed-refs",
+                                                             P + "/refs/heads/gone"],
+        "git.e12.unread.packed_after_no_event": lambda: K[0] == "content_unavailable"
+        and E[0]["side"] == "after" and kinds_of(P) == [
+            ("git_branch_created", "created"), ("git_branch_moved", "dated-by-packed")],
+        "git.e12.unread.packed_before_side_used": lambda: created(
+            P, "created", [P + "/packed-refs", P + "/refs/heads/created"])
+        and moved_from(P, "dated-by-packed", [P + "/packed-refs", P + "/refs/heads/dated-by-packed"]),
+        "git.e12.unread.packed_before_renamed": lambda: kinds_of(P) == [
+            ("git_branch_renamed", "old")] and ev(P)["paths"] == [
+            P + "/logs/refs/heads/new", P + "/packed-refs", P + "/refs/heads/new",
+            P + "/refs/heads/old"],
+        "git.e12.unread.reflog_would_date": lambda: kinds_of("a/.git") == [
+            ("git_branch_moved", "alone")] and moved_no_from("a/.git", "alone")
+        and ev("a/.git")["paths"] == ["a/.git/refs/heads/alone"],
+        "git.e12.unread.reflog_rename_untold": lambda: kinds_of("b/.git") == [
+            ("git_branch_created", "new"), ("git_branch_deleted", "old")]
+        and created("b/.git", "new", ["b/.git/packed-refs", "b/.git/refs/heads/new"]),
+        "git.e12.unread.reflog_head_detached": lambda: kinds_of("h/.git") == [
+            ("git_branch_moved", "HEAD")] and ev("h/.git")["from"] == X
+        and ev("h/.git")["paths"] == ["h/.git/HEAD"],
+        "git.e12.unread.head": lambda: K == ["content_unavailable"] * 2
+        and sorted(p for e in E for p in e["paths"]) == [
+            "a/.git/HEAD", "b/.git/HEAD", "c/.git/HEAD"],
+        "git.e12.unread.and_unparseable": lambda: [
+            (e["event"], e["paths"]) for e in E if e["event"] in (
+                "could_not_interpret", "content_unavailable")] == [
+            ("could_not_interpret", ["h/.git/HEAD"]), ("could_not_interpret", ["k/.git/packed-refs"]),
+            ("could_not_interpret", [P + "/refs/heads/bad"]),
+            ("content_unavailable", ["h/.git/HEAD", P + "/refs/heads/bad"]),
+            ("content_unavailable", ["k/.git/packed-refs"])]
+        and rec(P + "/refs/heads/bad") == [cu("missing", "before")]
+        and rec("h/.git/HEAD") == [cu("missing", "before")]
+        and rec("k/.git/packed-refs") == [cu("corrupt", "after")]
+        and kinds_of(P) == [("git_branch_moved", "good")] and not repo_events("h/.git")
+        and kinds_of("k/.git") == [("git_branch_moved", "nb")] and moved_no_from("k/.git", "nb"),
+        "git.e12.unread.and_unparseable_tag_remote": lambda: not any(
+            e["event"] == "could_not_interpret" and any("/refs/tags/" in p or "/refs/remotes/" in p
+                                                        for p in e["paths"]) for e in E)
+        and rec(P + "/refs/tags/t") == [cu("missing", "before")]
+        and rec(P + "/refs/remotes/origin/main") == [cu("corrupt", "after")]
+        and mine.outcomes.get((P + "/refs/tags/raced").encode()) == "unknown"
+        and mine.outcomes.get((P + "/refs/remotes/origin/raced").encode()) == "unknown",
         "git.e12.e11": lambda: e11_silent(mine, 2) and kinds_of("other/.git") == [
             ("git_branch_created", "seen")] and not repo_events(P) and K == ["git_branch_created"],
         "git.e12.e11_nostore": lambda: e11_silent(mine, 2) and K == ["content_unavailable"]
@@ -635,9 +723,6 @@ def main():
     pairs = 0
     seen_kinds = collections.Counter()
     e11 = collections.Counter()
-    disagree = collections.Counter()
-    disagree_eg = {}
-    dlog = []
     for case in cases:
         d = os.path.join(a.work, case.name)
         gen.write_case(case, d, cache)
@@ -668,20 +753,6 @@ def main():
             belay = parse_diff(out)
             diffs = compare(belay, mine)
             if diffs:
-                st = store if mode == "store" else None
-                every = frozenset(ref.ALT_READINGS)
-                if not compare(belay, ref.interpret(before, after, st, every)):
-                    need = set(every)
-                    for name in sorted(every):
-                        if not compare(belay, ref.interpret(before, after, st, need - {name})):
-                            need.discard(name)
-                    key = " + ".join(sorted(need))
-                    disagree[key] += 1
-                    disagree_eg.setdefault(key, "%s [%s]" % (case.name, mode))
-                    dlog.append("%s [%s]: %s\n%s" % (case.name, mode, key,
-                                                      "\n".join("  " + x for x in diffs)))
-                    diffs = []
-            if diffs:
                 report.append("[%s]" % mode)
                 report += ["  " + x for x in diffs]
             for cell in case.tags[mode]:
@@ -706,24 +777,14 @@ def main():
     print("\npairs with:")
     for k, n in sorted(e11.items()):
         print("  %-48s %d" % (k, n))
-    print("\ndisagreements -- pairs belay gives otherwise, each difference explained in full")
-    print("by belay's reading of a sentence the two can read either way (ref.ALT_READINGS):")
-    for k, n in sorted(disagree.items()):
-        print("  %-60s %5d  (e.g. %s)" % (k, n, disagree_eg[k]))
-    if not disagree:
-        print("  none")
-    with open(os.path.join(a.work, "disagreements.txt"), "w") as f:
-        for name, text in sorted(ref.ALT_READINGS.items()):
-            f.write("%s: belay's reading -- %s\n\n" % (name, text))
-        f.write("\n\n".join(dlog) + "\n")
     print("\ncells (hits):")
     zero = []
     for cell in sorted(declared):
         print("  %-48s %d" % (cell, hits[cell]))
         if hits[cell] == 0:
             zero.append(cell)
-    print("\n%d cases, %d pairs, %d failing cases, %d pairs disagreeing as listed, %.1f s"
-          % (len(cases), pairs, len(failed), sum(disagree.values()), time.time() - t0))
+    print("\n%d cases, %d pairs, %d failing cases, %.1f s"
+          % (len(cases), pairs, len(failed), time.time() - t0))
     if zero:
         print("coverage gate: cells never hit: " + ", ".join(zero))
     if failed:
