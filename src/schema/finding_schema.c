@@ -135,7 +135,8 @@ const struct event_rule EVENT_RULES[EVENT_RULE_COUNT] = {
     { "E6 failure",
         "An interpreter whose end hook fails emits `{\"event\": \"could_not_interpret\", \"interp\": "
         "..., \"text\": \"could not interpret\", \"paths\": [...], \"paths_truncated\": <n>}` and no "
-        "other event: `paths` the first 1,024 of the paths it had claimed (bytewise), "
+        "other event: `paths` the first 1,024 of the paths it had claimed (bytewise; never a path "
+        "E11 withholds), "
         "`paths_truncated` the number of the rest, present only when not 0 (decision P4). The "
         "diff does not fail." },
     { "E7 trailer",
@@ -165,6 +166,9 @@ const struct event_rule EVENT_RULES[EVENT_RULE_COUNT] = {
         "that lacks it excluded it, or it lies below an `unreadable` directory or a mount there "
         "(diff-v1, \"Present on one side only\") -- derives no event: that side was not looked "
         "at, so nothing was installed or removed there. Its path record stands. Any other "
-        "`unknown` path still derives provisional events (E2). (Decision 2026-11-02: approved, "
-        "from the review of #33, D1.)" },
+        "`unknown` path still derives provisional events (E2). No interpreter is given it, so no "
+        "event of the core's names it either: no `could_not_interpret` (E10) nor "
+        "`content_unavailable` for it, and a failed end hook's event (E6) never lists it. "
+        "(Decision 2026-11-02: approved, from the review of #33, D1; the core's events spelled "
+        "out, decision 118.)" },
 };
