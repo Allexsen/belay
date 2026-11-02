@@ -104,9 +104,13 @@ The corpus has three parts:
     another operation, HEAD switched, detached and attached, a detached
     HEAD moved, four repositories nested and side by side, `unknown` refs
     and packed-refs read from their copies (provisional) or with none,
-    a reflog that cannot be read, a packed-refs touched but unchanged, a ref
-    that cannot be parsed, tags and remote-tracking refs, and copies
-    missing, corrupt (other bytes, a symlink) and over a loose ref's bound;
+    a reflog that cannot be read (no evidence of before, or of how), a
+    loose ref or packed-refs that cannot be read on one side (before: the
+    reflog's evidence -- an old id, zeros -- or no from; a loose ref there
+    unread, its reflog from zeros; after: no event), a packed-refs that
+    cannot be parsed, a packed-refs touched but unchanged, a ref that
+    cannot be parsed, tags and remote-tracking refs, and copies missing,
+    corrupt (other bytes, a symlink) and over a loose ref's bound;
     and the values a record carries (values(), diff-values.md): link
     targets not UTF-8 on both sides, a type change whose symlink's target
     is not UTF-8, unknown or written on an unreadable link, or whose
@@ -3875,11 +3879,89 @@ def git_events(w, rng):
         lambda rng: [(f[0], f[1], f[2], S(raced=True) if f[0].endswith(b'packed-refs') else f[3])
                      for f in created_by_packed(rng)],
         ev(['an unknown packed-refs read from its copy: provisional']))
-    # A reflog that cannot be read decides nothing: no evidence of before.
+    # E12 (decision 137): "What git cannot read reduces what is claimed,
+    # never the fact the refs give". A reflog it cannot read is no evidence:
+    # of before (no from), or of how (moved, from the refs).
     one('git: a branch created, its reflog\'s copy missing',
         lambda rng: [(f[0], f[1], f[2], S(lacking='after') if b'logs/' in f[0] else f[3])
                      for f in created_by_reflog(rng)],
         ev(['a branch whose reflog cannot be read: no evidence of before']))
+    one('git: commits made, the reflog\'s copy missing',
+        lambda rng: [(f[0], f[1], f[2], S(lacking='after') if b'/logs/' in b'/' + f[0] else f[3])
+                     for f in moved(rng, lambda c: ([(c[0], c[1], 'commit: one')], 1))],
+        ev(['a branch moved, its reflog unreadable: from the refs, without a how']))
+
+    # A loose ref that cannot be read before: no value there -- its reflog's
+    # old id gives one (b), else no from (a). Its reverse: unread after, no
+    # event.
+    def loose_unread_before(rng):
+        r, c = repo(rng), [oid() for _ in range(5)]
+        base = [(Z, c[0], 'commit (initial): root')]
+        # (a's copy and b's differ: the store holds one copy per content.)
+        return [(r + b'refs/heads/a', git_loose(c[4]), git_loose(c[1]), S(lacking='before')),
+                (r + b'refs/heads/b', git_loose(c[0]), git_loose(c[3]), S(corrupt='before')),
+                (r + b'logs/refs/heads/b', git_reflog(*base),
+                 git_reflog(*(base + [(c[0], c[2], 'commit: one'),
+                                      (c[2], c[3], 'commit: two')])), O)]
+    one('git: a loose ref unreadable before, readable after', loose_unread_before,
+        ev(['a branch whose loose ref cannot be read before: now at (no from)',
+            'a loose ref unread before, its value before by its reflog',
+            'a branch whose loose ref cannot be read after: no event']))
+
+    # ... and its reflog gained an entry from zeros: the ref was there (ambiguity
+    # G10 of reference.py: not absent by the reflog, so no from).
+    def loose_unread_zeros(rng):
+        r, c3, c4 = repo(rng), oid(), oid()
+        return [(r + b'refs/heads/c', git_loose(c3), git_loose(c4), S(lacking='before')),
+                (r + b'logs/refs/heads/c', None,
+                 git_reflog((Z, c4, 'branch: Created from HEAD')), O)]
+    one('git: a loose ref unreadable before, its reflog from zeros', loose_unread_zeros,
+        ev(['a loose ref unread before whose reflog starts from zeros: now at, not created']))
+
+    # packed-refs that cannot be read before, read after: a branch only in it
+    # has no value before (main: no from -- "a branch only in `packed-refs`
+    # too"); the reflog's evidence gives one
+    # (dev: an old id, then how; mm: an old id, the from of a move by
+    # another operation, which names the reflog for that from alone; feat:
+    # zeros, created); a loose ref added with no reflog has none either
+    # (topic). Its reverse: packed-refs read before only -- no branch it
+    # would decide after has an event.
+    def packed_unread_before(rng):
+        r, c = repo(rng), [oid() for _ in range(9)]
+        base = [(Z, c[1], 'branch: Created from HEAD')]
+        return [(r + b'packed-refs',
+                 git_packed((c[1], 'refs/heads/dev'), (c[0], 'refs/heads/main'),
+                            (c[7], 'refs/heads/mm')),
+                 git_packed((c[2], 'refs/heads/dev'), (c[0], 'refs/heads/main'),
+                            (c[8], 'refs/heads/mm'), (c[6], 'refs/tags/v1', c[0])),
+                 S(lacking='before')),
+                (r + b'logs/refs/heads/dev', git_reflog(*base),
+                 git_reflog(*(base + [(c[1], c[2], 'reset: moving to HEAD~1')])), O),
+                (r + b'logs/refs/heads/mm', git_reflog((Z, c[5], 'branch: Created from HEAD')),
+                 git_reflog((Z, c[5], 'branch: Created from HEAD'),
+                            (c[7], c[8], 'update by script')), O),
+                (r + b'refs/heads/feat', None, git_loose(c[3]), O),
+                (r + b'logs/refs/heads/feat', None,
+                 git_reflog((Z, c[3], 'branch: Created from main')), O),
+                (r + b'refs/heads/topic', None, git_loose(c[4]), O)]
+    one('git: packed-refs unreadable before, readable after', packed_unread_before,
+        ev(['a branch whose packed-refs cannot be read before: now at (no from)',
+            "packed-refs unread before, a branch's value before by its reflog",
+            "a branch created by its reflog's zeros, packed-refs unread before",
+            'a branch whose packed-refs cannot be read after: no event',
+            'history rewritten by reset', 'a branch moved by another operation']))
+
+    # packed-refs that cannot be parsed ("nothing more is read from it"):
+    # as one that cannot be read, no value on either side (ambiguity G5 of
+    # reference.py) -- a loose ref added beside it has no from.
+    def packed_unparsed(rng):
+        r = repo(rng)
+        return [(r + b'packed-refs', b'not a packed-refs line\n',
+                 git_packed((oid(), 'refs/heads/main')), O),
+                (r + b'refs/heads/topic', None, git_loose(oid()), O)]
+    one('git: packed-refs that cannot be parsed, a loose ref added', packed_unparsed,
+        ev(['a branch whose packed-refs cannot be parsed before: now at (no from)',
+            'a ref that cannot be parsed']))
 
     # A ref that is no ref: could_not_interpret, its record and one event.
     one('git: a ref that cannot be parsed',
@@ -3915,7 +3997,10 @@ def git_events(w, rng):
                  git_reflog((Z, c[4], 'branch: Created from HEAD')), O)]
     one('git: copies the store cannot give', unreadable,
         ev(['content_unavailable, missing', 'content_unavailable, corrupt',
-            'content_unavailable, too_large', 'events with no name before the named']))
+            'content_unavailable, too_large', 'events with no name before the named',
+            'a branch whose loose ref cannot be read before: now at (no from)',
+            'a branch whose loose ref cannot be read after: no event',
+            'a loose ref removed, unread before: no event']))
 
 
 def targeted(w, rng):
