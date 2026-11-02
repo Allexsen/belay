@@ -62,7 +62,9 @@ under "not compared" (with `--json`, on standard error: `belay: not compared: PA
 sides), checkpoint JSON lists them as `excluded_paths`, and diff.v1's header as each side's
 `before_excluded` and `after_excluded`. A diff across an exclude reports what one side holds there
 as `unknown`, `not_captured`, never as removed or added, and derives no package event from it. An exclude has no
-control character; at most 31 per scope, each once; an `excludes` file that is not what belay
+control character; at most 31 per scope, each once, and no more than a manifest's header line can
+name (64 KiB, every number at its widest): `--add` refuses one past that, and a capture refuses to
+write a header it could not read back (exit 4); an `excludes` file that is not what belay
 writes is corrupt state (exit 4). Protected paths (a later milestone) will never be excludable.
 
 ## The state directory

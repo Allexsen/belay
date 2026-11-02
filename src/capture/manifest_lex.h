@@ -32,6 +32,8 @@
 #ifndef BELAY_CAPTURE_MANIFEST_LEX_H
 #define BELAY_CAPTURE_MANIFEST_LEX_H
 
+#include "belay/manifest.h"
+
 #include <stdbool.h>
 #include <stddef.h>
 #include <stdio.h>
@@ -39,7 +41,7 @@
 /* The writer's longest possible line is under 50 KB (two 4095-byte fields at
  * six bytes per escaped byte, plus fixed fields). Anything longer is not a
  * manifest line, and refusing it bounds the reader's memory. */
-#define LINE_MAX_BYTES (64u * 1024u)
+#define LINE_MAX_BYTES ((unsigned)BELAY_MANIFEST_LINE_MAX)   /* include/belay/manifest.h */
 #define MAX_PAIRS      32
 
 enum vkind { V_STR, V_INT, V_TRUE, V_ARR, V_OBJS };   /* V_ARR: strings (or none); V_OBJS: flat objects */

@@ -26,6 +26,7 @@
 /* What a capture did not walk (v2's `excluded`). */
 enum belay_exclude_reason { BELAY_EXCLUDE_STATE_DIR, BELAY_EXCLUDE_USER };
 #define BELAY_EXCLUDED_MAX 32       /* the state directory and 31 configured excludes */
+#define BELAY_MANIFEST_LINE_MAX 65536  /* bytes a line may hold, its newline aside (addendum A2) */
 struct belay_excluded {
     char     path[4096];            /* relative to the scope; path_len bytes */
     size_t   path_len;
@@ -280,6 +281,15 @@ struct belay_manifest_stats {
 int belay_manifest_write(const char *out_path, const char *scope,
                          const struct belay_manifest_opts *opts,
                          struct belay_manifest_stats *stats);
+
+/* The longest header line, its newline aside, a capture of `scope_real`
+ * could write with these `n` configured excludes and the state directory at
+ * `state_rel` (NULL: not inside the scope), every one of them found: every
+ * number at its widest. Over BELAY_MANIFEST_LINE_MAX the capture would fail
+ * (the reader refuses a longer line, addendum A2), so `belay exclude --add`
+ * refuses such a list. -1 with belay_err (NOMEM, RANGE). */
+long belay_manifest_header_bound(const char *scope_real, const char *const *paths, size_t n,
+                                 const char *state_rel);
 
 /*
  *  Streaming reader. `fn` is called once per entry, in file order; a non-zero

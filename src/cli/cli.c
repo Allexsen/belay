@@ -285,6 +285,21 @@ static int cmd_exclude(const struct opts *o, FILE *out, FILE *err) {
             goto done;
         }
         snprintf(x.path[x.n++], PATH_MAX, "%s", o->add);
+        /* A list whose header line could not fit would make every capture
+         * fail (decision 112): refused here, before it is kept. */
+        static const char *xs[STATE_EXCLUDES_MAX];
+        for (size_t i = 0; i < x.n; i++) xs[i] = x.path[i];
+        const long need = belay_manifest_header_bound(st.scope.path, xs, x.n, state_rel(&st));
+        if (need == -1) {
+            rc = failed(err);
+            goto done;
+        }
+        if (need > BELAY_MANIFEST_LINE_MAX) {
+            fprintf(err, "belay: with this exclude a manifest's header could need %ld bytes, over its "
+                         "%d-byte line limit: fewer or shorter excludes\n", need, BELAY_MANIFEST_LINE_MAX);
+            rc = EXIT_USAGE;
+            goto done;
+        }
     } else if (o->remove != NULL && at < x.n) {
         memmove(x.path[at], x.path[at + 1], (x.n - at - 1) * sizeof x.path[0]);
         x.n--;
