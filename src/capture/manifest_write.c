@@ -138,8 +138,10 @@ int capture_write(const struct fsops *ops, const char *out_path, const char *sco
     wc->xlist = malloc(XLIST_CAP + 1);
     wc->xnames = malloc((XLIST_CAP / 2 + 1) * sizeof *wc->xnames);
     wc->xs = calloc(BELAY_EXCLUDED_MAX, sizeof *wc->xs);
+    wc->xlen = calloc(opts->n_exclude_paths + 1, sizeof *wc->xlen);
+    for (size_t i = 0; wc->xlen != NULL && i < opts->n_exclude_paths; i++) wc->xlen[i] = strlen(opts->exclude_paths[i]);
     if (wc->pack == NULL || wc->line == NULL || wc->readbuf == NULL || wc->xlist == NULL ||
-        wc->xnames == NULL || wc->xs == NULL) {
+        wc->xnames == NULL || wc->xs == NULL || wc->xlen == NULL) {
         belay_err_set(BELAY_ERR_NOMEM, 0, "manifest: out of memory");
         goto cleanup;
     }
@@ -390,6 +392,7 @@ cleanup:
         free(wc->xlist);
         free(wc->xnames);
         free(wc->xs);
+        free(wc->xlen);
         free(wc->abs);
         prev_free(wc->prev);
         belay_store_close(wc->store);

@@ -56,9 +56,11 @@ and matched exactly (`--remove PATH` undoes it; without either, the list). They 
 a `node_modules` that a package manager owns -- not for noise: each one is a blind spot. Every
 manifest names what it did not walk in its header (`excluded`, with the reason `user` or, for
 belay's own state directory, `state_dir`), `check` and `mark` say so, and a receipt lists them
-under "not compared". A diff across an exclude reports what one side holds there as `unknown`,
-`not_captured`, never as removed or added. At most 31 per scope. Protected paths (a later
-milestone) will never be excludable.
+under "not compared" (with `--json`, on standard error: `belay: not compared: PATH (...)`, both
+sides), and checkpoint JSON lists them as `excluded_paths`. A diff across an exclude reports what
+one side holds there as `unknown`, `not_captured`, never as removed or added. An exclude has no
+control character; at most 31 per scope, each once; an `excludes` file that is not what belay
+writes is corrupt state (exit 4). Protected paths (a later milestone) will never be excludable.
 
 ## The state directory
 

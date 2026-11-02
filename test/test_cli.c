@@ -446,7 +446,7 @@ TEST(diff_says_what_its_capture_left_out) {
     ASSERT_EQ_INT(0, rc2);
     ASSERT_EQ_INT(0, rc3);
     ASSERT_TRUE(said);
-    ASSERT_TRUE(strstr(g_err, "not recorded: .state (belay's own state directory)") != NULL);
+    ASSERT_TRUE(strstr(g_err, "belay: not compared: .state (belay's own state directory)") != NULL);
     ASSERT_TRUE(strstr(g_out, "not recorded") == NULL);
 }
 
@@ -712,6 +712,73 @@ TEST(an_exclude_is_named_and_never_reads_as_removed) {
     ASSERT_TRUE(strstr(g_out, "node_modules") == NULL);
 }
 
+/* Review 2026-11-02 of #33, D3-D6: a hand-edited excludes file that is not
+ * what belay writes is refused -- a NUL, a CR, a line twice -- and the
+ * command never succeeds in silence. */
+TEST(the_excludes_file_and_command_are_strict) {
+    fresh();
+    ASSERT_EQ_INT(0, belay("check", "--scope", g_scope, NULL));
+    char d[700];
+    scope_dir(d, sizeof d);
+    REQUIRE(d[0] != '\0');
+    sh("printf 'node_modules\\n\\000src\\n' > '%s/excludes'", d);
+    ASSERT_EQ_INT(4, belay("exclude", "--scope", g_scope, NULL));               /* D3 */
+    sh("printf 'node_modules\\r\\n' > '%s/excludes'", d);
+    ASSERT_EQ_INT(4, belay("exclude", "--scope", g_scope, NULL));               /* D4 */
+    sh("printf 'node_modules\\nsrc\\nnode_modules\\n' > '%s/excludes'", d);
+    ASSERT_EQ_INT(4, belay("exclude", "--scope", g_scope, NULL));               /* D5 */
+    sh("rm '%s/excludes'", d);
+    ASSERT_EQ_INT(2, belay("exclude", "--scope", g_scope, "--add", "a\rb", NULL));
+    ASSERT_EQ_INT(2, belay("exclude", "--scope", g_scope, "--add", "x", "--add", "y", NULL));   /* D6 */
+    ASSERT_TRUE(strstr(g_err, "--add given twice") != NULL);
+    ASSERT_EQ_INT(2, belay("exclude", "--scope", g_scope, "--remove", "nothere", NULL));
+    ASSERT_TRUE(strstr(g_err, "nothere is not excluded") != NULL);
+}
+
+/* D2: the machine interfaces name what was not walked -- diff --json on
+ * stderr, both sides, with --to too; checkpoint JSON by path. S2: adding an
+ * exclude over the newest files is not "ctime went backwards". */
+TEST(json_output_names_every_excluded_path) {
+    fresh();
+    sh("mkdir -p '%s/node_modules/p' && printf 'x\\n' > '%s/node_modules/p/i.js'", g_scope, g_scope);
+    ASSERT_EQ_INT(0, belay("exclude", "--scope", g_scope, "--add", "node_modules", NULL));
+    ASSERT_EQ_INT(0, belay("check", "--scope", g_scope, "--json", NULL));
+    ASSERT_TRUE(strstr(g_out, "\"excluded_paths\":[{\"path\":\"node_modules\",\"reason\":\"user\"}]") != NULL);
+    ASSERT_EQ_INT(0, belay("mark", "--scope", g_scope, NULL));
+    ASSERT_EQ_INT(0, belay("diff", "--scope", g_scope, "--since", "1", "--to", "2", "--json", NULL));
+    ASSERT_TRUE(strstr(g_err, "belay: not compared: node_modules (excluded for this scope)\n") != NULL);
+    ASSERT_TRUE(strstr(g_out, "node_modules") == NULL);                   /* in no record */
+    /* S2: an exclude added over the newest file; the next mark prefilters */
+    sh("printf 'y\\n' > '%s/src/newest.c'", g_scope);
+    ASSERT_EQ_INT(0, belay("mark", "--scope", g_scope, NULL));
+    ASSERT_EQ_INT(0, belay("exclude", "--scope", g_scope, "--add", "src", NULL));
+    ASSERT_EQ_INT(0, belay("mark", "--scope", g_scope, "--json", NULL));
+    ASSERT_TRUE(strstr(g_out, "ctime went backwards") == NULL);
+    ASSERT_TRUE(strstr(g_out, "\"used\":true") != NULL);
+}
+
+/* Review gaps: an exclude names the symlink itself, never its target, and
+ * siblings sharing a name's prefix are compared as usual. */
+TEST(an_exclude_is_exact_on_links_and_prefixes) {
+    fresh();
+    sh("mkdir -p '%s/d/sub' '%s/a' '%s/a-' && printf 's\\n' > '%s/d/sub/s' && ln -s d '%s/ld' && "
+       "printf 'q\\n' > '%s/a.b' && printf 'y\\n' > '%s/a-/y'", g_scope, g_scope, g_scope, g_scope, g_scope, g_scope, g_scope);
+    ASSERT_EQ_INT(0, belay("exclude", "--scope", g_scope, "--add", "ld", NULL));
+    ASSERT_EQ_INT(0, belay("exclude", "--scope", g_scope, "--add", "a", NULL));
+    ASSERT_EQ_INT(0, belay("check", "--scope", g_scope, "--json", NULL));
+    ASSERT_TRUE(strstr(g_out, "{\"path\":\"a\",\"reason\":\"user\"},{\"path\":\"ld\",\"reason\":\"user\"}") != NULL);
+    char d[700], cmd[4000];
+    scope_dir(d, sizeof d);
+    snprintf(cmd, sizeof cmd, "m='%s/checkpoints/1/manifest.ndjson'; grep -q '\"path\":\"d/sub/s\"' \"$m\" && "
+             "grep -q '\"path\":\"a.b\"' \"$m\" && grep -q '\"path\":\"a-/y\"' \"$m\" && "
+             "[ \"$(tail -n +2 \"$m\" | grep -c '\"path\":\"ld\"')\" = 0 ]", d);
+    ASSERT_EQ_INT(0, system(cmd));
+    sh("printf 'Q\\n' >> '%s/a.b' && rm '%s/a-/y'", g_scope, g_scope);
+    ASSERT_EQ_INT(0, belay("diff", "--scope", g_scope, "--since", "1", "--json", NULL));
+    ASSERT_TRUE(strstr(g_out, "\"path\":\"a.b\",\"outcome\":\"modified\"") != NULL);
+    ASSERT_TRUE(strstr(g_out, "\"path\":\"a-/y\",\"outcome\":\"removed\"") != NULL);
+}
+
 int main(void) {
     snprintf(g_dir, sizeof g_dir, "/tmp/belay_cli_%d", (int)getpid());
     mkdir(g_dir, 0700);
@@ -749,6 +816,9 @@ int main(void) {
     RUN(ids_run_out_and_a_failed_diff_leaves_nothing);
     RUN(excludes_are_configured_per_scope);
     RUN(an_exclude_is_named_and_never_reads_as_removed);
+    RUN(the_excludes_file_and_command_are_strict);
+    RUN(json_output_names_every_excluded_path);
+    RUN(an_exclude_is_exact_on_links_and_prefixes);
     free(g_out);
     free(g_err);
     char cmd[800];

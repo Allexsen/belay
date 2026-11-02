@@ -73,7 +73,7 @@ static int visit(int parent_fd, const char *name, char *rel, size_t relsz,
             (uint64_t)st.st_ino == wc->opts->exclude_ino)
             reason = BELAY_EXCLUDE_STATE_DIR;
         for (size_t i = 0; reason == -1 && i < wc->opts->n_exclude_paths; i++)
-            if (strlen(wc->opts->exclude_paths[i]) == rel_len && memcmp(wc->opts->exclude_paths[i], rel, rel_len) == 0)
+            if (wc->xlen[i] == rel_len && memcmp(wc->opts->exclude_paths[i], rel, rel_len) == 0)
                 reason = BELAY_EXCLUDE_USER;
         if (reason != -1) {
             if (wc->excluded >= BELAY_EXCLUDED_MAX || rel_len >= sizeof wc->xs[0].path) {

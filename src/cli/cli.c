@@ -124,6 +124,11 @@ static int parse(int argc, char **argv, struct opts *o, FILE *err) {
             snprintf(why, sizeof why, "unknown option %.200s", a);
             return usage(err, why);
         }
+        if (val != NULL && *val != NULL) {      /* the last value won in silence (D6) */
+            char why[64];
+            snprintf(why, sizeof why, "%s given twice", a);
+            return usage(err, why);
+        }
         if (val != NULL) {
             if (i + 1 >= argc) {
                 char why[64];
@@ -164,18 +169,33 @@ static void json_checkpoint(FILE *out, const struct state *st, const struct chec
         belay_err_clear();
         why[0] = '\0';                 /* cannot happen: the buffers hold a PATH_MAX path escaped */
     }
+    /* The excluded paths by name, from the manifest's header: a count alone
+     * named no blind spot (review 2026-11-02, D2). */
+    static char xs[BELAY_EXCLUDED_MAX * (6 * PATH_MAX + 64) + 8];
+    size_t xw = (size_t)snprintf(xs, sizeof xs, "[");
+    struct belay_manifest_reader *r = NULL;
+    if (c->excluded && state_check_manifest(st, c->id) == 0 && belay_manifest_open(man, &r) == 0) {
+        const struct belay_manifest_header *h = belay_manifest_header(r);
+        static char one[6 * PATH_MAX + 32];
+        for (size_t i = 0; i < h->n_excluded; i++) {
+            if (state_json_member(one, sizeof one, "path", h->excluded[i].path) == -1) continue;
+            xw += (size_t)snprintf(xs + xw, sizeof xs - xw, "%s{%s,\"reason\":\"%s\"}", xw > 1 ? "," : "", one,
+                                   h->excluded[i].reason == BELAY_EXCLUDE_STATE_DIR ? "state_dir" : "user");
+        }
+        belay_manifest_close(r);
+    }
+    belay_err_clear();
+    snprintf(xs + xw, sizeof xs - xw, "]");
     fprintf(out, "{\"id\":%ld,\"kind\":\"%s\",\"created_ns\":%lld,%s,%s,"
                  "\"entries\":%llu,\"raced\":%llu,\"unstable\":%llu,\"vanished\":%llu,\"provisional\":%s,"
-                 "\"excluded\":%llu,\"prefilter\":{\"used\":%s,\"reference\":\"%s\",\"trusted\":%llu,"
+                 "\"excluded\":%llu,\"excluded_paths\":%s,\"prefilter\":{\"used\":%s,\"reference\":\"%s\",\"trusted\":%llu,"
                  "\"racy\":%llu,\"full_reason\":\"%s\"}}\n",
             c->id, c->kind, (long long)c->created_ns, esc, mesc, (unsigned long long)c->entries,
             (unsigned long long)c->raced, (unsigned long long)c->unstable, (unsigned long long)c->vanished,
-            c->provisional ? "true" : "false", (unsigned long long)c->excluded, c->full ? "false" : "true",
+            c->provisional ? "true" : "false", (unsigned long long)c->excluded, xs, c->full ? "false" : "true",
             state_reference(c), (unsigned long long)c->trusted, (unsigned long long)c->racy, why);
 }
 
-/* What a capture must say on every capture (Q6, never silent): it raced,
- * or skipped belay's own state directory. */
 /* What a manifest's header says was not walked, one line each (Q6;
  * decision 2026-11-01, 3: every exclude is named, never silent). */
 static void excluded_notes(FILE *out, const struct belay_manifest_header *h, const char *verb) {
@@ -188,6 +208,8 @@ static void excluded_notes(FILE *out, const struct belay_manifest_header *h, con
     }
 }
 
+/* What a capture must say on every capture (Q6, never silent): it raced,
+ * or left paths out. */
 static void capture_notes(FILE *out, const struct state *st, const struct checkpoint *c) {
     if (c->raced || c->unstable || c->vanished)
         fprintf(out, "  changing while captured: %llu raced, %llu unstable, %llu vanished\n",
@@ -208,6 +230,38 @@ static void capture_notes(FILE *out, const struct state *st, const struct checkp
 }
 
 static int open_scope(const struct opts *o, bool create, struct state *st, FILE *err);
+
+/* Every path either side of a diff did not walk, once: not compared,
+ * whatever the other side holds there (decision 2026-11-01, 3). Under a
+ * "not compared" heading, or, with `prefix` (stderr beside --json), one
+ * prefixed line each. */
+static void not_compared(FILE *out, const struct belay_manifest_header *hb,
+                         const struct belay_manifest_header *ha, const char *prefix) {
+    const struct belay_manifest_header *hs[2] = { hb, ha };
+    bool heading = false;
+    for (int sd = 0; sd < 2; sd++)
+        for (size_t i = 0; i < hs[sd]->n_excluded; i++) {
+            const struct belay_excluded *x = &hs[sd]->excluded[i];
+            bool seen = false;
+            for (size_t j = 0; sd == 1 && j < hs[0]->n_excluded; j++)
+                seen |= hs[0]->excluded[j].path_len == x->path_len &&
+                        memcmp(hs[0]->excluded[j].path, x->path, x->path_len) == 0;
+            if (seen) continue;
+            const char *why = x->reason == BELAY_EXCLUDE_STATE_DIR ? "belay's own state directory"
+                                                                   : "excluded for this scope";
+            if (prefix != NULL) {
+                fprintf(out, "%snot compared: ", prefix);
+                receipt_fputs(out, x->path);
+                fprintf(out, " (%s)\n", why);
+                continue;
+            }
+            if (!heading) fputs("\nnot compared\n", out);
+            heading = true;
+            fputs("  ", out);
+            receipt_fputs(out, x->path);
+            fprintf(out, "   %s\n", why);
+        }
+}
 
 static int cmd_exclude(const struct opts *o, FILE *out, FILE *err) {
     if (o->add != NULL && o->remove != NULL) return usage(err, "--add and --remove, one at a time");
@@ -234,6 +288,12 @@ static int cmd_exclude(const struct opts *o, FILE *out, FILE *err) {
     } else if (o->remove != NULL && at < x.n) {
         memmove(x.path[at], x.path[at + 1], (x.n - at - 1) * sizeof x.path[0]);
         x.n--;
+    } else if (o->remove != NULL) {
+        fputs("belay: ", err);                    /* never a silent success (D6) */
+        receipt_fputs(err, o->remove);
+        fputs(" is not excluded\n", err);
+        rc = EXIT_USAGE;
+        goto done;
     }
     if (p != NULL && state_excludes_write(&st, &x) == -1) {
         rc = failed(err);
@@ -407,7 +467,17 @@ static int cmd_diff(const struct opts *o, FILE *out, FILE *err) {
             rc = failed(err);
             goto done;
         }
-        if (now.id != 0) capture_notes(err, &st, &now);     /* never in the JSON */
+        /* Never in the JSON: the capture's notes, and every path either
+         * side did not walk, on stderr -- with --to too, both sides
+         * (review 2026-11-02, D2: a clean-looking diff named no blind spot). */
+        if (now.id != 0 && (now.raced || now.unstable || now.vanished))
+            capture_notes(err, &st, &(struct checkpoint){ .id = now.id, .raced = now.raced,
+                                                          .unstable = now.unstable, .vanished = now.vanished });
+        if (belay_manifest_open(a, &m.side[0].r) == -1 || belay_manifest_open(b, &m.side[1].r) == -1) {
+            rc = failed(err);
+            goto done;
+        }
+        not_compared(err, belay_manifest_header(m.side[0].r), belay_manifest_header(m.side[1].r), "belay: ");
     } else {
         if (belay_manifest_open(a, &m.side[0].r) == -1 || belay_manifest_open(b, &m.side[1].r) == -1) {
             rc = failed(err);
@@ -421,26 +491,7 @@ static int cmd_diff(const struct opts *o, FILE *out, FILE *err) {
             capture_notes(out, &st, &(struct checkpoint){ .id = now.id, .raced = now.raced,
                                                           .unstable = now.unstable, .vanished = now.vanished });
         }
-        /* Every path either side did not walk, once: not compared, whatever
-         * the other side holds there (decision 2026-11-01, 3). */
-        const struct belay_manifest_header *hs[2] = { belay_manifest_header(m.side[0].r),
-                                                      belay_manifest_header(m.side[1].r) };
-        bool heading = false;
-        for (int sd = 0; sd < 2; sd++)
-            for (size_t i = 0; i < hs[sd]->n_excluded; i++) {
-                const struct belay_excluded *x = &hs[sd]->excluded[i];
-                bool seen = false;
-                for (size_t j = 0; sd == 1 && j < hs[0]->n_excluded; j++)
-                    seen |= hs[0]->excluded[j].path_len == x->path_len &&
-                            memcmp(hs[0]->excluded[j].path, x->path, x->path_len) == 0;
-                if (seen) continue;
-                if (!heading) fputs("\nnot compared\n", out);
-                heading = true;
-                fputs("  ", out);
-                receipt_fputs(out, x->path);
-                fputs(x->reason == BELAY_EXCLUDE_STATE_DIR ? "   belay's own state directory\n"
-                                                           : "   excluded for this scope\n", out);
-            }
+        not_compared(out, belay_manifest_header(m.side[0].r), belay_manifest_header(m.side[1].r), NULL);
     }
     if (o->exit_code && ds.records > 0) rc = EXIT_CHANGES;
 done:
