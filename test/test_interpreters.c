@@ -703,6 +703,51 @@ TEST(git_events_name_only_the_paths_they_came_from) {
     r_free(&r);
 }
 
+/* Decision 137: what git cannot read reduces what is claimed, never the
+ * fact the refs give. A ref unreadable before, readable after: "now at". A
+ * packed-refs unreadable before: the reflog's evidence still dates a branch,
+ * and without it "now at". Unreadable after: no event, said as unavailable. */
+TEST(git_what_cannot_be_read_reduces_the_claim_never_the_fact) {
+    struct run r;
+    r_begin(&r, BELAY_INTERP_GIT, true);
+    const struct belay_entry a = file(put(OA "\n"), 0), b = file(put(OB "\n"), 0), none = file(NULL, 0);
+    const struct belay_entry pk = file(put("# pack-refs with: peeled fully-peeled sorted\n" OA " refs/heads/main\n"), 0);
+    r_path(&r, "/s/.git/refs/heads/blur", &none, &b, "modified");
+    r_path(&r, "/s/.git/packed-refs", &none, &pk, "modified");
+    r_path(&r, "/s/.git/refs/heads/fresh", NULL, &b, "added");
+    r_path(&r, "/s/.git/refs/heads/dated", NULL, &a, "added");
+    r_path(&r, "/s/.git/logs/refs/heads/dated", NULL, &none, "added");      /* unreadable: no evidence */
+    r_path(&r, "/s/.git/refs/heads/gone", &a, &none, "modified");
+    ASSERT_EQ_STR(
+        GEV("content_unavailable", "\"reason\":\"missing\",\"side\":\"both\"", "content unavailable (both): missing")
+            ",\"paths\":[\".git/logs/refs/heads/dated\",\".git/packed-refs\",\".git/refs/heads/blur\",\".git/refs/heads/gone\"]}\n"
+        GEV("git_branch_moved", "\"repo\":\".git\",\"branch\":\"blur\",\"to\":\"" OB "\"", "blur now at " OB)
+            ",\"paths\":[\".git/refs/heads/blur\"]}\n"
+        GEV("git_branch_moved", "\"repo\":\".git\",\"branch\":\"dated\",\"to\":\"" OA "\"", "dated now at " OA)
+            ",\"paths\":[\".git/refs/heads/dated\"]}\n"
+        GEV("git_branch_moved", "\"repo\":\".git\",\"branch\":\"fresh\",\"to\":\"" OB "\"", "fresh now at " OB)
+            ",\"paths\":[\".git/refs/heads/fresh\"]}\n",
+        r_end(&r));
+    r_free(&r);
+    /* packed-refs unreadable before; the reflog's first entry from zeros
+     * still says the branch was absent */
+    r_begin(&r, BELAY_INTERP_GIT, true);
+    const struct belay_entry lg = file(put(Z40 " " OB WHO "branch: Created from main\n"), 0);
+    r_path(&r, "/s/.git/packed-refs", &none, &pk, "modified");
+    r_path(&r, "/s/.git/refs/heads/new", NULL, &b, "added");
+    r_path(&r, "/s/.git/logs/refs/heads/new", NULL, &lg, "added");
+    /* a loose ref that was there, unread, was not absent, whatever the
+     * reflog says */
+    r_path(&r, "/s/.git/refs/heads/was", &none, &b, "modified");
+    r_path(&r, "/s/.git/logs/refs/heads/was", NULL, &lg, "added");
+    const char *got = r_end(&r);
+    ASSERT_TRUE(strstr(got, GEV("git_branch_created", "\"repo\":\".git\",\"branch\":\"new\",\"at\":\"" OB "\"",
+                                "branch new created at " OB) ",\"paths\":[\".git/logs/refs/heads/new\",\".git/refs/heads/new\"]}\n") != NULL);
+    ASSERT_TRUE(strstr(got, GEV("git_branch_moved", "\"repo\":\".git\",\"branch\":\"was\",\"to\":\"" OB "\"",
+                                "was now at " OB) ",\"paths\":[\".git/refs/heads/was\"]}\n") != NULL);
+    r_free(&r);
+}
+
 /* E10: a loose ref git cannot parse decides nothing and is said. */
 TEST(git_a_ref_that_cannot_be_parsed_is_one_could_not_interpret_event) {
     struct run r;
@@ -1301,6 +1346,7 @@ int main(void) {
     RUN(git_events_from_an_unknown_ref_are_provisional);
     RUN(git_a_ref_that_cannot_be_parsed_is_one_could_not_interpret_event);
     RUN(git_events_name_only_the_paths_they_came_from);
+    RUN(git_what_cannot_be_read_reduces_the_claim_never_the_fact);
     RUN(git_reflog_that_is_not_appended_to_is_rewritten);
     RUN(git_reflog_without_a_copy_is_content_unavailable);
     RUN(git_ref_that_cannot_be_parsed_could_not_be_interpreted);
