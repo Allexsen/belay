@@ -657,7 +657,11 @@ static int64_t now_ns(void) {
 
 bool state_exclude_valid(const char *p) {
     const size_t n = strlen(p);
-    if (n == 0 || n >= PATH_MAX || p[0] == '/' || p[n - 1] == '/' || strchr(p, '\n') != NULL) return false;
+    if (n == 0 || n >= PATH_MAX || p[0] == '/' || p[n - 1] == '/') return false;
+    /* No control byte: a CR from a hand edit made an exclude that matched
+     * nothing (review 2026-11-02, D4); a newline would split a line. */
+    for (size_t i = 0; i < n; i++)
+        if ((unsigned char)p[i] < 0x20 || p[i] == 0x7f) return false;
     for (const char *c = p; *c != '\0';) {
         const size_t k = strcspn(c, "/");
         if (k == 0 || (k == 1 && c[0] == '.') || (k == 2 && c[0] == '.' && c[1] == '.')) return false;
@@ -675,6 +679,12 @@ int state_excludes_read(const struct state *st, struct excludes *x) {
     snprintf(shown, sizeof shown, "%s/excludes", st->dir);
     const ssize_t got = read_small(st->dir_fd, "excludes", buf, sizeof buf, shown);
     if (got == -1) return errno == ENOENT ? 0 : -1;
+    /* A NUL ended the loop below early, dropping every line after it in
+     * silence (review 2026-11-02, D3): refused instead. */
+    if (memchr(buf, '\0', (size_t)got) != NULL) {
+        belay_err_set(BELAY_ERR_CORRUPT, 0, "%s is not a file belay wrote", shown);
+        return -1;
+    }
     for (char *line = buf, *nl; *line != '\0'; line = nl + 1) {
         nl = strchr(line, '\n');
         if (nl == NULL || x->n == STATE_EXCLUDES_MAX) {
@@ -686,6 +696,11 @@ int state_excludes_read(const struct state *st, struct excludes *x) {
             belay_err_set(BELAY_ERR_CORRUPT, 0, "%s holds a line that is not an exclude", shown);
             return -1;
         }
+        for (size_t i = 0; i < x->n; i++)          /* belay writes each once (D5) */
+            if (strcmp(x->path[i], line) == 0) {
+                belay_err_set(BELAY_ERR_CORRUPT, 0, "%s holds an exclude twice", shown);
+                return -1;
+            }
         snprintf(x->path[x->n++], PATH_MAX, "%s", line);
     }
     return 0;

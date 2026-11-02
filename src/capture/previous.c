@@ -100,6 +100,16 @@ bool prev_trusted(const struct prev_rec *r, const struct stat *st, int64_t refer
            r->mtime_ns == s.mtime_ns && r->ctime_ns == s.ctime_ns && r->ctime_ns < reference_ns;
 }
 
+/* Whether `path` is at or below a path this capture excludes (opts). */
+static bool now_excluded(const struct belay_manifest_opts *opts, const char *path, size_t len) {
+    for (size_t i = 0; i < opts->n_exclude_paths; i++) {
+        const size_t n = strlen(opts->exclude_paths[i]);
+        if (len >= n && memcmp(path, opts->exclude_paths[i], n) == 0 && (len == n || path[n] == '/'))
+            return true;
+    }
+    return false;
+}
+
 int prev_load(const struct fsops *ops, const char *path, const char *scope, uint64_t root_dev,
               const struct belay_manifest_opts *opts, struct prev_index **out,
               struct prev_info *info, const char **why) {
@@ -144,7 +154,12 @@ int prev_load(const struct fsops *ops, const char *path, const char *scope, uint
          * they say nothing of the scope's clock, as R or as its grain
          * (review 2026-11-01, D1). */
         if (!e->is_mount && e->ctime_ns % 1000000000 != 0) fine = true;
-        if (!e->is_mount && !e->raced && !e->unstable && !e->unreadable && e->ctime_ns > info->newest_validated_ns)
+        /* A path excluded now is not walked now: its ctime cannot be this
+         * walk's newest, so it is no measure of the clock going backwards
+         * (review 2026-11-02, S2: an exclude added after the newest file
+         * read as "ctime went backwards"). */
+        if (!e->is_mount && !e->raced && !e->unstable && !e->unreadable && e->ctime_ns > info->newest_validated_ns &&
+            !now_excluded(opts, e->path, e->path_len))
             info->newest_validated_ns = e->ctime_ns;
         if (e->type != BELAY_T_REG || !e->has_hash || e->raced || e->unstable) continue;
         struct prev_rec r = { e->dev, e->ino, e->size, e->mtime_ns, e->ctime_ns, e->mode,

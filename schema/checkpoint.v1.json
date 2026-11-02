@@ -14,6 +14,7 @@
     "vanished",
     "provisional",
     "excluded",
+    "excluded_paths",
     "prefilter"
   ],
   "properties": {
@@ -67,6 +68,43 @@
     "excluded": {
       "type": "integer",
       "minimum": 0
+    },
+    "excluded_paths": {
+      "type": "array",
+      "description": "every path the capture did not walk, from the manifest's header (manifest v2 `excluded`)",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "reason"
+        ],
+        "properties": {
+          "path": {
+            "type": "string"
+          },
+          "path_b64": {
+            "type": "string"
+          },
+          "reason": {
+            "enum": [
+              "state_dir",
+              "user"
+            ]
+          }
+        },
+        "oneOf": [
+          {
+            "required": [
+              "path"
+            ]
+          },
+          {
+            "required": [
+              "path_b64"
+            ]
+          }
+        ]
+      }
     },
     "prefilter": {
       "type": "object",
