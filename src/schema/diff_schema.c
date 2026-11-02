@@ -144,6 +144,13 @@ const struct line_field_def DIFF_HEADER_FIELDS[DH_COUNT] = {
         "do not depend on it (test/expect/manifest-v2.md, V2-R4)." },
     [DH_AFTER_MANIFEST_VERSION] = { "after_manifest_version", NULL, "int",
         "The after manifest's format version, likewise." },
+    [DH_BEFORE_EXCLUDED] = { "before_excluded", NULL, "array",
+        "What the before manifest did not walk: its `excluded`, as its header writes it "
+        "(manifest-v2.md); `null` for a v1 manifest, which does not say. It decides nothing: a "
+        "record says `not_captured` where an exclusion matters, and a path both sides excluded is "
+        "named only here (test/expect/manifest-v2.md, V2-R7)." },
+    [DH_AFTER_EXCLUDED] = { "after_excluded", NULL, "array",
+        "What the after manifest did not walk, likewise." },
 };
 
 const struct line_field_def DIFF_RECORD_FIELDS[DF_COUNT] = {

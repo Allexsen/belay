@@ -42,6 +42,8 @@ consumers MUST handle lines of any length.
 | `identity_compared` | bool | Whether `ino` was compared: never across a remount of the scope root, since an inode number means something only within one device. Content still compares by hash. |
 | `before_manifest_version` | int | The before manifest's format version (`belay_manifest`): provenance only; the outcomes do not depend on it (test/expect/manifest-v2.md, V2-R4). |
 | `after_manifest_version` | int | The after manifest's format version, likewise. |
+| `before_excluded` | array | What the before manifest did not walk: its `excluded`, as its header writes it (manifest-v2.md); `null` for a v1 manifest, which does not say. It decides nothing: a record says `not_captured` where an exclusion matters, and a path both sides excluded is named only here (test/expect/manifest-v2.md, V2-R7). |
+| `after_excluded` | array | What the after manifest did not walk, likewise. |
 <!-- END GENERATED: diff-header -->
 
 ### Records
@@ -132,7 +134,8 @@ The first of these that applies decides:
 - The side that lacks it excluded the path, or a path above it (manifest v2's `excluded`,
   `manifest-v2.md`): `unknown`, reason `not_captured`. That manifest did not look there, so its
   absence says nothing -- never `added` or `removed`. A path both manifests excluded is in neither,
-  and in no record.
+  and in no record: the header's `before_excluded` and `after_excluded` name it (`manifest-v2.md`,
+  V2-R7).
 - That ancestor is a directory carrying `unreadable` or `mount`: `unknown`, reason `not_captured`.
 - It is a directory carrying `unstable`: `unknown`, reason `listing_incomplete`.
 - It is not a directory and carries `raced`: `unknown`, reason `raced`. It changed after it was
@@ -314,7 +317,9 @@ included.
 **Event records.** A fact about a package rather than a path -- installed, removed, upgraded,
 reinstalled -- is an event record, emitted once every path has been seen, listing the paths it was
 derived from. Every path an event lists has its own record, or is unchanged. An event derived from a
-path whose outcome is `unknown` says `"provisional": true`: it may not hold. An event that breaks
+path whose outcome is `unknown` says `"provisional": true`: it may not hold. A path whose only
+reason is `not_captured` derives no event at all: that side was not looked at, so nothing was
+installed or removed there (diff-events E11). An event that breaks
 its kind's row becomes, in its place, one `invalid_finding` event naming its paths, and a file an
 interpreter cannot interpret one `could_not_interpret` event naming it: either way the interpreter's
 other events stand. Only when its end hook fails as a whole -- its per-diff state over its bound,
@@ -338,6 +343,7 @@ itself included.
 | E8 forward | A consumer ignores an event kind it does not know, as it ignores an unknown finding kind or field. |
 | E9 invalid | An event an interpreter adds that breaks its kind's row -- a kind not its own, not event-level, or the core's; a field missing, extra, or not a string field's value; text over 1,024 bytes -- is replaced, in its place, by `{"event": "invalid_finding", "interp": ..., "text": "invalid finding", "paths": [<its paths>]}`; the interpreter's other events stand (decisions P1, P5). |
 | E10 a file not interpreted | A file an interpreter claims and cannot interpret gives one `{"event": "could_not_interpret", "interp": ..., "text": "could not interpret", "paths": [<the files>]}`; the interpreter's other events stand (the class of decision P1). pip: a dist-info that cannot be named, or a RECORD it must read that cannot be parsed -- that RECORD's path record carries `could_not_interpret` too, unless its outcome is `unknown`, and nothing more is read from it; a name with RECORDs added and removed other than one of each -- one event naming them, their path records carrying nothing (the pairing is known only once every path record is written). dpkg: a status that cannot be parsed -- its path record carries `could_not_interpret` too, unless its outcome is `unknown`. |
+| E11 not captured | A path whose outcome is `unknown` with `not_captured` as its only reason -- the side that lacks it excluded it, or it lies below an `unreadable` directory or a mount there (diff-v1, "Present on one side only") -- derives no event: that side was not looked at, so nothing was installed or removed there. Its path record stands. Any other `unknown` path still derives provisional events (E2). (Decision 2026-11-02: approved, from the review of #33, D1.) |
 <!-- END GENERATED: diff-events -->
 
 **Reading findings.** A consumer ignores a finding kind, an event kind or a field it does not
@@ -388,7 +394,8 @@ know. Removing a kind or changing a field's meaning is a new diff version.
 An interpreter adds findings only to a path whose content is proven changed (added, removed,
 modified, type_changed): to a path whose outcome is `unknown` or `metadata_only` it adds none (a git
 hook's executable bit excepted, which is metadata). pip and dpkg still derive events from an
-`unknown` path, each marked provisional. A side on which the path is not a regular file counts as
+`unknown` path, each marked provisional -- but none from a path `unknown` only as `not_captured`,
+which no interpreter is given (E11). A side on which the path is not a regular file counts as
 absent (git hooks excepted: a symlink is a hook). Where an interpreter keeps the first of two equal
 keys (a package, a RECORD path, a packed ref), "first" is in file order. The limits: each
 interpreter reads at most a bound of each stored copy, and a larger one is `content_unavailable`,

@@ -106,6 +106,7 @@ enum change_class diff_field_class(enum entry_field f, enum belay_entry_type t);
 enum diff_header_field { DH_VERSION, DH_SCOPES, DH_BEFORE_CREATED, DH_AFTER_CREATED,
                          DH_BEFORE_HASH_MAX, DH_AFTER_HASH_MAX, DH_SCOPE_REMOUNTED,
                          DH_IDENTITY_COMPARED, DH_BEFORE_MANIFEST_VERSION, DH_AFTER_MANIFEST_VERSION,
+                         DH_BEFORE_EXCLUDED, DH_AFTER_EXCLUDED,
                          DH_COUNT };
 enum diff_record_field { DF_PATH, DF_OUTCOME, DF_TYPE, DF_TYPE_BEFORE, DF_CHANGED, DF_BEFORE,
                          DF_AFTER, DF_UNKNOWN, DF_FINDINGS, DF_COUNT };

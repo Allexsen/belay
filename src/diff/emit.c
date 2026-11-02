@@ -138,6 +138,36 @@ static int put_values(struct emitter *em, enum diff_record_field key, const stru
     return 0;
 }
 
+/* Writes what is in `b` so far, without ending the line: the header's
+ * excluded lists may hold 64 paths of 4,095 bytes, more than one buffer. */
+static int put_part(struct emitter *em, struct buf *b) {
+    if (fwrite(b->p, 1, b->w, em->f) != b->w) {
+        belay_err_set(BELAY_ERR_IO, errno, "diff: write failed");
+        return -1;
+    }
+    b->w = 0;
+    return 0;
+}
+
+/* `,"<key>":[...]`: one manifest's `excluded`, as its header writes it, or
+ * null for a v1 manifest, which does not say what it left out (V2-R7). */
+static int excluded(struct emitter *em, struct buf *b, const char *key,
+                    const struct belay_manifest_header *h) {
+    if (h->version < 2) return ap(b, ",\"%s\":null", key);
+    if (ap(b, ",\"%s\":[", key) == -1) return -1;
+    const struct line_field_def *X = EXCLUDED_FIELDS;
+    for (size_t i = 0; i < h->n_excluded; i++) {
+        const struct belay_excluded *x = &h->excluded[i];
+        if (put_part(em, b) == -1 || ap(b, "%s{", i ? "," : "") == -1 ||
+            ap_bytes(b, &X[EX_PATH], x->path, x->path_len) == -1 ||
+            ap(b, ",\"%s\":\"%s\",\"%s\":%llu,\"%s\":%llu}", X[EX_REASON].name,
+               x->reason == BELAY_EXCLUDE_STATE_DIR ? "state_dir" : "user", X[EX_DEV].name,
+               (unsigned long long)x->dev, X[EX_INO].name, (unsigned long long)x->ino) == -1)
+            return -1;
+    }
+    return ap(b, "]");
+}
+
 int emit_header(struct emitter *em, const struct belay_manifest_header *hb,
                 const struct belay_manifest_header *ha, bool scope_remounted) {
     const struct line_field_def *H = DIFF_HEADER_FIELDS;
@@ -162,6 +192,10 @@ int emit_header(struct emitter *em, const struct belay_manifest_header *hb,
            H[DH_IDENTITY_COMPARED].name, scope_remounted ? "false" : "true",
            H[DH_BEFORE_MANIFEST_VERSION].name, (unsigned long long)hb->version,
            H[DH_AFTER_MANIFEST_VERSION].name, (unsigned long long)ha->version) == -1)
+        return -1;
+    b.w--;                                                  /* the closing brace, reopened */
+    if (excluded(em, &b, H[DH_BEFORE_EXCLUDED].name, hb) == -1 ||
+        excluded(em, &b, H[DH_AFTER_EXCLUDED].name, ha) == -1 || ap(&b, "}") == -1)
         return -1;
     return put_line(em, &b);
 }

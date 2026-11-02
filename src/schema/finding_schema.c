@@ -160,4 +160,11 @@ const struct event_rule EVENT_RULES[EVENT_RULE_COUNT] = {
         "of each -- one event naming them, their path records carrying nothing (the pairing is "
         "known only once every path record is written). dpkg: a status that cannot be parsed -- "
         "its path record carries `could_not_interpret` too, unless its outcome is `unknown`." },
+    { "E11 not captured",
+        "A path whose outcome is `unknown` with `not_captured` as its only reason -- the side "
+        "that lacks it excluded it, or it lies below an `unreadable` directory or a mount there "
+        "(diff-v1, \"Present on one side only\") -- derives no event: that side was not looked "
+        "at, so nothing was installed or removed there. Its path record stands. Any other "
+        "`unknown` path still derives provisional events (E2). (Decision 2026-11-02: approved, "
+        "from the review of #33, D1.)" },
 };
