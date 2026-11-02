@@ -128,3 +128,10 @@
 # excluded-path sentence the oracle quotes one commit before the oracle's
 # author follows it, so `make oracle` (a CI step; `make check` passes) fails there.
 2026-11-02T14:29:50+04:00	spec: the excluded-path rule in diff-v1's ordered one-sided rules
+# #37: the E11 pin and V2-R7 land before the schema's event rules agree with them
+# (test_pins fails), and the code before the oracle's and the reference's authors
+# follow it (make oracle and make reference fail) -- the reference until its own commit.
+2026-11-02T14:40:23+04:00	pins: E11 -- a path not captured on one side derives no event (proposed)
+2026-11-02T15:07:13+04:00	pins: E11 approved; diff.v1's header carries each side's excluded (V2-R7)
+2026-11-02T15:12:06+04:00	diff: E11 -- nothing not captured is interpreted; the header names each side's excluded
+2026-11-02T15:26:56+04:00	oracle: E11 (no event from a path not captured) and V2-R7 (the header's excluded lists)
