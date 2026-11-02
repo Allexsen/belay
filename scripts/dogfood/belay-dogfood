@@ -13,8 +13,11 @@
 #   end     SessionEnd                a last checkpoint; the session's receipt,
 #                                     copied to NOTES/dogfood/ when interesting
 #
-# Reads the hook's JSON on stdin. Never fails a tool call: always exits 0,
-# and what goes wrong is logged and said at Stop. Environment:
+# Reads the hook's JSON on stdin. Never fails a tool call: always exits 0.
+# Never silent either (decision 114): whatever goes wrong in any hook is
+# kept in <state>/dogfood/failing, and the next Stop says it in one line,
+# every Stop while it keeps going wrong. (A checksum that no longer matches
+# is said by the settings command itself: install.sh.) Environment:
 #   BELAY                the binary (default ~/.local/bin/belay)
 #   BELAY_DOGFOOD_SCOPE  the repository to watch; other projects are ignored
 #   BELAY_STATE_DIR      belay's state directory (default as belay's)
@@ -35,21 +38,50 @@ in=$(cat)
 [ -n "$SCOPE" ] && [ "${CLAUDE_PROJECT_DIR:-}" = "$SCOPE" ] || exit 0     # this repository only (Q5)
 case $ev in start|pre|post|stop|end) ;; *) exit 0 ;; esac
 
+D=$STATE/dogfood
+FAILING=$D/failing
+here=
+# A failure, kept for the next Stop; where even that cannot be written, this
+# invocation says it itself when it is a Stop.
+fail() {
+    { mkdir -p "$D" && chmod 700 "$D" && printf '%s: %s\n' "$ev" "$1" | tr -d '\000-\011\013-\037' >> "$FAILING"; } \
+        2>/dev/null || here="$ev: $1"
+}
+# JSON's string escapes, for a line made here.
+js() { printf '%s' "$1" | sed 's/\\/\\\\/g; s/"/\\"/g' | tr -d '\000-\037'; }
+# Stop's message: the hooks' failures since the last Stop first, then the
+# turn's line (`$1`, from receipt.py); nothing when there is neither.
+say() {
+    f=
+    if [ -s "$FAILING" ] && mv "$FAILING" "$FAILING.$$" 2>/dev/null; then
+        n=$(wc -l < "$FAILING.$$")
+        f=$(head -1 "$FAILING.$$")
+        [ "$n" -gt 1 ] && f="$f (and $((n - 1)) more since the last stop: $D/failures.log)"
+        cat "$FAILING.$$" >> "$D/failures.log" 2>/dev/null
+        rm -f "$FAILING.$$"
+    fi
+    [ -n "$here" ] && f="$here${f:+; $f}"
+    [ -n "$f" ] && f="belay: hooks failing: $f"
+    if [ -n "$f" ] && [ -n "$1" ]; then m="$(js "$f")\n$(js "$1")"; else m=$(js "$f$1"); fi
+    [ -z "$m" ] || printf '{"systemMessage":"%s"}\n' "$m"
+}
+quit() { [ "$ev" = stop ] && say ""; exit 0; }
+command -v jq >/dev/null 2>&1 || { fail "jq not found"; quit; }
+
 # One jq for the whole input (each process costs; a writing tool call runs
 # two hooks): the session, the call, and what the receipt calls it -- a
 # command's first line, a file, a tool's name -- already JSON-encoded; and
 # the whole command, for the receipt's detail (turn-267: a label cut at 200
 # characters hid the `git fetch` that wrote what it was blamed for).
-eval "$(printf '%s' "$in" | jq -r '((.tool_input.command // .tool_input.file_path // .tool_input.notebook_path // .tool_input.description // "") | tostring) as $c | @sh "sid=\(.session_id // "") tid=\(.tool_use_id // "") tool=\(.tool_name // "") agent=\(.agent_type // "") bgtask=\(.tool_response.backgroundTaskId // (if .tool_input.run_in_background == true then "?" else "" end)) summary=\($c | split("\n")[0] | .[0:200] | @json) full=\($c | .[0:65536])"' 2>/dev/null)" || exit 0
-case ${sid:-} in ''|*[!A-Za-z0-9_-]*) exit 0 ;; esac                    # a name, never a path
+eval "$(printf '%s' "$in" | jq -r '((.tool_input.command // .tool_input.file_path // .tool_input.notebook_path // .tool_input.description // "") | tostring) as $c | @sh "sid=\(.session_id // "") tid=\(.tool_use_id // "") tool=\(.tool_name // "") agent=\(.agent_type // "") bgtask=\(.tool_response.backgroundTaskId // (if .tool_input.run_in_background == true then "?" else "" end)) summary=\($c | split("\n")[0] | .[0:200] | @json) full=\($c | .[0:65536])"' 2>/dev/null)" || { fail "the hook's input could not be read"; quit; }
+case ${sid:-} in ''|*[!A-Za-z0-9_-]*) fail "the hook's input names no session"; quit ;; esac   # a name, never a path
 
-D=$STATE/dogfood
-mkdir -p "$D" 2>/dev/null && chmod 700 "$D" 2>/dev/null
+mkdir -p "$D" 2>/dev/null && chmod 700 "$D" 2>/dev/null || { fail "cannot create $D"; quit; }
 LOG=$D/$sid.jsonl
 
 # One line, one write, appended: concurrent hooks never interleave (each line
 # is far under PIPE_BUF). The checkpoint id orders events, not the log.
-log() { printf '%s\n' "$1" >> "$LOG"; }
+log() { printf '%s\n' "$1" >> "$LOG" 2>/dev/null || fail "cannot write $LOG"; }
 
 # The whole command, once per call, in a file of its own: the log's lines
 # stay short (one write each), and only the call's own pre hook writes it.
@@ -69,6 +101,7 @@ fi
 if [ -z "$cp" ]; then
     msg=$(head -c 300 "$D/$sid.mark-err.$$" 2>/dev/null | tr -d '\000-\037"\\')
     log "{\"event\":\"error\",\"during\":\"$ev\",\"message\":\"$msg\"}"
+    fail "belay mark failed: ${msg:-no checkpoint id}"
 fi
 rm -f "$D/$sid.mark-err.$$"
 t1=$(date +%s%N)
@@ -107,9 +140,12 @@ fi
 
 case $ev in
 stop)
-    python3 -I "$HERE/receipt.py" turn "$LOG" "$BELAY" "$SCOPE" "$D" 2>>"$D/$sid.err" ;;
+    line=$(python3 -I "$HERE/receipt.py" turn "$LOG" "$BELAY" "$SCOPE" "$D" 2>>"$D/$sid.err") \
+        || fail "the turn's receipt failed (see $D/$sid.err)"
+    say "$line" ;;
 end)
     python3 -I "$HERE/receipt.py" session "$LOG" "$BELAY" "$SCOPE" "$D" \
-        "${BELAY_DOGFOOD_NOTES:-$SCOPE/NOTES/dogfood}" 2>>"$D/$sid.err" >/dev/null ;;
+        "${BELAY_DOGFOOD_NOTES:-$SCOPE/NOTES/dogfood}" 2>>"$D/$sid.err" >/dev/null \
+        || fail "the session's receipt failed (see $D/$sid.err)" ;;
 esac
 exit 0

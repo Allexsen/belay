@@ -110,6 +110,24 @@ def printable(s):
     return "".join(ch if ch.isprintable() else "?" for ch in s)
 
 
+def privileged(belay, scope, a, b):
+    """The paths belay's own receipt lists under "privilege" between
+    checkpoints a and b: a file added setuid or with caps, which diff.v1's
+    record of an added or removed path does not carry (the receipt reads the
+    manifests). Asked only where a directory may fold (decision 116)."""
+    p = subprocess.run([belay, "diff", "--scope", scope, "--since", str(a), "--to", str(b)],
+                       capture_output=True, text=True)
+    out, inside = set(), False
+    for line in p.stdout.splitlines():
+        if line == "privilege":
+            inside = True
+        elif inside and line.startswith("  ") and not line.startswith("      "):
+            out.add(line[4:].split("   ")[0])
+        elif inside and not line.startswith("  "):
+            inside = False
+    return out
+
+
 def label(c):
     """The call as a heading and the Stop line name it, read in one glance:
     cut to LABEL characters, with an ellipsis when anything is left out --
@@ -162,7 +180,14 @@ def sections(events, belay, scope, lo, hi, persistent=None, d=None, sid=None):
     far, or None at its first turn; returned narrowed to this turn's."""
     calls = calls_of(events, d, sid)
     cps = sorted({e["cp"] for e in events if e.get("cp") is not None and lo <= e["cp"] <= hi})
-    groups, errors = {}, [e for e in events if e.get("event") == "error"]
+    # An error has no checkpoint: it is this turn's when it was logged after
+    # the stop or start that opened the turn and before the one that ends it
+    # (one failure used to be said by every later turn).
+    opened = max((i for i, e in enumerate(events) if e.get("cp") == lo and e.get("event") in ("stop", "start")),
+                 default=-1)
+    closed = min((i for i, e in enumerate(events) if e.get("cp") == hi and e.get("event") in ("stop", "end")),
+                 default=len(events))
+    groups, errors = {}, [e for i, e in enumerate(events) if e.get("event") == "error" and opened < i < closed]
     seen, intervals = {}, 0
     per = []
     for a, b in zip(cps, cps[1:]):
@@ -172,6 +197,11 @@ def sections(events, belay, scope, lo, hi, persistent=None, d=None, sid=None):
             errors.append({"event": "error", "message": f"checkpoints {a} -> {b}: {err}"})
             continue
         intervals += 1
+        if any("event" not in r and r.get("type") == "dir" and r["outcome"] in ("added", "removed") for r in recs):
+            priv = privileged(belay, scope, a, b)
+            for r in recs:
+                if "event" not in r and path_of(r) in priv:
+                    r["receipt_privilege"] = True
         per.append((a, b, recs))
         for r in recs:
             if "event" not in r and r["outcome"] == "unknown":
@@ -254,11 +284,13 @@ def render(scope, belay, secs, errors):
     except OSError:
         pass
     ver = subprocess.run([belay, "--version"], capture_output=True, text=True).stdout.strip()
-    n = sum(len([r for r in recs if "event" not in r]) for h, recs, _, _ in secs
-            if not h.startswith("unknown throughout"))     # not a change: the same each time
+    counted = [r for h, recs, _, _ in secs if not h.startswith("unknown throughout")   # the same each time
+               for r in recs if "event" not in r]
+    n = len(counted)
+    paths = len({path_of(r) for r in counted})
     bg = sum(len(recs) for h, recs, _, _ in secs if h == "between tool calls")
     lines.append(f"belay receipt  {scope}   {ver} (sha256 {sha}...)")
-    head = f"  {n} change{'s' if n != 1 else ''}"
+    head = "  " + changed_line(paths, n)
     if bg:
         head += f" · background writers were active ({bg} change{'s' if bg != 1 else ''} outside any tool call)"
     lines.append(head)
@@ -275,12 +307,23 @@ def render(scope, belay, secs, errors):
         lines.append(head + ("   " + " ".join(refs) if refs else ""))
         build = [r for r in recs if "event" not in r and path_of(r).startswith(BUILD)]
         git = {}
+        shown = []
         for r in recs:
             if r in build:
                 continue
             repo = folded_git(r)
             if repo is not None:
                 git[repo] = git.get(repo, 0) + 1
+                continue
+            shown.append(r)
+        roots, under = folded_dirs(shown)
+        for r in shown:
+            if id(r) in under:
+                continue
+            if id(r) in roots and roots[id(r)]:
+                k = roots[id(r)]
+                lines.append(f"  {SYM[r['outcome']]} {printable(path_of(r))}/ and {k:,} "
+                             f"entr{'ies' if k != 1 else 'y'} below it")
                 continue
             lines.append(line_of(r, outside))
         if build:
@@ -294,7 +337,45 @@ def render(scope, belay, secs, errors):
             text = full_label(c).split("\n")
             lines.append(f"  [{k}] " + printable(text[0]))
             lines.extend("      " + printable(t) for t in text[1:])
-    return "\n".join(lines) + "\n", n
+    return "\n".join(lines) + "\n", n, paths
+
+
+def changed_line(paths, n):
+    """The headline (decision 117): paths, and changes across calls when a
+    path changed under more than one call."""
+    s = f"{paths:,} path{'s' if paths != 1 else ''} changed"
+    return s + (f" ({n:,} changes across calls)" if n != paths else "")
+
+
+def kept(r):
+    """What a folded directory never hides (decision 116): a privilege
+    change, a test file, a finding an interpreter other than text's made."""
+    p = path_of(r)
+    if r.get("receipt_privilege") or set(r.get("changed") or []) & {"caps", "iflags"}:
+        return True
+    if p.startswith(TESTS) or "/test_" in "/" + p or "_test." in p or ".test." in p or ".spec." in p:
+        return True
+    return any(not f.get("kind", "").startswith(("text_", "content_unavailable"))
+               for f in r.get("findings") or [])
+
+
+def folded_dirs(recs):
+    """A directory added or removed whole, and the entries below it with the
+    same outcome, in one line: {id(root): entries folded}, {id(folded)}."""
+    roots, under = {}, set()
+    dirs = sorted((r for r in recs if "event" not in r and r.get("type") == "dir"
+                   and r["outcome"] in ("added", "removed")), key=lambda r: len(path_of(r)))
+    for d in dirs:
+        if id(d) in under:
+            continue
+        pre = path_of(d) + "/"
+        roots[id(d)] = 0
+        for r in recs:
+            if "event" not in r and r["outcome"] == d["outcome"] and path_of(r).startswith(pre) and not kept(r):
+                if id(r) not in under:
+                    under.add(id(r))
+                    roots[id(d)] += 1
+    return roots, under
 
 
 def interesting(secs):
@@ -310,8 +391,8 @@ def interesting(secs):
             if (p.startswith(TESTS) or "/test_" in "/" + p or "_test." in p or ".test." in p or ".spec." in p) \
                     and r["outcome"] in ("modified", "removed", "type_changed"):
                 why.add("a test file changed")
-            ch = set(r.get("changed", []))
-            if ch & {"caps", "iflags"}:
+            ch = set(r.get("changed") or [])
+            if ch & {"caps", "iflags"} or r.get("receipt_privilege"):
                 why.add("privilege")
             b, a = r.get("before", {}), r.get("after", {})
             if "mode" in ch and (b.get("mode", 0) ^ a.get("mode", 0)) & 0o7000:
@@ -337,7 +418,7 @@ def latency(paths):
 
 
 def turn(events, belay, scope, d, sid, lo, hi):
-    """The turn [lo, hi]: its receipt and JSON written; (text, n, path, errors, heads)."""
+    """The turn [lo, hi]: its receipt and JSON written; (text, n, paths, path, errors, heads)."""
     pf = os.path.join(d, f"{sid}.persistent.json")
     try:
         with open(pf) as f:
@@ -347,16 +428,16 @@ def turn(events, belay, scope, d, sid, lo, hi):
     secs, errors, _, throughout = sections(events, belay, scope, lo, hi, persistent, d, sid)
     with open(pf, "w") as f:
         json.dump([[p, list(u)] for p, u in sorted(throughout)], f)
-    text, n = render(scope, belay, secs, errors)
+    text, n, paths = render(scope, belay, secs, errors)
     path = os.path.join(d, f"{sid}.turn-{hi}.txt")
     with open(path, "w") as f:
         f.write(text)
     with open(os.path.join(d, f"{sid}.turn-{hi}.json"), "w") as f:
-        json.dump({"lo": lo, "hi": hi, "changes": n, "interesting": interesting(secs),
+        json.dump({"lo": lo, "hi": hi, "changes": n, "paths": paths, "interesting": interesting(secs),
                    "sections": [{"section": h, "calls": [full_label(c) for c in cs], "records": r}
                                 for h, r, _, cs in secs]}, f)
     heads = [h for h, _, _, _ in secs if not h.startswith("unknown throughout")][:3]
-    return text, n, path, errors, heads
+    return text, n, paths, path, errors, heads
 
 
 def main():
@@ -376,14 +457,14 @@ def main():
         hi = stops[-1] if stops else max(cps)
         earlier = stops[:-1] + starts
         lo = max([s for s in earlier if s < hi], default=min(cps))
-        _, n, path, errors, heads = turn(events, belay, scope, d, sid, lo, hi)
+        _, n, paths, path, errors, heads = turn(events, belay, scope, d, sid, lo, hi)
         if n or errors:
-            msg = f"belay: {n} change{'s' if n != 1 else ''} this turn"
+            msg = "belay: " + changed_line(paths, n).replace(" changed", " changed this turn", 1)
             if heads:
                 msg += " (" + "; ".join(heads) + ")"
             if errors:
                 msg += f"; receipt incomplete ({len(errors)} error{'s' if len(errors) != 1 else ''})"
-            print(json.dumps({"systemMessage": msg + f" -- {path}"}))
+            print(msg + f" -- {path}")             # the hook makes the Stop's JSON
         return
     # The session: what happened after the last stop as a last turn, then
     # every turn's receipt in order -- nothing diffed twice, so SessionEnd
