@@ -32,14 +32,21 @@ Its only sources:
     `before` and `after` objects of a record;
   - docs/spec/diff-v1.md "## Shape", PROSE ONLY, for V5's "stated in
     diff-v1": no line has a fixed length bound;
-  - test/expect/manifest-v2.md V2-R4: the header ends with
-    `before_manifest_version` and `after_manifest_version`, each manifest's
-    `belay_manifest`; nothing else depends on the version (the entries are
-    v1's, and of the keys v2 adds only `excluded` is read: V2-R6);
+  - test/expect/manifest-v2.md V2-R4: `before_manifest_version` and
+    `after_manifest_version`, each manifest's `belay_manifest`; nothing else
+    depends on the version (the entries are v1's, and of the keys v2 adds
+    only `excluded` is read: V2-R6);
+  - test/expect/manifest-v2.md V2-R7, READ AT RUN TIME (its words checked at
+    start-up): the header ends with `before_excluded` and `after_excluded`,
+    after `after_manifest_version`, each manifest's `excluded` as its header
+    writes it, `null` for a v1 manifest; they decide nothing;
   - docs/spec/diff-v1.md "Present on one side only", its first bullet: a
     path the side lacking it excluded, or below one (checked at start-up,
     with the list's order), with test/expect/manifest-v2.md V2-2 (what an
-    `excluded` element holds).
+    `excluded` element holds);
+  - test/expect/diff-events.md E11 and the prose's "Event records" and "What
+    each interpreter reports" (checked at start-up): a path `unknown` only
+    as `not_captured` derives no event.
 Never the generated blocks of the spec, never src/ or include/.
 
 Ambiguities this file resolves one way (questions for the author) are
@@ -71,10 +78,16 @@ SPEC = os.path.join(REPO, 'docs', 'spec', 'diff-v1.md')
 
 # The header's and the trailer's keys, in order. The header's from the "Shape"
 # example (its first line); `scopes` is spelled `scopes_b64` when the scope
-# is not UTF-8 (ambiguity A9).
-HEADER_KEYS = ['belay_diff', 'scopes', 'before_created_ns', 'after_created_ns',
-               'before_hash_max_bytes', 'after_hash_max_bytes', 'scope_remounted',
-               'identity_compared', 'before_manifest_version', 'after_manifest_version']
+# is not UTF-8 (ambiguity A9). Then V2-R7's two (test/expect/manifest-v2.md):
+# "`before_excluded` and `after_excluded`, after `after_manifest_version`".
+# The example predates V2-R7 and does not show them (ambiguity X2: the pin,
+# approved later and explicit about the place, is followed; the example is
+# accepted with them or without them, so it may be brought up to date).
+HEADER_KEYS_SHAPE = ['belay_diff', 'scopes', 'before_created_ns', 'after_created_ns',
+                     'before_hash_max_bytes', 'after_hash_max_bytes', 'scope_remounted',
+                     'identity_compared', 'before_manifest_version', 'after_manifest_version']
+EXCLUDED_KEYS = ['before_excluded', 'after_excluded']
+HEADER_KEYS = HEADER_KEYS_SHAPE + EXCLUDED_KEYS
 # The trailer's from the "### Trailer" paragraph: "`belay_diff_end` is the
 # number of records written. Then come one count per outcome, named as the
 # outcome, ... `unchanged` included" (in the example's order) ...
@@ -107,7 +120,9 @@ EXCLUDED_RULE = ('The first of these that applies decides: '
                  '- The side that lacks it excluded the path, or a path above it (manifest '
                  'v2\'s `excluded`, `manifest-v2.md`): `unknown`, reason `not_captured`. That '
                  'manifest did not look there, so its absence says nothing -- never `added` or '
-                 '`removed`. A path both manifests excluded is in neither, and in no record. '
+                 '`removed`. A path both manifests excluded is in neither, and in no record: '
+                 'the header\'s `before_excluded` and `after_excluded` name it '
+                 '(`manifest-v2.md`, V2-R7). '
                  '- That ancestor is a directory carrying `unreadable` or `mount`')
 
 
@@ -133,9 +148,36 @@ def shape_example_keys():
     return keys(lines[0]), keys(lines[-1])
 
 
-if shape_example_keys() != (HEADER_KEYS, TRAILER_KEYS):
+_shape_header, _shape_trailer = shape_example_keys()
+if _shape_header not in (HEADER_KEYS_SHAPE, HEADER_KEYS) or _shape_trailer != TRAILER_KEYS:
     raise SystemExit('spec: the "Shape" example\'s header or trailer keys are not the ones '
                      'reference.py writes: %r' % (shape_example_keys(),))
+
+# test/expect/manifest-v2.md V2-R7, the words diff()'s header and
+# header_excluded() rely on: the two
+# keys and their place, the value (the manifest's own `excluded`, written as
+# its header writes it; `null` for v1), and that they decide nothing. V2-R4
+# still says the versions are "at the end of the header"; V2-R7, approved
+# later, puts these two after them (ambiguity X3: V2-R7 is followed).
+MANIFEST_V2_PIN = os.path.join(REPO, 'test', 'expect', 'manifest-v2.md')
+V2_R7 = ['The diff header carries what each manifest left out: `before_excluded` and '
+         '`after_excluded`, after `after_manifest_version`, each that manifest\'s `excluded` '
+         'array as its header writes it',
+         '`[]` when none), and `null` for a v1 manifest, which does not say what it left out',
+         'Like V2-R4 they decide nothing',
+         'a path both sides excluded is in no record and only here']
+
+
+def v2_r7():
+    """Called once the table reader is defined (below)."""
+    rows = [split_row(l) for l in open(MANIFEST_V2_PIN, encoding='utf-8').read().splitlines()
+            if l.startswith('| V2-R7 |')]
+    if len(rows) != 1 or len(rows[0]) != 2:
+        raise SystemExit('pin: manifest-v2.md has no one V2-R7 row')
+    for w in V2_R7:
+        if w not in rows[0][1]:
+            raise SystemExit('pin: manifest-v2.md V2-R7 no longer says what reference.py '
+                             'assumes: %r' % w)
 
 # ---------------------------------------------------------------------------
 # The pins, parsed at run time.
@@ -302,6 +344,7 @@ def o5_timestamps(fields, rules):
 
 
 FIELDS, RULES = load_fields()
+v2_r7()
 prose_unknown_carveout()
 DIR_TIMESTAMPS = o5_timestamps(FIELDS, RULES)
 FIELD_ORDER = list(FIELDS)          # `changed` lists fields in this order (the
@@ -339,6 +382,28 @@ def excluded(header):
     for d in header.get('excluded', []):
         out[b64(d['path_b64']) if 'path_b64' in d else d['path'].encode('utf-8')] = d
     return out
+
+
+def header_excluded(path):
+    """V2-R7: the value of the diff header's `before_excluded` or
+    `after_excluded` for the manifest at path -- "that manifest's `excluded`
+    array as its header writes it" (its objects as [(key, value)], in the
+    header's order: path or path_b64, reason, dev, ino), "and `null` for a v1
+    manifest" (None). Also (header line bytes, the array's bytes), so that
+    compare.py can check the diff writes those very bytes."""
+    with open(path, 'rb') as f:
+        line = f.readline().rstrip(b'\n')
+    h = json.loads(line.decode('utf-8'), object_pairs_hook=list)
+    d = dict(h)
+    if d['belay_manifest'] == 1:
+        if 'excluded' in d:
+            raise ValueError('%s: a version 1 header with `excluded`' % path)
+        return None, line, None
+    v = d['excluded']
+    raw = b'"excluded":' + canonical(v)
+    if raw not in line:
+        raise ValueError('%s: `excluded` not written canonically' % path)
+    return v, line, canonical(v)
 
 
 def covering(excl, p):
@@ -408,7 +473,8 @@ def one_sided(p, present, lacking_entries, added, lacking_excluded):
         return 'unknown', [NOT_CAPTURED], trace + ['excluded']
     anc = nearest_ancestor(lacking_entries, p)
     if anc['type'] == 'dir' and (anc.get('unreadable') or anc.get('mount')):
-        return 'unknown', [NOT_CAPTURED], trace + ['not_captured']
+        return 'unknown', [NOT_CAPTURED], trace + [
+            'not_captured', 'not_captured:' + ('unreadable' if anc.get('unreadable') else 'mount')]
     if anc['type'] == 'dir' and anc.get('unstable'):
         return 'unknown', [LISTING_INCOMPLETE], trace + ['listing_incomplete']
     # "It is not a directory and carries `raced`: `unknown`, reason `raced`.
@@ -988,6 +1054,13 @@ def load_event_rules():
                 'RECORDs added and removed other than one of each -- one event naming them, '
                 'their path records carrying nothing'],
         'E7': ['The trailer gains `events`: the number of event records.'],
+        # E11, in diff(): a path not captured is given to no interpreter.
+        'E11': ['A path whose outcome is `unknown` with `not_captured` as its only reason -- '
+                'the side that lacks it excluded it, or it lies below an `unreadable` directory '
+                'or a mount there (diff-v1, "Present on one side only") -- derives no event: '
+                'that side was not looked at, so nothing was installed or removed there. Its '
+                'path record stands. Any other `unknown` path still derives provisional events '
+                '(E2).'],
     }
     for r, words in said.items():
         for w in words:
@@ -1038,7 +1111,14 @@ def _check_claims():
               'on', 'any other is **binary**, which adds nothing',
               "to a path whose outcome is `unknown` or `metadata_only` it adds none (a git "
               "hook's executable bit excepted, which is metadata). pip and dpkg still derive "
-              'events from an `unknown` path, each marked provisional.',
+              'events from an `unknown` path, each marked provisional -- but none from a path '
+              '`unknown` only as `not_captured`, which no interpreter is given (E11).',
+              # "Event records" (E11 in the prose): explain() is not called
+              # for such a path, so it derives no event of any kind.
+              'An event derived from a path whose outcome is `unknown` says `"provisional": '
+              'true`: it may not hold. A path whose only reason is `not_captured` derives no '
+              'event at all: that side was not looked at, so nothing was installed or removed '
+              'there (diff-events E11).',
               'A side on which the path is not a regular file counts as absent (git hooks '
               'excepted: a symlink is a hook).',
               '`missing` covers a path whose entry records no `stored` copy (a reflog over its '
@@ -1304,7 +1384,9 @@ def explain(interp, what, p, b, a, outcome, state, trace):
     # changed (added, removed, modified, type_changed): to a path whose
     # outcome is `unknown` or `metadata_only` it adds none (a git hook's
     # executable bit excepted, which is metadata). pip and dpkg still derive
-    # events from an `unknown` path, each marked provisional."
+    # events from an `unknown` path, each marked provisional -- but none
+    # from a path `unknown` only as `not_captured`, which no interpreter is
+    # given (E11)": diff() never calls this for one.
     if outcome == 'unknown':
         trace.append('interp-unknown')
         if (interp, what) == ('dpkg', 'status'):
@@ -1628,7 +1710,11 @@ def diff(before, after):
               ('after_hash_max_bytes', ha['hash_max_bytes']),
               ('scope_remounted', remounted), ('identity_compared', not remounted),
               ('before_manifest_version', hb['belay_manifest']),
-              ('after_manifest_version', ha['belay_manifest'])]
+              ('after_manifest_version', ha['belay_manifest']),
+              # V2-R7: each manifest's `excluded` as written, null for v1;
+              # they decide nothing (xb and xa above are what decides).
+              ('before_excluded', header_excluded(before)[0]),
+              ('after_excluded', header_excluded(after)[0])]
     assert [('scopes' if k == 'scopes_b64' else k) for k, _ in header] == HEADER_KEYS
     records, counts, traces = [], collections.Counter(), {}
     states = {i: {'unavailable': [], 'moved': [], 'unnamed': [], 'reinstalled': [],
@@ -1682,7 +1768,17 @@ def diff(before, after):
         # adds **findings** to its record" -- `findings` "absent when none".
         interp, what = interpreter_of(sb, p, b, a)
         traces[p].append('interp:%s%s' % (interp, ':' + what if what else ''))
-        if interp != BINARY:
+        # E11: "A path whose outcome is `unknown` with `not_captured` as its
+        # only reason ... derives no event ... Its path record stands"; the
+        # prose: "none from a path `unknown` only as `not_captured`, which no
+        # interpreter is given". Not given to explain(): no event of any
+        # kind names it -- no pip pairing, no content_unavailable, no
+        # could_not_interpret (ambiguity X4: "derives no event at all" read
+        # as every kind, the core's included) -- and, `unknown`, its record
+        # carries no finding either way.
+        if out == 'unknown' and why == [NOT_CAPTURED]:
+            traces[p].append('e11-not-interpreted')
+        elif interp != BINARY:
             fs = explain(interp, what, p, b, a, out, states[interp], traces[p])
             if fs:
                 rec['findings'] = fs
@@ -1721,6 +1817,8 @@ def canonical(v):
     """The bytes of a JSON value as a belay writer emits it (manifest-v1
     "Encoding": no whitespace, strings by canonical_string(), `true` and
     `false`); an object is a [(key, value)] list or a dict, in its order."""
+    if v is None:                      # V2-R7: `null` for a v1 manifest
+        return b'null'
     if isinstance(v, bool):
         return b'true' if v else b'false'
     if isinstance(v, int):
@@ -1744,7 +1842,7 @@ if __name__ == '__main__':
         sys.exit(1)
     header, records, events, trailer, _ = res
     dump = lambda o: json.dumps(o, ensure_ascii=False, separators=(',', ':'))
-    print(dump(dict(header)))
+    print(canonical(header).decode('utf-8'))
     for r in records:
         print(dump(encode_record(r)))
     for ev in events:

@@ -7,7 +7,9 @@
 pair-NNNNN.before/.after (same scope): the driver's diff and reference.diff()
 must agree on
   - the header: every key, its value and their order (the "Shape" example's,
-    which the reference checks at start-up);
+    which the reference checks at start-up, then V2-R7's `before_excluded`
+    and `after_excluded`); and those two as bytes: each manifest's
+    `excluded` array exactly as its header writes it, `null` for v1;
   - every record: path and its spelling (path / path_b64), outcome, type,
     type_before, `changed` exactly (order included), `unknown` as a set, the
     records' order;
@@ -41,7 +43,8 @@ must agree on
 Every pair is also run in the other three combinations of manifest versions
 (.before.alt/.after.alt: the same manifests in the other version), and each
 of those diffs must be the pair's own, byte for byte, but for
-`before_manifest_version`/`after_manifest_version` (the files' versions)
+`before_manifest_version`/`after_manifest_version` (the files' versions),
+`before_excluded`/`after_excluded` (`[]` in v2, `null` in v1: V2-R7)
 and `before_sha256`/`after_sha256` (their bytes): "diff.v1 records and
 outcomes do not depend on the version", and the v2 statements decide
 nothing (test/expect/manifest-v2.md V2-R4, V2-R6). A manifest with a
@@ -82,12 +85,19 @@ the generator's labels (coverage(), required(), gate()):
   - every interpreter item (INTERP_SCENARIOS): which interpreter claims a
     path, what its entries hold and the outcome, with no store -- text,
     binary, dpkg, pip and git paths, the pip and dpkg end hooks' inputs,
-    events of two interpreters, and a diff with findings but no event;
+    events of two interpreters, and a diff with findings but no event; a
+    RECORD and a dpkg status not captured (excluded, below an unreadable
+    directory, below a mount), alone and beside ones read, which derive no
+    event (E11), and ones unknown on one side for another reason
+    (listing_incomplete, raced), still provisional (E2);
   - every manifest-version item (VERSION_SCENARIOS): the four combinations
     of versions, identical entries in two versions (V2-R4) and in v2 with
     only the v2 statements different (V2-R6), each kind of walk a v2
-    manifest's statements say (manifest-v2.md V2-3..V2-6), and a manifest
-    with exclusions against a v1 one and against one with its own;
+    manifest's statements say (manifest-v2.md V2-3..V2-6), a manifest
+    with exclusions against a v1 one and against one with its own; and the
+    header's `before_excluded` and `after_excluded` (V2-R7): `null` (v1),
+    `[]`, path_b64, both reasons in one list, a path in both lists, two
+    lists that differ, a list against `null` and against `[]`;
   - every exclusion item (EXCLUDED_SCENARIOS, among the scenarios): what a
     path at or below one manifest's `excluded` gets where the other holds
     it (diff-v1.md, "Present on one side only"; V2-2).
@@ -445,6 +455,10 @@ def check_versions(stem, own, others):
                 break
         names = {'before_manifest_version': manifest_version(stem + before),
                  'after_manifest_version': manifest_version(stem + after),
+                 # V2-R7: the file's `excluded`, `null` for version 1 (only
+                 # a manifest with no exclusions has a v1 counterpart).
+                 'before_excluded': ref.header_excluded(stem + before)[0],
+                 'after_excluded': ref.header_excluded(stem + after)[0],
                  'before_sha256': ref.trailer_of(stem + before)[1],
                  'after_sha256': ref.trailer_of(stem + after)[1]}
         for what, x, y in (('header', lines[0], got[0]), ('trailer', lines[-1], got[-1])):
@@ -520,6 +534,14 @@ def run_pair(ran, stem, orders):
             result['header'].append(('header: unexpected %s' % k, None, gh[k]))
     if [k for k in gk if k in ek] != [k for k in ek if k in gk] or len(set(gk)) != len(gk):
         result['header'].append(('header: key order', ek, gk))
+    # V2-R7: each manifest's `excluded` "as its header writes it" -- the very
+    # bytes of the manifest's array in the diff's header line -- and `null`
+    # for a v1 manifest.
+    for k, side in (('before_excluded', '.before'), ('after_excluded', '.after')):
+        _, _, raw_x = ref.header_excluded(stem + side)
+        want = b'"%s":%s' % (k.encode(), b'null' if raw_x is None else raw_x)
+        if want not in lines[0]:
+            result['header'].append(('header: the bytes of %s' % k, want, lines[0]))
     # records
     got_by, prev = {}, None
     for rec in got_records:
@@ -1247,7 +1269,24 @@ INTERP_SCENARIOS = (
        'git hook: type_changed, reg -> lnk', 'git hook: type_changed, lnk -> reg',
        'git hook: type_changed, lnk -> dir',
        'text: a stored *.md5sums file outside var/lib/dpkg/info/, modified']
-    + ['events: from pip and dpkg in one diff', 'events: none, though records carry findings'])
+    + ['events: from pip and dpkg in one diff', 'events: none, though records carry findings']
+    # E11 (diff-events.md): a path `unknown` only as `not_captured` -- the
+    # side lacking it excluded it, or it lies below an unreadable directory
+    # or a mount there -- derives no event; any other unknown path still
+    # derives provisional ones (E2). The cause is the reference's trace (the
+    # rule of "Present on one side only" that decided), what the entries
+    # hold is the manifests'.
+    + ['%s: unknown, one side only, not captured (%s): no event (E11)' % (w, why)
+       for w in ('pip RECORD', 'dpkg status')
+       for why in ('excluded', 'below an unreadable directory', 'below a mount')]
+    + ['pip RECORD: unknown, one side only, not captured, a dist-info that cannot be named: '
+       'no event (E11)',
+       'pip events: a RECORD not captured, another of its pair key known: that one alone, not '
+       'provisional (E11)',
+       'dpkg events: a status not captured beside one that is read: that one alone (E11)',
+       'events: none, every claimed path not captured (E11)']
+    + ['%s: unknown, one side only, %s: provisional events (E2)' % (w, r)
+       for w in ('pip RECORD', 'dpkg status') for r in ('listing_incomplete', 'raced')])
 NEED_CONTENT = ('status', 'RECORD', 'HEAD', 'ref', 'packed-refs', 'reflog')
 
 
@@ -1259,11 +1298,33 @@ def interp_coverage(stem, tags):
     _, ea = ref.load(stem + '.after')[1:]
     _, records, events, _, traces = res
     status_sides = []
+    e11 = {'RECORD': [], 'status': []}         # claimed paths not captured (E11)
+    read = {'RECORD': [], 'status': []}        # claimed paths given to the interpreter
     for rec in records:
         p, o = rec['path'], rec['outcome']
         b, a = eb.get(p), ea.get(p)
         it = [t for t in traces[p] if t.startswith('interp:')][0].split(':')[1:]
         regs = [e for e in (b, a) if ref.is_reg(e)]
+        if it in (['pip', 'RECORD'], ['dpkg', 'status']) and regs:
+            name = '%s %s' % tuple(it)
+            if 'e11-not-interpreted' in traces[p]:
+                why = ('excluded' if 'excluded' in traces[p] else
+                       'below an unreadable directory' if 'not_captured:unreadable' in traces[p]
+                       else 'below a mount')
+                tags.add('%s: unknown, one side only, not captured (%s): no event (E11)'
+                         % (name, why))
+                if it[1] == 'RECORD' and ref.dist_info(p) is None:
+                    tags.add('pip RECORD: unknown, one side only, not captured, a dist-info that '
+                             'cannot be named: no event (E11)')
+                e11[it[1]].append(p)
+                continue                        # given to no interpreter: no other item
+            read[it[1]].append((p, o))
+            if o == 'unknown' and len(rec['unknown']) == 1 and (b is None) != (a is None) and \
+                    rec['unknown'][0] in (ref.LISTING_INCOMPLETE, ref.RACED):
+                tags.add('%s: unknown, one side only, %s: provisional events (E2)'
+                         % (name, rec['unknown'][0]))
+        elif 'e11-not-interpreted' in traces[p]:
+            continue
         if it == ['text']:
             tags.add('text: %s, stored on every side it exists on' % o)
             if b'.git/' in p:
@@ -1391,6 +1452,22 @@ def interp_coverage(stem, tags):
         tags.add('events: from pip and dpkg in one diff')
     if not events and any('findings' in r for r in records):
         tags.add('events: none, though records carry findings')
+    # E11 beside what is read: a RECORD not captured and one of its pair key
+    # (holder, normalized name) added or removed -- that one is a lone
+    # install or removal, not provisional; a status not captured beside one
+    # read.
+    key = lambda p: (ref.dist_info(p)[0], ref.pep503(ref.dist_info(p)[1]))
+    lost = {key(p) for p in e11['RECORD'] if ref.dist_info(p) is not None}
+    if any(o in ('added', 'removed') and ref.dist_info(p) is not None and key(p) in lost
+           for p, o in read['RECORD']):
+        tags.add('pip events: a RECORD not captured, another of its pair key known: that one '
+                 'alone, not provisional (E11)')
+    if e11['status'] and any(o in ('added', 'removed', 'modified') for _, o in read['status']):
+        tags.add('dpkg events: a status not captured beside one that is read: that one alone '
+                 '(E11)')
+    if (e11['RECORD'] or e11['status']) and not read['RECORD'] and not read['status'] \
+            and not events:
+        tags.add('events: none, every claimed path not captured (E11)')
 
 
 # Manifest versions (test/expect/manifest-v2.md), from each pair's own two
@@ -1416,7 +1493,19 @@ VERSION_SCENARIOS = (['before v%d, after v%d' % vv for vv in ((1, 1), (1, 2), (2
                         'v2: every file read, read_all check',
                         'v2: every file read, another reason',
                         'v2: walk_start_ns 0', 'v2: walk_start_ns not 0',
-                        'v2 with exclusions against v1', 'v2 with exclusions on both sides'])
+                        'v2 with exclusions against v1', 'v2 with exclusions on both sides']
+                     # V2-R7: the header's before_excluded and after_excluded,
+                     # from what the two manifests' headers write.
+                     + ['header: %s null (a v1 manifest)' % k
+                        for k in ('before_excluded', 'after_excluded')]
+                     + ['header: %s [] (a v2 manifest with no exclusion)' % k
+                        for k in ('before_excluded', 'after_excluded')]
+                     + ['header: an excluded element spelled path_b64 (not UTF-8)',
+                        'header: one excluded list with both reasons, state_dir and user',
+                        'header: a path in both excluded lists',
+                        'header: two non-empty excluded lists that differ',
+                        'header: a non-empty excluded list against null (v1)',
+                        'header: a non-empty excluded list against []'])
 
 
 def version_coverage(stem, tags):
@@ -1439,6 +1528,29 @@ def version_coverage(stem, tags):
         tags.add('v2 on both sides, every entry the same, only the v2 statements differ (V2-R6)')
     if xb and xa:
         tags.add('v2 with exclusions on both sides')
+    # V2-R7, from the headers as written (reference.header_excluded: the
+    # objects as [(key, value)], None for v1).
+    hx = [ref.header_excluded(stem + side)[0] for side in ('.before', '.after')]
+    for k, x, o in (('before_excluded', hx[0], hx[1]), ('after_excluded', hx[1], hx[0])):
+        if x is None:
+            tags.add('header: %s null (a v1 manifest)' % k)
+        elif x == []:
+            tags.add('header: %s [] (a v2 manifest with no exclusion)' % k)
+        else:
+            if any(dict(d).keys() >= {'path_b64'} for d in x):
+                tags.add('header: an excluded element spelled path_b64 (not UTF-8)')
+            if {dict(d)['reason'] for d in x} == {'state_dir', 'user'}:
+                tags.add('header: one excluded list with both reasons, state_dir and user')
+            if o is None:
+                tags.add('header: a non-empty excluded list against null (v1)')
+            elif o == []:
+                tags.add('header: a non-empty excluded list against []')
+    if hx[0] and hx[1]:
+        paths = lambda x: {dict(d).get('path', dict(d).get('path_b64')) for d in x}
+        if paths(hx[0]) & paths(hx[1]):
+            tags.add('header: a path in both excluded lists')
+        if not same(hx[0], hx[1]):
+            tags.add('header: two non-empty excluded lists that differ')
     for st in (sb, sa):
         if st is None:
             continue
