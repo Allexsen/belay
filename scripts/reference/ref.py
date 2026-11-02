@@ -840,9 +840,15 @@ def interpret(before_fn, after_fn, store):
             # E11: "A path whose outcome is `unknown` with `not_captured` as
             # its only reason ... derives no event"; diff-v1: "none from a
             # path `unknown` only as `not_captured`, which no interpreter is
-            # given". So it is no pair partner, is never named (no E10), and
-            # no copy of it is needed (no content_unavailable). Its record
-            # stands, with no finding (its outcome is unknown).
+            # given". So it is no pair partner and is never read. The pin
+            # says the rest outright (decision 118): "No interpreter is given
+            # it, so no event of the core's names it either: no
+            # `could_not_interpret` (E10) nor `content_unavailable` for it,
+            # and a failed end hook's event (E6) never lists it." Hence it is
+            # never named nor parsed (no E10), no copy of it is needed (no
+            # content_unavailable), and it is in no interpreter's claimed
+            # paths (E6: "never a path E11 withholds"). Its record stands,
+            # with no finding (its outcome is unknown).
             res.not_captured.add(path)
             res.findings[path] = None
             continue
@@ -1007,6 +1013,12 @@ def interpret(before_fn, after_fn, store):
 
     # E6 (per-diff state over 64 MiB, memory, an event naming no path) is not
     # modelled: the corpus never builds it (see the report's questions).
+    # diff-v1: the end hook fails "only when the interpreter's per-diff state
+    # would exceed 64 MiB or memory runs out" -- neither reachable from the
+    # driver's inputs at the corpus's sizes. Were it modelled, its paths
+    # would be those "given to it (every path it claims whose outcome is not
+    # `unchanged`; none `unknown` only as `not_captured`, which it is never
+    # given: E11)": the claimed paths outside res.not_captured.
     res.events = bound_events("pip", pip_lines) + bound_events("dpkg", dpkg_lines)
     return res
 
