@@ -381,7 +381,7 @@ int receipt_render(FILE *diff, FILE *out, const struct receipt_opts *o) {
         fputc('\n', out);
     }
     const struct { const char *title; struct lines *l; } SEC[] = {
-        { "packages and files explained", &ev }, { "privilege", &priv }, { "changes", &other },
+        { "events", &ev }, { "privilege", &priv }, { "changes", &other },
     };
     for (size_t s = 0; s < 3; s++) {
         if (SEC[s].l->n == 0) continue;
