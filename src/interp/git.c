@@ -593,23 +593,37 @@ static struct val value(const struct git *g, const struct grepo *r, struct gs b,
     const struct gfact *lo = find(g, r, GK_LOOSE, b), *pk = find(g, r, GK_PACKED, b),
                        *lg = find(g, r, GK_LOG, b);
     *src = NULL;
+    /* What cannot be read reduces what is claimed, never the fact the refs
+     * give (decision 137): a side that cannot be read gives no value --
+     * after, no event; before, what follows in this order still may. */
+    bool existed = false;                       /* a loose ref there, unread */
     if (lo != NULL && lo->present[k]) {
-        *src = lo;
-        return lo->known[k] ? (struct val){ V_VALUE, lo->val[k] } : (struct val){ V_UNKNOWN, { 0 } };
-    }
-    if (pk != NULL) {
-        *src = pk;
-        return packed_val(pk, k, b);
-    }
-    if (k == SIDE_AFTER) {
+        if (lo->known[k]) {
+            *src = lo;
+            return (struct val){ V_VALUE, lo->val[k] };
+        }
+        if (k == SIDE_AFTER) return (struct val){ V_UNKNOWN, { 0 } };
+        existed = true;                         /* not packed-refs: a loose ref overrides it */
+    } else if (pk != NULL) {
+        if (pk->known[k]) {
+            *src = pk;
+            return packed_val(pk, k, b);
+        }
+        if (k == SIDE_AFTER) return (struct val){ V_UNKNOWN, { 0 } };
+    } else if (k == SIDE_AFTER) {
         if (lo == NULL || !lo->present[SIDE_BEFORE]) return (struct val){ V_NONE, { 0 } };
         *src = lo;
         return (struct val){ V_ABSENT, { 0 } };
     }
-    /* A reflog is only evidence: one that cannot be read gives none. */
-    if (lg != NULL && lg->known[0] && lg->known[1] && lg->log_ok && lg->ne > 0) {
+    /* Before only, the reflog's evidence; one that cannot be read gives none. */
+    if (k == SIDE_BEFORE && lg != NULL && lg->known[0] && lg->known[1] && lg->log_ok && lg->ne > 0) {
+        if (zeros(lg->e[0].old)) {
+            if (existed) return (struct val){ V_NONE, { 0 } };
+            *src = lg;
+            return (struct val){ V_ABSENT, { 0 } };
+        }
         *src = lg;
-        return zeros(lg->e[0].old) ? (struct val){ V_ABSENT, { 0 } } : (struct val){ V_VALUE, lg->e[0].old };
+        return (struct val){ V_VALUE, lg->e[0].old };
     }
     return (struct val){ V_NONE, { 0 } };
 }
@@ -747,6 +761,9 @@ static int repo_events(struct git *g, const struct grepo *r, struct gev **v, siz
     const size_t first = *n;
     for (size_t i = r->lo; i < r->hi; i++) {
         const struct gfact *x = &g->f[i];
+        /* packed-refs names a branch by itself only where both its sides
+         * were read: one side alone shows no branch moved (decision 137) */
+        if (x->kind == GK_PACKED && (!x->known[0] || !x->known[1])) continue;
         for (size_t m = 0; m < (x->kind == GK_PACKED ? x->npk[0] + x->npk[1] : 1); m += (x->kind == GK_PACKED ? 2 : 1)) {
             struct gs b;
             if (x->kind == GK_PACKED) b = m < x->npk[0] ? x->pk[0][m] : x->pk[1][m - x->npk[0]];
