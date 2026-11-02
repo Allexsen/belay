@@ -123,3 +123,8 @@
 # header gains its version keys one commit before the oracle's author models
 # them, so `make oracle` (a CI step; `make check` passes) fails at it.
 2026-11-01T12:42:15+04:00	manifest: version 2, written and read (pin test/expect/manifest-v2.md)
+
+# m1/one-sided (decision 2026-11-02, row 98), merged by rebase. The spec moves the
+# excluded-path sentence the oracle quotes one commit before the oracle's
+# author follows it, so `make oracle` (a CI step; `make check` passes) fails there.
+2026-11-02T14:29:50+04:00	spec: the excluded-path rule in diff-v1's ordered one-sided rules
