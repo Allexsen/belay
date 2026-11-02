@@ -163,7 +163,7 @@ def path_of(r):
 
 def line_of(r, outside):
     if "event" in r:
-        return f"  {r.get('interp', '')} {r.get('text', '')}"
+        return f"  {r.get('interp', '')} {short_ids(printable(r.get('text', '')))}"
     s = f"  {SYM.get(r['outcome'], '?')} {path_of(r)}"
     if r["outcome"] == "unknown":
         s += "   unknown: " + ", ".join(r.get("unknown", []))
@@ -290,12 +290,19 @@ def sections(events, belay, scope, lo, hi, persistent=None, d=None, sid=None):
     return out, errors, calls, throughout
 
 
-def folded_git(r):
+def compiled(p):
+    """Compiled Python: a path under __pycache__/, or a .pyc (decision 134)."""
+    return p.endswith(".pyc") or "/__pycache__/" in "/" + p or p.endswith("__pycache__")
+
+
+def folded_git(r, events=False):
     """The repository a record's path is git's bookkeeping of ("" for the
     scope's own), or None: what the git interpreter reports -- refs, HEAD,
     hooks, reflog moves, the index (a finding of a git_ kind) -- and every
     path under hooks/ stay visible, as do privilege changes; the rest under a
-    .git directory folds to one line (decision 105)."""
+    .git directory folds to one line (decision 105). With `events` -- git's
+    events in the same section (decision 126) -- the events say what the
+    findings did, and only hooks and privilege changes stay listed."""
     if "event" in r:
         return None
     m = GIT.match(path_of(r))
@@ -303,7 +310,7 @@ def folded_git(r):
         return None
     if path_of(r)[m.end():].startswith("hooks/") or path_of(r)[m.end():] == "hooks":
         return None
-    if any(f.get("kind", "").startswith("git_") for f in r.get("findings") or []):
+    if not events and any(f.get("kind", "").startswith("git_") for f in r.get("findings") or []):
         return None
     ch = set(r.get("changed") or [])
     b, a = r.get("before", {}), r.get("after", {})
@@ -347,13 +354,21 @@ def short(oid):
     return oid[:12] if len(oid) in (40, 64) and all(c in "0123456789abcdef" for c in oid) else oid
 
 
+OID = re.compile(r"\b([0-9a-f]{12})(?:[0-9a-f]{28}|[0-9a-f]{52})\b")
+
+
+def short_ids(text):
+    """Object ids cut to 12 digits for reading; the JSON keeps them whole."""
+    return OID.sub(r"\1", text)
+
+
 def git_items(recs):
     """What git says, for the summary: its events when it emits them, else
     its findings on refs, HEAD and hooks; hook changes always."""
     out, other = [], 0
     events = [r for r in recs if "event" in r and r.get("interp") == "git"]
     for e in events:
-        out.append(printable(e.get("text", "")))
+        out.append(short_ids(printable(e.get("text", ""))))
     for r in recs:
         if "event" in r:
             continue
@@ -396,12 +411,15 @@ def summary(secs):
             per.setdefault(path_of(r), []).append(r)
     edited, added, removed, gone = [], [], [], 0
     added_dirs = set()
-    unknown, priv, build = [], [], 0
+    unknown, priv, build, pyc = [], [], 0, 0
     for p, rs in per.items():
         if any(privilege_change(r) for r in rs):
             priv.append(f"{SYM.get(rs[-1]['outcome'], '?')} {printable(p)}")
-        if p.startswith(BUILD):
+        if p.startswith(BUILD) or p + "/" in BUILD:     # build/ itself is build output too
             build += 1
+            continue
+        if compiled(p):
+            pyc += 1
             continue
         if GIT.match(p):
             continue
@@ -452,8 +470,11 @@ def summary(secs):
         lines.append(f"  packages   {listed(pk)}")
     if priv:
         lines.append(f"  privilege  {listed(sorted(priv))}")
-    if build:
-        lines.append(f"  build      {build:,} change{'s' if build != 1 else ''} under build/, bin/")
+    if build or pyc:
+        parts = [f"{build:,} change{'s' if build != 1 else ''} under build/, bin/"] if build else []
+        if pyc:
+            parts.append(f"{pyc:,} compiled Python")
+        lines.append(f"  build      {'; '.join(parts)}")
     if unknown:
         lines.append(f"  unknown    {len(unknown):,}: {listed(sorted(unknown))}")
     return ["", "summary"] + lines if lines else []
@@ -492,12 +513,14 @@ def render(scope, belay, secs, errors):
         lines.append("")
         lines.append(head + ("   " + " ".join(refs) if refs else ""))
         build = [r for r in recs if "event" not in r and path_of(r).startswith(BUILD)]
+        pyc = [r for r in recs if "event" not in r and r not in build and compiled(path_of(r))]
+        events = any("event" in r and r.get("interp") == "git" for r in recs)
         git = {}
         shown = []
         for r in recs:
-            if r in build:
+            if r in build or r in pyc:
                 continue
-            repo = folded_git(r)
+            repo = folded_git(r, events)
             if repo is not None:
                 git[repo] = git.get(repo, 0) + 1
                 continue
@@ -519,6 +542,8 @@ def render(scope, belay, secs, errors):
                          f"[t{len(touches)}]")
         if build:
             lines.append(f"  build output: {len(build)} change{'s' if len(build) != 1 else ''} under build/, bin/")
+        if pyc:
+            lines.append(f"  compiled Python: {len(pyc)} change{'s' if len(pyc) != 1 else ''} (__pycache__/, *.pyc)")
         for repo, k in git.items():
             lines.append(f"  git bookkeeping: {k} change{'s' if k != 1 else ''} under {repo}.git/")
     if detail:
