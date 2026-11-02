@@ -35,6 +35,10 @@ in a diff (V2-R6) and vary freely; their numbers come from the writer's own
 random stream. manifest_versions() builds the gate's version items
 deterministically.
 
+The diff header (V2-R7) carries each manifest's `excluded` as written, `null`
+for v1: the exclusion pairs are built in the versions that show it (an empty
+list, path_b64, both reasons, a path both sides excluded, v1 against v2).
+
 Exclusions (V2-2; docs/spec/diff-v1.md, "Present on one side only"): a
 tree's excluded paths have no entry, nothing below them is recorded (no entry, no other
 exclusion), and each one's parent is a directory that was listed -- neither
@@ -46,6 +50,11 @@ written in version 2 only, with no .alt, and compare.py runs its pair in the
 combinations of versions whose files exist (Writer.write_both_versions).
 exclusions() builds the gate's exclusion items; random trees exclude entries
 too (the base of a random pair, and the `exclude`/`unexclude` mutations).
+And E11 (test/expect/diff-events.md): RECORDs and dpkg status files not
+captured -- excluded (the venv, the dist-info, the status itself), below an
+unreadable directory, below a mount -- beside ones read, which derive no
+event; and, against them, ones unknown for another reason (listing_incomplete,
+raced), whose events are still provisional.
 
 The corpus has three parts:
   - targeted pairs, the same for every seed (only the values vary): for every
@@ -2732,7 +2741,10 @@ def exclusions(w, rng):
                           'excluded: reason state_dir', 'excluded: reason user',
                           'excluded: two paths whose order by bytes is not their order by '
                           'components'],
-               version=['v2 with exclusions on both sides'])
+               version=['v2 with exclusions on both sides',
+                        'header: one excluded list with both reasons, state_dir and user',
+                        'header: a path in both excluded lists',
+                        'header: two non-empty excluded lists that differ'])
 
     # A directory whose name is not UTF-8 (path_b64), excluded on one side.
     def build(rng):
@@ -2745,8 +2757,13 @@ def exclusions(w, rng):
         exclude(t, n)
         return t, a
     w.targeted(rng, 'excluded: a directory not UTF-8 on one side, held on the other', build,
+               versions=(2, 2),
                scenarios=['excluded on one side: a path not UTF-8 (path_b64), held on the other '
-                          'with entries below it'])
+                          'with entries below it'],
+               version=['header: an excluded element spelled path_b64 (not UTF-8)',
+                        'header: a non-empty excluded list against []',
+                        'header: before_excluded [] (a v2 manifest with no exclusion)',
+                        'header: after_excluded [] (a v2 manifest with no exclusion)'])
 
     # The other one-sided rules, after it in the spec's order
     # (reference.one_sided): the excluded path's parent unstable on the
@@ -2805,11 +2822,15 @@ def exclusions(w, rng):
                versions=(2, 1),
                scenarios=['excluded on one side: nothing at or below it on the other'],
                version=['v2 with exclusions against v1', 'before v2, after v1',
-                        'before v1, after v2'])
+                        'before v1, after v2',
+                        'header: before_excluded null (a v1 manifest)',
+                        'header: after_excluded null (a v1 manifest)',
+                        'header: a non-empty excluded list against null (v1)'])
 
     # Paths interpreters claim below an excluded directory (a venv, a
-    # chroot): `unknown` records, from which pip and dpkg derive provisional
-    # events (diff-v1 "What each interpreter reports").
+    # chroot): `unknown` records, `not_captured`, from which pip and dpkg
+    # derive no event (diff-events E11; diff-v1 "What each interpreter
+    # reports": "none from a path `unknown` only as `not_captured`").
     def build(rng):
         rec, st = SITE[0] + b'foo-1.0.dist-info/RECORD', b'chroot/var/lib/dpkg/status'
         t, a = build_items(rng, [(rec, 'added', {}), (st, 'added', {})])
@@ -2818,7 +2839,108 @@ def exclusions(w, rng):
         return t, a
     w.targeted(rng, 'excluded: a venv and a chroot on one side, held on the other', build,
                scenarios=['excluded on one side: held on the other, a path below it an '
-                          'interpreter claims'])
+                          'interpreter claims'],
+               interp=['pip RECORD: unknown, one side only, not captured (excluded): no event '
+                       '(E11)',
+                       'dpkg status: unknown, one side only, not captured (excluded): no event '
+                       '(E11)',
+                       'events: none, every claimed path not captured (E11)'])
+
+    # E11 beside what is read, the exclusions at the dist-info and the
+    # status file themselves, on both sides: before excludes foo's
+    # dist-info, an unnamed one (x-) and the chroot's status, which after
+    # holds -- no event, not even could_not_interpret or
+    # content_unavailable; after excludes bar-1.0's dist-info, which before
+    # holds, and adds bar-2.0: a lone pip_installed, not provisional (no
+    # upgrade from a side not looked at); the root's status, modified and
+    # read, is the one content_unavailable event's only path.
+    def build(rng):
+        s = SITE[0]
+        t, a = build_items(rng, [(s + b'foo-1.0.dist-info/RECORD', 'modified', {}),
+                                 (s + b'x-.dist-info/RECORD', 'modified', {}),
+                                 (s + b'bar-1.0.dist-info/RECORD', 'modified', {}),
+                                 (s + b'bar-2.0.dist-info/RECORD', 'added', {'own_dir': True}),
+                                 (b'chroot/var/lib/dpkg/status', 'modified', {}),
+                                 (b'var/lib/dpkg/status', 'modified', {})])
+        for p in (s + b'foo-1.0.dist-info', s + b'x-.dist-info', b'chroot/var/lib/dpkg/status'):
+            exclude(t, p)
+        exclude(a, s + b'bar-1.0.dist-info')
+        return t, a
+    w.targeted(rng, 'excluded: dist-infos and a status, beside a RECORD and a status read', build,
+               scenarios=['excluded on one side: held on the other, a path below it an '
+                          'interpreter claims',
+                          'excluded on one side: a non-directory, held on the other'],
+               interp=['pip RECORD: unknown, one side only, not captured (excluded): no event '
+                       '(E11)',
+                       'dpkg status: unknown, one side only, not captured (excluded): no event '
+                       '(E11)',
+                       'pip RECORD: unknown, one side only, not captured, a dist-info that '
+                       'cannot be named: no event (E11)',
+                       'pip events: a RECORD not captured, another of its pair key known: that '
+                       'one alone, not provisional (E11)',
+                       'dpkg events: a status not captured beside one that is read: that one '
+                       'alone (E11)'],
+               version=['v2 with exclusions on both sides'])
+
+    # The same below a directory not captured: unreadable, or a mount root,
+    # on the side that lacks the path (diff-v1 "Present on one side only":
+    # "That ancestor is a directory carrying `unreadable` or `mount`:
+    # `unknown`, reason `not_captured`") -- E11 alike.
+    def sealed(how):
+        def build(rng):
+            s, s0 = SITE[1], SITE[0]
+            t, a = build_items(rng, [(s + b'foo-1.0.dist-info/RECORD', 'modified', {}),
+                                     (s + b'x-.dist-info/RECORD', 'modified', {}),
+                                     (s0 + b'bar-1.0.dist-info/RECORD', 'modified', {}),
+                                     (s0 + b'bar-2.0.dist-info/RECORD', 'added',
+                                      {'own_dir': True}),
+                                     (b'chroot/var/lib/dpkg/status', 'modified', {}),
+                                     (b'var/lib/dpkg/status', 'modified', {})])
+            for side, p in ((t, s + b'foo-1.0.dist-info'), (t, s + b'x-.dist-info'),
+                            (t, b'chroot/var/lib/dpkg'), (a, s0 + b'bar-1.0.dist-info')):
+                side.drop_below(p)
+                if how == 'unreadable':
+                    side.e[p]['unreadable'] = True
+                else:
+                    side.e[p] = in_context('mount', side.e[p], side, rng)
+            return t, a
+        return build
+    for how, why in (('unreadable', 'below an unreadable directory'), ('mount', 'below a mount')):
+        w.targeted(rng, 'not captured: dist-infos and a status below %s directories, beside a '
+                        'RECORD and a status read' % how, sealed(how),
+                   interp=['pip RECORD: unknown, one side only, not captured (%s): no event '
+                           '(E11)' % why,
+                           'dpkg status: unknown, one side only, not captured (%s): no event '
+                           '(E11)' % why,
+                           'pip RECORD: unknown, one side only, not captured, a dist-info that '
+                           'cannot be named: no event (E11)',
+                           'pip events: a RECORD not captured, another of its pair key known: '
+                           'that one alone, not provisional (E11)',
+                           'dpkg events: a status not captured beside one that is read: that '
+                           'one alone (E11)'])
+
+    # Unknown for another reason, one side only: still provisional events
+    # (E11: "Any other `unknown` path still derives provisional events
+    # (E2)"). A RECORD and a status whose directory after is unstable and
+    # lacks them (listing_incomplete); a RECORD and a status added, raced.
+    def build(rng):
+        s = SITE[1]
+        t, a = build_items(rng, [(s + b'baz-1.0.dist-info/RECORD', 'modified', {}),
+                                 (b'chroot/var/lib/dpkg/status', 'modified', {}),
+                                 (SITE[0] + b'quux-1.0.dist-info/RECORD', 'raced_added',
+                                  {'own_dir': True}),
+                                 (b'srv/ct1/rootfs/var/lib/dpkg/status', 'raced_added', {})])
+        for d, p in ((s.rstrip(b'/'), s + b'baz-1.0.dist-info'),
+                     (b'chroot/var/lib/dpkg', b'chroot/var/lib/dpkg/status')):
+            a.e[d]['unstable'] = True
+            a.drop_below(p)
+            del a.e[p]
+        return t, a
+    w.targeted(rng, 'unknown one side only, listing_incomplete and raced: RECORDs and statuses',
+               build,
+               interp=['%s: unknown, one side only, %s: provisional events (E2)' % (x, r)
+                       for x in ('pip RECORD', 'dpkg status')
+                       for r in ('listing_incomplete', 'raced')])
 
 
 # ---------------------------------------------------------------------------
