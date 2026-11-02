@@ -46,8 +46,12 @@ Its only sources:
     `excluded` element holds);
   - test/expect/diff-events.md E11 and the prose's "Event records" and "What
     each interpreter reports" (checked at start-up): a path `unknown` only
-    as `not_captured` derives no event.
-Never the generated blocks of the spec, never src/ or include/.
+    as `not_captured` derives no event -- the core's `could_not_interpret`
+    and `content_unavailable` included, and E6's list never names it
+    (decision 118);
+Never the generated blocks of the spec, never src/ or include/: every check
+that quotes a spec reads it through spec_prose(), which withholds them
+(decision 119); a check that quotes a pin reads that pin.
 
 Ambiguities this file resolves one way (questions for the author) are
 marked "ambiguity I<n>" where they are decided (VA<n> for diff-values.md).
@@ -75,6 +79,41 @@ REPO = os.path.normpath(os.path.join(HERE, '..', '..'))
 FIELDS_PIN = os.path.join(REPO, 'test', 'expect', 'diff-fields.md')
 MANIFEST_PIN = os.path.join(REPO, 'test', 'expect', 'manifest-v1.md')
 SPEC = os.path.join(REPO, 'docs', 'spec', 'diff-v1.md')
+# Where a generated block was (spec_prose()): no quote can match across it.
+WITHHELD = '\n<!-- a generated block, withheld from the oracle -->\n'
+
+
+def spec_prose(path):
+    """A spec's text with every generated block removed (decision 119): the
+    oracle quotes prose only, so a sentence that someday appeared only in a
+    generated table fails its check. A block runs from a line `<!-- BEGIN
+    GENERATED: <name> -->` to the line `<!-- END GENERATED: <name> -->`;
+    each becomes WITHHELD. An END without its BEGIN, a BEGIN inside a block
+    or never ended, or names that differ stop the oracle rather than keep or
+    drop text silently. Pins (test/expect/) have no generated blocks and are
+    read whole."""
+    out, inside = [], None
+    for n, line in enumerate(open(path, encoding='utf-8').read().split('\n'), 1):
+        m = re.fullmatch(r'\s*<!-- (BEGIN|END) GENERATED(?::\s*(\S+))?\s*-->\s*', line)
+        if m is None and 'GENERATED' in line and '<!--' in line:
+            raise SystemExit('spec: %s:%d: a GENERATED marker spec_prose() does not read: %r'
+                             % (path, n, line))
+        if m is None:
+            if inside is None:
+                out.append(line)
+        elif m.group(1) == 'BEGIN':
+            if inside is not None:
+                raise SystemExit('spec: %s:%d: BEGIN GENERATED inside %r' % (path, n, inside))
+            inside = m.group(2) or ''
+            out.append(WITHHELD)
+        else:
+            if inside != (m.group(2) or ''):
+                raise SystemExit('spec: %s:%d: END GENERATED %r closes %r'
+                                 % (path, n, m.group(2), inside))
+            inside = None
+    if inside is not None:
+        raise SystemExit('spec: %s: BEGIN GENERATED %r is never ended' % (path, inside))
+    return '\n'.join(out)
 
 # The header's and the trailer's keys, in order. The header's from the "Shape"
 # example (its first line); `scopes` is spelled `scopes_b64` when the scope
@@ -127,7 +166,7 @@ EXCLUDED_RULE = ('The first of these that applies decides: '
 
 
 def excluded_rule():
-    text = ' '.join(open(SPEC, encoding='utf-8').read().split())
+    text = ' '.join(spec_prose(SPEC).split())
     if EXCLUDED_RULE not in text:
         raise SystemExit('reference: docs/spec/diff-v1.md no longer says %r; review '
                          'one_sided() first' % EXCLUDED_RULE)
@@ -139,7 +178,7 @@ excluded_rule()
 def shape_example_keys():
     """The keys of the first (header) and last (trailer) line of the example
     under "## Shape" in docs/spec/diff-v1.md -- prose, not a generated block."""
-    text = open(SPEC, encoding='utf-8').read()
+    text = spec_prose(SPEC)
     m = re.search(r'^## Shape\n.*?^```json\n(.*?)^```', text, re.S | re.M)
     if not m:
         raise SystemExit('spec: no example under "## Shape" in %s' % SPEC)
@@ -324,7 +363,7 @@ def prose_unknown_carveout():
     path present on both sides": "the reasons of every flag on either side --
     except `unverified` on a side that also carries `mount` ...". Pin O8 says
     the same; the prose is checked too, so that neither can drop it alone."""
-    text = ' '.join(open(SPEC, encoding='utf-8').read().split())
+    text = ' '.join(spec_prose(SPEC).split())
     want = ('`unknown`, for an `unknown` outcome: the reasons of every flag on either side -- '
             'except `unverified` on a side that also carries `mount`')
     if want not in text:
@@ -776,7 +815,7 @@ def load_values_pin():
         raise SystemExit('pin: diff-values field table %r is not the fields `changed` can name '
                          '%r' % (fields, can_change))
     # V5's "(stated in diff-v1, "Shape")".
-    spec = ' '.join(open(SPEC, encoding='utf-8').read().split())
+    spec = ' '.join(spec_prose(SPEC).split())
     if 'consumers MUST handle lines of any length' not in spec:
         raise SystemExit('spec: "Shape" no longer says consumers handle lines of any length')
     return rules
@@ -1060,7 +1099,17 @@ def load_event_rules():
                 'or a mount there (diff-v1, "Present on one side only") -- derives no event: '
                 'that side was not looked at, so nothing was installed or removed there. Its '
                 'path record stands. Any other `unknown` path still derives provisional events '
-                '(E2).'],
+                '(E2).',
+                # Decision 118: the core's events too -- what ambiguity X4
+                # read "derives no event at all" as, now the pin's words.
+                'No interpreter is given it, so no event of the core\'s names it either: no '
+                '`could_not_interpret` (E10) nor `content_unavailable` for it, and a failed end '
+                'hook\'s event (E6) never lists it.'],
+        # E6, not modelled (end()): checked so that a change to what a failed
+        # end hook lists is reviewed against E11 here.
+        'E6': ['and no other event: `paths` the first 1,024 of the paths it had claimed '
+               '(bytewise; never a path E11 withholds), `paths_truncated` the number of the '
+               'rest, present only when not 0'],
     }
     for r, words in said.items():
         for w in words:
@@ -1101,7 +1150,7 @@ CLAIMS = [('dpkg', 'status', '*/var/lib/dpkg/status'),
 
 
 def _check_claims():
-    text = ' '.join(open(SPEC, encoding='utf-8').read().split())
+    text = ' '.join(spec_prose(SPEC).split())
     for _, _, pat in CLAIMS:
         # "the per-package `*/var/lib/dpkg/info/*.list` and `*.md5sums`"
         tail = '*.md5sums' if pat == '*/var/lib/dpkg/info/*.md5sums' else pat
@@ -1140,7 +1189,10 @@ def _check_claims():
               '-- come before every named event, in the Kinds table\'s order, then by path '
               '(`content_unavailable`, one per reason, in the reasons\' order).',
               'The end hook fails (E6) only when the interpreter\'s per-diff state would exceed '
-              '64 MiB or memory runs out',
+              '64 MiB or memory runs out: its events are then one `could_not_interpret` naming '
+              'the first 1,024 paths given to it (every path it claims whose outcome is not '
+              '`unchanged`; none `unknown` only as `not_captured`, which it is never given: E11) '
+              'and counting the rest.',
               'Only a reinstall reads content (both RECORDs); the others come from the paths '
               'alone.',
               'A RECORD whose outcome is `unknown` pairs like any other, by its directory\'s '
@@ -1275,6 +1327,9 @@ def render_event(interp, kind, values, paths, unknown=frozenset()):
     not UTF-8)."""
     f = render(kind, values)
     ps = sorted(set(paths))
+    # "an event naming no path" fails the end hook (E6; "Event records"),
+    # which end() does not model: no event here may reach it (ambiguity X5).
+    assert ps, 'reference: a %s %s event naming no path (E6 is not modelled)' % (interp, kind)
     try:
         pv = ('paths', [x.decode('utf-8') for x in ps])
     except UnicodeDecodeError:
@@ -1670,7 +1725,15 @@ def pip_end(state, trace):
 def end(interp, state, trace):
     """An interpreter's events. The end hook fails as a whole (E6) only when
     its per-diff state would exceed 64 MiB or memory runs out, which a corpus
-    of small manifests and no store never reaches: not modelled."""
+    of small manifests and no store never reaches: not modelled. Were it
+    modelled, its event would list "the first 1,024 of the paths it had
+    claimed (bytewise; never a path E11 withholds)" (E6; the prose: "none
+    `unknown` only as `not_captured`, which it is never given: E11") --
+    `state` already holds only what explain() was given, and diff() gives
+    explain() no such path. "Event records" names a third cause, "an event
+    naming no path" (ambiguity X5): this model derives every event from
+    the paths it was given, so none names no path; render_event() asserts
+    it."""
     if interp == 'pip':
         return pip_end(state, trace)
     if interp == 'dpkg':
@@ -1773,9 +1836,13 @@ def diff(before, after):
         # prose: "none from a path `unknown` only as `not_captured`, which no
         # interpreter is given". Not given to explain(): no event of any
         # kind names it -- no pip pairing, no content_unavailable, no
-        # could_not_interpret (ambiguity X4: "derives no event at all" read
-        # as every kind, the core's included) -- and, `unknown`, its record
-        # carries no finding either way.
+        # could_not_interpret -- and, `unknown`, its record carries no
+        # finding either way. E11 now says so of the core's events (decision
+        # 118; ambiguity X4, which read "derives no event at all" as every
+        # kind, is settled the same way): "No interpreter is given it, so no
+        # event of the core's names it either: no `could_not_interpret` (E10)
+        # nor `content_unavailable` for it, and a failed end hook's event
+        # (E6) never lists it."
         if out == 'unknown' and why == [NOT_CAPTURED]:
             traces[p].append('e11-not-interpreted')
         elif interp != BINARY:

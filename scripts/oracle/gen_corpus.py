@@ -309,7 +309,8 @@ def load_manifest_v2_pin():
     for words in V2_EXCLUDED_WORDS:
         if words not in text['excluded']:
             die('pin: V2-2 no longer says %r; review exclusion_violations() first' % words)
-    if V2_AGREEMENT not in open(MANIFEST_V2_SPEC, encoding='utf-8').read():
+    # The prose only, its generated blocks withheld (decision 119).
+    if V2_AGREEMENT not in compare.ref.spec_prose(MANIFEST_V2_SPEC):
         die('spec: manifest-v2.md changed its agreement rule; review v2_violations() first')
     return {k: KEYS[k] + v for k, v in keys.items()}
 
