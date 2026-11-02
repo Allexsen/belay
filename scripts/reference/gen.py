@@ -9,7 +9,8 @@ each; random cases come from a seeded random.Random. Nothing here retries.
 
 Each case says which modes it runs in ("store": belay_diff given the store;
 "nostore": given none) and, per mode, the cells it was built to hit. git's
-repositories are built by hand for E12's cells (cell_git_events) and, in the
+repositories are built by hand for E12's cells (cell_git_events, and
+cell_git_unread for what git cannot read) and, in the
 random cases, from a simulated history (random_git).
 """
 
@@ -996,7 +997,8 @@ def cell_git_events():
     g = GitRepo(c, b"a")
     g.unchanged()
     g.ref("after", b"feat", W)
-    # ... and a reflog rewritten: it gained nothing, so no before either
+    # ... and a reflog rewritten: it gained nothing, so no before either, and
+    # it is not listed ("a reflog only when its entries were used")
     g = GitRepo(c, b"b")
     g.unchanged()
     g.ref("after", b"feat", W)
@@ -1010,9 +1012,18 @@ def cell_git_events():
     g.ref("after", b"feat", Y)
     g.log("before", b"feat", [(ZERO, X, b"branch: Created from HEAD")])
     g.log("after", b"feat", [(ZERO, X, b"branch: Created from HEAD"), (X, Y, b"commit: y")])
+    # ... and before from the reflog whose entries then do not lead to after:
+    # moved from that value, the reflog listed -- its entries gave the `from`
+    # (ref.reflog_before's READING)
+    g = GitRepo(c, b"d")
+    g.unchanged()
+    g.ref("after", b"feat", Y)
+    g.log("before", b"feat", [(ZERO, X, b"branch: Created from HEAD")])
+    g.log("after", b"feat", [(ZERO, X, b"branch: Created from HEAD"), (X, V, b"commit: v")])
     c.tag("git.e12.moved.no_from")
     c.tag("git.e12.moved.no_from_reflog_rewritten")
     c.tag("git.e12.before_from_reflog")
+    c.tag("git.e12.before_from_reflog_not_chaining")
     out.append(c)
 
     # ---- deleted
@@ -1262,16 +1273,26 @@ def cell_git_events():
     g.unchanged()
     g.packed("before", [(b"refs/tags/v1", X)])
     g.put("after", b"packed-refs", gpacked([(b"refs/tags/v1", X)]) + b"this is no ref line\n")
-    g.ref("after", b"needs-packed", Y)              # its before is packed-refs': nothing
+    # packed-refs not interpreted gives no value on either side (diff-v1:
+    # "nothing more is read from it"): its before, no evidence -- moved, no
+    # `from`
+    g.ref("after", b"needs-packed", Y)
     g.ref("before", b"loose-both", X)               # both sides loose: stands
     g.ref("after", b"loose-both", Y)
     g = GitRepo(c, b"q")
     g.head("before", b"main")
     g.put("after", b"HEAD", b"\xff\xfe not a HEAD\n")
     g.both(b"refs/heads/main", X + b"\n")
+    # a loose ref that cannot be parsed before only: not interpreted, it
+    # gives no value after either -- "after, the branch derives no event"
+    g = GitRepo(c, b"s")
+    g.unchanged()
+    g.put("before", b"refs/heads/bad-before", b"not an object id either\n")
+    g.ref("after", b"bad-before", Y)
     c.tag("git.e12.unparseable_ref")
     c.tag("git.e12.unparseable_packed")
     c.tag("git.e12.unparseable_head")
+    c.tag("git.e12.unparseable_ref_before")
     out.append(c)
 
     # ---- tags and remote-tracking refs derive nothing (path findings stand)
@@ -1292,11 +1313,14 @@ def cell_git_events():
     c.tag("git.e12.tags_remotes_nothing")
     out.append(c)
 
-    # ---- a ref or packed-refs git needs and cannot read decides nothing
+    # ---- what git cannot read reduces the claim, never the fact (decision
+    # 137): "a ref or `packed-refs` that cannot be read on a side gives no
+    # value there"
     c = Case("git-e12-cu")
     g = GitRepo(c, b"r")
     g.unchanged()
-    # its before cannot be read (bytes no other entry has: one state per object)
+    # its before cannot be read (bytes no other entry has: one state per
+    # object), no reflog: moved, no `from`
     g.ref("before", b"lost", goid("lost"), store="absent")
     g.ref("after", b"lost", Y)
     g.ref("before", b"fine", X)
@@ -1305,14 +1329,16 @@ def cell_git_events():
     g.unchanged()
     g.packed("before", [(b"refs/tags/v1", X)])
     g.packed("after", [(b"refs/tags/v1", Y)], store="corrupt")
-    g.ref("after", b"needs-packed", Y)              # needs packed-refs: nothing
-    g.ref("before", b"loose-both", X)               # does not: stands
+    g.ref("after", b"needs-packed", Y)              # packed-refs before, read: created
+    g.ref("before", b"loose-both", X)               # does not need it: stands
     g.ref("after", b"loose-both", Y)
     c.tag("git.e12.cu.ref")
     c.tag("git.e12.cu.packed")
     out.append(c)
 
-    # ... and a reflog it needs to say how a branch moved
+    # ... and a reflog it cannot read to say how a branch moved: "no
+    # evidence -- the move still comes from the refs, as `git_branch_moved`,
+    # without a how"
     c = Case("git-e12-cu-reflog")
     g = GitRepo(c)
     g.unchanged()
@@ -1392,6 +1418,176 @@ def cell_git_events():
     g.ref("before", b"a", X)
     g.ref("after", b"a/b", Y)
     c.tag("git.e12.ref_type_changed")
+    out.append(c)
+    return out
+
+
+def cell_git_unread():
+    """Required cells for what git cannot read (E12, decision 137): "What git
+    cannot read reduces what is claimed, never the fact the refs give". Each
+    copy that cannot be read holds bytes no other entry has (one state per
+    object)."""
+    out = []
+    X, Y, Z, W, V = (goid(c) for c in "XYZWV")
+
+    # ---- a loose ref that cannot be read before
+    c = Case("git-e12-unread-ref")
+    g = GitRepo(c, b"a")            # the reflog's evidence dates it
+    g.unchanged()
+    g.ref("before", b"dated", goid("unread a"), store="absent")
+    g.ref("after", b"dated", Y)
+    g.log("before", b"dated", [(ZERO, X, b"branch: Created from HEAD")])
+    g.log("after", b"dated", [(ZERO, X, b"branch: Created from HEAD"), (X, Y, b"commit: y")])
+    g = GitRepo(c, b"b")            # its reflog starts from zeros: never absent
+    g.unchanged()
+    g.ref("before", b"zeros", goid("unread b"), store="corrupt")
+    g.ref("after", b"zeros", Y)
+    g.log("after", b"zeros", [(ZERO, Y, b"branch: Created from HEAD")])
+    g = GitRepo(c, b"c")            # removed after, no evidence: no event
+    g.unchanged()
+    g.ref("before", b"gone", goid("unread c"), store="absent")
+    c.tag("git.e12.unread.ref_before_dated")
+    c.tag("git.e12.unread.ref_before_reflog_zeros")
+    c.tag("git.e12.unread.ref_before_removed")
+    out.append(c)
+
+    # ---- packed-refs that cannot be read before, read after
+    c = Case("git-e12-unread-packed-before")
+    g = GitRepo(c)
+    g.unchanged()
+    g.put("before", b"packed-refs", gpacked([(b"refs/heads/kept", X), (b"refs/heads/old-packed", X),
+                                            (b"refs/tags/v1", goid("unread packed"))]),
+          store="absent")
+    # `kept`, only in packed-refs, read after only: moved, no `from` ("a
+    # branch only in `packed-refs` too"); `old-packed`, in the side not read,
+    # is named by nothing
+    g.packed("after", [(b"kept", X), (b"later", Z), (b"refs/tags/v1", X)])
+    g.ref("after", b"new-dated", Y)                 # the reflog's zeros: created
+    g.log("after", b"new-dated", [(ZERO, Y, b"branch: Created from HEAD")])
+    g.ref("after", b"moved-dated", Y)               # the reflog's old id: dated
+    g.log("before", b"moved-dated", [(ZERO, X, b"branch: Created from HEAD")])
+    g.log("after", b"moved-dated", [(ZERO, X, b"branch: Created from HEAD"), (X, Y, b"commit: y")])
+    g.ref("after", b"undated", W)                   # no evidence: moved, no `from`
+    g.ref("before", b"later", X)                    # loose before, packed after: read
+    g.ref("before", b"gone", X)                     # loose before, not packed after: deleted
+    c.tag("git.e12.unread.packed_before_only_packed")
+    c.tag("git.e12.unread.packed_before_reflog_absent")
+    c.tag("git.e12.unread.packed_before_reflog_value")
+    c.tag("git.e12.unread.packed_before_no_evidence")
+    c.tag("git.e12.unread.packed_after_side_used")
+    out.append(c)
+
+    # ---- packed-refs read before, that cannot be read after
+    c = Case("git-e12-unread-packed-after")
+    g = GitRepo(c)
+    g.unchanged()
+    g.packed("before", [(b"only-before", X), (b"dated-by-packed", X), (b"refs/tags/v1", X)])
+    g.put("after", b"packed-refs", gpacked([(b"refs/tags/v1", goid("unread packed after"))]),
+          store="corrupt")
+    g.ref("before", b"needs-after", X)              # its after is packed-refs': no event
+    # (`only-before`, only in packed-refs, read before only: no value after,
+    # no event)
+    g.ref("after", b"dated-by-packed", Y)           # before from packed-refs, read
+    g.ref("after", b"created", Y)                   # absent before by packed-refs, read
+    c.tag("git.e12.unread.packed_after_no_event")
+    c.tag("git.e12.unread.packed_before_side_used")
+    out.append(c)
+
+    # ---- a rename whose deletion takes its absence after from packed-refs,
+    # which cannot be read before: the event uses that value
+    c = Case("git-e12-unread-packed-renamed")
+    g = GitRepo(c)
+    g.unchanged()
+    born = [(ZERO, X, b"branch: Created from HEAD")]
+    g.ref("before", b"old", X)
+    g.ref("after", b"new", X)
+    g.log("before", b"old", born)
+    g.log("after", b"new", born + [(X, X, b"Branch: renamed refs/heads/old to refs/heads/new")])
+    g.put("before", b"packed-refs", gpacked([(b"refs/tags/v1", goid("unread packed renamed"))]),
+          store="absent")
+    g.packed("after", [(b"refs/tags/v1", Z)])
+    c.tag("git.e12.unread.packed_before_renamed")
+    out.append(c)
+
+    # ---- a reflog that cannot be read is no evidence
+    c = Case("git-e12-unread-reflog")
+    g = GitRepo(c, b"a")            # it alone would date the branch
+    g.unchanged()
+    g.ref("after", b"alone", Y)
+    g.log("before", b"alone", [(ZERO, goid("unread log a"), b"branch: Created from HEAD")],
+          store="corrupt")
+    g.log("after", b"alone", [(ZERO, goid("unread log a"), b"branch: Created from HEAD"),
+                              (goid("unread log a"), Y, b"commit: y")])
+    g = GitRepo(c, b"b")            # it would say a rename: created and deleted stand
+    g.unchanged()
+    g.packed("before", [(b"refs/tags/v1", X)])
+    g.packed("after", [(b"refs/tags/v1", X), (b"refs/tags/v2", Y)])
+    g.ref("before", b"old", X)
+    g.ref("after", b"new", X)
+    g.log("before", b"old", [(ZERO, X, b"branch: Created from HEAD")])
+    g.log("after", b"new", [(ZERO, X, b"branch: Created from HEAD"),
+                            (X, X, b"Branch: renamed refs/heads/old to refs/heads/new")],
+          store="absent")
+    g = GitRepo(c, b"h")            # HEAD detached: the branch `HEAD`, without a how
+    g.head("before", oid=X)
+    g.head("after", oid=Y)
+    g.log("before", b"HEAD", [(ZERO, X, b"commit (initial): x")])
+    g.log("after", b"HEAD", [(ZERO, X, b"commit (initial): x"), (X, Y, b"reset: moving to y")],
+          store="corrupt")
+    c.tag("git.e12.unread.reflog_would_date")
+    c.tag("git.e12.unread.reflog_rename_untold")
+    c.tag("git.e12.unread.reflog_head_detached")
+    out.append(c)
+
+    # ---- HEAD that cannot be read on a side: neither a switch nor the
+    # branch `HEAD` can be told (ref.git_events' READING)
+    c = Case("git-e12-unread-head")
+    g = GitRepo(c, b"a")
+    g.put("before", b"HEAD", b"ref: refs/heads/unread-a\n", store="absent")
+    g.head("after", b"topic")
+    g.both(b"refs/heads/main", X + b"\n")
+    g = GitRepo(c, b"b")
+    g.head("before", b"main")
+    g.put("after", b"HEAD", b"ref: refs/heads/unread-b\n", store="corrupt")
+    g.both(b"refs/heads/main", X + b"\n")
+    g = GitRepo(c, b"c")
+    g.put("before", b"HEAD", goid("unread head c") + b"\n", store="absent")
+    g.head("after", oid=Y)
+    g.both(b"refs/heads/main", X + b"\n")
+    c.tag("git.e12.unread.head")
+    out.append(c)
+
+    # ---- a file that cannot be read on one side and cannot be parsed on the
+    # other: its record says what could not be read. A branch ref, HEAD or
+    # packed-refs is read on the side it can be (E12's value there), so E10
+    # names it; a tag or remote-tracking ref is not (nothing needs that
+    # side: ref.git_read's READING), so no E10 event -- nor for one whose
+    # outcome is unknown (raced), which nothing needs either
+    c = Case("git-e12-unread-and-unparseable")
+    g = GitRepo(c)
+    g.unchanged()
+    g.ref("before", b"bad", goid("unread bad"), store="absent")
+    g.put("after", b"refs/heads/bad", b"garbage, not an id\n")
+    g.ref("before", b"good", X)
+    g.ref("after", b"good", Y)
+    g.ref("before", b"refs/tags/t", goid("unread tag"), store="absent")
+    g.put("after", b"refs/tags/t", b"no tag here\n")
+    g.put("before", b"refs/remotes/origin/main", b"no remote here\n")
+    g.ref("after", b"refs/remotes/origin/main", goid("unread remote"), store="corrupt")
+    g.put("after", b"refs/tags/raced", b"a raced tag, no id\n", raced=True)
+    g.ref("before", b"refs/remotes/origin/raced", X)
+    g.put("after", b"refs/remotes/origin/raced", b"a raced remote, no id\n", raced=True)
+    g = GitRepo(c, b"h")
+    g.put("before", b"HEAD", b"ref: refs/heads/unread-h\n", store="absent")
+    g.put("after", b"HEAD", b"no HEAD here\n")
+    g.both(b"refs/heads/main", X + b"\n")
+    g = GitRepo(c, b"k")
+    g.unchanged()
+    g.put("before", b"packed-refs", b"no packed line\n")
+    g.packed("after", [(b"refs/tags/k", goid("unread packed k"))], store="corrupt")
+    g.ref("after", b"nb", Y)                        # no value before: moved, no `from`
+    c.tag("git.e12.unread.and_unparseable")
+    c.tag("git.e12.unread.and_unparseable_tag_remote")
     out.append(c)
     return out
 
@@ -2673,7 +2869,7 @@ def cell_probes():
 def required_cases():
     return (cell_dpkg_simple() + cell_pip_simple() + cell_pip_e10() + cell_dpkg_e9_e10()
             + cell_p7() + cell_e11() + cell_order() + cell_content_unavailable() + cell_paths_b64()
-            + cell_git_reflog() + cell_git_events() + cell_probes())
+            + cell_git_reflog() + cell_git_events() + cell_git_unread() + cell_probes())
 
 
 def all_cases(n, seed):

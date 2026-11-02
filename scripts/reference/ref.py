@@ -136,49 +136,6 @@ GIT_PATTERNS = [b"*/.git/HEAD", b"*/.git/packed-refs", b"*/.git/refs/*",
                 b"*/.git/logs/HEAD", b"*/.git/logs/refs/*"]
 
 
-# ---------------------------------------------------------------- readings
-# Where belay's output and this reference differ and the documents can be
-# read either way, belay's reading is modelled here too, as a named
-# alternative, so that the harness can show that it explains a difference
-# exactly (every byte, every pair) -- never to replace the reading above it.
-# interpret(alt=...) applies them; the default is this file's own reading.
-# Each entry: the text the two readings rest on.
-ALT_READINGS = {
-    "cni_e12_paths":
-        "a tag or remote-tracking ref that cannot be parsed gets no "
-        "could_not_interpret event (its record still carries one): Content's "
-        "\"git names only the paths it derives events from (HEAD, branches, "
-        "`packed-refs`, their reflogs)\" read as covering every git event. This "
-        "reference: that sentence is about content_unavailable, in the paragraph "
-        "on copies that cannot be read; E10 is diff-v1's \"a file it claims cannot "
-        "be parsed ... pip, dpkg and git emit one `could_not_interpret` event "
-        "naming it (E10)\" and the pin's \"A file an interpreter claims and "
-        "cannot interpret gives one `could_not_interpret` event\".",
-    "paths_reflog_used":
-        "an event lists the branch's reflog only when its entries decided it: "
-        "they gave the value before, or lead from before to after (whatever "
-        "operations they say); not when they do not chain, gained nothing or "
-        "were rewritten, nor when a creation's reflog was read for the rename "
-        "check and said none. This reference: E12 \"`paths`: every ref, "
-        "`packed-refs`, `HEAD` and reflog path it was derived from\" -- the reflog "
-        "is listed whenever it was read to decide the event (a reflog consulted "
-        "for the value before, the kind of a move, or a rename), since the event "
-        "rests on what it says, and were it unknown the event may not hold.",
-    "per_side":
-        "a path that cannot be read or parsed on one side decides nothing only "
-        "where that side is needed. This reference: E12 \"A ref, `packed-refs` or "
-        "reflog git needs and cannot read decides nothing\" -- the path as a whole.",
-    "reflog_unreadable_moved":
-        "a reflog that cannot be read is no evidence: a branch it alone would "
-        "date is git_branch_moved with no `from`, one whose move it would "
-        "classify git_branch_moved, a creation it would test for a rename stays "
-        "a creation; it is not listed. This reference: E12 \"A ref, "
-        "`packed-refs` or reflog git needs and cannot read decides nothing\" -- "
-        "the event that needs it is not decided, so no event.",
-}
-ALT = frozenset()
-
-
 class InterpFailure(Exception):
     """A file the interpreter claims cannot be interpreted (E10)."""
 
@@ -944,8 +901,8 @@ def reflog_findings(ref, before, after):
 
 class GitPath:
     """One path git is given (its outcome proven or unknown) and what was read
-    of it. bad: a side it needs could not be read or parsed -- it "decides
-    nothing" (E12)."""
+    of it, side by side: E12, "a ref or `packed-refs` that cannot be read on
+    a side gives no value there"."""
 
     def __init__(self, path, repo, rest, role, oc, b, a):
         self.path, self.repo, self.rest, self.role, self.oc = path, repo, rest, role, oc
@@ -956,9 +913,8 @@ class GitPath:
         self.cu_findings = []
         self.contents = {}
         self.parsed = {}        # side -> parsed value (HEAD, ref, packed)
-        self.cni = False
-        self.bad = False
-        self.side_bad = set()   # sides that could not be read or parsed
+        self.cni = False        # could not be interpreted: E10, the file as a whole
+        self.unread = set()     # sides it needs whose copy could not be read
         self.record_unav = []   # the unavailable sides its record names
         self.gained = None      # reflog: [(old, new, msg)] when appended, else None
 
@@ -968,7 +924,30 @@ def git_read(store, g):
     when the reflog was removed (no copy needed)"; Content: "a reflog removed
     needs no copy"); every other path is read where it is a regular file.
     E12: an unknown path "is read like any other where its copy can be
-    read"."""
+    read".
+
+    A side that can be read is read and parsed even when the other cannot,
+    for a path E12 derives events from: E12 (decision 137), "a ref or
+    `packed-refs` that cannot be read on a side gives no value there" --
+    there, not on the other side.
+
+    READING: a tag or remote-tracking ref is read for its record alone --
+    E12 derives no event from it ("Remote-tracking refs and tags derive no
+    event"). So it is not interpreted, and no E10 event names it, when its
+    record needs nothing of it: when a side it needs cannot be read (the
+    record, which would compare the two sides, carries its
+    content_unavailable findings only), or when its outcome is `unknown`
+    (its record carries no finding: "to a path whose outcome is `unknown`
+    ... it adds none", and "pip, dpkg and git still derive events from an
+    `unknown` path" -- none from this one). As an unknown RECORD on both
+    sides is not read (pip).
+
+    READING: a file one side of which cannot be parsed is not interpreted
+    at all, on either side -- diff-v1, "Where an interpreter fails on a path
+    (a file it claims cannot be parsed ...), ... nothing more is read from
+    it, and pip, dpkg and git emit one `could_not_interpret` event naming it
+    (E10)". It gives no value on either side, with what E12 says follows
+    from no value there (see branch_value)."""
     if g.role == "reflog":
         need_b = g.reg["before"] and g.reg["after"]
         need_a = g.reg["after"]
@@ -978,17 +957,15 @@ def git_read(store, g):
         bound = GIT_PACKED_BOUND if g.role == "packed" else GIT_REF_BOUND
     g.cu_findings, g.unav, g.contents = needed_copies(
         store, g.b, g.a, bound, need_b, need_a, nocopy_too_large=g.role == "reflog")
-    g.side_bad = {sd for sd, _ in g.unav}
+    g.unread = {sd for sd, _ in g.unav}
     removed_log = g.role == "reflog" and not g.reg["after"]
     g.record_unav = [] if removed_log else g.unav
     if removed_log:
         g.cu_findings = []
         g.gained = []           # removed: it gained nothing
         return
-    if g.unav:
-        g.bad = True
-        if "per_side" not in ALT:
-            return
+    if not e12_path(g) and (g.unav or g.unknown):
+        return
     for side, data in sorted(g.contents.items()):
         try:
             if g.role in ("HEAD", "ref"):
@@ -997,25 +974,27 @@ def git_read(store, g):
                 g.parsed[side] = parse_packed(data)
         except InterpFailure:
             g.cni = True
-            g.bad = True
-            g.side_bad.add(side)
-            if "per_side" not in ALT:
-                return
-    if g.role == "reflog" and not g.side_bad:
+            g.parsed = {}
+            break
+    if g.role == "reflog" and not g.unread:
         new = appended(g.contents.get("before"), g.contents["after"])
         g.gained = None if new is None else [reflog_entry_fields(x) for x in new]
 
 
-def bad_on(g, side):
-    """Can this path not decide its value on `side`?"""
-    return side in g.side_bad if "per_side" in ALT else g.bad
+def gives(g, side):
+    """Does this ref, packed-refs or HEAD give a value on `side`? It is a
+    file there, its copy there was read, and the file was interpreted."""
+    return g.reg[side] and side not in g.unread and not g.cni
 
 
 def git_path_findings(g):
     """The record's findings for a path whose content is proven changed."""
     if g.record_unav:
         # READING (as before for a reflog): a path a needed side of which
-        # cannot be read carries its content_unavailable findings only.
+        # cannot be read carries its content_unavailable findings only --
+        # no path finding can be told from one side. Its other side is
+        # still read for E12's value there, and if it cannot be parsed the
+        # E10 event names the file (git_read).
         return g.cu_findings
     if g.cni:
         return [finding_json("could_not_interpret", {})]
@@ -1060,7 +1039,7 @@ def reflog_name(rest):
 
 # ---------------------------------------------------------------- git: E12
 
-ABSENT, UNKNOWN, FAIL = "absent", "unknown", "fail"
+ABSENT, UNKNOWN = "absent", "unknown"
 COMMIT_OPS = (b"commit", b"commit (merge)", b"cherry-pick", b"revert", b"am")
 
 
@@ -1122,9 +1101,32 @@ class Repo:
 
 
 def reflog_unusable(G):
-    """A reflog whose entries of this diff cannot be told: a side it needs
-    could not be read (a removed one needs none)."""
-    return G is not None and G.reg["after"] and bool(G.side_bad)
+    """A reflog git cannot read: a side it needs could not be read (a removed
+    one needs none). E12: "a reflog it cannot read is no evidence"."""
+    return G is not None and G.reg["after"] and bool(G.unread)
+
+
+def reflog_before(G, loose_there):
+    """E12, before only: "the old id of the first entry its reflog gained in
+    this diff (all zeros: absent)" -- (value, paths), the reflog listed when
+    its entries gave the value: "a reflog only when its entries were used --
+    giving the value before or evidence of absence before, ...", whether or
+    not they then lead to the value after.
+
+    READING (the text leaves it open): a loose ref that was a file before
+    and could not be read is never absent by its reflog. Its existence there
+    is a fact the refs give (the manifest records the file), and "What git
+    cannot read reduces what is claimed, never the fact the refs give":
+    zeros, there, are evidence against a fact, so they give no value, and
+    the reflog is not listed (its entries were not used). An old id that is
+    not zeros still dates it ("before, the reflog's evidence may still give
+    one")."""
+    if G is None or reflog_unusable(G) or not G.gained:
+        return UNKNOWN, set()           # no evidence: "a reflog it cannot read is no evidence"
+    old = G.gained[0][0]
+    if is_zero(old):
+        return (UNKNOWN, set()) if loose_there else (ABSENT, {G.path})
+    return old, {G.path}
 
 
 def branch_value(side, ref, L, P, G):
@@ -1133,54 +1135,51 @@ def branch_value(side, ref, L, P, G):
     only, the old id of the first entry its reflog gained in this diff (all
     zeros: absent)"; and for a deletion, "its loose ref removed and
     `packed-refs` without it (a path of this diff, or not -- git removes a
-    branch from both)". (value, the paths it came from).
+    branch from both)". (value, the paths whose value it uses): `paths`,
+    "every ref, `packed-refs` and `HEAD` path whose value the event uses".
+
+    What cannot be read (decision 137): "a ref or `packed-refs` that cannot
+    be read on a side gives no value there -- before, the reflog's evidence
+    may still give one, and without one the event is `git_branch_moved`
+    with no `from` (a branch only in `packed-refs` too); after, the branch
+    derives no event". Before, that is UNKNOWN ("no evidence of before");
+    after, UNKNOWN too, which derives nothing.
 
     READING: "its loose ref there" is the loose ref as git sees it -- a path
-    of this diff ("git sees only the paths that changed"). A path git needs
-    and cannot read or parse "decides nothing": the value is FAIL and the
-    branch derives no event. A reflog consulted for before's value is listed
-    even when it gained nothing (it was read for this branch, and were it
-    unknown the event may not hold)."""
+    of this diff ("git sees only the paths that changed"). A loose ref that
+    is a file on a side and gives no value there is still the branch's ref
+    there: before, the reflog may date it, never packed-refs (whose line it
+    hides); after, nothing. A symbolic loose branch ref names no commit and
+    gives no value (the corpus never builds one)."""
     if L is not None and L.reg[side]:
-        if bad_on(L, side):
-            return FAIL, {L.path}
-        kind, v = L.parsed[side]
-        if kind != "oid":
-            # READING: a symbolic loose branch ref names no commit; it
-            # decides nothing (the corpus never builds one).
-            return FAIL, {L.path}
-        return v, {L.path}
+        if gives(L, side) and L.parsed[side][0] == "oid":
+            return L.parsed[side][1], {L.path}
+        return reflog_before(G, True) if side == "before" else (UNKNOWN, set())
     if P is not None:
-        if bad_on(P, side) if P.reg[side] else (P.bad and "per_side" not in ALT):
-            return FAIL, {P.path}
         if not P.reg[side]:
             return ABSENT, {P.path}
-        v = P.parsed[side].get(ref)
-        return (ABSENT if v is None else v), {P.path}
+        if gives(P, side):
+            v = P.parsed[side].get(ref)
+            return (ABSENT if v is None else v), {P.path}
+        return reflog_before(G, False) if side == "before" else (UNKNOWN, set())
     if side == "after":
         if L is not None and L.reg["before"]:
             return ABSENT, {L.path}     # removed, packed-refs not a path
         return UNKNOWN, set()
-    if G is not None:
-        if reflog_unusable(G):
-            if "reflog_unreadable_moved" in ALT:
-                return UNKNOWN, set()
-            return FAIL, {G.path}
-        if G.gained:
-            old = G.gained[0][0]
-            return (ABSENT if is_zero(old) else old), {G.path}
-        return UNKNOWN, (set() if "paths_reflog_used" in ALT else {G.path})
-    return UNKNOWN, set()
+    return reflog_before(G, False)
 
 
 def is_id(v):
-    return v not in (ABSENT, UNKNOWN, FAIL)
+    return v not in (ABSENT, UNKNOWN)
 
 
 def packed_names(P):
-    """The branches packed-refs names on a side it could be read."""
+    """The branches packed-refs names, on every side it was read: read on one
+    side only, the side read is used -- E12, "without one the event is
+    `git_branch_moved` with no `from` (a branch only in `packed-refs` too)".
+    A packed-refs not interpreted (E10) names none: nothing is read from it."""
     out = set()
-    if P is None or (P.bad and "per_side" not in ALT):
+    if P is None or P.cni:
         return out
     for side, refs in P.parsed.items():
         for ref in refs:
@@ -1191,18 +1190,15 @@ def packed_names(P):
 
 def classified(repo, branch, frm, to, G, paths):
     """classify() with the branch's reflog G (or None), adding it to paths
-    where it is listed. None when the reflog decides nothing."""
-    gained = None
-    if G is not None:
-        if reflog_unusable(G):
-            if "reflog_unreadable_moved" not in ALT:
-                return None
-        else:
-            gained = G.gained
+    when its entries say "how the branch moved" -- they lead from before to
+    after and give git_commits_added or git_history_rewritten. E12: "(entries
+    that lead from before to after but say not how are not used)"; "a reflog
+    it cannot read is no evidence -- the move still comes from the refs, as
+    `git_branch_moved`, without a how"."""
+    gained = None if G is None or reflog_unusable(G) else G.gained
     kind, vals = classify(repo, branch, frm, to, gained)
-    if G is not None and not reflog_unusable(G):
-        if "paths_reflog_used" not in ALT or (gained and chains(frm, to, gained)):
-            paths.add(G.path)
+    if kind != "git_branch_moved":
+        paths.add(G.path)               # classify says how only from chaining entries
     return kind, vals
 
 
@@ -1235,12 +1231,16 @@ def git_events(gpaths):
     for repo, r in sorted(repos.items()):
         # ---- HEAD
         H = r.head
-        if H is not None and not H.bad and H.reg["before"] and H.reg["after"]:
+        if H is not None and gives(H, "before") and gives(H, "after"):
             # READING: git_head_switched needs HEAD on both sides: its from and
             # to are "the branch (`main`) or, detached, the commit", with no
             # empty value (git_head_changed's "empty on a side where it is
             # absent" is not repeated for it), so a HEAD added or removed
-            # (a repository made or deleted) switches nothing.
+            # (a repository made or deleted) switches nothing. So too a HEAD
+            # that gives no value on a side (its copy there cannot be read,
+            # or it cannot be interpreted): whether it was attached or
+            # detached there is not known, so neither a switch nor the
+            # branch `HEAD` ("detached on both sides") can be told.
             hb, ha = H.parsed["before"], H.parsed["after"]
 
             def shown(v):
@@ -1256,8 +1256,7 @@ def git_events(gpaths):
                     # the branch `HEAD`, decided by `logs/HEAD` as above"
                     paths = {H.path}
                     c = classified(repo, b"HEAD", hb[1], ha[1], r.hlog, paths)
-                    if c is not None:
-                        emit(repo, True, b"HEAD", c[0], c[1], paths)
+                    emit(repo, True, b"HEAD", c[0], c[1], paths)
             elif shown(hb) != shown(ha) or hb[0] != ha[0]:
                 emit(repo, True, b"", "git_head_switched",
                      {"repo": repo, "from": shown(hb), "to": shown(ha)}, {H.path})
@@ -1272,8 +1271,13 @@ def git_events(gpaths):
             B, pb = branch_value("before", ref, L, P, G)
             A, pa = branch_value("after", ref, L, P, G)
             paths = pb | pa
-            if FAIL in (B, A):
-                continue
+            # READING (the text leaves it open): no value before and removed
+            # after -- a loose ref there that cannot be read, gone after, its
+            # reflog no evidence -- derives no event. git_branch_deleted's
+            # `was` is required, and E12's "without one the event is
+            # `git_branch_moved` with no `from`" names a branch present after;
+            # the record's and the event's content_unavailable say what could
+            # not be read.
             if B == ABSENT and is_id(A):
                 created[br] = (A, paths)
             elif B == UNKNOWN and is_id(A):
@@ -1285,41 +1289,32 @@ def git_events(gpaths):
                 deleted[br] = (B, paths)
             elif is_id(B) and is_id(A) and B != A:
                 c = classified(repo, br, B, A, G, paths)
-                if c is not None:
-                    emit(repo, False, br, c[0], c[1], paths)
+                emit(repo, False, br, c[0], c[1], paths)
         # "a deletion and a creation at the same commit whose new reflog says
         # `Branch: renamed`, one `git_branch_renamed`": the new branch's
         # reflog of this diff, an entry it gained whose message is
         # `Branch: renamed refs/heads/{from} to refs/heads/{to}`.
         # READING: the event takes the place of the deletion: it is ordered
         # by `from` (the branch renamed; E4's "then branch"), and it lists
-        # the paths of both. A creation with a deletion at its commit
-        # consulted its reflog, which it lists, renamed or not.
+        # the paths of both and the new reflog, its entries used "as evidence
+        # ... of a rename". A reflog that says none adds nothing to the
+        # creation's paths; one git cannot read "is no evidence": the
+        # creation and the deletion stand.
         renamed_from = set()
         for to in sorted(created):
             at, cpaths = created[to]
             G = r.rlog.get(to)
             partners = [d for d in sorted(deleted) if deleted[d][0] == at and d not in renamed_from]
-            if not partners or G is None:
-                emit(repo, False, to, "git_branch_created",
-                     {"repo": repo, "branch": to, "at": at}, cpaths)
-                continue
-            if reflog_unusable(G):
-                if "reflog_unreadable_moved" in ALT:
-                    emit(repo, False, to, "git_branch_created",
-                         {"repo": repo, "branch": to, "at": at}, cpaths)
-                continue                # decides nothing
-            said = {m for _, _, m in (G.gained or [])}
+            said = set() if G is None or reflog_unusable(G) else {
+                m for _, _, m in (G.gained or [])}
             match = [d for d in partners
                      if b"Branch: renamed refs/heads/" + d + b" to refs/heads/" + to in said]
-            if match or "paths_reflog_used" not in ALT:
-                cpaths = cpaths | {G.path}
             if match:
                 d = match[0]
                 renamed_from.add(d)
                 emit(repo, False, d, "git_branch_renamed",
                      {"repo": repo, "from": d, "to": to, "at": at},
-                     cpaths | deleted[d][1])
+                     cpaths | {G.path} | deleted[d][1])
             else:
                 emit(repo, False, to, "git_branch_created",
                      {"repo": repo, "branch": to, "at": at}, cpaths)
@@ -1382,11 +1377,7 @@ def end_events(interp, named, cni_files, unav, unknown):
 
 
 
-def interpret(before_fn, after_fn, store, alt=frozenset()):
-    """alt: names of ALT_READINGS to apply instead of this file's own."""
-    global ALT
-    assert set(alt) <= set(ALT_READINGS), alt
-    ALT = frozenset(alt)
+def interpret(before_fn, after_fn, store):
     scope_b, bents, bexcl = read_manifest(before_fn)
     scope_a, aents, aexcl = read_manifest(after_fn)
     assert scope_b == scope_a, "the corpus never pairs manifests of different scopes"
@@ -1596,13 +1587,17 @@ def interpret(before_fn, after_fn, store, alt=frozenset()):
     unav_git = []
     for g in git_paths:
         git_read(store, g)
-        # diff-v1, Content: "git names only the paths it derives events from
-        # (HEAD, branches, `packed-refs`, their reflogs), and a reflog removed
-        # needs no copy". A tag's or remote-tracking ref's record still
-        # carries its content_unavailable findings.
+        # E12: "The record of a path git cannot read whose outcome is not
+        # `unknown` carries `content_unavailable`, and one
+        # `content_unavailable` event per reason names those paths
+        # (provisional when one of them is `unknown`)"; diff-v1, Content:
+        # "git names only the paths it derives events from (HEAD, branches,
+        # `packed-refs`, their reflogs), and a reflog removed needs no copy".
+        # A tag's or remote-tracking ref's record still carries its
+        # content_unavailable findings.
         if e12_path(g):
             unav_git += [(g.path, sd, rs) for sd, rs in g.unav]
-        if g.cni and ("cni_e12_paths" not in ALT or e12_path(g)):
+        if g.cni:
             # E10: "A file an interpreter claims and cannot interpret gives one
             # `could_not_interpret` event"; diff-v1: "pip, dpkg and git emit one
             # `could_not_interpret` event naming it (E10)" -- any file git
