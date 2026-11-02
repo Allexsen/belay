@@ -1203,6 +1203,30 @@ GIT_EVENT_ITEMS = collections.OrderedDict([
      'a branch moved with no evidence of before (no from)'),
     ('git-ev:moved, its reflog unreadable',
      'a branch whose reflog cannot be read: no evidence of before'),
+    # E12, decision 137: "What git cannot read reduces what is claimed,
+    # never the fact the refs give".
+    ('git-ev:moved:its reflog unreadable',
+     'a branch moved, its reflog unreadable: from the refs, without a how'),
+    ('git-ev:moved, no value before: its loose ref unread',
+     'a branch whose loose ref cannot be read before: now at (no from)'),
+    ('git-ev:value before by its reflog, its loose ref unread',
+     'a loose ref unread before, its value before by its reflog'),
+    ('git-ev:moved, no value before: its loose ref unread, its reflog from zeros',
+     'a loose ref unread before whose reflog starts from zeros: now at, not created'),
+    ('git-ev:no value after, no event: its loose ref unread',
+     'a branch whose loose ref cannot be read after: no event'),
+    ('git-ev:removed, no value before, no event: its loose ref unread',
+     'a loose ref removed, unread before: no event'),
+    ('git-ev:moved, no value before: packed-refs unread',
+     'a branch whose packed-refs cannot be read before: now at (no from)'),
+    ('git-ev:value before by its reflog, packed-refs unread',
+     "packed-refs unread before, a branch's value before by its reflog"),
+    ('git-ev:created, absent before by reflog, packed-refs unread',
+     "a branch created by its reflog's zeros, packed-refs unread before"),
+    ('git-ev:no value after, no event: packed-refs unread',
+     'a branch whose packed-refs cannot be read after: no event'),
+    ('git-ev:moved, no value before: packed-refs unparsed',
+     'a branch whose packed-refs cannot be parsed before: now at (no from)'),
     ('git-ev:deleted, packed-refs not a path of this diff',
      'a branch deleted, packed-refs not a path of this diff'),
     ('git-ev:deleted, packed-refs a path of this diff without it',
@@ -1270,7 +1294,7 @@ def git_coverage(records, traces, tags):
             if 'git-read-unknown' in tr and any(t.startswith('git-ev:provisional:')
                                                 for t in end):
                 tags.add('git events: an unknown ref read from its copy: provisional')
-            if 'git-decides-nothing' in tr and any(
+            if 'git-unread-side' in tr and any(
                     t.startswith('git-ev:content_unavailable:') and t.endswith(', provisional')
                     for t in end):
                 tags.add('git events: an unknown ref with no copy: a provisional '

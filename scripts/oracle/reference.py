@@ -73,18 +73,29 @@ branches, `packed-refs`, their reflogs), and a reflog removed needs no
 copy"):
   G2 `repo` is the path of the directory named `.git` (`.git` at the root);
   G3 a reflog that is not a prefix of its after gained no entries;
-  G5 a ref or packed-refs that cannot be read or parsed leaves its
-     branch's value unknown, and the branch has no event; a reflog that
-     cannot be read gives no evidence: the value before "cannot be told";
+  G5 a ref or packed-refs that cannot be parsed ("nothing more is read
+     from it") gives no value on any side it is on, as one that cannot be
+     read gives none on that side (E12, decision 137): before, the
+     reflog's evidence or no `from`; after, no event;
   G6 a rename takes its `from`'s place in E4's "then branch";
-  G7 a both-sides event is derived from the reflog only when its entries
-     lead from before to after;
-  G8 an event's `paths` are those its values came from: the loose ref,
-     packed-refs where its line or its absence gave a value (a creation's
-     or deletion's evidence), the reflog where it gave the value before or
-     the rename -- never a removed reflog, which gives nothing;
+  G7, G8 are settled by E12 (decision 137): "a reflog only when its
+     entries were used -- giving the value before or evidence of absence
+     before, a rename, or how the branch moved (entries that lead from
+     before to after but say not how are not used)"; packed-refs is named
+     where its line or its absence gave a value, never where it gave none
+     ("every ref, `packed-refs` and `HEAD` path whose value the event
+     uses"), and a removed reflog gives nothing;
   G9 a packed-refs absent on a side, being a path of this diff, is
-     "packed-refs without it" there.
+     "packed-refs without it" there;
+  G10 a loose ref there before and not read is not absent by its reflog's
+     zeros: that it was there is "the fact the refs give" -- no value
+     before, so `git_branch_moved` with no `from`;
+  G11 a loose ref removed whose value before is not told derives no
+     event: `git_branch_deleted` needs `was`, and the "`git_branch_moved`
+     with no `from`" a `to`;
+  G12 HEAD not read on a side derives no event (git_head_switched's
+     `from` and `to` are required; HEAD is a branch only when detached on
+     both sides).
 
 Deliberately naive: both manifests in memory as dictionaries, the union of
 their paths sorted, ancestors found by walking a path's prefixes.
@@ -1154,8 +1165,8 @@ def load_event_rules():
         'E4': ['By interpreter, in the order text, pip, dpkg, git',
                'git by repository, then `HEAD` before every branch, then branch, then kind '
                '(decision 126)'],
-        # E12 (decisions 126, 132), each sentence git_explain() and git_end()
-        # rely on.
+        # E12 (decisions 126, 132, 137), each sentence git_explain() and
+        # git_end() rely on.
         'E12': ['git\'s end hook derives repository-level events from the paths of this diff '
                 'it explained -- loose refs, `packed-refs`, `HEAD`, reflogs -- per repository '
                 '(a directory named `.git`; `repo` its path in the scope).',
@@ -1187,12 +1198,20 @@ def load_event_rules():
                 'read like any other where its copy can be read, as dpkg reads a status',
                 'every event derived from it is provisional (E2), so a branch whose ref raced '
                 'is never silent.',
-                'A ref, `packed-refs` or reflog git needs and cannot read decides nothing; the '
-                'record of one whose outcome is not `unknown` carries `content_unavailable`, '
-                'and one `content_unavailable` event per reason names those paths (provisional '
-                'when one of them is `unknown`).',
-                '`paths`: every ref, `packed-refs`, `HEAD` and reflog path it was derived '
-                'from.'],
+                # Decision 137: "refs are proof, the reflog is evidence".
+                'What git cannot read reduces what is claimed, never the fact the refs give: a '
+                'reflog it cannot read is no evidence -- the move still comes from the refs, as '
+                '`git_branch_moved`, without a how; a ref or `packed-refs` that cannot be read '
+                'on a side gives no value there -- before, the reflog\'s evidence may still give '
+                'one, and without one the event is `git_branch_moved` with no `from` (a branch '
+                'only in `packed-refs` too); after, the branch derives no event.',
+                'The record of a path git cannot read whose outcome is not `unknown` carries '
+                '`content_unavailable`, and one `content_unavailable` event per reason names '
+                'those paths (provisional when one of them is `unknown`).',
+                '`paths`: every ref, `packed-refs` and `HEAD` path whose value the event uses, '
+                'and a reflog only when its entries were used -- giving the value before or '
+                'evidence of absence before, a rename, or how the branch moved (entries that lead '
+                'from before to after but say not how are not used).'],
         'E9': ['is replaced, in its place, by `{"event": "invalid_finding", "interp": ..., '
                '"text": "invalid finding", "paths": [<its paths>]}`; the interpreter\'s other '
                'events stand'],
@@ -1919,8 +1938,10 @@ def pip_end(state, trace):
 # git's content: HEAD, loose refs, packed-refs and reflogs, read from a store
 # (diff-v1 "**git.**" and the paragraph after it; diff-events E12; the kinds
 # of finding-kinds.md). Without a store every copy is `content_unavailable`
-# and git derives no event but those (E12: "A ref, `packed-refs` or reflog
-# git needs and cannot read decides nothing").
+# and git derives no event but those: no side gives a value (E12: "a ref or
+# `packed-refs` that cannot be read on a side gives no value there -- ...;
+# after, the branch derives no event"), and a branch removed whose value
+# before is not told has no kind to say it (ambiguity G11).
 #
 # The formats are git's own, which the prose does not restate: a loose ref is
 # an object id and a newline; HEAD is that or `ref: <name>` and a newline;
@@ -1947,7 +1968,7 @@ class _Mark:
 
 
 ABSENT = _Mark('ABSENT')                # not a regular file on that side, or no line for it
-UNREADABLE = _Mark('UNREADABLE')        # content_unavailable: "decides nothing"
+UNREADABLE = _Mark('UNREADABLE')        # content_unavailable: "gives no value there"
 UNPARSED = _Mark('UNPARSED')            # could_not_interpret: "nothing more is read from it"
 NO_EVIDENCE = _Mark('NO_EVIDENCE')      # no value can be told on that side
 _OID = rb'(?:[0-9a-f]{40}|[0-9a-f]{64})'
@@ -2056,10 +2077,10 @@ def git_explain(what, p, b, a, outcome, state, trace):
     read: a tag's or a remote-tracking ref's, or their reflogs', whose only
     use is a path finding that an `unknown` record does not carry. A side
     whose copy cannot be read is `content_unavailable`: a finding (not on an
-    `unknown` record), and that path decides nothing. The per-reason event
-    names it only when git derives events from that content -- HEAD,
-    packed-refs, a branch's loose ref or reflog, `logs/HEAD` -- not a tag's
-    or a remote-tracking ref's, whose record alone says it ("Content": "git
+    `unknown` record), and that path gives no value on that side (E12). The
+    per-reason event names it only when git derives events from that content
+    -- HEAD, packed-refs, a branch's loose ref or reflog, `logs/HEAD` -- not
+    a tag's or a remote-tracking ref's, whose record alone says it ("Content": "git
     names only the paths it derives events from (HEAD, branches,
     `packed-refs`, their reflogs), and a reflog removed needs no copy")."""
     store, unknown = state['store'], outcome == 'unknown'
@@ -2103,18 +2124,36 @@ def git_explain(what, p, b, a, outcome, state, trace):
         else:
             raw[s] = data
     if cannot:
-        trace.append('git-decides-nothing')
+        # E12: "a ref or `packed-refs` that cannot be read on a side gives no
+        # value there" -- on that side only: a side read gives its value (no
+        # path finding, which needs both: the record says content_unavailable).
+        # "a reflog it cannot read is no evidence" -- on either side, as the
+        # entries it gained need both.
+        trace.append('git-unread-side')
         if slot is not None:
-            put_slot(R, slot, {'path': p, 'before': UNREADABLE, 'after': UNREADABLE,
-                               'gained': None, 'read': False})
+            sides = {}
+            for s in SIDES:
+                if not is_reg(ent[s]):
+                    sides[s] = ABSENT
+                elif s not in raw:
+                    sides[s] = UNREADABLE
+                else:
+                    sides[s] = parse_git(what, raw[s])
+                    # The corpus never makes a side that cannot be parsed
+                    # beside one that cannot be read (no rule orders the two).
+                    assert sides[s] is not None, 'corpus: unparsed beside unread at %r' % p
+            put_slot(R, slot, dict(sides, path=p, gained=None, read=False))
         return out
     trace.append('git-read' + ('-unknown' if unknown else ''))
     parsed = {s: parse_git(what, raw[s]) for s in regs}
     if any(v is None for v in parsed.values()):
+        # "nothing more is read from it": no value on any side it is on --
+        # given, as a side that cannot be read, no value there (ambiguity G5).
         trace.append('git-cannot-parse')
         state['cni'].append(p)
         if slot is not None:
-            put_slot(R, slot, {'path': p, 'before': UNPARSED, 'after': UNPARSED,
+            put_slot(R, slot, {'path': p, 'before': UNPARSED if is_reg(b) else ABSENT,
+                               'after': UNPARSED if is_reg(a) else ABSENT,
                                'gained': None, 'read': False})
         return [] if unknown else [render('could_not_interpret', {})]
     pb, pa = parsed.get('before', ABSENT), parsed.get('after', ABSENT)
@@ -2220,19 +2259,22 @@ def adds(e):
 def classify(branch, vb, va, G, trace):
     """A branch on both sides at different commits, "decided by the entries
     its reflog gained in this diff, when they lead from its value before to
-    its value after". (kind, values, whether the event is derived from the
-    reflog.) It is when its entries lead from before to after, whatever
-    they say -- the move then is theirs; not when it gained none or they do
-    not lead there: the prose's "the reflog only says how a branch moved
-    (...), and only when its entries of this diff lead from the value before
-    to the value after" (ambiguity G7)."""
+    its value after". (kind, values, whether the event names the reflog.)
+    `paths` names "a reflog only when its entries were used -- giving the
+    value before or evidence of absence before, a rename, or how the branch
+    moved (entries that lead from before to after but say not how are not
+    used)": here, how -- `git_commits_added` and `git_history_rewritten`;
+    never a `git_branch_moved`'s, whose reflog "does not say how (none,
+    another operation, or entries that do not lead ...)" (finding-kinds.md).
+    "a reflog it cannot read is no evidence -- the move still comes from the
+    refs, as `git_branch_moved`, without a how"."""
     entries = G['gained'] if G is not None and G['read'] else None
-    moved = lambda why, said=False: (trace.append('git-ev:moved:' + why) or
-                                     ('git_branch_moved', collections.OrderedDict(
-                                         [('branch', branch), ('from', vb), ('to', va)]), said))
+    moved = lambda why: (trace.append('git-ev:moved:' + why) or
+                         ('git_branch_moved', collections.OrderedDict(
+                             [('branch', branch), ('from', vb), ('to', va)]), False))
     if not entries:
-        return moved('no entries' if G is None or not G['read'] else
-                     'a reflog that gained none')
+        return moved('no entries' if G is None else 'its reflog unreadable'
+                     if not G['read'] else 'a reflog that gained none')
     if entries[0][0] != vb or entries[-1][1] != va or \
             any(x[0] != y[1] for y, x in zip(entries, entries[1:])):
         return moved('entries that do not lead from before to after')
@@ -2254,7 +2296,7 @@ def classify(branch, vb, va, G, trace):
         return ('git_commits_added', collections.OrderedDict(
             [('branch', branch), ('count', len(entries) if counted else None), ('to', va)]),
             True)
-    return moved('another operation', True)
+    return moved('another operation')
 
 
 def git_event(kind, repo, values, paths, unk, trace):
@@ -2284,27 +2326,60 @@ def side_value(R, br, side):
     zeros: absent)". And a loose ref removed with `packed-refs` not a path of
     this diff is absent after: "its loose ref removed and `packed-refs`
     without it (a path of this diff, or not -- git removes a branch from
-    both)". (value, the paths it came from, which source.) A path of this
-    diff that could not be read or parsed gives UNREADABLE or UNPARSED: it
-    "decides nothing", and neither does the branch (ambiguity G5). "packed-refs
-    without it" counts an absent `packed-refs` too (ambiguity G9). The paths
-    returned are the event's `paths` from that side (ambiguity G8: "`paths`:
-    every ref, `packed-refs`, `HEAD` and reflog path it was derived from" --
-    packed-refs is the evidence of a creation or deletion it gives)."""
+    both)". "packed-refs without it" counts an absent `packed-refs` too
+    (ambiguity G9). (value, the paths whose value it is, which source.)
+
+    "What git cannot read reduces what is claimed, never the fact the refs
+    give: ... a ref or `packed-refs` that cannot be read on a side gives no
+    value there -- before, the reflog's evidence may still give one, and
+    without one the event is `git_branch_moved` with no `from`; after, the
+    branch derives no event." A loose ref that is there unread is still its
+    loose ref there: `packed-refs` does not stand in for it (git reads the
+    loose ref first), only the reflog may. Its value after: UNREADABLE. A
+    path that cannot be parsed gives none on either side (ambiguity G5).
+    And a loose ref that is there before, unread, is never absent by its
+    reflog's zeros: that it was there is the fact the refs give, which
+    evidence does not overturn -- no value, so no `from` (ambiguity G10).
+
+    "... without one the event is `git_branch_moved` with no `from` (a
+    branch only in `packed-refs` too)": a branch named by `packed-refs` on
+    the side read alone is a branch like any other.
+
+    The paths returned are those whose value the event uses (`paths`:
+    "every ref, `packed-refs` and `HEAD` path whose value the event uses,
+    and a reflog only when its entries were used -- giving the value before
+    or evidence of absence before, ..."): `packed-refs` where its line or its
+    absence gave the value, never where it gave none; the reflog where it
+    gave the value before -- an old id, or zeros."""
     L, P, G = R['loose'].get(br), R['packed-refs'], R['logs'].get(br)
+    unread = None                       # which path gave no value, and why
+    word = lambda v: 'unread' if v is UNREADABLE else 'unparsed'
     if L is not None and L[side] is not ABSENT:
-        return L[side], [L['path']], 'loose'
-    if P is not None:
+        if L[side] is not UNREADABLE and L[side] is not UNPARSED:
+            return L[side], [L['path']], 'loose'
+        unread = 'its loose ref ' + word(L[side])
+    elif P is not None:
         v = P[side]
         if isinstance(v, dict):
             v = v.get(b'refs/heads/' + br, ABSENT)
-        return v, [P['path']], 'packed-refs'
-    if side == 'before' and G is not None and G['read'] and G['gained']:
+        if v is not UNREADABLE and v is not UNPARSED:
+            return v, [P['path']], 'packed-refs'
+        unread = 'packed-refs ' + word(v)
+    if side == 'after':
+        if unread is not None:
+            return UNREADABLE, [], unread
+        if L is not None:
+            return ABSENT, [L['path']], 'loose removed'
+        return NO_EVIDENCE, [], None
+    if G is not None and G['read'] and G['gained']:
         old = G['gained'][0][0]
-        return (ABSENT if set(old) == {'0'} else old), [G['path']], 'reflog'
-    if side == 'after' and L is not None:
-        return ABSENT, [L['path']], 'loose removed'
-    return NO_EVIDENCE, [], None
+        how = 'reflog' + (', ' + unread if unread else '')
+        if set(old) != {'0'}:
+            return old, [G['path']], how
+        if unread is None or not unread.startswith('its loose ref'):
+            return ABSENT, [G['path']], how
+        return NO_EVIDENCE, [], unread + ', its reflog from zeros'
+    return NO_EVIDENCE, [], unread
 
 
 def repo_events(repo, R, unk, trace):
@@ -2330,7 +2405,10 @@ def repo_events(repo, R, unk, trace):
         out.append(((repo, 0, b'', kind_ix(kind)), git_event(kind, repo, values, paths, unk,
                                                              trace)))
     elif H is not None and not H['read']:
-        trace.append('git-ev:HEAD decides nothing')
+        # A side of HEAD that cannot be read: git_head_switched's `from` and
+        # `to` are both required, and "the branch `HEAD`" is HEAD detached on
+        # both sides -- which a side not read cannot show (ambiguity G12).
+        trace.append('git-ev:HEAD not read on a side, no event')
     P = R['packed-refs']
     names = set(R['loose']) | set(R['logs'])
     if P is not None:
@@ -2342,27 +2420,42 @@ def repo_events(repo, R, unk, trace):
         vb, pb, how_b = side_value(R, br, 'before')
         va, pa, how_a = side_value(R, br, 'after')
         paths = pb + pa
-        if any(v is UNREADABLE or v is UNPARSED for v in (vb, va)):
-            trace.append('git-ev:a branch that decides nothing')
+        assert vb is not UNREADABLE and vb is not UNPARSED
+        if va is UNREADABLE:
+            # "after, the branch derives no event"
+            trace.append('git-ev:no value after, no event: ' + how_a)
             continue
+        if how_b is not None and how_b.startswith('reflog, '):
+            trace.append('git-ev:value before by its reflog, ' + how_b[len('reflog, '):])
         if vb is ABSENT and isinstance(va, str):
             trace.append('git-ev:created, absent before by ' + how_b)
             ev[br] = ('git_branch_created', collections.OrderedDict(
                 [('branch', br), ('at', va)]), paths)
         elif vb is NO_EVIDENCE and isinstance(va, str):
-            trace.append('git-ev:moved, no evidence of before')
             G = R['logs'].get(br)
-            if G is not None and not G['read']:
-                # Its reflog "decides nothing": the value before "cannot be
-                # told" (git_branch_moved's row), so no `from` (ambiguity G5).
-                trace.append('git-ev:moved, its reflog unreadable')
+            if how_b is None:
+                trace.append('git-ev:moved, no evidence of before')
+                if G is not None and not G['read']:
+                    # "a reflog it cannot read is no evidence": the value
+                    # before "cannot be told" (git_branch_moved's row).
+                    trace.append('git-ev:moved, its reflog unreadable')
+            else:
+                # "before, the reflog's evidence may still give one, and
+                # without one the event is `git_branch_moved` with no `from`"
+                trace.append('git-ev:moved, no value before: ' + how_b)
             ev[br] = ('git_branch_moved', collections.OrderedDict(
                 [('branch', br), ('from', None), ('to', va)]), paths)
+        elif vb is NO_EVIDENCE and va is ABSENT and how_b is not None:
+            # Removed, its value before not told: `git_branch_deleted` needs
+            # `was`, and "`git_branch_moved` with no `from`" a `to` -- no
+            # kind can say it (ambiguity G11). The content_unavailable or
+            # could_not_interpret event names the path.
+            trace.append('git-ev:removed, no value before, no event: ' + how_b)
         elif isinstance(vb, str) and va is ABSENT:
             trace.append('git-ev:deleted, ' + {
                 'loose removed': 'packed-refs not a path of this diff',
                 'packed-refs': 'packed-refs a path of this diff without it'}[how_a]
-                + ('' if how_b == 'loose' else ', packed only'))
+                + {'loose': '', 'packed-refs': ', packed only'}.get(how_b, ', by its reflog'))
             ev[br] = ('git_branch_deleted', collections.OrderedDict(
                 [('branch', br), ('was', vb)]), paths)
         elif isinstance(vb, str) and isinstance(va, str) and vb != va:
