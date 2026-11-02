@@ -37,6 +37,7 @@ vs empty must never be ambiguous").
 | V2-R4 | Two manifests of different versions compare: diff.v1 records and outcomes do not depend on the version (the entries are v1's). The diff header names both: `before_manifest_version` and `after_manifest_version` (int), at the end of the header (*answer 4*: cheap provenance); like every v2 statement they decide nothing (V2-R6). |
 | V2-R5 | A v1 manifest used as mark's previous: its `walk_start_ns` is taken as `0` (unknown), so the newest-ctime reference applies, with its coarse-timestamp rule. |
 | V2-R6 | The values of V2-4..6 decide nothing in a diff; they are the capture's statements about itself. |
+| V2-R7 | The diff header carries what each manifest left out: `before_excluded` and `after_excluded`, after `after_manifest_version`, each that manifest's `excluded` array as its header writes it (V2-2: `{"path", "reason", "dev", "ino"}`, `path_b64` in place of `path` when not UTF-8, sorted by path bytes; `[]` when none), and `null` for a v1 manifest, which does not say what it left out. Like V2-R4 they decide nothing: the records already say `not_captured` where an exclusion matters (diff-v1, "Present on one side only"); a path both sides excluded is in no record and only here. (Decision 2026-11-02: graders consume the JSON, and stderr is not part of the record.) |
 
 ## Example
 
