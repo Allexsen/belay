@@ -35,7 +35,7 @@
 
 #define MAX_ROWS 96
 #define MAX_COLS 8
-struct table { int n; char cell[MAX_ROWS][MAX_COLS][1024]; int cols[MAX_ROWS]; };
+struct table { int n; char cell[MAX_ROWS][MAX_COLS][4096]; int cols[MAX_ROWS]; };   /* a cell: E12 is 2,763 bytes */
 
 static void trim(char *s) {
     char *p = s;
@@ -67,7 +67,7 @@ static int read_table(const char *path, const char *first, struct table *t) {
         for (; *p && c < MAX_COLS; p++) {
             if (*p == '|' && p[-1] != '\\') {
                 *p = '\0';
-                snprintf(t->cell[t->n][c], sizeof t->cell[t->n][c], "%.1023s", start);
+                snprintf(t->cell[t->n][c], sizeof t->cell[t->n][c], "%.4095s", start);
                 trim(t->cell[t->n][c]);
                 c++;
                 start = p + 1;

@@ -336,7 +336,7 @@ itself included.
 | E1 placement | Event records come after the last path record and before the trailer. A diff with none has none. |
 | E2 shape | `{"event": "<kind>", "interp": "<interpreter>", <the kind's fields, in finding-kinds.md's order>, "text": "<its template>", "provisional": true, "paths": [...]}`. The kind is an `event`-level kind of finding-kinds.md. `provisional` is present, and `true`, exactly when a path the event was derived from has the outcome `unknown` (decision P7): the event may not hold. |
 | E3 paths | The paths it was derived from, relative to the scope as in path records, sorted bytewise, each once, at least one (except `and_more`). `paths_b64` instead -- every element base64 -- when any is not valid UTF-8. |
-| E4 order | By interpreter, in the order text, pip, dpkg, git; within one, as the interpreter defines it in finding-kinds.md's terms: pip by normalized name, then kind; dpkg by Package, then Architecture, then kind. The same inputs give the same bytes. |
+| E4 order | By interpreter, in the order text, pip, dpkg, git; within one, as the interpreter defines it in finding-kinds.md's terms: pip by normalized name, then kind; dpkg by Package, then Architecture, then kind; git by repository, then `HEAD` before every branch, then branch, then kind (decision 126). The same inputs give the same bytes. |
 | E5 bound | At most 65,536 event records per interpreter per diff: past that, the 65,536th is `{"event": "and_more", "interp": ..., "n": <that one and the rest>, "text": "and {n} more", "paths": []}`. An interpreter's per-diff state is bounded to match. |
 | E6 failure | An interpreter whose end hook fails emits `{"event": "could_not_interpret", "interp": ..., "text": "could not interpret", "paths": [...], "paths_truncated": <n>}` and no other event: `paths` the first 1,024 of the paths it had claimed (bytewise; never a path E11 withholds), `paths_truncated` the number of the rest, present only when not 0 (decision P4). The diff does not fail. |
 | E7 trailer | The trailer gains `events`: the number of event records. `belay_diff_end` still counts path records only. |
@@ -344,6 +344,7 @@ itself included.
 | E9 invalid | An event an interpreter adds that breaks its kind's row -- a kind not its own, not event-level, or the core's; a field missing, extra, or not a string field's value; text over 1,024 bytes -- is replaced, in its place, by `{"event": "invalid_finding", "interp": ..., "text": "invalid finding", "paths": [<its paths>]}`; the interpreter's other events stand (decisions P1, P5). |
 | E10 a file not interpreted | A file an interpreter claims and cannot interpret gives one `{"event": "could_not_interpret", "interp": ..., "text": "could not interpret", "paths": [<the files>]}`; the interpreter's other events stand (the class of decision P1). pip: a dist-info that cannot be named, or a RECORD it must read that cannot be parsed -- that RECORD's path record carries `could_not_interpret` too, unless its outcome is `unknown`, and nothing more is read from it; a name with RECORDs added and removed other than one of each -- one event naming them, their path records carrying nothing (the pairing is known only once every path record is written). dpkg: a status that cannot be parsed -- its path record carries `could_not_interpret` too, unless its outcome is `unknown`. |
 | E11 not captured | A path whose outcome is `unknown` with `not_captured` as its only reason -- the side that lacks it excluded it, or it lies below an `unreadable` directory or a mount there (diff-v1, "Present on one side only") -- derives no event: that side was not looked at, so nothing was installed or removed there. Its path record stands. Any other `unknown` path still derives provisional events (E2). No interpreter is given it, so no event of the core's names it either: no `could_not_interpret` (E10) nor `content_unavailable` for it, and a failed end hook's event (E6) never lists it. (Decision 2026-11-02: approved, from the review of #33, D1; the core's events spelled out, decision 118.) |
+| E12 git events | git's end hook derives repository-level events from the paths of this diff it explained -- loose refs, `packed-refs`, `HEAD`, reflogs -- per repository (a directory named `.git`; `repo` its path in the scope). A branch is a ref `refs/heads/<branch>`, named without `refs/heads/`. Its value on a side: its loose ref there; else its line in `packed-refs` when `packed-refs` is a path of this diff; else, before only, the old id of the first entry its reflog gained in this diff (all zeros: absent). One event per branch whose existence or commit differs: absent before by that evidence and present after, `git_branch_created`; present after with no evidence of before, `git_branch_moved` with no `from`; its loose ref removed and `packed-refs` without it (a path of this diff, or not -- git removes a branch from both), `git_branch_deleted`; a deletion and a creation at the same commit whose new reflog says `Branch: renamed`, one `git_branch_renamed`. A branch on both sides at different commits is decided by the entries its reflog gained in this diff, when they lead from its value before to its value after (each entry's old id the previous one's new, the first's old the value before, the last's new the value after): any `reset`, `commit (amend)`, operation containing `rebase`, message starting `branch: Reset to`, or message containing `forced-update` -- `git_history_rewritten`; else only commits (`commit`, `commit (merge)`, `cherry-pick`, `revert`, `am`) and fast-forwards or merges (a message containing `Fast-forward`; an operation starting with `merge` or `pull`) -- `git_commits_added`; else, or with no such entries, `git_branch_moved`. `HEAD` naming another branch, or detaching or attaching: `git_head_switched`; `HEAD` detached on both sides at different commits is the branch `HEAD`, decided by `logs/HEAD` as above. Remote-tracking refs and tags derive no event (their path findings stand). A path whose outcome is `unknown` adds no finding to its record (P8) but is read like any other where its copy can be read, as dpkg reads a status (a `raced` file's bytes were true when read, and may be no longer): every event derived from it is provisional (E2), so a branch whose ref raced is never silent. A ref, `packed-refs` or reflog git needs and cannot read decides nothing; the record of one whose outcome is not `unknown` carries `content_unavailable`, and one `content_unavailable` event per reason names those paths (provisional when one of them is `unknown`). `paths`: every ref, `packed-refs`, `HEAD` and reflog path it was derived from. The reflog is written by the watched process (diff-v1, git): the kinds that rest on it say so. (Decisions 126, 132: approved 2026-11-02, events from an `unknown` path provisional rather than dropped.) |
 <!-- END GENERATED: diff-events -->
 
 **Reading findings.** A consumer ignores a finding kind, an event kind or a field it does not
@@ -387,19 +388,26 @@ know. Removing a kind or changing a field's meaning is a new diff version.
 | `git_reflog_appended` | git | path | ref: string, entries: int | `{ref}: {entries} reflog entries` | Entries appended to the ref's reflog. |
 | `git_reflog_move` | git | path | ref: string, from: string, to: string, operation: string | `{ref} {from} -> {to} by {operation}` | An appended entry that is not a plain commit or a fast-forward. The reflog is written by the watched process: evidence, not proof. |
 | `git_reflog_rewritten` | git | path | ref: string | `{ref}: reflog rewritten` | The reflog before is not a prefix of the reflog after. |
+| `git_head_switched` | git | event | repo: string, from: string, to: string | `HEAD {from} -> {to}` | `HEAD` names another branch, or became or stopped being detached: from and to are the branch or, detached, the commit (diff-events E12). |
+| `git_branch_created` | git | event | repo: string, branch: string, at: string | `branch {branch} created at {at}` | A branch absent before, by evidence (E12), exists after. |
+| `git_branch_deleted` | git | event | repo: string, branch: string, was: string | `branch {branch} deleted (was {was})` | A branch that existed before exists no more (E12). |
+| `git_branch_renamed` | git | event | repo: string, from: string, to: string, at: string | `branch {from} renamed to {to}` | In place of a deletion and a creation at the same commit, by the new branch's reflog. From the reflog: evidence, not proof. |
+| `git_commits_added` | git | event | repo: string, branch: string, count: int?, to: string | `commits added to {branch}: {count}, now at {to}`; counts absent: `commits added to {branch}, now at {to}` | The branch moved forward by commits, fast-forwards or merges alone (E12); count, when every entry is one commit. From the reflog: evidence, not proof. |
+| `git_history_rewritten` | git | event | repo: string, branch: string, how: string, from: string, to: string | `{branch} rewritten by {how}: {from} -> {to}` | A reset, an amend, a rebase or a forced update (E12). From the reflog: evidence, not proof. |
+| `git_branch_moved` | git | event | repo: string, branch: string, from: string?, to: string | `{branch} {from} -> {to}`; counts absent: `{branch} now at {to}` | The branch names another commit, its reflog not saying how; from absent when its value before cannot be told (E12). |
 <!-- END GENERATED: diff-findings -->
 
 ### What each interpreter reports
 
 An interpreter adds findings only to a path whose content is proven changed (added, removed,
 modified, type_changed): to a path whose outcome is `unknown` or `metadata_only` it adds none (a git
-hook's executable bit excepted, which is metadata). pip and dpkg still derive events from an
+hook's executable bit excepted, which is metadata). pip, dpkg and git still derive events from an
 `unknown` path, each marked provisional -- but none from a path `unknown` only as `not_captured`,
 which no interpreter is given (E11). A side on which the path is not a regular file counts as
 absent (git hooks excepted: a symlink is a hook). Where an interpreter keeps the first of two equal
 keys (a package, a RECORD path, a packed ref), "first" is in file order. The limits: each
 interpreter reads at most a bound of each stored copy, and a larger one is `content_unavailable`,
-reason `too_large`; pip's and dpkg's per-diff state is at most 64 MiB; a record carries at most
+reason `too_large`; pip's, dpkg's and git's per-diff state is at most 64 MiB; a record carries at most
 4,096 findings and an interpreter at most 65,536 events (and_more past either); a failed end hook
 names at most 1,024 paths:
 
@@ -508,3 +516,20 @@ operation being the message before its first `:`; otherwise, or when the reflog 
 needed), `git_reflog_rewritten`. **The reflog is written by the process being watched: it is
 evidence, not proof.** A process can write any reflog it likes; a capture taken from outside the
 process (a host-reader mode, not built yet) would be the answer when that matters.
+
+From its end hook git also derives repository-level events (diff-events E12), so that a reader
+sees "branch x created", not the file git keeps it in. Per repository -- a directory named `.git`,
+`repo` being its path in the scope -- and per branch (a ref `refs/heads/<branch>`, named without
+`refs/heads/`): `git_branch_created`, `git_branch_deleted`, `git_branch_renamed`,
+`git_commits_added`, `git_history_rewritten` or `git_branch_moved`, one for each branch whose
+existence or commit differs, and `git_head_switched` when `HEAD` names another branch or detaches
+or attaches. A branch's value on a side is its loose ref there; else its line in `packed-refs`
+when `packed-refs` is a path of this diff; else, before only, the old id of the first entry its
+reflog gained in this diff (all zeros: absent). git sees only the paths that changed, so an
+unchanged `packed-refs` is never read: a branch is created only by evidence that it was absent
+before, and a ref that appeared without that evidence is moved, with no `from`. The values are the
+refs' own; the reflog only says how a branch moved (a reset, an amend, a rebase or a forced update
+rewrites; commits, fast-forwards and merges add), and only when its entries of this diff lead from
+the value before to the value after -- the kinds that rest on it say evidence, not proof. A path
+whose outcome is `unknown` is read where its copy can be read, and every event from it is
+provisional. Tags and remote-tracking refs derive no event.

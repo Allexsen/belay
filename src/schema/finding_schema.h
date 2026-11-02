@@ -23,6 +23,8 @@ enum finding_kind {
     FK_GIT_HEAD_CHANGED, FK_GIT_REF_CREATED, FK_GIT_REF_DELETED, FK_GIT_REF_MOVED,
     FK_GIT_HOOK_ADDED, FK_GIT_HOOK_REMOVED, FK_GIT_HOOK_CHANGED, FK_GIT_HOOK_EXECUTABLE_CHANGED,
     FK_GIT_INDEX_CHANGED, FK_GIT_REFLOG_APPENDED, FK_GIT_REFLOG_MOVE, FK_GIT_REFLOG_REWRITTEN,
+    FK_GIT_HEAD_SWITCHED, FK_GIT_BRANCH_CREATED, FK_GIT_BRANCH_DELETED, FK_GIT_BRANCH_RENAMED,
+    FK_GIT_COMMITS_ADDED, FK_GIT_HISTORY_REWRITTEN, FK_GIT_BRANCH_MOVED,
     FK_COUNT
 };
 
@@ -58,7 +60,7 @@ struct finding_kind_def {
 extern const struct finding_kind_def FINDING_KINDS[FK_COUNT];
 
 /* The rules of event records (diff-events.md), by id ("E1 placement"). */
-#define EVENT_RULE_COUNT 11
+#define EVENT_RULE_COUNT 12
 struct event_rule { const char *id, *statement; };
 extern const struct event_rule EVENT_RULES[EVENT_RULE_COUNT];
 
