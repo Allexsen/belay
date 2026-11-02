@@ -20,6 +20,8 @@
 #   BELAY_STATE_DIR      belay's state directory (default as belay's)
 #   BELAY_DOGFOOD_NOTES  where interesting receipts are copied (default
 #                        $BELAY_DOGFOOD_SCOPE/NOTES/dogfood)
+#   BELAY_DOGFOOD_TASKS  where Claude Code writes background commands' output
+#                        (default ${TMPDIR:-/tmp}/claude-<uid>/*/<session>/tasks)
 
 set -u
 t0=$(date +%s%N)
@@ -38,7 +40,7 @@ case $ev in start|pre|post|stop|end) ;; *) exit 0 ;; esac
 # command's first line, a file, a tool's name -- already JSON-encoded; and
 # the whole command, for the receipt's detail (turn-267: a label cut at 200
 # characters hid the `git fetch` that wrote what it was blamed for).
-eval "$(printf '%s' "$in" | jq -r '((.tool_input.command // .tool_input.file_path // .tool_input.notebook_path // .tool_input.description // "") | tostring) as $c | @sh "sid=\(.session_id // "") tid=\(.tool_use_id // "") tool=\(.tool_name // "") agent=\(.agent_type // "") summary=\($c | split("\n")[0] | .[0:200] | @json) full=\($c | .[0:65536])"' 2>/dev/null)" || exit 0
+eval "$(printf '%s' "$in" | jq -r '((.tool_input.command // .tool_input.file_path // .tool_input.notebook_path // .tool_input.description // "") | tostring) as $c | @sh "sid=\(.session_id // "") tid=\(.tool_use_id // "") tool=\(.tool_name // "") agent=\(.agent_type // "") bgtask=\(.tool_response.backgroundTaskId // (if .tool_input.run_in_background == true then "?" else "" end)) summary=\($c | split("\n")[0] | .[0:200] | @json) full=\($c | .[0:65536])"' 2>/dev/null)" || exit 0
 case ${sid:-} in ''|*[!A-Za-z0-9_-]*) exit 0 ;; esac                    # a name, never a path
 
 D=$STATE/dogfood
@@ -73,7 +75,35 @@ t1=$(date +%s%N)
 # Names from Claude Code are [A-Za-z0-9_] in practice; anything else is
 # dropped rather than escaped by hand. The summary arrives JSON-encoded.
 clean() { printf '%s' "$1" | tr -cd 'A-Za-z0-9_.:-'; }
-log "{\"event\":\"$ev\",\"cp\":${cp:-null},\"tool_use_id\":\"$(clean "$tid")\",\"tool\":\"$(clean "$tool")\",\"agent\":\"$(clean "$agent")\",\"summary\":${summary:-\"\"},\"t0\":$t0,\"t1\":$t1}"
+bg=
+[ "$ev" = post ] && [ -n "${bgtask:-}" ] && bg=",\"background\":\"$(clean "$bgtask")\""
+log "{\"event\":\"$ev\",\"cp\":${cp:-null},\"tool_use_id\":\"$(clean "$tid")\",\"tool\":\"$(clean "$tool")\",\"agent\":\"$(clean "$agent")\",\"summary\":${summary:-\"\"}$bg,\"t0\":$t0,\"t1\":$t1}"
+
+# A command still running in the background after its post (asked to, or
+# moved there at its timeout) may write at any checkpoint until it ends
+# (decision 111). Its end is seen here, at the first hook after it: the
+# command's output file is no longer open in any process. Where that file
+# cannot be found, the next stop ends it -- so "may have written" never
+# outlives the turn unseen.
+B=$D/$sid.background
+if [ -n "$bg" ] && [ -n "${tid:-}" ]; then
+    f=$(printf '%s' "$tid" | tr -cd 'A-Za-z0-9_-'); task=$(clean "$bgtask"); out=
+    for t in ${BELAY_DOGFOOD_TASKS:-"${TMPDIR:-/tmp}"/claude-$(id -u)/*/"$sid"/tasks}; do
+        [ -e "$t/$task.output" ] && out=$t/$task.output && break
+    done
+    [ -n "$f" ] && mkdir -p "$B" 2>/dev/null && printf '%s' "$out" > "$B/$f"
+elif [ -d "$B" ] && [ -n "$cp" ]; then
+    for m in "$B"/*; do
+        [ -f "$m" ] || continue
+        out=$(cat "$m" 2>/dev/null)
+        if [ -n "$out" ] && [ -d /proc/self/fd ]; then
+            find /proc/[0-9]*/fd -lname "$out" -print -quit 2>/dev/null | grep -q . && continue
+        elif [ "$ev" != stop ] && [ "$ev" != end ]; then
+            continue
+        fi
+        rm -f "$m" && log "{\"event\":\"background_end\",\"cp\":$cp,\"tool_use_id\":\"${m##*/}\"}"
+    done
+fi
 
 case $ev in
 stop)
