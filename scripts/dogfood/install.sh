@@ -10,7 +10,9 @@
 #
 # BELAY_BINARY is the release binary (installed as ~/.local/bin/belay);
 # REPOSITORY is the scope the hooks watch (this repo). Standard output is the
-# merge command and nothing else; the rest goes to standard error.
+# merge command and nothing else; the rest goes to standard error. Linux only,
+# for now: the commands it writes, like the hook, time failures with
+# `date +%s%N`, which macOS `date` lacks (decision 131).
 
 set -eu
 BIN=$1

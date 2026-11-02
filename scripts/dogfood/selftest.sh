@@ -55,7 +55,7 @@ hook pre t5 Bash "touch d"; printf 'd\n' > "$S/src/d.c"; hook post t5 Bash
 hook pre t6 Bash "touch e"; printf 'e\n' > "$S/src/e.c"; hook post t6 Bash
 out=$(hook stop)
 R2=$(ls -t "$T/state/dogfood"/s1.turn-*.txt | head -1)
-[ "$(grep -c 'locked' "$R2")" = 1 ] || fail "the unreadable directory not said once: $(cat "$R2")"
+[ "$(grep -c '^  ? locked' "$R2")" = 1 ] || fail "the unreadable directory not said once: $(cat "$R2")"
 grep -q '^unknown throughout the session' "$R2" || fail "no 'unknown throughout' section: $(cat "$R2")"
 printf '%s' "$out" | jq -e '.systemMessage | test("^belay: 2 paths changed")' >/dev/null || fail "counted the unreadable directory: $out"
 # a turn that changes nothing says nothing
@@ -216,6 +216,47 @@ grep -A2 '^Bash: seen$' "$R8" | grep -q '  A seen.txt' || fail "the call before 
 printf '%s' "$out" | jq -e '.systemMessage | test("^belay: hooks failing: pre: belay mark failed")' >/dev/null \
     || fail "the failure was not said with the receipt: $out"
 
+# The turn at a glance (decisions 125, 127, 128): a summary before any
+# section -- edited with line counts, files added and removed, git,
+# packages, privilege, build output, unknown; a file touched with its
+# content unchanged folds, a mode change never does; a long command shows
+# ten lines and counts the rest, the whole of it in the JSON.
+hook pre t80 Bash "glance"
+printf 'x\ny\nz\n' >> "$S/src/a.c"
+mkdir -p "$S/newpkg" "$S/build" "$S/venv/lib/python3.12/site-packages/foo-1.0.dist-info"
+printf '1\n' > "$S/newpkg/one.txt"; printf '2\n' > "$S/newpkg/two.txt"; printf 'n\n' > "$S/src/new1.c"
+for i in 1 2 3 4 5; do printf '%s\n' "$i" > "$S/src/m$i.c"; done
+rm "$S/src/b.c"
+chmod 4755 "$S/src/c.c"
+printf 'o' > "$S/build/out.o"
+touch -m -d '2002-02-02' "$S/src/d.c"
+printf '%s\n' "$H" > "$S/.git/refs/heads/feature"
+printf 'Name: foo\nVersion: 1.0\n' > "$S/venv/lib/python3.12/site-packages/foo-1.0.dist-info/METADATA"
+printf 'foo-1.0.dist-info/METADATA,,\n' > "$S/venv/lib/python3.12/site-packages/foo-1.0.dist-info/RECORD"
+hook post t80 Bash
+fifteen=$(seq 1 15 | sed 's/^/echo line /')
+hook pre t81 Bash "$fifteen"; printf 'q\n' > "$S/src/q.c"; hook post t81 Bash
+out=$(hook stop)
+R10=$(ls -t "$T/state/dogfood"/s1.turn-*.txt | head -1)
+[ "$(sed -n 4p "$R10")" = "summary" ] || fail "no summary before the sections: $(head -6 "$R10")"
+sum=$(sed -n '/^summary$/,/^$/p' "$R10")
+n=$(printf '%s\n' "$sum" | grep -c '^  ')
+[ "$n" -ge 3 ] && [ "$n" -le 8 ] || fail "a summary of $n lines: $sum"
+printf '%s\n' "$sum" | grep -q '^  edited     .*src/a\.c +3 -0' || fail "the edit's line counts not summarised: $sum"
+printf '%s\n' "$sum" | grep -q '^  files      added [0-9]*: .*newpkg/ (+2).*; removed 1: src/b\.c' || fail "added and removed not summarised: $sum"
+printf '%s\n' "$sum" | grep -q '^  files      added [0-9]*: [^;]* (and [0-9]* more);' || fail "a long list not cut with a count: $sum"
+printf '%s\n' "$sum" | grep -q '^  git        .*branch feature created at' || fail "git not summarised: $sum"
+printf '%s\n' "$sum" | grep -q '^  packages   pip installed foo 1\.0' || fail "the package not summarised: $sum"
+printf '%s\n' "$sum" | grep -q '^  privilege  .*src/c\.c' || fail "the setuid bit not summarised: $sum"
+printf '%s\n' "$sum" | grep -q '^  build      1 change under build/, bin/' || fail "build output not counted: $sum"
+printf '%s\n' "$sum" | grep -q '^  unknown    .*locked' || fail "the unknown not summarised: $sum"
+grep -A20 '^Bash: glance$' "$R10" | grep -q '^  ~ 1 file touched, content unchanged   \[t1\]$' || fail "an mtime-only change not folded: $(cat "$R10")"
+grep -A1 '^the files touched, content unchanged$' "$R10" | grep -q '^  \[t1\] src/d\.c$' || fail "the touched file not in the detail"
+grep -q '^  ~ src/c\.c   mode' "$R10" || fail "a mode change was folded with the touched files: $(cat "$R10")"
+grep -q '^      echo line 10$' "$R10" && ! grep -q '^      echo line 11$' "$R10" && grep -q '^      … 5 more lines$' "$R10" \
+    || fail "a long command not shown as ten lines and a count: $(cat "$R10")"
+jq -e 'any(.sections[].calls[]; test("echo line 15$"))' "${R10%.txt}.json" >/dev/null || fail "the JSON lost the whole command"
+
 # install.sh (decision 115): the settings in a file, one line printed that
 # merges them into settings.json after a backup of its own -- other hooks
 # and keys kept, an earlier belay hook replaced, twice the same as once. A
@@ -271,4 +312,4 @@ grep -A2 '^Bash: before$' "$R9" | grep -q '  A before-gap.txt' && grep -A2 '^Bas
 ! grep -q 'background writers\|^between tool calls' "$R9" || fail "an inactive gap read as background writing: $(cat "$R9")"
 printf '%s' "$out" | jq -e '.systemMessage | test("^belay: hooks failing: [a-z]+: checksum mismatch \\(hooks inactive\\)")' >/dev/null \
     || fail "the first good Stop did not say the hooks had been inactive: $out"
-echo "dogfood selftest: sequential, concurrent, background, cancelled, silent turn, other project, git folded, labels cut, background commands, directories folded, paths counted, failures said, inactive gaps unattributed, install: ok"
+echo "dogfood selftest: sequential, concurrent, background, cancelled, silent turn, other project, git folded, labels cut, background commands, directories folded, paths counted, failures said, inactive gaps unattributed, summary, touched folded, long commands, install: ok"
