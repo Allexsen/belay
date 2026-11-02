@@ -12,6 +12,7 @@
 #define B(n) { n, FT_BOOL }
 #define BO(n) { n, FT_BOOL, true }
 #define NO(n) { n, FT_INT, true }
+#define SO(n) { n, FT_STRING, true }
 #define BY(n) { n, FT_BYTES }
 
 const struct finding_kind_def FINDING_KINDS[FK_COUNT] = {
@@ -100,6 +101,31 @@ const struct finding_kind_def FINDING_KINDS[FK_COUNT] = {
         "the watched process: evidence, not proof." },
     [FK_GIT_REFLOG_REWRITTEN] = { "git_reflog_rewritten", I_GIT, LV_PATH, { S("ref") },
         "{ref}: reflog rewritten", "The reflog before is not a prefix of the reflog after." },
+    [FK_GIT_HEAD_SWITCHED] = { "git_head_switched", I_GIT, LV_EVENT, { S("repo"), S("from"), S("to") },
+        "HEAD {from} -> {to}",
+        "`HEAD` names another branch, or became or stopped being detached: from and to are the branch "
+        "or, detached, the commit (diff-events E12)." },
+    [FK_GIT_BRANCH_CREATED] = { "git_branch_created", I_GIT, LV_EVENT, { S("repo"), S("branch"), S("at") },
+        "branch {branch} created at {at}", "A branch absent before, by evidence (E12), exists after." },
+    [FK_GIT_BRANCH_DELETED] = { "git_branch_deleted", I_GIT, LV_EVENT, { S("repo"), S("branch"), S("was") },
+        "branch {branch} deleted (was {was})", "A branch that existed before exists no more (E12)." },
+    [FK_GIT_BRANCH_RENAMED] = { "git_branch_renamed", I_GIT, LV_EVENT,
+        { S("repo"), S("from"), S("to"), S("at") }, "branch {from} renamed to {to}",
+        "In place of a deletion and a creation at the same commit, by the new branch's reflog. From "
+        "the reflog: evidence, not proof." },
+    [FK_GIT_COMMITS_ADDED] = { "git_commits_added", I_GIT, LV_EVENT,
+        { S("repo"), S("branch"), NO("count"), S("to") }, "commits added to {branch}: {count}, now at {to}",
+        "The branch moved forward by commits, fast-forwards or merges alone (E12); count, when every "
+        "entry is one commit. From the reflog: evidence, not proof.",
+        "commits added to {branch}, now at {to}" },
+    [FK_GIT_HISTORY_REWRITTEN] = { "git_history_rewritten", I_GIT, LV_EVENT,
+        { S("repo"), S("branch"), S("how"), S("from"), S("to") }, "{branch} rewritten by {how}: {from} -> {to}",
+        "A reset, an amend, a rebase or a forced update (E12). From the reflog: evidence, not proof." },
+    [FK_GIT_BRANCH_MOVED] = { "git_branch_moved", I_GIT, LV_EVENT,
+        { S("repo"), S("branch"), SO("from"), S("to") }, "{branch} {from} -> {to}",
+        "The branch names another commit, its reflog not saying how; from absent when its value "
+        "before cannot be told (E12).",
+        "{branch} now at {to}" },
 };
 
 size_t finding_nfields(enum finding_kind k) {
@@ -127,7 +153,8 @@ const struct event_rule EVENT_RULES[EVENT_RULE_COUNT] = {
     { "E4 order",
         "By interpreter, in the order text, pip, dpkg, git; within one, as the interpreter "
         "defines it in finding-kinds.md's terms: pip by normalized name, then kind; dpkg by "
-        "Package, then Architecture, then kind. The same inputs give the same bytes." },
+        "Package, then Architecture, then kind; git by repository, then `HEAD` before every "
+        "branch, then branch, then kind (decision 126). The same inputs give the same bytes." },
     { "E5 bound",
         "At most 65,536 event records per interpreter per diff: past that, the 65,536th is "
         "`{\"event\": \"and_more\", \"interp\": ..., \"n\": <that one and the rest>, \"text\": \"and {n} "
@@ -171,4 +198,38 @@ const struct event_rule EVENT_RULES[EVENT_RULE_COUNT] = {
         "`content_unavailable` for it, and a failed end hook's event (E6) never lists it. "
         "(Decision 2026-11-02: approved, from the review of #33, D1; the core's events spelled "
         "out, decision 118.)" },
+    { "E12 git events",
+        "git's end hook derives repository-level events from the paths of this diff it explained "
+        "-- loose refs, `packed-refs`, `HEAD`, reflogs -- per repository (a directory named "
+        "`.git`; `repo` its path in the scope). A branch is a ref `refs/heads/<branch>`, named "
+        "without `refs/heads/`. Its value on a side: its loose ref there; else its line in "
+        "`packed-refs` when `packed-refs` is a path of this diff; else, before only, the old id "
+        "of the first entry its reflog gained in this diff (all zeros: absent). One event per "
+        "branch whose existence or commit differs: absent before by that evidence and present "
+        "after, `git_branch_created`; present after with no evidence of before, "
+        "`git_branch_moved` with no `from`; its loose ref removed and `packed-refs` without it (a "
+        "path of this diff, or not -- git removes a branch from both), `git_branch_deleted`; a "
+        "deletion and a creation at the same commit whose new reflog says `Branch: renamed`, one "
+        "`git_branch_renamed`. A branch on both sides at different commits is decided by the "
+        "entries its reflog gained in this diff, when they lead from its value before to its "
+        "value after (each entry's old id the previous one's new, the first's old the value "
+        "before, the last's new the value after): any `reset`, `commit (amend)`, operation "
+        "containing `rebase`, message starting `branch: Reset to`, or message containing "
+        "`forced-update` -- `git_history_rewritten`; else only commits (`commit`, `commit "
+        "(merge)`, `cherry-pick`, `revert`, `am`) and fast-forwards or merges (a message "
+        "containing `Fast-forward`; an operation starting with `merge` or `pull`) -- "
+        "`git_commits_added`; else, or with no such entries, `git_branch_moved`. `HEAD` naming "
+        "another branch, or detaching or attaching: `git_head_switched`; `HEAD` detached on both "
+        "sides at different commits is the branch `HEAD`, decided by `logs/HEAD` as above. "
+        "Remote-tracking refs and tags derive no event (their path findings stand). A path whose "
+        "outcome is `unknown` adds no finding to its record (P8) but is read like any other where "
+        "its copy can be read, as dpkg reads a status (a `raced` file's bytes were true when "
+        "read, and may be no longer): every event derived from it is provisional (E2), so a "
+        "branch whose ref raced is never silent. A ref, `packed-refs` or reflog git needs and "
+        "cannot read decides nothing; the record of one whose outcome is not `unknown` carries "
+        "`content_unavailable`, and one `content_unavailable` event per reason names those paths "
+        "(provisional when one of them is `unknown`). `paths`: every ref, `packed-refs`, `HEAD` "
+        "and reflog path it was derived from. The reflog is written by the watched process "
+        "(diff-v1, git): the kinds that rest on it say so. (Decisions 126, 132: approved "
+        "2026-11-02, events from an `unknown` path provisional rather than dropped.)" },
 };

@@ -138,11 +138,13 @@ static const char *r_path(struct run *r, const char *abs, const struct belay_ent
 static const char *r_end(struct run *r) {
     r->ev.interp = r->id;
     const enum belay_interp_result e = r->it->end ? r->it->end(r->state, &r->ev) : BELAY_INTERP_DECLINE;
+    r->state = NULL;                            /* the end hook freed it */
     if (e == BELAY_INTERP_ERROR || events_broken(&r->ev, r->id)) events_failed(&r->ev, r->id);
     return capture(r, true);
 }
 
 static void r_free(struct run *r) {
+    if (r->state != NULL && r->it->end != NULL) r->it->end(r->state, NULL);   /* as the diff does */
     findings_free(&r->f);
     events_free(&r->ev);
     belay_content_close(r->c);
@@ -520,6 +522,159 @@ TEST(git_a_ref_rewritten_to_the_same_value_says_nothing) {
     const struct belay_entry h1 = file(put("ref: refs/heads/main\n"), 0), h2 = file(put("ref:  refs/heads/main\nextra\n"), 0);
     ASSERT_EQ_STR("", r_path(&r, "/s/r/.git/refs/heads/main", &a, &b, "modified"));
     ASSERT_EQ_STR("", r_path(&r, "/s/r/.git/HEAD", &h1, &h2, "modified"));
+    r_free(&r);
+}
+
+/* ---- git's events (diff-events E12) ---- */
+
+#define Z40 "0000000000000000000000000000000000000000"
+#define GEV(kind, fields, text) "{\"event\":\"" kind "\",\"interp\":\"git\"," fields ",\"text\":\"" text "\""
+
+/* A branch created (its reflog's first entry from zeros), one deleted, one
+ * moved by commits alone (counted), HEAD switched: HEAD first, then the
+ * branches bytewise; each lists the paths it came from. */
+TEST(git_events_create_delete_commit_and_switch) {
+    struct run r;
+    r_begin(&r, BELAY_INTERP_GIT, true);
+    const struct belay_entry hb = file(put("ref: refs/heads/main\n"), 0), ha = file(put("ref: refs/heads/feat\n"), 0);
+    const struct belay_entry a = file(put(OA "\n"), 0), b = file(put(OB "\n"), 0), c = file(put(OC "\n"), 0);
+    const struct belay_entry fl = file(put(Z40 " " OA WHO "branch: Created from main\n"), 0);
+    const char *ml0 = Z40 " " OA WHO "commit (initial): one\n";
+    char ml1[1024];
+    snprintf(ml1, sizeof ml1, "%s" OA " " OB WHO "commit: two\n" OB " " OC WHO "cherry-pick: three\n", ml0);
+    const struct belay_entry mb = file(put(ml0), 0), ma = file(put(ml1), 0);
+    r_path(&r, "/s/r/.git/HEAD", &hb, &ha, "modified");
+    r_path(&r, "/s/r/.git/refs/heads/feat", NULL, &a, "added");
+    r_path(&r, "/s/r/.git/logs/refs/heads/feat", NULL, &fl, "added");
+    r_path(&r, "/s/r/.git/refs/heads/old", &b, NULL, "removed");
+    r_path(&r, "/s/r/.git/refs/heads/main", &a, &c, "modified");
+    r_path(&r, "/s/r/.git/logs/refs/heads/main", &mb, &ma, "modified");
+    ASSERT_EQ_STR(
+        GEV("git_head_switched", "\"repo\":\"r/.git\",\"from\":\"main\",\"to\":\"feat\"", "HEAD main -> feat")
+            ",\"paths\":[\"r/.git/HEAD\"]}\n"
+        GEV("git_branch_created", "\"repo\":\"r/.git\",\"branch\":\"feat\",\"at\":\"" OA "\"", "branch feat created at " OA)
+            ",\"paths\":[\"r/.git/logs/refs/heads/feat\",\"r/.git/refs/heads/feat\"]}\n"
+        GEV("git_commits_added", "\"repo\":\"r/.git\",\"branch\":\"main\",\"count\":2,\"to\":\"" OC "\"",
+            "commits added to main: 2, now at " OC)
+            ",\"paths\":[\"r/.git/logs/refs/heads/main\",\"r/.git/refs/heads/main\"]}\n"
+        GEV("git_branch_deleted", "\"repo\":\"r/.git\",\"branch\":\"old\",\"was\":\"" OB "\"", "branch old deleted (was " OB ")")
+            ",\"paths\":[\"r/.git/refs/heads/old\"]}\n",
+        r_end(&r));
+    r_free(&r);
+}
+
+/* How a branch moved, by its reflog when its entries lead from before to
+ * after: a reset or amend rewrites, a fast-forward adds (not counted);
+ * with no reflog, or one that does not lead there, it just moved; a ref
+ * that appears without evidence of absence is "now at". */
+TEST(git_events_say_how_a_branch_moved_only_by_a_reflog_that_agrees) {
+    struct run r;
+    r_begin(&r, BELAY_INTERP_GIT, true);
+    const struct belay_entry a = file(put(OA "\n"), 0), b = file(put(OB "\n"), 0), c = file(put(OC "\n"), 0);
+    char l1[1024], l2[1024];
+    snprintf(l1, sizeof l1, OA " " OB WHO "commit: x\n" OB " " OC WHO "reset: moving to HEAD~1\n"
+             OC " " OB WHO "commit (amend): y\n");
+    snprintf(l2, sizeof l2, OA " " OC WHO "pull --ff-only: Fast-forward\n");
+    const struct belay_entry ra = file(put(l1), 0), pa = file(put(l2), 0);
+    const struct belay_entry wrong = file(put(OB " " OC WHO "commit: z\n"), 0);
+    r_path(&r, "/s/.git/refs/heads/fix", &a, &b, "modified");
+    r_path(&r, "/s/.git/logs/refs/heads/fix", NULL, &ra, "added");
+    r_path(&r, "/s/.git/refs/heads/ff", &a, &c, "modified");
+    r_path(&r, "/s/.git/logs/refs/heads/ff", NULL, &pa, "added");
+    r_path(&r, "/s/.git/refs/heads/odd", &a, &c, "modified");
+    r_path(&r, "/s/.git/logs/refs/heads/odd", NULL, &wrong, "added");
+    r_path(&r, "/s/.git/refs/heads/plain", &a, &b, "modified");
+    r_path(&r, "/s/.git/refs/heads/seen", NULL, &c, "added");
+    ASSERT_EQ_STR(
+        GEV("git_commits_added", "\"repo\":\".git\",\"branch\":\"ff\",\"to\":\"" OC "\"", "commits added to ff, now at " OC)
+            ",\"paths\":[\".git/logs/refs/heads/ff\",\".git/refs/heads/ff\"]}\n"
+        GEV("git_history_rewritten", "\"repo\":\".git\",\"branch\":\"fix\",\"how\":\"reset, commit (amend)\",\"from\":\"" OA
+            "\",\"to\":\"" OB "\"", "fix rewritten by reset, commit (amend): " OA " -> " OB)
+            ",\"paths\":[\".git/logs/refs/heads/fix\",\".git/refs/heads/fix\"]}\n"
+        GEV("git_branch_moved", "\"repo\":\".git\",\"branch\":\"odd\",\"from\":\"" OA "\",\"to\":\"" OC "\"", "odd " OA " -> " OC)
+            ",\"paths\":[\".git/refs/heads/odd\"]}\n"
+        GEV("git_branch_moved", "\"repo\":\".git\",\"branch\":\"plain\",\"from\":\"" OA "\",\"to\":\"" OB "\"", "plain " OA " -> " OB)
+            ",\"paths\":[\".git/refs/heads/plain\"]}\n"
+        GEV("git_branch_moved", "\"repo\":\".git\",\"branch\":\"seen\",\"to\":\"" OC "\"", "seen now at " OC)
+            ",\"paths\":[\".git/refs/heads/seen\"]}\n",
+        r_end(&r));
+    r_free(&r);
+}
+
+/* A rename: the new branch's reflog says so and the old one went at the
+ * same commit -- one event, not a creation and a deletion. A commit on a
+ * packed branch (its loose ref reappears) is commits added, by its reflog;
+ * a branch gone from packed-refs is deleted. */
+TEST(git_events_rename_and_packed_branches) {
+    struct run r;
+    r_begin(&r, BELAY_INTERP_GIT, true);
+    const struct belay_entry a = file(put(OA "\n"), 0), b = file(put(OB "\n"), 0);
+    char nl[1024];
+    snprintf(nl, sizeof nl, Z40 " " OA WHO "branch: Created from main\n" OA " " OA WHO
+             "Branch: renamed refs/heads/feat to refs/heads/done\n");
+    const struct belay_entry nlog = file(put(nl), 0), ol = file(put(Z40 " " OA WHO "branch: Created from main\n"), 0);
+    r_path(&r, "/s/.git/refs/heads/feat", &a, NULL, "removed");
+    r_path(&r, "/s/.git/logs/refs/heads/feat", &ol, NULL, "removed");
+    r_path(&r, "/s/.git/refs/heads/done", NULL, &a, "added");
+    r_path(&r, "/s/.git/logs/refs/heads/done", NULL, &nlog, "added");
+    const struct belay_entry pb = file(put("# pack-refs with: peeled fully-peeled sorted\n" OA " refs/heads/main\n"
+                                           OA " refs/heads/gone\n"), 0);
+    const struct belay_entry pa = file(put("# pack-refs with: peeled fully-peeled sorted\n" OA " refs/heads/main\n"), 0);
+    const struct belay_entry mb = file(put(Z40 " " OA WHO "commit (initial): one\n"), 0);
+    const struct belay_entry ma = file(put(Z40 " " OA WHO "commit (initial): one\n" OA " " OB WHO "commit: two\n"), 0);
+    r_path(&r, "/s/.git/packed-refs", &pb, &pa, "modified");
+    r_path(&r, "/s/.git/refs/heads/main", NULL, &b, "added");
+    r_path(&r, "/s/.git/logs/refs/heads/main", &mb, &ma, "modified");
+    ASSERT_EQ_STR(
+        GEV("git_branch_renamed", "\"repo\":\".git\",\"from\":\"feat\",\"to\":\"done\",\"at\":\"" OA "\"", "branch feat renamed to done")
+            ",\"paths\":[\".git/logs/refs/heads/done\",\".git/logs/refs/heads/feat\",\".git/refs/heads/done\",\".git/refs/heads/feat\"]}\n"
+        GEV("git_branch_deleted", "\"repo\":\".git\",\"branch\":\"gone\",\"was\":\"" OA "\"", "branch gone deleted (was " OA ")")
+            ",\"paths\":[\".git/packed-refs\"]}\n"
+        GEV("git_commits_added", "\"repo\":\".git\",\"branch\":\"main\",\"count\":1,\"to\":\"" OB "\"", "commits added to main: 1, now at " OB)
+            ",\"paths\":[\".git/logs/refs/heads/main\",\".git/packed-refs\",\".git/refs/heads/main\"]}\n",
+        r_end(&r));
+    r_free(&r);
+}
+
+/* Decision 132: a branch whose ref raced (outcome unknown) is never silent:
+ * read where its copy can be, its events provisional, nothing on its record
+ * (P8); one with no copy decides nothing and is said by a provisional
+ * content_unavailable event. Detached HEAD moving is the branch HEAD; tags
+ * and remote-tracking refs derive nothing. */
+TEST(git_events_from_an_unknown_ref_are_provisional) {
+    struct run r;
+    r_begin(&r, BELAY_INTERP_GIT, true);
+    const struct belay_entry a = file(put(OA "\n"), 0), b = file(put(OB "\n"), 0), none = file(NULL, 0);
+    ASSERT_EQ_STR("", r_path(&r, "/s/.git/refs/heads/raced", &a, &b, "unknown"));
+    ASSERT_EQ_STR("", r_path(&r, "/s/.git/refs/heads/blind", &a, &none, "unknown"));
+    r_path(&r, "/s/.git/refs/tags/v1", NULL, &a, "added");
+    r_path(&r, "/s/.git/refs/remotes/origin/main", &a, &b, "modified");
+    const struct belay_entry ha = file(put(OA "\n"), 0), hb = file(put(OB "\n"), 0);
+    const struct belay_entry lg = file(put(OA " " OB WHO "commit: detached\n"), 0);
+    r_path(&r, "/s/w/.git/HEAD", &ha, &hb, "modified");
+    r_path(&r, "/s/w/.git/logs/HEAD", NULL, &lg, "added");
+    r_path(&r, "/s/w/.git/refs/heads/Alpha", &a, &b, "modified");        /* sorts before "HEAD", comes after it */
+    ASSERT_EQ_STR(
+        GEV("content_unavailable", "\"reason\":\"missing\",\"side\":\"after\"", "content unavailable (after): missing")
+            ",\"provisional\":true,\"paths\":[\".git/refs/heads/blind\"]}\n"
+        GEV("git_branch_moved", "\"repo\":\".git\",\"branch\":\"raced\",\"from\":\"" OA "\",\"to\":\"" OB "\"", "raced " OA " -> " OB)
+            ",\"provisional\":true,\"paths\":[\".git/refs/heads/raced\"]}\n"
+        GEV("git_commits_added", "\"repo\":\"w/.git\",\"branch\":\"HEAD\",\"count\":1,\"to\":\"" OB "\"", "commits added to HEAD: 1, now at " OB)
+            ",\"paths\":[\"w/.git/HEAD\",\"w/.git/logs/HEAD\"]}\n"
+        GEV("git_branch_moved", "\"repo\":\"w/.git\",\"branch\":\"Alpha\",\"from\":\"" OA "\",\"to\":\"" OB "\"", "Alpha " OA " -> " OB)
+            ",\"paths\":[\"w/.git/refs/heads/Alpha\"]}\n",
+        r_end(&r));
+    r_free(&r);
+}
+
+/* E10: a loose ref git cannot parse decides nothing and is said. */
+TEST(git_a_ref_that_cannot_be_parsed_is_one_could_not_interpret_event) {
+    struct run r;
+    r_begin(&r, BELAY_INTERP_GIT, true);
+    const struct belay_entry a = file(put(OA "\n"), 0), junk = file(put("not a ref\n"), 0);
+    r_path(&r, "/s/.git/refs/heads/bad", &a, &junk, "modified");
+    ASSERT_EQ_STR("{\"event\":\"could_not_interpret\",\"interp\":\"git\",\"text\":\"could not interpret\","
+                  "\"paths\":[\".git/refs/heads/bad\"]}\n", r_end(&r));
     r_free(&r);
 }
 
@@ -1096,6 +1251,11 @@ int main(void) {
     RUN(git_hooks_are_added_removed_changed_or_made_executable);
     RUN(git_index_is_changed_and_nothing_more);
     RUN(git_reflog_entries_appended_and_the_moves_that_are_not_commits);
+    RUN(git_events_create_delete_commit_and_switch);
+    RUN(git_events_say_how_a_branch_moved_only_by_a_reflog_that_agrees);
+    RUN(git_events_rename_and_packed_branches);
+    RUN(git_events_from_an_unknown_ref_are_provisional);
+    RUN(git_a_ref_that_cannot_be_parsed_is_one_could_not_interpret_event);
     RUN(git_reflog_that_is_not_appended_to_is_rewritten);
     RUN(git_reflog_without_a_copy_is_content_unavailable);
     RUN(git_ref_that_cannot_be_parsed_could_not_be_interpreted);
