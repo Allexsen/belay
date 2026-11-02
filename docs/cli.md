@@ -137,7 +137,8 @@ previous manifest that is a symlink or a FIFO is corrupt state (exit 4).
 
 ## The receipt
 
-Events first (packages installed, upgraded, removed), then every privilege change -- capabilities,
+Events first (packages installed, upgraded, removed; branches created, deleted, renamed or moved,
+commits added, history rewritten, HEAD switched), then every privilege change -- capabilities,
 inode flags, setuid, setgid or sticky bits, on a file changed, added or removed -- then the other
 changes by path. A record shows at most 15 of its findings, then "and N more". An entry belay could
 not capture reliably is named on its own line with the reason (`raced`, `unstable`, `unverified`,
