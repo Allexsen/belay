@@ -1189,7 +1189,8 @@ def _check_claims():
               '-- come before every named event, in the Kinds table\'s order, then by path '
               '(`content_unavailable`, one per reason, in the reasons\' order).',
               'The end hook fails (E6) only when the interpreter\'s per-diff state would exceed '
-              '64 MiB or memory runs out: its events are then one `could_not_interpret` naming '
+              '64 MiB, memory runs out, or it adds an event naming no path: its events are then '
+              'one `could_not_interpret` naming '
               'the first 1,024 paths given to it (every path it claims whose outcome is not '
               '`unchanged`; none `unknown` only as `not_captured`, which it is never given: E11) '
               'and counting the rest.',
@@ -1327,8 +1328,9 @@ def render_event(interp, kind, values, paths, unknown=frozenset()):
     not UTF-8)."""
     f = render(kind, values)
     ps = sorted(set(paths))
-    # "an event naming no path" fails the end hook (E6; "Event records"),
-    # which end() does not model: no event here may reach it (ambiguity X5).
+    # "it adds an event naming no path" fails the end hook (E6; both
+    # "Event records" and "What each interpreter reports", decision 121),
+    # which end() does not model: no event here may reach it.
     assert ps, 'reference: a %s %s event naming no path (E6 is not modelled)' % (interp, kind)
     try:
         pv = ('paths', [x.decode('utf-8') for x in ps])
@@ -1724,16 +1726,17 @@ def pip_end(state, trace):
 
 def end(interp, state, trace):
     """An interpreter's events. The end hook fails as a whole (E6) only when
-    its per-diff state would exceed 64 MiB or memory runs out, which a corpus
-    of small manifests and no store never reaches: not modelled. Were it
-    modelled, its event would list "the first 1,024 of the paths it had
+    "the interpreter's per-diff state would exceed 64 MiB, memory runs out,
+    or it adds an event naming no path" (decision 121: both "Event records"
+    and "What each interpreter reports" now name all three). None is
+    reachable from this corpus: its manifests are small and it has no
+    store, and this model derives every event from the paths it was given,
+    so none names no path (render_event() asserts it). Not modelled. Were
+    it modelled, its event would list "the first 1,024 of the paths it had
     claimed (bytewise; never a path E11 withholds)" (E6; the prose: "none
     `unknown` only as `not_captured`, which it is never given: E11") --
     `state` already holds only what explain() was given, and diff() gives
-    explain() no such path. "Event records" names a third cause, "an event
-    naming no path" (ambiguity X5): this model derives every event from
-    the paths it was given, so none names no path; render_event() asserts
-    it."""
+    explain() no such path."""
     if interp == 'pip':
         return pip_end(state, trace)
     if interp == 'dpkg':
