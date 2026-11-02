@@ -295,9 +295,11 @@ match its name, so a stale, planted or truncated copy is never read as content; 
 regular file (a symlink included) is `corrupt`. When an interpreter needs a copy it cannot read, on
 a side where the path exists, it says so: the finding `content_unavailable`, with `reason`
 `no_store` (the diff was given no store), `missing`, `too_large` (over the interpreter's bound) or
-`corrupt` (does not hash to its name), and `side`. It never declines silently there: pip and dpkg,
-whose package facts come from that content, also emit a `content_unavailable` event naming the
-paths, so a consumer never reads "no packages changed" where the change could not be read.
+`corrupt` (does not hash to its name), and `side`. It never declines silently there: pip, dpkg and
+git, whose package and repository facts come from that content, also emit a `content_unavailable`
+event naming the paths, so a consumer never reads "no packages changed" or "no branch moved" where
+the change could not be read. git names only the paths it derives events from (HEAD, branches,
+`packed-refs`, their reflogs), and a reflog removed needs no copy.
 
 **Findings.** Each finding is an object: `{"kind": ..., <its fields, in order>, "text": ...}`. `int`
 fields are non-negative integers, `string` fields UTF-8 of at most 1,024 bytes, `bool` fields `true`
@@ -437,7 +439,7 @@ same `size` rule, like one recorded without a copy.
 
 Where an interpreter fails on a path (a file it claims cannot be parsed, a dist-info cannot be
 named), that path's record carries `could_not_interpret` (R11) unless its outcome is `unknown`,
-nothing more is read from it, and pip and dpkg emit one `could_not_interpret` event naming it (E10);
+nothing more is read from it, and pip, dpkg and git emit one `could_not_interpret` event naming it (E10);
 their other events stand. An event a value of which is not a string field's value, or whose text
 would exceed 1,024 bytes, is one `invalid_finding` event naming its paths (E9). Events with no name
 -- `could_not_interpret` for a file, `content_unavailable` -- come before every named event, in the

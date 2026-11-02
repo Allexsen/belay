@@ -627,7 +627,7 @@ TEST(git_events_rename_and_packed_branches) {
     r_path(&r, "/s/.git/logs/refs/heads/main", &mb, &ma, "modified");
     ASSERT_EQ_STR(
         GEV("git_branch_renamed", "\"repo\":\".git\",\"from\":\"feat\",\"to\":\"done\",\"at\":\"" OA "\"", "branch feat renamed to done")
-            ",\"paths\":[\".git/logs/refs/heads/done\",\".git/logs/refs/heads/feat\",\".git/refs/heads/done\",\".git/refs/heads/feat\"]}\n"
+            ",\"paths\":[\".git/logs/refs/heads/done\",\".git/packed-refs\",\".git/refs/heads/done\",\".git/refs/heads/feat\"]}\n"
         GEV("git_branch_deleted", "\"repo\":\".git\",\"branch\":\"gone\",\"was\":\"" OA "\"", "branch gone deleted (was " OA ")")
             ",\"paths\":[\".git/packed-refs\"]}\n"
         GEV("git_commits_added", "\"repo\":\".git\",\"branch\":\"main\",\"count\":1,\"to\":\"" OB "\"", "commits added to main: 1, now at " OB)
@@ -663,6 +663,42 @@ TEST(git_events_from_an_unknown_ref_are_provisional) {
             ",\"paths\":[\"w/.git/HEAD\",\"w/.git/logs/HEAD\"]}\n"
         GEV("git_branch_moved", "\"repo\":\"w/.git\",\"branch\":\"Alpha\",\"from\":\"" OA "\",\"to\":\"" OB "\"", "Alpha " OA " -> " OB)
             ",\"paths\":[\"w/.git/refs/heads/Alpha\"]}\n",
+        r_end(&r));
+    r_free(&r);
+}
+
+/* An event lists the paths it was derived from, and only those (E12,
+ * E3): a deletion its ref, not the reflog removed with it (a removed reflog
+ * needs no copy, so cannot be unavailable); packed-refs when it is the
+ * evidence -- provisional when packed-refs raced; an unreadable reflog is
+ * no evidence, so a branch it alone would date is "now at". (The oracle's
+ * author, disagreements 1-5.) */
+TEST(git_events_name_only_the_paths_they_came_from) {
+    struct run r;
+    r_begin(&r, BELAY_INTERP_GIT, true);
+    const struct belay_entry a = file(put(OA "\n"), 0), b = file(put(OB "\n"), 0), none = file(NULL, 0);
+    r_path(&r, "/s/.git/refs/heads/old", &a, NULL, "removed");
+    r_path(&r, "/s/.git/logs/refs/heads/old", &none, NULL, "removed");
+    r_path(&r, "/s/.git/refs/heads/feat", NULL, &a, "added");
+    r_path(&r, "/s/.git/logs/refs/heads/feat", NULL, &none, "added");
+    ASSERT_EQ_STR(
+        GEV("content_unavailable", "\"reason\":\"missing\",\"side\":\"after\"", "content unavailable (after): missing")
+            ",\"paths\":[\".git/logs/refs/heads/feat\"]}\n"
+        GEV("git_branch_moved", "\"repo\":\".git\",\"branch\":\"feat\",\"to\":\"" OA "\"", "feat now at " OA)
+            ",\"paths\":[\".git/refs/heads/feat\"]}\n"
+        GEV("git_branch_deleted", "\"repo\":\".git\",\"branch\":\"old\",\"was\":\"" OA "\"", "branch old deleted (was " OA ")")
+            ",\"paths\":[\".git/refs/heads/old\"]}\n",
+        r_end(&r));
+    r_free(&r);
+    /* packed-refs in this diff decides absence: it is listed, and raced, it
+     * makes the event provisional */
+    r_begin(&r, BELAY_INTERP_GIT, true);
+    const struct belay_entry pk = file(put("# pack-refs with: peeled fully-peeled sorted\n" OA " refs/heads/main\n"), 0);
+    r_path(&r, "/s/.git/packed-refs", &pk, &pk, "unknown");
+    r_path(&r, "/s/.git/refs/heads/topic", NULL, &b, "added");
+    ASSERT_EQ_STR(
+        GEV("git_branch_created", "\"repo\":\".git\",\"branch\":\"topic\",\"at\":\"" OB "\"", "branch topic created at " OB)
+            ",\"provisional\":true,\"paths\":[\".git/packed-refs\",\".git/refs/heads/topic\"]}\n",
         r_end(&r));
     r_free(&r);
 }
@@ -1256,6 +1292,7 @@ int main(void) {
     RUN(git_events_rename_and_packed_branches);
     RUN(git_events_from_an_unknown_ref_are_provisional);
     RUN(git_a_ref_that_cannot_be_parsed_is_one_could_not_interpret_event);
+    RUN(git_events_name_only_the_paths_they_came_from);
     RUN(git_reflog_that_is_not_appended_to_is_rewritten);
     RUN(git_reflog_without_a_copy_is_content_unavailable);
     RUN(git_ref_that_cannot_be_parsed_could_not_be_interpreted);
