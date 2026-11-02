@@ -8,6 +8,7 @@
 #include "belay_test.h"
 #include "cli/cli.h"
 #include "cli/state.h"
+#include "belay/manifest.h"
 
 #include <errno.h>
 #include <limits.h>
@@ -760,6 +761,102 @@ TEST(the_state_directory_is_located_inside_the_scope_by_path) {
     }
 }
 
+/* Decision 112: a manifest's header line names every excluded path, and a
+ * reader refuses a line over 65,536 bytes (A2). A list that could not fit
+ * is refused by `exclude --add`; one edited in by hand makes the capture
+ * fail, loudly, instead of writing a manifest nothing can read. */
+TEST(an_exclude_list_whose_header_could_not_fit_is_refused) {
+#if PATH_MAX < 4096
+    /* macOS: an exclude is under 1,024 bytes, so 31 of them, base64 or
+     * not, are far under the bound -- the overflow cannot happen there. */
+    SKIP("PATH_MAX under 4096: no exclude list can outgrow a header line");
+#else
+    fresh();
+    static char p[20][4000];
+    static const char *ps[20];
+    for (int i = 0; i < 20; i++) {
+        int w = snprintf(p[i], sizeof p[i], "d%02d", i);
+        for (int k = 0; k < 15; k++) {
+            p[i][w++] = '/';
+            memset(p[i] + w, 'c', 240);
+            w += 240;
+        }
+        p[i][w] = '\0';
+        ps[i] = p[i];
+    }
+    sh("cd '%s' && c=$(printf 'c%%.0s' $(seq 240)) && for i in $(seq -w 0 19); do p=d$i; "
+       "for k in $(seq 15); do p=$p/$c; done; mkdir -p $p; done", g_scope);
+    int accepted = 0;
+    while (accepted < 20 && belay("exclude", "--scope", g_scope, "--add", p[accepted], NULL) == 0) accepted++;
+    ASSERT_TRUE(accepted >= 15 && accepted < 20);
+    ASSERT_TRUE(strstr(g_err, "a manifest's header could need") != NULL &&
+                strstr(g_err, "over its 65536-byte line limit") != NULL);
+    ASSERT_EQ_INT(0, belay("exclude", "--scope", g_scope, NULL));
+    size_t lines = 0;
+    for (const char *c = g_out; *c; c++) lines += *c == '\n';
+    ASSERT_EQ_INT(accepted, (int)lines);                                /* the refused one not kept */
+    /* What was accepted is captured and read back; the bound held. */
+    ASSERT_EQ_INT(0, belay("check", "--scope", g_scope, NULL));
+    ASSERT_EQ_INT(0, belay("diff", "--scope", g_scope, "--since", "1", NULL));
+    char d[700], cmd[1600];
+    scope_dir(d, sizeof d);
+    REQUIRE(d[0] != '\0');
+    snprintf(cmd, sizeof cmd, "head -1 '%s/checkpoints/1/manifest.ndjson' | wc -c", d);
+    FILE *f = popen(cmd, "r");
+    REQUIRE(f != NULL);
+    long hl = 0;
+    REQUIRE(fscanf(f, "%ld", &hl) == 1);
+    pclose(f);
+    char real[PATH_MAX];
+    REQUIRE(realpath(g_scope, real) != NULL);
+    const long bound = belay_manifest_header_bound(real, ps, (size_t)accepted, NULL);
+    ASSERT_TRUE(hl - 1 > 60000 && hl - 1 <= bound && bound <= BELAY_MANIFEST_LINE_MAX);
+    /* The bound is the widest line those names can make: every number at
+     * its widest, the state directory counted where it is. */
+    static const char *const one[] = { "a" };
+    const char *widest = "{\"belay_manifest\":2,\"created_ns\":-9223372036854775808,\"scopes\":[\"/s\"],"
+        "\"hash\":\"sha256\",\"hash_max_bytes\":18446744073709551615,\"store_max_bytes\":18446744073709551615,"
+        "\"excluded\":[{\"path\":\".st\",\"reason\":\"state_dir\",\"dev\":18446744073709551615,"
+        "\"ino\":18446744073709551615},{\"path\":\"a\",\"reason\":\"user\",\"dev\":18446744073709551615,"
+        "\"ino\":18446744073709551615}],\"walk_start_ns\":-9223372036854775808}";
+    ASSERT_EQ_INT((int)strlen(widest), (int)belay_manifest_header_bound("/s", one, 1, ".st"));
+    /* By hand, all twenty: the capture fails and says why. */
+    sh("cd '%s' && find d* -mindepth 15 -maxdepth 15 -type d > '%s/excludes'", g_scope, d);
+    ASSERT_EQ_INT(4, belay("check", "--scope", g_scope, NULL));
+    ASSERT_TRUE(strstr(g_err, "the header line would be") != NULL &&
+                strstr(g_err, "over the 65536-byte line limit: 20 excluded paths") != NULL);
+    snprintf(cmd, sizeof cmd, "[ ! -e '%s/checkpoints/3/manifest.ndjson' ] && [ ! -e '%s/checkpoints/3/meta.json' ]", d, d);
+    ASSERT_EQ_INT(0, system(cmd));                                      /* no unreadable manifest */
+    ASSERT_EQ_INT(0, belay("log", "--scope", g_scope, NULL));
+    /* The state directory inside the scope takes its place in that line: a
+     * name that fits without it and not with it is refused. */
+    fresh();
+    char inside[700];
+    snprintf(inside, sizeof inside, "%s/.state", g_scope);
+    REQUIRE(realpath(g_scope, real) != NULL);
+    size_t k = 0;
+    while (k < 20 && belay_manifest_header_bound(real, ps, k + 1, ".state") <= BELAY_MANIFEST_LINE_MAX) k++;
+    static char filler[4000];
+    static const char *with[21];
+    for (size_t i = 0; i < k; i++) with[i] = ps[i];
+    with[k] = filler;
+    size_t len = 0;
+    for (len = 1; len < sizeof filler - 1; len++) {
+        memset(filler, 'f', len);
+        filler[len] = '\0';
+        if (belay_manifest_header_bound(real, with, k + 1, ".state") > BELAY_MANIFEST_LINE_MAX) break;
+    }
+    REQUIRE(belay_manifest_header_bound(real, with, k + 1, NULL) <= BELAY_MANIFEST_LINE_MAX);
+    setenv("BELAY_STATE_DIR", inside, 1);
+    int added = 0;
+    for (size_t i = 0; i < k; i++) added += belay("exclude", "--scope", g_scope, "--add", ps[i], NULL) == 0;
+    const int rc = belay("exclude", "--scope", g_scope, "--add", filler, NULL);
+    setenv("BELAY_STATE_DIR", g_state, 1);
+    ASSERT_EQ_INT((int)k, added);
+    ASSERT_EQ_INT(2, rc);
+#endif
+}
+
 /* Review 2026-11-02 of #33, D3-D6: a hand-edited excludes file that is not
  * what belay writes is refused -- a NUL, a CR, a line twice -- and the
  * command never succeeds in silence. */
@@ -870,6 +967,7 @@ int main(void) {
     RUN(an_exclude_is_named_and_never_reads_as_removed);
     RUN(no_package_event_comes_from_an_excluded_path);
     RUN(the_state_directory_is_located_inside_the_scope_by_path);
+    RUN(an_exclude_list_whose_header_could_not_fit_is_refused);
     RUN(the_excludes_file_and_command_are_strict);
     RUN(json_output_names_every_excluded_path);
     RUN(an_exclude_is_exact_on_links_and_prefixes);
