@@ -1,7 +1,8 @@
 #!/usr/bin/env python3
 """Runs belay (through the driver) and the reference on every generated pair,
 compares the dpkg, pip and git-reflog findings and the pip, dpkg and git
-events (git's: none) byte for byte, and gates on
+events (git's: none) byte for byte, every path's outcome, and the header's
+`before_excluded` and `after_excluded` (manifest-v2 pin, V2-R7), and gates on
 coverage: every cell a builder declares must be hit at least once.
 
     run.py --driver build/reference/driver --work DIR [--n N] [--seed S] [--keep]
@@ -55,6 +56,12 @@ def compare(belay, mine):
     """The differences, as text lines; empty when they agree."""
     header, records, events, trailer = belay
     diffs = []
+    # V2-R7: each manifest's `excluded` as its header writes it, null for v1
+    for key, want in zip(("before_excluded", "after_excluded"), mine.excluded):
+        if key not in header:
+            diffs.append("header: no %s" % key)
+        elif header[key] != want:
+            diffs.append("header %s: belay %r, reference %r" % (key, header[key], want))
     if trailer.get("events") != len(events):
         diffs.append("trailer events %r, %d event records" % (trailer.get("events"), len(events)))
     for p in sorted(set(records) | set(mine.outcomes)):
@@ -160,6 +167,24 @@ def no_unknown_findings(mine):
     """An unknown path carries no path finding (P7)."""
     return all(mine.findings.get(p) is None for p, o in mine.outcomes.items()
                if o == "unknown" and p in mine.claims)
+
+
+def event_paths(e):
+    if "paths" in e:
+        return [p.encode("utf-8") for p in e["paths"]]
+    return [base64.b64decode(p) for p in e.get("paths_b64", [])]
+
+
+def e11_silent(mine, n=1):
+    """E11 holds for the pair: at least n claimed paths are unknown only as
+    not_captured, each with its record (outcome unknown, no finding), and
+    no event names any of them."""
+    nc = {p for p in mine.not_captured if p in mine.claims}
+    if len(nc) < n:
+        return False
+    if any(mine.outcomes.get(p) != "unknown" or mine.findings.get(p) is not None for p in nc):
+        return False
+    return not any(p in nc for e in evs(mine) for p in event_paths(e))
 
 
 def check_cell(cell, mine, belay=None):
@@ -270,6 +295,53 @@ def check_cell(cell, mine, belay=None):
         and E[0].get("provisional") is True and "provisional" not in E[1]
         and E[0]["paths"] == ["usr/lib/python3/dist-packages/nodash.dist-info/RECORD"]
         and cni_records(mine) == 0 and no_unknown_findings(mine),
+        # E11: nothing from a path unknown only as not_captured; any other
+        # unknown path still provisional (E2)
+        "pip.E11.below_unreadable": lambda: e11_silent(mine, 4)
+        and K == ["pip_installed"] and "provisional" not in E[0],
+        "pip.E11.below_mount": lambda: e11_silent(mine, 4)
+        and K == ["pip_installed"] and "provisional" not in E[0],
+        "pip.E11.excluded_above": lambda: e11_silent(mine, 2)
+        and any(p.startswith(gen.SITES[1] + b"/") for p in mine.not_captured)
+        and K == ["pip_installed"] and E[0]["name"] == "requests",
+        "pip.E11.excluded_path": lambda: e11_silent(mine, 2)
+        and gen.dist(gen.SITES[2], b"wheel", b"0.41")[0] in mine.not_captured,
+        "pip.E11.not_a_partner": lambda: e11_silent(mine, 2)
+        and K == ["pip_installed", "pip_removed"]
+        and not any(e.get("provisional") for e in E)
+        and E[0]["version"] == "2.0" and E[1]["version"] == "1.15.0",
+        "pip.E11.not_in_ambiguity": lambda: e11_silent(mine)
+        and K == ["pip_upgraded"] and "provisional" not in E[0]
+        and (E[0]["from"], E[0]["to"]) == ("1.15.0", "1.16.0"),
+        "pip.E11.unnameable": lambda: e11_silent(mine, 2) and K == ["pip_installed"]
+        and cni_records(mine) == 0,
+        "pip.E11.with_raced": lambda: e11_silent(mine)
+        and K == ["pip_reinstalled", "pip_installed", "pip_removed"]
+        and all(e.get("provisional") is True for e in E),
+        "pip.E11.first_rule_decides": lambda: e11_silent(mine, 2) and not K,
+        "pip.E11.excluded_both_sides": lambda: not any(
+            p.startswith(gen.SITES[1]) for p in mine.outcomes)
+        and K == ["pip_installed"] and mine.excluded[0] and mine.excluded[1],
+        "pip.E11.v1_against_v2": lambda: e11_silent(mine, 2) and K == ["pip_installed"]
+        and None in mine.excluded and mine.excluded != (None, None),
+        "dpkg.E11.below_unreadable": lambda: e11_silent(mine, 2) and not K,
+        "dpkg.E11.below_mount": lambda: e11_silent(mine, 2) and not K,
+        "dpkg.E11.excluded_above": lambda: e11_silent(mine, 2) and not K
+        and b"var/lib/dpkg/status" in mine.not_captured,
+        "dpkg.E11.excluded_path": lambda: e11_silent(mine, 2) and not K
+        and b"x/var/lib/dpkg/status" in mine.not_captured,
+        "dpkg.E11.with_raced": lambda: e11_silent(mine) and K
+        and all(e.get("provisional") is True for e in E)
+        and {p for e in E for p in event_paths(e)} == {
+            b"var/lib/dpkg/status", b"chroot/old/var/lib/dpkg/status"},
+        # a file mounted on one side of a path on both: reason `mount`, not E11
+        "probe.pip.mounted_record_not_e11": lambda: K == ["pip_reinstalled"]
+        and E[0].get("provisional") is True and "files_added" not in E[0]
+        and not mine.not_captured and "unknown" in mine.outcomes.values(),
+        # (without a store, before's copy is no_store too)
+        "probe.dpkg.mounted_status_not_e11": lambda: K and set(K) == {"content_unavailable"}
+        and ("missing", "after") in [(e["reason"], e["side"]) for e in E]
+        and all(e.get("provisional") is True for e in E) and not mine.not_captured,
         "dpkg.P7.unknown_status_readable": lambda: any(e.get("provisional") for e in E)
         and "content_unavailable" not in K and no_unknown_findings(mine),
         "dpkg.P7.unknown_status_no_store": lambda: K == ["content_unavailable"]
@@ -359,6 +431,7 @@ def main():
     failed = []
     pairs = 0
     seen_kinds = collections.Counter()
+    e11 = collections.Counter()
     for case in cases:
         d = os.path.join(a.work, case.name)
         gen.write_case(case, d, cache)
@@ -379,6 +452,13 @@ def main():
             for e in mine.events:
                 o = json.loads(e)
                 seen_kinds["%s %s" % (o["interp"], o["event"])] += 1
+            if mine.not_captured & set(mine.claims):
+                e11["E11: a claimed path not captured"] += 1
+                if any(b'"provisional":true' in e for e in mine.events):
+                    e11["E11 and E2: that, and a provisional event"] += 1
+            v2 = sum(1 for x in mine.excluded if x is not None)
+            if v2:
+                e11["v2 manifests: %d of the two" % v2] += 1
             belay = parse_diff(out)
             diffs = compare(belay, mine)
             if diffs:
@@ -402,6 +482,9 @@ def main():
 
     print("\nevent records the reference expected, over every pair:")
     for k, n in sorted(seen_kinds.items()):
+        print("  %-48s %d" % (k, n))
+    print("\npairs with:")
+    for k, n in sorted(e11.items()):
         print("  %-48s %d" % (k, n))
     print("\ncells (hits):")
     zero = []
