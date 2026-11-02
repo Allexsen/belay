@@ -118,6 +118,12 @@ struct capture_req {
     long full_every;            /* a full mark every N marks (Q8); 0: never */
 };
 
+/* The state root's path relative to the scope, when its resolved path is
+ * inside the scope's (both are resolved); NULL otherwise. The walk counts
+ * the state directory once, there: met again through a bind mount, it is a
+ * mount root like any other (review of #33, S1). */
+const char *state_rel(const struct state *st);
+
 /* Captures the scope into a new checkpoint. 0 with *out; -1 with belay_err. */
 int state_capture(struct state *st, const struct capture_req *req, struct checkpoint *out);
 

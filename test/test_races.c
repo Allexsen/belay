@@ -1096,6 +1096,91 @@ static int bind_child(void) {
 }
 
 /*
+ *  Review of #33, S1: belay's own state directory reached at a second path
+ *  inside the scope -- a bind mount of it -- took a second excluded slot, so
+ *  31 configured excludes made every capture fail with "more than 32
+ *  excluded entries", which named the wrong cause. It is counted once, at its
+ *  own path; the bind mount is a boundary like any mount root, recorded and
+ *  never entered. Without statx a same-filesystem bind mount cannot be told
+ *  from a directory (st_dev decides): it still takes a slot, and the overflow
+ *  names its cause. Run twice, the bind mount created before and after the
+ *  state directory, so that one run meets it first, whatever the kernel's
+ *  listing order.
+ */
+static int state_dir_bind_run(bool dup_first, bool st_mounted) {
+    char fs[300], scope[320], st[400], dup[400], x[420];
+    snprintf(fs, sizeof fs, "%s/fs", g_root);
+    snprintf(scope, sizeof scope, "%s/scope", fs);
+    snprintf(st, sizeof st, "%s/st", scope);
+    snprintf(dup, sizeof dup, "%s/a_dup", scope);
+    /* A fresh tmpfs: its listing order follows creation order (one way or
+     * the other, by kernel), so one of the two runs meets the bind mount
+     * before the state directory's own path. */
+    if (mount("none", fs, "tmpfs", 0, NULL) != 0) return 77;
+    if (mkdir(scope, 0700) != 0) return 10;
+    if (mkdir(dup_first ? dup : st, 0700) != 0 || mkdir(dup_first ? st : dup, 0700) != 0) return 10;
+    /* The state directory may be a mount root itself: then both appearances
+     * are, and its own path still takes the one slot. */
+    if (st_mounted && mount("none", st, "tmpfs", 0, NULL) != 0) return 77;
+    snprintf(x, sizeof x, "%s/scopes", st);
+    if (mkdir(x, 0700) != 0) return 10;
+    if (mount(st, dup, NULL, MS_BIND, NULL) != 0) return 77;
+    struct stat sst;
+    if (stat(st, &sst) != 0) return 10;
+    static char names[31][8];
+    static const char *xs[31];
+    for (int i = 0; i < 31; i++) {
+        snprintf(names[i], sizeof names[i], "x%02d", i);
+        xs[i] = names[i];
+        snprintf(x, sizeof x, "%s/%s", scope, names[i]);
+        if (mkdir(x, 0700) != 0) return 11;
+    }
+    struct belay_manifest_opts o = {
+        .hash_max_bytes = BELAY_HASH_MAX_BYTES_DEFAULT,
+        .store_max_bytes = BELAY_STORE_MAX_BYTES_DEFAULT,
+        .exclude = true, .exclude_dev = (uint64_t)sst.st_dev, .exclude_ino = (uint64_t)sst.st_ino,
+        .exclude_rel = "st", .exclude_paths = xs, .n_exclude_paths = 31,
+    };
+    /* With statx: one slot, the bind mount a recorded boundary. */
+    if (capture_write(&g_ops, g_m, scope, &o, NULL) != 0) return 1;
+    struct belay_manifest_reader *rd = NULL;
+    if (belay_manifest_open(g_m, &rd) != 0) return 2;
+    const struct belay_manifest_header *h = belay_manifest_header(rd);
+    size_t states = 0;
+    for (size_t i = 0; i < h->n_excluded; i++) states += h->excluded[i].reason == BELAY_EXCLUDE_STATE_DIR;
+    const bool counted_once = h->n_excluded == 32 && states == 1;
+    belay_manifest_close(rd);
+    if (!counted_once) return 3;
+    g_n = 0;
+    if (belay_manifest_read(g_m, collect, NULL) != 0) return 4;
+    const struct belay_entry *e = find("a_dup");
+    if (e == NULL || !e->is_mount) return 5;
+    if (find("a_dup/scopes") != NULL || find("st") != NULL) return 6;
+    /* Without statx: a second slot, and no room for it -- the cause named.
+     * (A state directory on its own filesystem is told by st_dev alone.) */
+    if (st_mounted) return umount(dup) == 0 && umount(st) == 0 && umount(fs) == 0 ? 0 : 9;
+    g_arm = STATX_ENOSYS;
+    const int w = capture_write(&g_ops, g_m, scope, &o, NULL);
+    g_arm = NONE;
+    if (w == 0) return 7;
+    const char *m = belay_err_msg();
+    if ((strstr(m, "state directory is inside the scope at 2 paths (a_dup and st)") == NULL &&
+         strstr(m, "state directory is inside the scope at 2 paths (st and a_dup)") == NULL) ||
+        strstr(m, "besides 31 configured excludes") == NULL)
+        return 8;
+    belay_err_clear();
+    if (umount(dup) != 0 || umount(fs) != 0) return 9;
+    return 0;
+}
+
+static int state_dir_bind_child(void) {
+    if (enter_userns() != 0) return 77;
+    int r = state_dir_bind_run(true, false);
+    if (r == 0) r = state_dir_bind_run(false, false);
+    return r != 0 ? r : state_dir_bind_run(true, true);
+}
+
+/*
  *  R4-F4a: a mount that appears over an already-walked directory before the
  *  end-of-walk validator runs. The validator used to open it and stat the
  *  recorded children inside (could hang on a dead network mount; §5.1.1
@@ -1259,6 +1344,18 @@ TEST(r3_file_bind_mounted_from_another_fs_is_a_boundary_with_or_without_statx) {
     int status = 0;
     waitpid(pid, &status, 0);
     const int rc = WIFEXITED(status) ? WEXITSTATUS(status) : 99;
+    if (rc == 77) SKIP("no unprivileged user+mount namespace here");
+    ASSERT_EQ_INT(0, rc);
+#endif
+}
+
+TEST(s1_the_state_directory_takes_one_excluded_slot_however_often_it_is_mounted) {
+#ifndef __linux__
+    SKIP("Linux only -- bind mounts in a user namespace");
+#else
+    reset();
+    mk("fs");
+    const int rc = run_child(state_dir_bind_child);
     if (rc == 77) SKIP("no unprivileged user+mount namespace here");
     ASSERT_EQ_INT(0, rc);
 #endif
@@ -1750,6 +1847,7 @@ int main(void) {
     RUN(r4_validator_never_enters_a_mount_that_appeared);
     RUN(r4_mount_over_the_scope_root_flags_the_root);
     RUN(r3_file_bind_mounted_from_another_fs_is_a_boundary_with_or_without_statx);
+    RUN(s1_the_state_directory_takes_one_excluded_slot_however_often_it_is_mounted);
     RUN(r3_move_into_a_listed_directory_is_caught_whatever_the_file_clock);
     RUN(r3_file_changed_after_it_was_read_is_raced);
     RUN(r3_one_statx_eperm_is_recorded_and_does_not_switch_statx_off);

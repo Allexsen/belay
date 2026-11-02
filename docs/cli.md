@@ -47,7 +47,9 @@ capture resolves the path again and refuses it unless it is the same directory (
 If belay's own state directory is inside the scope, it is not recorded, and every capture says so:
 in the manifest's header (`excluded`, reason `state_dir`; [manifest v2](spec/manifest-v2.md)),
 `check` and `mark` in their output (`"excluded"` in `--json`), `diff` after its receipt, or on
-standard error with `--json`. A scope that is the state directory, or inside it, is refused.
+standard error with `--json`. It is counted once, at its own path: reached again through a bind
+mount inside the scope, it is a mount point like any other -- recorded, never entered. A scope that
+is the state directory, or inside it, is refused.
 
 ## Excludes
 

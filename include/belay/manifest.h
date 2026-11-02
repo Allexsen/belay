@@ -212,6 +212,12 @@ struct belay_manifest_opts {
      */
     bool     exclude;
     uint64_t exclude_dev, exclude_ino;
+    /* That directory's own path relative to the scope, when its resolved
+     * path is inside the scope's; NULL otherwise. It is counted once (review
+     * of #33, S1): reached again through a mount -- a bind mount of it inside
+     * the scope -- it is a capture boundary like any mount root, recorded and
+     * never entered, and takes no excluded slot. */
+    const char *exclude_rel;
     /* Paths relative to the scope not walked, configured for it (v2's
      * `excluded`, reason `user`): each matched exactly, named in the header
      * when something was there. At most BELAY_EXCLUDED_MAX - 1. */

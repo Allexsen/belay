@@ -278,6 +278,12 @@ static bool within(const char *path, const char *dir) {
     return strncmp(path, dir, n) == 0 && (path[n] == '\0' || path[n] == '/');
 }
 
+const char *state_rel(const struct state *st) {
+    const size_t n = strlen(st->scope.path);
+    if (strcmp(st->root, st->scope.path) == 0 || !within(st->root, st->scope.path)) return NULL;
+    return st->root + (n == 1 ? 1 : n + 1);
+}
+
 int state_open(const struct scope *sc, bool create, struct state *st, FILE *note) {
     memset(st, 0, sizeof *st);
     st->dir_fd = st->cp_fd = st->lock_fd = -1;
@@ -785,6 +791,7 @@ int state_capture(struct state *st, const struct capture_req *req, struct checkp
         .store_dir = st->store, .previous = previous,
         .full_reason = c.full_reason[0] != '\0' ? c.full_reason : NULL,   /* the trailer's read_all */
         .exclude = st->root_ino != 0, .exclude_dev = st->root_dev, .exclude_ino = st->root_ino,
+        .exclude_rel = state_rel(st),
         .expect_root = true, .root_dev = st->scope.dev, .root_ino = st->scope.ino,
     };
     struct belay_manifest_stats s;
