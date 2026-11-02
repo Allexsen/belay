@@ -30,16 +30,19 @@ $rsha  $DEST/receipt.py"
 
 # Each command checks all three files before it runs anything: a changed
 # binary or script makes the hook do nothing instead of reviewing. Never in
-# silence (decision 114): the Stop hook then says so, naming the files, every
-# Stop until this is run again; the other hooks fail (non-blocking).
+# silence (decision 114): every hook then records when it was inactive, in the
+# file the hook keeps its failures in (the receipt labels what changed
+# meanwhile unattributed, decision 122), and the Stop hook says so, naming
+# the files, every Stop until this is run again.
 cmd() {
+    rec="d=\"\${BELAY_STATE_DIR:-\${XDG_STATE_HOME:-\$HOME/.local/state}/belay}/dogfood\"; mkdir -p \"\$d\" && printf '%s\t$1: checksum mismatch (hooks inactive)\n' \"\$(date +%s%N)\" >> \"\$d/failing\""
     if [ "$1" = stop ]; then
         cat <<EOF
-cd / && s='$sums'; if printf '%s\n' "\$s" | sha256sum -c --status 2>/dev/null; then BELAY_DOGFOOD_SCOPE='$REPO' '$DEST/belay-dogfood' stop; else printf '{"systemMessage":"belay: hooks inactive: checksum mismatch: %s-- run scripts/dogfood/install.sh"}\n' "\$(printf '%s\n' "\$s" | sha256sum -c 2>/dev/null | sed -n 's/: FAILED.*/ /p' | tr -d '\n"\\\\')"; fi
+cd / && s='$sums'; if printf '%s\n' "\$s" | sha256sum -c --status 2>/dev/null; then BELAY_DOGFOOD_SCOPE='$REPO' '$DEST/belay-dogfood' stop; else $rec; printf '{"systemMessage":"belay: hooks inactive: checksum mismatch: %s-- run scripts/dogfood/install.sh"}\n' "\$(printf '%s\n' "\$s" | sha256sum -c 2>/dev/null | sed -n 's/: FAILED.*/ /p' | tr -d '\n"\\\\')"; fi
 EOF
     else
         cat <<EOF
-cd / && s='$sums'; printf '%s\n' "\$s" | sha256sum -c --status 2>/dev/null && BELAY_DOGFOOD_SCOPE='$REPO' '$DEST/belay-dogfood' $1
+cd / && s='$sums'; if printf '%s\n' "\$s" | sha256sum -c --status 2>/dev/null; then BELAY_DOGFOOD_SCOPE='$REPO' '$DEST/belay-dogfood' $1; else $rec; fi
 EOF
     fi
 }

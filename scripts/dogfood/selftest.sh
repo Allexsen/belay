@@ -196,9 +196,25 @@ mkdir -p "$T/broken" && cp "$HOOK" "$T/broken/" && echo 'raise SystemExit(3)' > 
 out=$(jq -cn '{session_id:"s1"}' | "$T/broken/belay-dogfood" stop)
 printf '%s' "$out" | jq -e '.systemMessage | test("hooks failing: stop: the turn.s receipt failed")' >/dev/null \
     || fail "a failed receipt was not said: $out"
-mkdir -p "$T/nojq" && for c in date cat mkdir chmod tr sed head wc mv rm dirname; do ln -sf "$(command -v $c)" "$T/nojq/$c"; done
+mkdir -p "$T/nojq" && for c in date cat mkdir chmod tr sed head wc mv rm dirname cut; do ln -sf "$(command -v $c)" "$T/nojq/$c"; done
 out=$(printf '{}' | PATH="$T/nojq" "$HOOK" stop)
 printf '%s' "$out" | grep -q '"systemMessage":"belay: hooks failing: stop: jq not found' || fail "a missing jq was not said: $out"
+
+# A hook that failed (decision 122): the calls around it were never seen,
+# so what changed then is unattributed -- never "between tool calls", never
+# background writing.
+hook pre t60 Bash "seen"; printf 'a\n' > "$S/seen.txt"; hook post t60 Bash
+BELAY=/nonexistent/belay hook pre t61 Bash "unseen"
+printf 'b\n' > "$S/unseen.txt"
+hook post t61 Bash
+out=$(hook stop)
+R8=$(ls -t "$T/state/dogfood"/s1.turn-*.txt | head -1)
+grep -A3 "^hooks were inactive; these changes are unattributed$" "$R8" | grep -q '  A unseen.txt' \
+    || fail "changes around a failed hook were not unattributed: $(cat "$R8")"
+grep -A2 '^Bash: seen$' "$R8" | grep -q '  A seen.txt' || fail "the call before the failure lost its change: $(cat "$R8")"
+! grep -q 'background writers\|^between tool calls' "$R8" || fail "a failed hook's gap read as background writing: $(cat "$R8")"
+printf '%s' "$out" | jq -e '.systemMessage | test("^belay: hooks failing: pre: belay mark failed")' >/dev/null \
+    || fail "the failure was not said with the receipt: $out"
 
 # install.sh (decision 115): the settings in a file, one line printed that
 # merges them into settings.json after a backup of its own -- other hooks
@@ -226,4 +242,33 @@ for k in 1 2; do
     printf '%s' "$out" | jq -e '.systemMessage | test("^belay: hooks inactive: checksum mismatch: .*/receipt.py -- run scripts/dogfood/install.sh$")' >/dev/null \
         || fail "a checksum mismatch was not said at Stop $k: $out"
 done
-echo "dogfood selftest: sequential, concurrent, background, cancelled, silent turn, other project, git folded, labels cut, background commands, directories folded, paths counted, failures said, install: ok"
+# Inactive hooks are recorded at every event, and once installed again the
+# receipt says what changed meanwhile is unattributed (decision 122).
+run_cmd() {  # run_cmd EVENT tool_use_id summary -- the installed command for EVENT
+    c=$(jq -r --arg e "$1" '.hooks[$e][0].hooks[0].command' "$SH")
+    jq -cn --arg t "$2" --arg s "$3" '{session_id:"s3", tool_use_id:$t, tool_name:"Bash", tool_input:{command:$s}}' | sh -c "$c"
+}
+run_cmd PreToolUse t71 "while inactive" >/dev/null
+printf 'd\n' > "$S/while-inactive.txt"
+run_cmd PostToolUse t71 "while inactive" >/dev/null
+grep -q 'pre: checksum mismatch (hooks inactive)' "$T/state/dogfood/failing" || fail "an inactive pre hook left no record"
+HOME=$FH sh scripts/dogfood/install.sh "$BELAY" "$S" >/dev/null 2>&1
+SH=$FH/.local/share/belay/dogfood/settings-hooks.json
+run_cmd SessionStart "" "" >/dev/null
+run_cmd PreToolUse t72 "before" >/dev/null; printf 'c\n' > "$S/before-gap.txt"; run_cmd PostToolUse t72 "before" >/dev/null
+echo '#' >> "$FH/.local/share/belay/dogfood/receipt.py"
+run_cmd PreToolUse t73 "while inactive" >/dev/null
+printf 'e\n' > "$S/gap.txt"
+run_cmd PostToolUse t73 "while inactive" >/dev/null
+HOME=$FH sh scripts/dogfood/install.sh "$BELAY" "$S" >/dev/null 2>&1
+run_cmd PreToolUse t74 "after" >/dev/null; printf 'f\n' > "$S/after-gap.txt"; run_cmd PostToolUse t74 "after" >/dev/null
+out=$(run_cmd Stop "" "")
+R9=$(ls -t "$T/state/dogfood"/s3.turn-*.txt | head -1)
+grep -A3 "^hooks were inactive; these changes are unattributed$" "$R9" | grep -q '  A gap.txt' \
+    || fail "changes made while the hooks were inactive were not unattributed: $(cat "$R9")"
+grep -A2 '^Bash: before$' "$R9" | grep -q '  A before-gap.txt' && grep -A2 '^Bash: after$' "$R9" | grep -q '  A after-gap.txt' \
+    || fail "the calls around the gap lost their changes: $(cat "$R9")"
+! grep -q 'background writers\|^between tool calls' "$R9" || fail "an inactive gap read as background writing: $(cat "$R9")"
+printf '%s' "$out" | jq -e '.systemMessage | test("^belay: hooks failing: [a-z]+: checksum mismatch \\(hooks inactive\\)")' >/dev/null \
+    || fail "the first good Stop did not say the hooks had been inactive: $out"
+echo "dogfood selftest: sequential, concurrent, background, cancelled, silent turn, other project, git folded, labels cut, background commands, directories folded, paths counted, failures said, inactive gaps unattributed, install: ok"
