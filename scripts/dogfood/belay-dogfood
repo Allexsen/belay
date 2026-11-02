@@ -16,8 +16,14 @@
 # Reads the hook's JSON on stdin. Never fails a tool call: always exits 0.
 # Never silent either (decision 114): whatever goes wrong in any hook is
 # kept in <state>/dogfood/failing, and the next Stop says it in one line,
-# every Stop while it keeps going wrong. (A checksum that no longer matches
-# is said by the settings command itself: install.sh.) Environment:
+# every Stop while it keeps going wrong -- whichever session's Stop comes
+# first, as a failure of one hook is every session's (decision 130). (A
+# checksum that no longer matches is said by the settings command itself:
+# install.sh.)
+#
+# Linux only, for now (decision 131): times come from `date +%s%N`, which
+# BSD and macOS `date` do not have (it prints a literal N), and a background
+# command's end is seen through /proc. Environment:
 #   BELAY                the binary (default ~/.local/bin/belay)
 #   BELAY_DOGFOOD_SCOPE  the repository to watch; other projects are ignored
 #   BELAY_STATE_DIR      belay's state directory (default as belay's)

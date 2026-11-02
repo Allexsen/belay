@@ -28,6 +28,8 @@ TESTS = ("test/", "tests/", "spec/", "__tests__/")
 BUILD = ("build/", "bin/")
 GIT = re.compile(r"^(.*?)\.git(/|$)")      # a repository's bookkeeping, at any depth
 LABEL = 60                                  # a call's label in a heading and the Stop line
+CALL_LINES = 10                             # a command's lines in "the calls in full" (decision 128)
+LISTED = 4                                  # the items a summary line names before "and N more"
 SYM = {"added": "A", "removed": "D", "modified": "M", "type_changed": "T",
        "metadata_only": "~", "unknown": "?"}
 
@@ -310,6 +312,153 @@ def folded_git(r):
     return m.group(1)
 
 
+def privilege_change(r):
+    """A privilege change on this record: caps, inode flags, a setuid,
+    setgid or sticky bit, or one belay's own receipt saw on an added or
+    removed file (receipt_privilege)."""
+    ch = set(r.get("changed") or [])
+    b, a = r.get("before", {}), r.get("after", {})
+    return bool(r.get("receipt_privilege") or ch & {"caps", "iflags"}
+                or "mode" in ch and (b.get("mode", 0) ^ a.get("mode", 0)) & 0o7000)
+
+
+def hook_path(p):
+    """A path under a repository's hooks/: never folded (decision 105)."""
+    m = GIT.match(p)
+    return bool(m) and (p[m.end():].startswith("hooks/") or p[m.end():] == "hooks")
+
+
+def touched(r):
+    """A file whose only change is its mtime (decision 127): content, mode,
+    owner, caps, xattrs and inode flags all equal; a hook never."""
+    return ("event" not in r and r["outcome"] == "metadata_only" and (r.get("changed") or []) == ["mtime_ns"]
+            and not hook_path(path_of(r)))
+
+
+def listed(items, total=None):
+    """Up to LISTED items, then how many more: a summary never drops one
+    silently."""
+    total = len(items) if total is None else total
+    s = ", ".join(items[:LISTED])
+    return s + (f" (and {total - min(len(items), LISTED):,} more)" if total > LISTED else "")
+
+
+def short(oid):
+    return oid[:12] if len(oid) in (40, 64) and all(c in "0123456789abcdef" for c in oid) else oid
+
+
+def git_items(recs):
+    """What git says, for the summary: its events when it emits them, else
+    its findings on refs, HEAD and hooks; hook changes always."""
+    out, other = [], 0
+    events = [r for r in recs if "event" in r and r.get("interp") == "git"]
+    for e in events:
+        out.append(printable(e.get("text", "")))
+    for r in recs:
+        if "event" in r:
+            continue
+        for f in r.get("findings") or []:
+            k = f.get("kind", "")
+            if k.startswith("git_hook"):
+                out.append(printable(f.get("text", "")))
+            elif events:
+                continue
+            elif k == "git_head_changed":
+                out.append(f"HEAD {short(f.get('from', ''))} -> {short(f.get('to', ''))}".replace("refs/heads/", ""))
+            elif k in ("git_ref_created", "git_ref_deleted", "git_ref_moved"):
+                ref = f.get("ref", "")
+                if not ref.startswith("refs/heads/"):
+                    other += 1
+                    continue
+                b = ref[len("refs/heads/"):]
+                out.append({"git_ref_created": f"branch {b} created at {short(f.get('to', ''))}",
+                            "git_ref_deleted": f"branch {b} deleted",
+                            "git_ref_moved": f"{b} -> {short(f.get('to', ''))}"}[k])
+    seen, uniq = set(), []
+    for x in out:
+        if x not in seen:
+            seen.add(x)
+            uniq.append(x)
+    if other:
+        uniq.append(f"{other} other ref{'s' if other != 1 else ''} updated")
+    return uniq
+
+
+def summary(secs):
+    """The turn at a glance (decision 125), before any section: what was
+    edited (with line counts), added, removed; git; packages; privilege;
+    build output; unknown. Each line names a few and counts the rest; the
+    sections below hold every record."""
+    recs = [r for h, rs, _, _ in secs for r in rs]
+    per = {}
+    for r in recs:
+        if "event" not in r:
+            per.setdefault(path_of(r), []).append(r)
+    edited, added, removed, gone = [], [], [], 0
+    added_dirs = set()
+    unknown, priv, build = [], [], 0
+    for p, rs in per.items():
+        if any(privilege_change(r) for r in rs):
+            priv.append(f"{SYM.get(rs[-1]['outcome'], '?')} {printable(p)}")
+        if p.startswith(BUILD):
+            build += 1
+            continue
+        if GIT.match(p):
+            continue
+        outs = [r["outcome"] for r in rs]
+        if outs[-1] == "unknown":
+            unknown.append(f"{printable(p)} ({', '.join(rs[-1].get('unknown', []))})")
+        elif "added" in outs and outs[-1] == "removed":
+            gone += 1
+        elif "added" in outs:
+            added.append(p)
+            if rs[-1].get("type") == "dir":
+                added_dirs.add(p)
+        elif outs[-1] == "removed":
+            removed.append(printable(p))
+        elif any(o in ("modified", "type_changed") for o in outs):
+            plus = minus = 0
+            text = False
+            for r in rs:
+                for f in r.get("findings") or []:
+                    if f.get("kind") == "text_changed":
+                        plus, minus, text = plus + f.get("lines_added", 0), minus + f.get("lines_deleted", 0), True
+                    elif f.get("kind") == "text_rewritten":
+                        plus, minus, text = plus + f.get("lines_after", 0), minus + f.get("lines_before", 0), True
+            kind = " (type changed)" if "type_changed" in outs else f" +{plus} -{minus}" if text else ""
+            edited.append(printable(p) + kind)
+    # An added directory stands for what was added below it.
+    roots = sorted(d for d in added_dirs if not any(d.startswith(o + "/") for o in added_dirs))
+    shown = [f"{printable(d)}/ (+{sum(1 for p in added if p.startswith(d + '/'))})" for d in roots]
+    shown += [printable(p) for p in sorted(added) if not any(p == d or p.startswith(d + "/") for d in roots)]
+    lines = []
+    if edited:
+        lines.append(f"  edited     {len(edited):,}: {listed(sorted(edited))}")
+    if added or removed or gone:
+        parts = []
+        if added:
+            parts.append(f"added {len(added):,}: {listed(shown)}")
+        if removed:
+            parts.append(f"removed {len(removed):,}: {listed(sorted(removed))}")
+        if gone:
+            parts.append(f"{gone:,} added and removed again")
+        lines.append("  files      " + "; ".join(parts))
+    git = git_items(recs)
+    if git:
+        lines.append(f"  git        {listed(git)}")
+    pk = [f"{r.get('interp', '')} {printable(r.get('text', ''))}" for r in recs
+          if "event" in r and r.get("interp") in ("pip", "dpkg")]
+    if pk:
+        lines.append(f"  packages   {listed(pk)}")
+    if priv:
+        lines.append(f"  privilege  {listed(sorted(priv))}")
+    if build:
+        lines.append(f"  build      {build:,} change{'s' if build != 1 else ''} under build/, bin/")
+    if unknown:
+        lines.append(f"  unknown    {len(unknown):,}: {listed(sorted(unknown))}")
+    return ["", "summary"] + lines if lines else []
+
+
 def render(scope, belay, secs, errors):
     lines = []
     sha = ""
@@ -332,7 +481,8 @@ def render(scope, belay, secs, errors):
     lines.append(head)
     for e in errors:
         lines.append("  receipt incomplete: " + printable(e.get("message", "")))
-    detail = []
+    lines.extend(summary(secs))
+    detail, touches = [], []
     for head, recs, outside, calls in secs:
         refs = []
         for c in calls:
@@ -353,8 +503,9 @@ def render(scope, belay, secs, errors):
                 continue
             shown.append(r)
         roots, under = folded_dirs(shown)
+        same = [r for r in shown if touched(r) and id(r) not in under and id(r) not in roots]
         for r in shown:
-            if id(r) in under:
+            if id(r) in under or r in same:
                 continue
             if id(r) in roots and roots[id(r)]:
                 k = roots[id(r)]
@@ -362,6 +513,10 @@ def render(scope, belay, secs, errors):
                              f"entr{'ies' if k != 1 else 'y'} below it")
                 continue
             lines.append(line_of(r, outside))
+        if same:
+            touches.append([path_of(r) for r in same])
+            lines.append(f"  ~ {len(same):,} file{'s' if len(same) != 1 else ''} touched, content unchanged   "
+                         f"[t{len(touches)}]")
         if build:
             lines.append(f"  build output: {len(build)} change{'s' if len(build) != 1 else ''} under build/, bin/")
         for repo, k in git.items():
@@ -372,7 +527,16 @@ def render(scope, belay, secs, errors):
         for k, c in enumerate(detail, 1):
             text = full_label(c).split("\n")
             lines.append(f"  [{k}] " + printable(text[0]))
-            lines.extend("      " + printable(t) for t in text[1:])
+            lines.extend("      " + printable(t) for t in text[1:CALL_LINES])
+            if len(text) > CALL_LINES:      # the whole command is in the turn's JSON ("calls")
+                more = len(text) - CALL_LINES
+                lines.append(f"      \u2026 {more:,} more line{'s' if more != 1 else ''}")
+    if touches:
+        lines.append("")
+        lines.append("the files touched, content unchanged")
+        for k, ps in enumerate(touches, 1):
+            lines.append(f"  [t{k}] " + printable(ps[0]))
+            lines.extend("       " + printable(p) for p in ps[1:])
     return "\n".join(lines) + "\n", n, paths
 
 
