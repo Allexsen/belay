@@ -174,12 +174,42 @@ def line_of(r, outside):
     return "".join(ch if ch.isprintable() else "?" for ch in s)
 
 
+INACTIVE = "hooks were inactive; these changes are unattributed"
+
+
+def failure_times(d):
+    """When a hook failed or was inactive (belay-dogfood, install.sh): the
+    first field of each line of `failing` (since the last Stop) and
+    `failures.log` (before it), in nanoseconds."""
+    out = []
+    for name in ("failing", "failures.log"):
+        try:
+            with open(os.path.join(d, name), encoding="utf-8", errors="replace") as f:
+                for line in f:
+                    head = line.split("\t", 1)[0]
+                    if head.isdigit():
+                        out.append(int(head))
+        except OSError:
+            pass
+    return sorted(out)
+
+
 def sections(events, belay, scope, lo, hi, persistent=None, d=None, sid=None):
     """[(heading, records)] for the checkpoints in [lo, hi], and the errors.
     `persistent`: (path, reasons) unknown in every interval of the session so
     far, or None at its first turn; returned narrowed to this turn's."""
     calls = calls_of(events, d, sid)
     cps = sorted({e["cp"] for e in events if e.get("cp") is not None and lo <= e["cp"] <= hi})
+    # Decision 122: an interval during which a hook failed or was inactive
+    # holds calls the log never saw -- what changed then is unattributed,
+    # never "between tool calls". Its window: from the first checkpoint's
+    # mark to the end of the second's.
+    when = {}
+    for e in events:
+        if e.get("cp") is not None and "t0" in e:
+            t0, t1 = when.get(e["cp"], (e["t0"], e["t1"]))
+            when[e["cp"]] = (min(t0, e["t0"]), max(t1, e["t1"]))
+    failed = failure_times(d) if d is not None else []
     # An error has no checkpoint: it is this turn's when it was logged after
     # the stop or start that opened the turn and before the one that ends it
     # (one failure used to be said by every later turn).
@@ -224,6 +254,9 @@ def sections(events, belay, scope, lo, hi, persistent=None, d=None, sid=None):
         running = tuple(sorted(t for t, c in calls.items()
                                if c["background"] and c["post"] is not None and c["post"] <= a
                                and (c["background_end"] is None or c["background_end"] >= b)))
+        wa, wb = when.get(a, (None, None))[0], when.get(b, (None, None))[1]
+        if wa is not None and wb is not None and any(wa <= t <= wb for t in failed):
+            open_, running = ("inactive",), ()
         groups.setdefault((open_, running), []).extend(recs)
     outside = {path_of(r) for r in groups.get(((), ()), []) if "event" not in r}
     out = []
@@ -237,7 +270,9 @@ def sections(events, belay, scope, lo, hi, persistent=None, d=None, sid=None):
         for r in recs:
             last[("e", len(last)) if "event" in r else path_of(r)] = r
         recs = list(last.values())
-        if running:
+        if key == ("inactive",):
+            head = INACTIVE
+        elif running:
             head = "a background command may have written these: " + "; ".join(label(calls[t]) for t in running)
             if key:
                 head += "   (open at the time: " + "; ".join(label(calls[t]) for t in key) + ")"
@@ -248,7 +283,8 @@ def sections(events, belay, scope, lo, hi, persistent=None, d=None, sid=None):
             head = label(c) + ("   (cancelled)" if c["cancelled"] else "")
         else:
             head = "during these concurrent calls: " + "; ".join(label(calls[t]) for t in key)
-        out.append((head, recs, outside if key or running else set(), [calls[t] for t in running + key]))
+        named = [] if key == ("inactive",) else [calls[t] for t in running + key]
+        out.append((head, recs, outside if named else set(), named))
     return out, errors, calls, throughout
 
 

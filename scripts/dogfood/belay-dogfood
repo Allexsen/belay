@@ -41,10 +41,12 @@ case $ev in start|pre|post|stop|end) ;; *) exit 0 ;; esac
 D=$STATE/dogfood
 FAILING=$D/failing
 here=
-# A failure, kept for the next Stop; where even that cannot be written, this
-# invocation says it itself when it is a Stop.
+# A failure, kept for the next Stop with when it happened (the receipt
+# labels what changed around it unattributed: decision 122); where even
+# that cannot be written, this invocation says it itself when it is a Stop.
 fail() {
-    { mkdir -p "$D" && chmod 700 "$D" && printf '%s: %s\n' "$ev" "$1" | tr -d '\000-\011\013-\037' >> "$FAILING"; } \
+    { mkdir -p "$D" && chmod 700 "$D" &&
+      printf '%s\t%s: %s\n' "$(date +%s%N)" "$ev" "$(printf '%s' "$1" | tr -d '\000-\037')" >> "$FAILING"; } \
         2>/dev/null || here="$ev: $1"
 }
 # JSON's string escapes, for a line made here.
@@ -55,7 +57,7 @@ say() {
     f=
     if [ -s "$FAILING" ] && mv "$FAILING" "$FAILING.$$" 2>/dev/null; then
         n=$(wc -l < "$FAILING.$$")
-        f=$(head -1 "$FAILING.$$")
+        f=$(head -1 "$FAILING.$$" | cut -f2-)
         [ "$n" -gt 1 ] && f="$f (and $((n - 1)) more since the last stop: $D/failures.log)"
         cat "$FAILING.$$" >> "$D/failures.log" 2>/dev/null
         rm -f "$FAILING.$$"
