@@ -59,7 +59,7 @@ want "$T/out" '"kind":"mark"'
 want "$T/out" '"used":true'
 
 code 0 "$BELAY" diff --scope "$S" --since 1 --to 2
-want "$T/out" 'packages and files explained'
+grep -qx 'events' "$T/out" || fail "no 'events' heading"   # the heading, not the headline's count
 want "$T/out" 'upgraded six 1.16.0 -> 1.17.0'
 want "$T/out" 'upgraded bash:amd64 5.1-6 -> 5.2-1'
 want "$T/out" 'removed vim:amd64 2:9.0-1'

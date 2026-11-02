@@ -84,7 +84,7 @@ TEST(a_receipt_puts_events_then_privilege_then_changes) {
         "  1 modified · 1 added · 3 metadata_only · 1 unknown    events: 2\n"
         "  2 entries changed while they were read (checkpoint 4); running belay again settles them\n"
         "\n"
-        "packages and files explained\n"
+        "events\n"
         "  pip   upgraded numpy 1 -> 2\n"
         "  dpkg  installed git: 1 (provisional: a path it came from is unknown)\n"
         "\n"
