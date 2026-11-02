@@ -137,3 +137,5 @@
 2026-11-02T15:26:56+04:00	oracle: E11 (no event from a path not captured) and V2-R7 (the header's excluded lists)
 # Decision 118: the E11/E6 pin wording lands one commit before the schema's event rules follow it (test_pins fails).
 2026-11-02T20:18:52+04:00	pins: E11 names the core's events it suppresses; E6 lists no path E11 withholds
+# Decision 121: the E6 causes sentence changes one commit before the oracle's author quotes it (make oracle stops).
+2026-11-02T20:48:40+04:00	spec: a failed end hook's three causes, in both places diff-v1 lists them
