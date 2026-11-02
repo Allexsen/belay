@@ -116,8 +116,42 @@ printf '%s' "$out" | jq -e '.systemMessage | (test("git fetch") | not) and test(
 jq -e 'any(.sections[].calls[]; test("git fetch -q origin\necho second line"))' "${R4%.txt}.json" >/dev/null \
     || fail "the JSON lost the whole command"
 
+# A command left running in the background (decision 111): what lands while
+# it runs may be its writing -- said so, never put on the open call alone.
+# Its end is seen at the next hook (its output file no longer open). One
+# moved to the background at its timeout, whose output file cannot be
+# found, runs until the stop.
+export BELAY_DOGFOOD_TASKS="$T/tasks"; mkdir -p "$T/tasks"
+raw() { printf '%s' "$2" | "$HOOK" "$1"; }
+bgcall='"session_id":"s1","tool_use_id":"t20","tool_name":"Bash","tool_input":{"command":"make watch","run_in_background":true}'
+raw pre "{$bgcall}"
+sleep 60 > "$T/tasks/bgt20.output" & held=$!
+raw post "{$bgcall,\"tool_response\":{\"backgroundTaskId\":\"bgt20\"}}"
+hook pre t21 Bash "cat README"; printf 'w\n' > "$S/watch.out"; hook post t21 Bash
+printf 'v\n' >> "$S/watch.out"
+kill $held; wait $held 2>/dev/null || :        # its status is the kill's
+hook pre t22 Bash "edit f"; printf 'f\n' > "$S/src/f.c"; hook post t22 Bash
+tocall='"session_id":"s1","tool_use_id":"t23","tool_name":"Bash","tool_input":{"command":"long build"}'
+raw pre "{$tocall}"; raw post "{$tocall,\"tool_response\":{\"backgroundTaskId\":\"gone1\",\"timedOutAfterMs\":120000}}"
+printf 'g\n' > "$S/late.txt"
+out=$(hook stop)
+R5=$(ls -t "$T/state/dogfood"/s1.turn-*.txt | head -1)
+grep -A2 '^a background command may have written these: Bash: make watch   (open at the time: Bash: cat README)$' "$R5" \
+    | grep -q '  A watch.out' || fail "the open call was blamed for the background command's time: $(cat "$R5")"
+! grep -q '^Bash: cat README' "$R5" || fail "a read-only call got changes while a background command ran: $(cat "$R5")"
+grep -A2 '^a background command may have written these: Bash: make watch$' "$R5" | grep -q '  M watch.out' \
+    || fail "a write between calls while it ran is not said to be maybe its"
+grep -A2 '^Bash: edit f$' "$R5" | grep -q '  A src/f.c' || fail "after its end, a call is not credited: $(cat "$R5")"
+grep -A2 '^a background command may have written these: Bash: long build$' "$R5" | grep -q '  A late.txt' \
+    || fail "a command moved to the background at its timeout is not seen: $(cat "$R5")"
+hook pre t24 Bash "after"; printf 'h\n' > "$S/src/h.c"; hook post t24 Bash
+out=$(hook stop)
+R6=$(ls -t "$T/state/dogfood"/s1.turn-*.txt | head -1)
+grep -A2 '^Bash: after$' "$R6" | grep -q '  A src/h.c' && ! grep -q 'background command' "$R6" \
+    || fail "a background command whose output cannot be found outlived the stop: $(cat "$R6")"
+
 hook end
 [ -f "$T/state/dogfood/s1.receipt.txt" ] || fail "no session receipt"
 ls "$T/notes"/*-s1.md >/dev/null 2>&1 || fail "a test file changed, but the receipt was not kept"
 grep -q 'Kept because: a test file changed' "$T"/notes/*-s1.md || fail "kept for the wrong reason"
-echo "dogfood selftest: sequential, concurrent, background, cancelled, silent turn, other project, git folded, labels cut: ok"
+echo "dogfood selftest: sequential, concurrent, background, cancelled, silent turn, other project, git folded, labels cut, background commands: ok"

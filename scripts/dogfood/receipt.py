@@ -53,14 +53,27 @@ def calls_of(events, d=None, sid=None):
         tid = e.get("tool_use_id")
         if not tid or e.get("cp") is None:
             continue
+        if e.get("event") == "background_end":
+            continue
         c = calls.setdefault(tid, {"tool": e.get("tool"), "summary": e.get("summary"),
                                    "agent": e.get("agent"), "pre": None, "post": None,
-                                   "ms": 0.0, "cancelled": False})
+                                   "ms": 0.0, "cancelled": False, "background": None,
+                                   "background_end": None})
         if e["event"] == "pre":
             c["pre"] = e["cp"]
         elif e["event"] == "post":
             c["post"] = e["cp"]
+            c["background"] = e.get("background")
         c["ms"] += (e["t1"] - e["t0"]) / 1e6
+    # A command left running in the background ends at the first hook that
+    # saw it gone (belay-dogfood); never seen gone, it runs to the end.
+    ends = {}
+    for e in events:
+        if e.get("event") == "background_end" and e.get("cp") is not None:
+            k = e.get("tool_use_id", "")
+            ends[k] = min(ends.get(k, e["cp"]), e["cp"])
+    for tid, c in calls.items():
+        c["background_end"] = ends.get(re.sub(r"[^A-Za-z0-9_-]", "", tid))
     for tid, c in calls.items():
         c["full"] = None
         if d is not None:
@@ -176,27 +189,36 @@ def sections(events, belay, scope, lo, hi, persistent=None, d=None, sid=None):
             continue
         open_ = tuple(sorted(t for t, c in calls.items()
                              if c["pre"] is not None and c["post"] is not None and c["pre"] <= a and c["post"] >= b))
-        groups.setdefault(open_, []).extend(recs)
-    outside = {path_of(r) for r in groups.get((), []) if "event" not in r}
+        # Decision 111: while a command runs in the background, what lands
+        # may be its writing -- said so, never put on the open call alone.
+        running = tuple(sorted(t for t, c in calls.items()
+                               if c["background"] and c["post"] is not None and c["post"] <= a
+                               and (c["background_end"] is None or c["background_end"] >= b)))
+        groups.setdefault((open_, running), []).extend(recs)
+    outside = {path_of(r) for r in groups.get(((), ()), []) if "event" not in r}
     out = []
     if throughout:
         out.append(("unknown throughout the session (never reported unchanged)",
                     [{"path": p, "outcome": "unknown", "unknown": list(u)} for p, u in sorted(throughout)], set(), []))
-    for key, recs in groups.items():
+    for (key, running), recs in groups.items():
         # One line per path in a section: its last record (several intervals
         # of one call, or of the time between calls, touch the same path).
         last = {}
         for r in recs:
             last[("e", len(last)) if "event" in r else path_of(r)] = r
         recs = list(last.values())
-        if not key:
+        if running:
+            head = "a background command may have written these: " + "; ".join(label(calls[t]) for t in running)
+            if key:
+                head += "   (open at the time: " + "; ".join(label(calls[t]) for t in key) + ")"
+        elif not key:
             head = "between tool calls"
         elif len(key) == 1:
             c = calls[key[0]]
             head = label(c) + ("   (cancelled)" if c["cancelled"] else "")
         else:
             head = "during these concurrent calls: " + "; ".join(label(calls[t]) for t in key)
-        out.append((head, recs, outside if key else set(), [calls[t] for t in key]))
+        out.append((head, recs, outside if key or running else set(), [calls[t] for t in running + key]))
     return out, errors, calls, throughout
 
 
