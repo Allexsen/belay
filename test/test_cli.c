@@ -709,7 +709,34 @@ TEST(an_exclude_is_named_and_never_reads_as_removed) {
     /* both sides excluding it: nothing about it at all */
     sh("printf 'y\\n' >> '%s/node_modules/pkg/i.js'", g_scope);
     ASSERT_EQ_INT(0, belay("diff", "--scope", g_scope, "--since", "2", "--json", "--exit-code", NULL));
-    ASSERT_TRUE(strstr(g_out, "node_modules") == NULL);
+    ASSERT_TRUE(strstr(g_out, "\"outcome\"") == NULL);                    /* in no record ... */
+    ASSERT_TRUE(strstr(g_out, "\"before_excluded\":[{\"path\":\"node_modules\",\"reason\":\"user\"") != NULL);
+    ASSERT_TRUE(strstr(g_out, "\"after_excluded\":[{\"path\":\"node_modules\",\"reason\":\"user\"") != NULL);
+}
+
+/* diff-events E11 (review of #33, D1): a package under an exclude was not
+ * looked at on that side, so no event is derived from it -- excluding a venv
+ * or dpkg's database used to read as packages installed or removed. */
+TEST(no_package_event_comes_from_an_excluded_path) {
+    fresh();
+    sh("d='%s/venv/lib/python3.12/site-packages' && mkdir -p \"$d/foo-1.0.dist-info\" \"$d/foo\" "
+       "&& printf 'Name: foo\\nVersion: 1.0\\n' > \"$d/foo-1.0.dist-info/METADATA\" "
+       "&& printf 'foo/__init__.py,,\\n' > \"$d/foo-1.0.dist-info/RECORD\" && : > \"$d/foo/__init__.py\" "
+       "&& mkdir -p '%s/var/lib/dpkg' && printf 'Package: bash\\nStatus: install ok installed\\nVersion: 5.2\\n\\n' "
+       "> '%s/var/lib/dpkg/status'", g_scope, g_scope, g_scope);
+    ASSERT_EQ_INT(0, belay("exclude", "--scope", g_scope, "--add", "venv", NULL));
+    ASSERT_EQ_INT(0, belay("check", "--scope", g_scope, NULL));              /* 1: venv excluded */
+    ASSERT_EQ_INT(0, belay("exclude", "--scope", g_scope, "--remove", "venv", NULL));
+    ASSERT_EQ_INT(0, belay("exclude", "--scope", g_scope, "--add", "var/lib/dpkg", NULL));
+    ASSERT_EQ_INT(0, belay("mark", "--scope", g_scope, NULL));               /* 2: dpkg excluded */
+    ASSERT_EQ_INT(0, belay("diff", "--scope", g_scope, "--since", "1", "--to", "2", "--json", NULL));
+    ASSERT_TRUE(strstr(g_out, "\"path\":\"venv/lib/python3.12/site-packages/foo-1.0.dist-info/RECORD\","
+                              "\"outcome\":\"unknown\"") != NULL);         /* the record stands */
+    ASSERT_TRUE(strstr(g_out, "\"path\":\"var/lib/dpkg/status\",\"outcome\":\"unknown\"") != NULL);
+    ASSERT_TRUE(strstr(g_out, "\"event\"") == NULL);
+    ASSERT_TRUE(strstr(g_out, "\"events\":0") != NULL);
+    ASSERT_EQ_INT(0, belay("diff", "--scope", g_scope, "--since", "1", "--to", "2", NULL));
+    ASSERT_TRUE(strstr(g_out, "installed") == NULL && strstr(g_out, "removed bash") == NULL);
 }
 
 /* S1: the walk counts belay's state directory once, at its own path relative
@@ -756,8 +783,9 @@ TEST(the_excludes_file_and_command_are_strict) {
     ASSERT_TRUE(strstr(g_err, "nothere is not excluded") != NULL);
 }
 
-/* D2: the machine interfaces name what was not walked -- diff --json on
- * stderr, both sides, with --to too; checkpoint JSON by path. S2: adding an
+/* D2: the machine interfaces name what was not walked -- diff --json in its
+ * header (V2-R7) and on stderr, both sides, with --to too; checkpoint JSON by
+ * path. S2: adding an
  * exclude over the newest files is not "ctime went backwards". */
 TEST(json_output_names_every_excluded_path) {
     fresh();
@@ -768,7 +796,10 @@ TEST(json_output_names_every_excluded_path) {
     ASSERT_EQ_INT(0, belay("mark", "--scope", g_scope, NULL));
     ASSERT_EQ_INT(0, belay("diff", "--scope", g_scope, "--since", "1", "--to", "2", "--json", NULL));
     ASSERT_TRUE(strstr(g_err, "belay: not compared: node_modules (excluded for this scope)\n") != NULL);
-    ASSERT_TRUE(strstr(g_out, "node_modules") == NULL);                   /* in no record */
+    ASSERT_TRUE(strstr(g_out, "\"path\":\"node_modules\",\"outcome\"") == NULL);  /* in no record */
+    /* ... and in the header, each side's (V2-R7): stderr is not the record */
+    ASSERT_TRUE(strstr(g_out, "\"before_excluded\":[{\"path\":\"node_modules\",\"reason\":\"user\",\"dev\":") != NULL);
+    ASSERT_TRUE(strstr(g_out, "\"after_excluded\":[{\"path\":\"node_modules\",\"reason\":\"user\",\"dev\":") != NULL);
     /* S2: an exclude added over the newest file; the next mark prefilters */
     sh("printf 'y\\n' > '%s/src/newest.c'", g_scope);
     ASSERT_EQ_INT(0, belay("mark", "--scope", g_scope, NULL));
@@ -837,6 +868,7 @@ int main(void) {
     RUN(ids_run_out_and_a_failed_diff_leaves_nothing);
     RUN(excludes_are_configured_per_scope);
     RUN(an_exclude_is_named_and_never_reads_as_removed);
+    RUN(no_package_event_comes_from_an_excluded_path);
     RUN(the_state_directory_is_located_inside_the_scope_by_path);
     RUN(the_excludes_file_and_command_are_strict);
     RUN(json_output_names_every_excluded_path);

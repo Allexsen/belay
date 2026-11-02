@@ -55,15 +55,17 @@ static FILE *g_f;
 static size_t g_n, g_unreadable, g_unstable, g_mounts, g_raced, g_vanished;
 static long long g_created = 1;           /* the next manifest's created_ns */
 static bool g_v2;                         /* the next manifest is version 2 */
+static const char *g_xs;                  /* its `excluded`, when not [] */
 
 static void m_begin(const char *name, const char *scope, unsigned long long hash_max) {
     char p[400];
     snprintf(p, sizeof p, "%s/%s", g_dir, name);
     g_f = fopen(p, "wb");
     fprintf(g_f, "{\"belay_manifest\":%d,\"created_ns\":%lld,\"scopes\":[\"%s\"],\"hash\":\"sha256\","
-                 "\"hash_max_bytes\":%llu,\"store_max_bytes\":0%s}\n", g_v2 ? 2 : 1, g_created, scope, hash_max,
-            g_v2 ? ",\"excluded\":[],\"walk_start_ns\":0" : "");
+                 "\"hash_max_bytes\":%llu,\"store_max_bytes\":0%s%s%s}\n", g_v2 ? 2 : 1, g_created, scope, hash_max,
+            g_v2 ? ",\"excluded\":" : "", g_v2 ? (g_xs ? g_xs : "[]") : "", g_v2 ? ",\"walk_start_ns\":0" : "");
     g_created = 1;
+    g_xs = NULL;
     g_n = g_unreadable = g_unstable = g_mounts = g_raced = g_vanished = 0;
 }
 
@@ -115,7 +117,7 @@ static void m_end(void) {
 /* ---- running a diff, reading its lines ---- */
 
 static struct belay_diff_stats g_st;
-static char g_text[1 << 16];
+static char g_text[1 << 18];         /* a header with two full excluded lists: ~120 KB */
 
 static int run(void) {
     char b[400], a[400];
@@ -205,7 +207,8 @@ TEST(a_remounted_scope_reports_once_and_still_compares_content) {
     E(.path = "g", .type = "reg", .size = 3, .sha = HB, .ino = 80, .dev = 9); m_end();
     REQUIRE(run() == 0);
     ASSERT_TRUE(strstr(g_text, "\"scope_remounted\":true,\"identity_compared\":false,\"before_manifest_version\":1,"
-                               "\"after_manifest_version\":1}") != NULL);
+                               "\"after_manifest_version\":1,"
+                               "\"before_excluded\":null,\"after_excluded\":null}") != NULL);
     ASSERT_TRUE(record("f") == NULL);                    /* renumbered, nothing else */
     ASSERT_TRUE(has("g", "\"outcome\":\"modified\"") && has("g", "\"changed\":[\"sha256\"]"));
     ASSERT_TRUE(record(".") == NULL);
@@ -224,7 +227,8 @@ TEST(inode_numbers_compare_only_within_one_device) {
     REQUIRE(run() == 0);
     ASSERT_TRUE(record("f") == NULL);                    /* off the root's device on both sides */
     ASSERT_TRUE(strstr(g_text, "\"scope_remounted\":false,\"identity_compared\":true,\"before_manifest_version\":1,"
-                               "\"after_manifest_version\":1}") != NULL);
+                               "\"after_manifest_version\":1,"
+                               "\"before_excluded\":null,\"after_excluded\":null}") != NULL);
 }
 
 /* Item 1c: ttys and FIFOs stamp themselves when used, and a mount root's
@@ -1313,6 +1317,42 @@ TEST(a_record_line_has_no_fixed_bound) {
     ASSERT_TRUE(longest > 65536);                                      /* past the old cap */
 }
 
+/* V2-R7: the header carries each side's `excluded` as that manifest wrote it
+ * -- a path both sides excluded is in no record and only there; a name not
+ * UTF-8 in base64 -- however long the lists: each manifest's fits its 64 KiB
+ * line (A2), the two together do not fit one buffer, so they are written in
+ * parts. */
+TEST(the_header_carries_each_sides_excluded) {
+    m_begin("before", "/s", 1000); ROOT(); m_end();
+    g_v2 = true;
+    g_xs = "[{\"path\":\"nm\",\"reason\":\"user\",\"dev\":1,\"ino\":2},"
+           "{\"path_b64\":\"bv91\",\"reason\":\"state_dir\",\"dev\":1,\"ino\":3}]";
+    m_begin("after", "/s", 1000); ROOT(); m_end();
+    REQUIRE(run() == 0);
+    ASSERT_TRUE(strstr(g_text, "\"before_excluded\":null,\"after_excluded\":[{\"path\":\"nm\",\"reason\":\"user\","
+                               "\"dev\":1,\"ino\":2},{\"path_b64\":\"bv91\",\"reason\":\"state_dir\",\"dev\":1,"
+                               "\"ino\":3}]}\n") != NULL);
+    static char big[15 * 4100 + 64];
+    size_t w = 0;
+    w += (size_t)snprintf(big + w, sizeof big - w, "[");
+    for (int i = 0; i < 15; i++) {
+        w += (size_t)snprintf(big + w, sizeof big - w, "%s{\"path\":\"", i ? "," : "");
+        for (int k = 0; k < 4000; k++) big[w++] = 'a';
+        w += (size_t)snprintf(big + w, sizeof big - w, "%03d\",\"reason\":\"user\",\"dev\":1,\"ino\":%d}", i, i + 2);
+    }
+    snprintf(big + w, sizeof big - w, "]");
+    for (int k = 0; k < 2; k++) {
+        g_v2 = true;
+        g_xs = big;
+        m_begin(k ? "after" : "before", "/s", 1000); ROOT(); m_end();
+    }
+    if (run() != 0) BELAY_FAIL("%s", belay_err_msg());
+    const char *nl = strchr(g_text, '\n');
+    REQUIRE(nl != NULL);
+    ASSERT_TRUE(nl - g_text > 2 * 15 * 4000);                         /* both lists, whole */
+    ASSERT_TRUE(strstr(g_text, "014\",\"reason\":\"user\",\"dev\":1,\"ino\":16}]}\n") != NULL);
+}
+
 /* Manifest v2, V2-R4: manifests of different versions compare, the same
  * records either way; the header names both versions (provenance only). */
 TEST(manifests_of_different_versions_compare) {
@@ -1323,7 +1363,8 @@ TEST(manifests_of_different_versions_compare) {
         m_begin("after", "/s", 1000); ROOT(); E(.path = "f", .type = "reg", .size = 4, .sha = HB); m_end();
         REQUIRE(run() == 0);
         char want[120];
-        snprintf(want, sizeof want, "\"before_manifest_version\":1,\"after_manifest_version\":%d}\n", way ? 2 : 1);
+        snprintf(want, sizeof want, "\"before_manifest_version\":1,\"after_manifest_version\":%d,"
+                 "\"before_excluded\":null,\"after_excluded\":%s}\n", way ? 2 : 1, way ? "[]" : "null");
         ASSERT_TRUE(strstr(g_text, want) != NULL);
         const char *rec = strchr(g_text, '\n');                        /* past the header */
         REQUIRE(rec != NULL);
@@ -1394,6 +1435,7 @@ int main(void) {
     RUN(a_type_change_carries_each_sides_content_fields);
     RUN(a_record_line_has_no_fixed_bound);
     RUN(manifests_of_different_versions_compare);
+    RUN(the_header_carries_each_sides_excluded);
     snprintf(cmd, sizeof cmd, "rm -rf '%s'", g_dir);
     if (system(cmd) != 0) { /* best effort */ }
     return belay_test_report();

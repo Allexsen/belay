@@ -113,6 +113,10 @@ static int explain(struct run *x, const struct belay_entry *b, const struct bela
     const struct belay_entry *e = a != NULL ? a : b;
     const size_t sl = strlen(scope), sep = sl > 1 ? 1 : 0;
     findings_reset(&x->findings, BELAY_INTERP_BINARY);    /* nothing of the last path survives */
+    /* Not looked at on one side (excluded, or below an unreadable directory
+     * or a mount): no interpreter is given it, so no event is derived from
+     * it -- nothing was installed or removed there (diff-events E11). */
+    if (v->outcome == D_UNKNOWN && v->reasons == DRBIT(DR_NOT_CAPTURED)) return 0;
     if (sl + sep + e->path_len >= sizeof x->abs) return 0;
     memcpy(x->abs, scope, sl);
     if (sep) x->abs[sl] = '/';

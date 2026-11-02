@@ -58,7 +58,7 @@ struct finding_kind_def {
 extern const struct finding_kind_def FINDING_KINDS[FK_COUNT];
 
 /* The rules of event records (diff-events.md), by id ("E1 placement"). */
-#define EVENT_RULE_COUNT 10
+#define EVENT_RULE_COUNT 11
 struct event_rule { const char *id, *statement; };
 extern const struct event_rule EVENT_RULES[EVENT_RULE_COUNT];
 
