@@ -13,7 +13,7 @@ BELAY=${1:-bin/belay}
 case $BELAY in /*) ;; *) BELAY=$PWD/$BELAY ;; esac
 HOOK=$PWD/scripts/dogfood/belay-dogfood
 T=$(mktemp -d "${TMPDIR:-/tmp}/belay-dogfood.XXXXXX")
-trap 'rm -rf "${T:?}"' EXIT
+trap 'chmod -R u+rwx "${T:?}" 2>/dev/null; rm -rf "${T:?}"' EXIT
 S=$T/repo
 mkdir -p "$S/src" "$S/tests" "$T/state" && chmod 700 "$T/state"
 printf 'a\n' > "$S/src/a.c"
@@ -27,6 +27,7 @@ hook() {  # hook EVENT [tool_use_id tool summary]
 }
 LOG=$T/state/dogfood/s1.jsonl
 
+mkdir "$S/locked" && chmod 000 "$S/locked"         # unreadable before the session: unknown throughout
 hook start
 # one call, writing src/a.c
 hook pre t1 Bash "edit a"; printf 'b\n' >> "$S/src/a.c"; hook post t1 Bash
@@ -46,8 +47,17 @@ grep -q '^Bash: edit a$' "$R" && grep -q '  M src/a.c' "$R" || fail "src/a.c not
 grep -A2 '^between tool calls$' "$R" | grep -q '  A watcher.log' || fail "the background write not between calls"
 grep -q '^during these concurrent calls: Bash: write b; Bash: write c$' "$R" || fail "the concurrent calls not together"
 grep -q '^Bash: weaken a test   (cancelled)$' "$R" || fail "the cancelled call not named"
-grep -q 'background writers were active (1 change outside any tool call)' "$R" || fail "background not said"
+grep -q 'background writers were active (1 change outside any tool call)' "$R" || fail "background not said: $(cat "$R")"
 
+# an entry unknown in every interval (an unreadable directory) is said once,
+# and is no change: a turn with nothing else says nothing
+hook pre t5 Bash "touch d"; printf 'd\n' > "$S/src/d.c"; hook post t5 Bash
+hook pre t6 Bash "touch e"; printf 'e\n' > "$S/src/e.c"; hook post t6 Bash
+out=$(hook stop)
+R2=$(ls -t "$T/state/dogfood"/s1.turn-*.txt | head -1)
+[ "$(grep -c 'locked' "$R2")" = 1 ] || fail "the unreadable directory not said once: $(cat "$R2")"
+grep -q '^unknown throughout the session' "$R2" || fail "no 'unknown throughout' section: $(cat "$R2")"
+printf '%s' "$out" | jq -e '.systemMessage | test("^belay: 2 changes")' >/dev/null || fail "counted the unreadable directory: $out"
 # a turn that changes nothing says nothing
 out=$(hook stop)
 [ -z "$out" ] || fail "a turn without changes said: $out"

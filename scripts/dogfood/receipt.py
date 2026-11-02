@@ -105,17 +105,35 @@ def line_of(r, outside):
     return "".join(ch if ch.isprintable() else "?" for ch in s)
 
 
-def sections(events, belay, scope, lo, hi):
-    """[(heading, records)] for the checkpoints in [lo, hi], and the errors."""
+def sections(events, belay, scope, lo, hi, persistent=None):
+    """[(heading, records)] for the checkpoints in [lo, hi], and the errors.
+    `persistent`: (path, reasons) unknown in every interval of the session so
+    far, or None at its first turn; returned narrowed to this turn's."""
     calls = calls_of(events)
     cps = sorted({e["cp"] for e in events if e.get("cp") is not None and lo <= e["cp"] <= hi})
     groups, errors = {}, [e for e in events if e.get("event") == "error"]
+    seen, intervals = {}, 0
+    per = []
     for a, b in zip(cps, cps[1:]):
         try:
             recs = diff(belay, scope, a, b)
         except RuntimeError as err:
             errors.append({"event": "error", "message": f"checkpoints {a} -> {b}: {err}"})
             continue
+        intervals += 1
+        per.append((a, b, recs))
+        for r in recs:
+            if "event" not in r and r["outcome"] == "unknown":
+                key = (path_of(r), tuple(r.get("unknown", [])))
+                seen[key] = seen.get(key, 0) + 1
+    # An entry unknown in every interval -- an unreadable directory, say,
+    # which is never reported unchanged -- is said once, not once per
+    # interval (first real receipt, 2026-11-02: tmp/work/work 41 times).
+    here = {k for k, n in seen.items() if n == intervals}
+    throughout = here if persistent is None else here & persistent
+    for a, b, recs in per:
+        recs = [r for r in recs if "event" in r or r["outcome"] != "unknown"
+                or (path_of(r), tuple(r.get("unknown", []))) not in throughout]
         if not recs:
             continue
         open_ = tuple(sorted(t for t, c in calls.items()
@@ -123,7 +141,16 @@ def sections(events, belay, scope, lo, hi):
         groups.setdefault(open_, []).extend(recs)
     outside = {path_of(r) for r in groups.get((), []) if "event" not in r}
     out = []
+    if throughout:
+        out.append(("unknown throughout the session (never reported unchanged)",
+                    [{"path": p, "outcome": "unknown", "unknown": list(u)} for p, u in sorted(throughout)], set()))
     for key, recs in groups.items():
+        # One line per path in a section: its last record (several intervals
+        # of one call, or of the time between calls, touch the same path).
+        last = {}
+        for r in recs:
+            last[("e", len(last)) if "event" in r else path_of(r)] = r
+        recs = list(last.values())
         if not key:
             head = "between tool calls"
         elif len(key) == 1:
@@ -132,7 +159,7 @@ def sections(events, belay, scope, lo, hi):
         else:
             head = "during these concurrent calls: " + "; ".join(label(calls[t]) for t in key)
         out.append((head, recs, outside if key else set()))
-    return out, errors, calls
+    return out, errors, calls, throughout
 
 
 def render(scope, belay, secs, errors):
@@ -145,7 +172,8 @@ def render(scope, belay, secs, errors):
     except OSError:
         pass
     ver = subprocess.run([belay, "--version"], capture_output=True, text=True).stdout.strip()
-    n = sum(len([r for r in recs if "event" not in r]) for _, recs, _ in secs)
+    n = sum(len([r for r in recs if "event" not in r]) for h, recs, _ in secs
+            if not h.startswith("unknown throughout"))     # not a change: the same each time
     bg = sum(len(recs) for h, recs, _ in secs if h == "between tool calls")
     lines.append(f"belay receipt  {scope}   {ver} (sha256 {sha}...)")
     head = f"  {n} change{'s' if n != 1 else ''}"
@@ -206,6 +234,28 @@ def latency(paths):
           f"max {per[-1]:.1f} ms")
 
 
+def turn(events, belay, scope, d, sid, lo, hi):
+    """The turn [lo, hi]: its receipt and JSON written; (text, n, path, errors, heads)."""
+    pf = os.path.join(d, f"{sid}.persistent.json")
+    try:
+        with open(pf) as f:
+            persistent = {(p, tuple(u)) for p, u in json.load(f)}
+    except (OSError, ValueError):
+        persistent = None
+    secs, errors, _, throughout = sections(events, belay, scope, lo, hi, persistent)
+    with open(pf, "w") as f:
+        json.dump([[p, list(u)] for p, u in sorted(throughout)], f)
+    text, n = render(scope, belay, secs, errors)
+    path = os.path.join(d, f"{sid}.turn-{hi}.txt")
+    with open(path, "w") as f:
+        f.write(text)
+    with open(os.path.join(d, f"{sid}.turn-{hi}.json"), "w") as f:
+        json.dump({"lo": lo, "hi": hi, "changes": n, "interesting": interesting(secs),
+                   "sections": [{"section": h, "records": r} for h, r, _ in secs]}, f)
+    heads = [h for h, _, _ in secs if not h.startswith("unknown throughout")][:3]
+    return text, n, path, errors, heads
+
+
 def main():
     mode = sys.argv[1]
     if mode == "latency":
@@ -217,18 +267,14 @@ def main():
     cps = [e["cp"] for e in events if e.get("cp") is not None]
     if not cps:
         return
+    stops = [e["cp"] for e in events if e.get("event") == "stop" and e.get("cp") is not None]
+    starts = [e["cp"] for e in events if e.get("event") == "start" and e.get("cp") is not None]
     if mode == "turn":
-        stops = [e["cp"] for e in events if e.get("event") == "stop" and e.get("cp") is not None]
         hi = stops[-1] if stops else max(cps)
-        earlier = [s for s in stops[:-1]] + [e["cp"] for e in events if e.get("event") == "start" and e.get("cp")]
+        earlier = stops[:-1] + starts
         lo = max([s for s in earlier if s < hi], default=min(cps))
-        secs, errors, _ = sections(events, belay, scope, lo, hi)
-        text, n = render(scope, belay, secs, errors)
-        path = os.path.join(d, f"{sid}.turn-{hi}.txt")
-        with open(path, "w") as f:
-            f.write(text)
+        _, n, path, errors, heads = turn(events, belay, scope, d, sid, lo, hi)
         if n or errors:
-            heads = [h for h, _, _ in secs][:3]
             msg = f"belay: {n} change{'s' if n != 1 else ''} this turn"
             if heads:
                 msg += " (" + "; ".join(heads) + ")"
@@ -236,20 +282,32 @@ def main():
                 msg += f"; receipt incomplete ({len(errors)} error{'s' if len(errors) != 1 else ''})"
             print(json.dumps({"systemMessage": msg + f" -- {path}"}))
         return
+    # The session: what happened after the last stop as a last turn, then
+    # every turn's receipt in order -- nothing diffed twice, so SessionEnd
+    # stays within its time budget however long the session was.
     notes = sys.argv[6]
-    secs, errors, calls = sections(events, belay, scope, min(cps), max(cps))
-    text, n = render(scope, belay, secs, errors)
-    path = os.path.join(d, f"{sid}.receipt.txt")
-    with open(path, "w") as f:
+    last = max(stops + starts, default=min(cps))
+    if max(cps) > last:
+        turn(events, belay, scope, d, sid, last, max(cps))
+    turns = []
+    for name in os.listdir(d):
+        if name.startswith(f"{sid}.turn-") and name.endswith(".json"):
+            with open(os.path.join(d, name)) as f:
+                turns.append(json.load(f))
+    turns.sort(key=lambda t: t["hi"])
+    texts, why = [], set()
+    for t in turns:
+        with open(os.path.join(d, f"{sid}.turn-{t['hi']}.txt")) as f:
+            texts.append(f"--- checkpoints {t['lo']} -> {t['hi']}\n" + f.read())
+        why |= set(t["interesting"])
+    text = "".join(texts)
+    with open(os.path.join(d, f"{sid}.receipt.txt"), "w") as f:
         f.write(text)
-    with open(os.path.join(d, f"{sid}.receipt.json"), "w") as f:
-        json.dump([{"section": h, "records": recs} for h, recs, _ in secs], f)
-    why = interesting(secs)
     if why:
         os.makedirs(notes, exist_ok=True)
         stamp = time.strftime("%Y-%m-%d", time.gmtime())
         with open(os.path.join(notes, f"{stamp}-{sid}.md"), "w") as f:
-            f.write(f"# Receipt {stamp} {sid}\n\nKept because: {', '.join(why)}.\n\n```\n{text}```\n")
+            f.write(f"# Receipt {stamp} {sid}\n\nKept because: {', '.join(sorted(why))}.\n\n```\n{text}```\n")
 
 
 if __name__ == "__main__":
