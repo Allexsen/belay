@@ -35,8 +35,10 @@ case $ev in start|pre|post|stop|end) ;; *) exit 0 ;; esac
 
 # One jq for the whole input (each process costs; a writing tool call runs
 # two hooks): the session, the call, and what the receipt calls it -- a
-# command's first line, a file, a tool's name -- already JSON-encoded.
-eval "$(printf '%s' "$in" | jq -r '@sh "sid=\(.session_id // "") tid=\(.tool_use_id // "") tool=\(.tool_name // "") agent=\(.agent_type // "") summary=\((.tool_input.command // .tool_input.file_path // .tool_input.notebook_path // .tool_input.description // "") | tostring | split("\n")[0] | .[0:200] | @json)"' 2>/dev/null)" || exit 0
+# command's first line, a file, a tool's name -- already JSON-encoded; and
+# the whole command, for the receipt's detail (turn-267: a label cut at 200
+# characters hid the `git fetch` that wrote what it was blamed for).
+eval "$(printf '%s' "$in" | jq -r '((.tool_input.command // .tool_input.file_path // .tool_input.notebook_path // .tool_input.description // "") | tostring) as $c | @sh "sid=\(.session_id // "") tid=\(.tool_use_id // "") tool=\(.tool_name // "") agent=\(.agent_type // "") summary=\($c | split("\n")[0] | .[0:200] | @json) full=\($c | .[0:65536])"' 2>/dev/null)" || exit 0
 case ${sid:-} in ''|*[!A-Za-z0-9_-]*) exit 0 ;; esac                    # a name, never a path
 
 D=$STATE/dogfood
@@ -46,6 +48,13 @@ LOG=$D/$sid.jsonl
 # One line, one write, appended: concurrent hooks never interleave (each line
 # is far under PIPE_BUF). The checkpoint id orders events, not the log.
 log() { printf '%s\n' "$1" >> "$LOG"; }
+
+# The whole command, once per call, in a file of its own: the log's lines
+# stay short (one write each), and only the call's own pre hook writes it.
+if [ "$ev" = pre ] && [ -n "${tid:-}" ]; then
+    f=$(printf '%s' "$tid" | tr -cd 'A-Za-z0-9_-')
+    [ -n "$f" ] && mkdir -p "$D/$sid.calls" 2>/dev/null && printf '%s' "$full" > "$D/$sid.calls/$f" 2>/dev/null
+fi
 
 # A mark's checkpoint id, from `{"id":N,...}` without another process; ""
 # on failure, logged with belay's message.
