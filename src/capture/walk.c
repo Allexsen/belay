@@ -70,16 +70,44 @@ static int visit(int parent_fd, const char *name, char *rel, size_t relsz,
          * header with what was there -- never excluded silently. */
         int reason = -1;
         if (wc->opts->exclude && S_ISDIR(st.st_mode) && (uint64_t)st.st_dev == wc->opts->exclude_dev &&
-            (uint64_t)st.st_ino == wc->opts->exclude_ino)
-            reason = BELAY_EXCLUDE_STATE_DIR;
+            (uint64_t)st.st_ino == wc->opts->exclude_ino) {
+            /* The state directory is counted once (S1): at its own path, or,
+             * when it is not inside the scope by path, where it is first met.
+             * Met again at a mount root -- a bind mount of it -- it is a
+             * boundary like any other, recorded below and never entered. */
+            const char *own = wc->opts->exclude_rel;
+            const bool its_own = own != NULL ? strlen(own) == rel_len && memcmp(own, rel, rel_len) == 0
+                                             : wc->state_dirs == 0;
+            if (its_own || !cap_crossed(wc, &st, mount_root, mount_known)) reason = BELAY_EXCLUDE_STATE_DIR;
+        }
         for (size_t i = 0; reason == -1 && i < wc->opts->n_exclude_paths; i++)
             if (wc->xlen[i] == rel_len && memcmp(wc->opts->exclude_paths[i], rel, rel_len) == 0)
                 reason = BELAY_EXCLUDE_USER;
         if (reason != -1) {
-            if (wc->excluded >= BELAY_EXCLUDED_MAX || rel_len >= sizeof wc->xs[0].path) {
-                belay_err_set(BELAY_ERR_RANGE, 0, "manifest: more than %d excluded entries", BELAY_EXCLUDED_MAX);
+            if (rel_len >= sizeof wc->xs[0].path) {
+                belay_err_set(BELAY_ERR_RANGE, 0, "manifest: path too long");
                 return -1;
             }
+            if (wc->excluded >= BELAY_EXCLUDED_MAX) {
+                /* belay keeps at most BELAY_EXCLUDED_MAX - 1 configured
+                 * excludes, so only the state directory met again where no
+                 * mount root can be recognised (a directory hard link, a
+                 * same-filesystem bind mount without statx) overflows. */
+                const size_t states = wc->state_dirs + (reason == BELAY_EXCLUDE_STATE_DIR);
+                const char *at[2] = { "", reason == BELAY_EXCLUDE_STATE_DIR ? rel : "" };
+                for (size_t i = 0, k = 0; i < wc->excluded && k < 2; i++)
+                    if (wc->xs[i].reason == BELAY_EXCLUDE_STATE_DIR) at[k++] = wc->xs[i].path;
+                if (states > 1)
+                    belay_err_set(BELAY_ERR_RANGE, 0, "manifest: more than %d excluded entries: belay's own state "
+                                  "directory is inside the scope at %zu paths (%s and %s%s), not each recognisable "
+                                  "as a mount root, besides %zu configured excludes", BELAY_EXCLUDED_MAX, states,
+                                  at[0], at[1], states > 2 ? ", ..." : "", wc->opts->n_exclude_paths);
+                else
+                    belay_err_set(BELAY_ERR_RANGE, 0, "manifest: more than %d excluded entries "
+                                  "(%zu configured excludes)", BELAY_EXCLUDED_MAX, wc->opts->n_exclude_paths);
+                return -1;
+            }
+            if (reason == BELAY_EXCLUDE_STATE_DIR) wc->state_dirs++;
             struct belay_excluded *x = &wc->xs[wc->excluded++];
             memcpy(x->path, rel, rel_len);
             x->path[rel_len] = '\0';

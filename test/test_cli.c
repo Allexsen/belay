@@ -712,6 +712,27 @@ TEST(an_exclude_is_named_and_never_reads_as_removed) {
     ASSERT_TRUE(strstr(g_out, "node_modules") == NULL);
 }
 
+/* S1: the walk counts belay's state directory once, at its own path relative
+ * to the scope -- only when that path is inside the scope, component-wise. */
+TEST(the_state_directory_is_located_inside_the_scope_by_path) {
+    static struct state st;
+    const struct { const char *scope, *root, *want; } c[] = {
+        { "/home/u/proj", "/home/u/proj/.belay", ".belay" },
+        { "/home/u/proj", "/home/u/proj/a/b", "a/b" },
+        { "/", "/var/belay", "var/belay" },
+        { "/home/u/proj", "/home/u/projx/.belay", NULL },     /* a prefix, not a parent */
+        { "/home/u/proj", "/home/u/.local/state/belay", NULL },
+        { "/home/u/proj", "/home/u/proj", NULL },             /* refused before any walk */
+    };
+    for (size_t i = 0; i < sizeof c / sizeof c[0]; i++) {
+        snprintf(st.scope.path, sizeof st.scope.path, "%s", c[i].scope);
+        snprintf(st.root, sizeof st.root, "%s", c[i].root);
+        const char *got = state_rel(&st);
+        if (c[i].want == NULL) ASSERT_TRUE(got == NULL);
+        else ASSERT_TRUE(got != NULL && strcmp(got, c[i].want) == 0);
+    }
+}
+
 /* Review 2026-11-02 of #33, D3-D6: a hand-edited excludes file that is not
  * what belay writes is refused -- a NUL, a CR, a line twice -- and the
  * command never succeeds in silence. */
@@ -816,6 +837,7 @@ int main(void) {
     RUN(ids_run_out_and_a_failed_diff_leaves_nothing);
     RUN(excludes_are_configured_per_scope);
     RUN(an_exclude_is_named_and_never_reads_as_removed);
+    RUN(the_state_directory_is_located_inside_the_scope_by_path);
     RUN(the_excludes_file_and_command_are_strict);
     RUN(json_output_names_every_excluded_path);
     RUN(an_exclude_is_exact_on_links_and_prefixes);

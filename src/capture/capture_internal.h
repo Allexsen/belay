@@ -74,6 +74,7 @@ struct walk_ctx {
     int64_t newest_ctime_ns;
     struct belay_excluded *xs;  /* what was not walked, for the v2 header: `excluded` of them */
     size_t *xlen;               /* strlen of each opts->exclude_paths, once per walk */
+    size_t state_dirs;          /* xs entries for belay's own state directory */
 
     struct belay_store *store;  /* NULL when content storage is off */
     size_t store_failed;        /* copies the store failed to keep (R11) */
