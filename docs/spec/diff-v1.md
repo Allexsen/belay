@@ -434,8 +434,8 @@ their other events stand. An event a value of which is not a string field's valu
 would exceed 1,024 bytes, is one `invalid_finding` event naming its paths (E9). Events with no name
 -- `could_not_interpret` for a file, `content_unavailable` -- come before every named event, in the
 Kinds table's order, then by path (`content_unavailable`, one per reason, in the reasons' order).
-The end hook fails (E6) only when the interpreter's per-diff state would exceed 64 MiB or memory
-runs out: its events are then one `could_not_interpret` naming the first 1,024 paths given to it
+The end hook fails (E6) only when the interpreter's per-diff state would exceed 64 MiB, memory
+runs out, or it adds an event naming no path: its events are then one `could_not_interpret` naming the first 1,024 paths given to it
 (every path it claims whose outcome is not `unchanged`; none `unknown` only as `not_captured`, which
 it is never given: E11) and counting the rest.
 
