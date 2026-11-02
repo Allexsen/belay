@@ -66,8 +66,58 @@ n=$(wc -l < "$LOG")
 CLAUDE_PROJECT_DIR=$T/elsewhere hook pre t9 Bash x
 [ "$(wc -l < "$LOG")" = "$n" ] || fail "another project's hook was logged"
 
+# git's bookkeeping folds; what git reports stays (decision 105): a ref
+# moved, HEAD, a hook added, the index's content -- and a real edit beside
+# them. A nested repository folds on its own line; a .git file is not one.
+H=0123456789abcdef0123456789abcdef01234567; H2=89abcdef0123456789abcdef0123456789abcdef
+mkdir -p "$S/.git/refs/heads" "$S/.git/objects/01" "$S/.git/hooks" "$S/vendor/lib/.git/objects" "$S/wt"
+printf 'ref: refs/heads/main\n' > "$S/.git/HEAD"; printf '%s\n' "$H" > "$S/.git/refs/heads/main"
+printf 'gitdir: /elsewhere\n' > "$S/wt/.git"
+printf '#!/bin/sh\n' > "$S/.git/hooks/post-merge"; chmod +x "$S/.git/hooks/post-merge"
+hook pre t10 Bash "git fetch"
+out=$(hook stop)                     # the .git above, before this turn's calls
+hook pre t11 Bash "git commit"
+printf 'x' > "$S/.git/objects/01/a"; printf 'y' > "$S/.git/objects/01/b"; printf 'f\n' > "$S/.git/FETCH_HEAD"
+printf '%s\n' "$H2" > "$S/.git/refs/heads/main"; printf 'ref: refs/heads/dev\n' > "$S/.git/HEAD"
+printf '#!/bin/sh\n' > "$S/.git/hooks/pre-commit"; chmod +x "$S/.git/hooks/pre-commit"
+printf 'z' > "$S/vendor/lib/.git/objects/o"; printf 'gitdir: /moved\n' > "$S/wt/.git"
+touch -m -d '2001-01-01' "$S/.git/hooks/post-merge"           # metadata only: no finding of git's
+printf 'c\n' >> "$S/src/a.c"
+hook post t11 Bash
+out=$(hook stop)
+R3=$(ls -t "$T/state/dogfood"/s1.turn-*.txt | head -1)
+grep -q '^  git bookkeeping: 3 changes under \.git/$' "$R3" || fail "git's bookkeeping not folded: $(cat "$R3")"
+grep -q '^  git bookkeeping: [0-9]* changes\{0,1\} under vendor/lib/\.git/$' "$R3" || fail "the nested repository not folded apart"
+! grep -q 'objects/01\|FETCH_HEAD' "$R3" || fail "a raw .git path listed: $(cat "$R3")"
+grep -q '  M \.git/refs/heads/main ' "$R3" && grep -q '  M \.git/HEAD ' "$R3" || fail "what git reports was folded: $(cat "$R3")"
+grep -q '  A \.git/hooks/pre-commit' "$R3" && grep -q '  ~ \.git/hooks/post-merge' "$R3" || fail "a hook was folded"
+grep -q '  M wt/\.git ' "$R3" && grep -q '  M src/a\.c' "$R3" || fail "a .git file or a real edit was folded"
+J=${R3%.txt}.json
+jq -e '[.sections[].records[].path] | index(".git/objects/01/a") != null' "$J" >/dev/null || fail "the JSON lost a folded path"
+
+# A label is cut for one glance; the call's whole command is in the detail
+# (turn-267: a command cut at 200 characters hid the git fetch that wrote).
+long="cat README; gh pr view 36 --json state $(printf '%0220d' 0); git fetch -q origin
+echo second line"
+hook pre t12 Bash "$long"; printf 'd\n' >> "$S/src/a.c"; hook post t12 Bash
+hook pre t13 Bash "python3 - <<'EOF'
+open('src/e.c', 'w')
+EOF"; printf 'e\n' > "$S/src/e.c"; hook post t13 Bash
+out=$(hook stop)
+R4=$(ls -t "$T/state/dogfood"/s1.turn-*.txt | head -1)
+head=$(grep '^Bash: cat README' "$R4") || fail "no heading for the long call: $(cat "$R4")"
+case $head in "Bash: cat README; gh pr view 36 --json state 00000000000000…   [1]") ;;
+    *) fail "the heading is not cut to 60 with an ellipsis: $head" ;; esac
+grep -q "^Bash: python3 - <<'EOF'…   \\[2\\]\$" "$R4" || fail "a short first line hides the other lines: $(cat "$R4")"
+grep -q '^  \[1\] Bash: cat README.*; git fetch -q origin$' "$R4" && grep -q '^      echo second line$' "$R4" \
+    || fail "the whole command is not in the detail: $(cat "$R4")"
+printf '%s' "$out" | jq -e '.systemMessage | (test("git fetch") | not) and test("state 0+…")' >/dev/null \
+    || fail "the Stop line does not carry the cut label: $out"
+jq -e 'any(.sections[].calls[]; test("git fetch -q origin\necho second line"))' "${R4%.txt}.json" >/dev/null \
+    || fail "the JSON lost the whole command"
+
 hook end
 [ -f "$T/state/dogfood/s1.receipt.txt" ] || fail "no session receipt"
 ls "$T/notes"/*-s1.md >/dev/null 2>&1 || fail "a test file changed, but the receipt was not kept"
 grep -q 'Kept because: a test file changed' "$T"/notes/*-s1.md || fail "kept for the wrong reason"
-echo "dogfood selftest: sequential, concurrent, background, cancelled, silent turn, other project: ok"
+echo "dogfood selftest: sequential, concurrent, background, cancelled, silent turn, other project, git folded, labels cut: ok"

@@ -18,6 +18,7 @@ checkpoint and closes at its post one, or, cancelled, at the next stop.
 """
 import json
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -25,6 +26,8 @@ import time
 
 TESTS = ("test/", "tests/", "spec/", "__tests__/")
 BUILD = ("build/", "bin/")
+GIT = re.compile(r"^(.*?)\.git(/|$)")      # a repository's bookkeeping, at any depth
+LABEL = 60                                  # a call's label in a heading and the Stop line
 SYM = {"added": "A", "removed": "D", "modified": "M", "type_changed": "T",
        "metadata_only": "~", "unknown": "?"}
 
@@ -40,9 +43,11 @@ def load(path):
     return events
 
 
-def calls_of(events):
-    """{tool_use_id: {tool, summary, agent, pre, post}} -- post is the closing
-    checkpoint: the call's own, or the next stop's for one cancelled."""
+def calls_of(events, d=None, sid=None):
+    """{tool_use_id: {tool, summary, full, agent, pre, post}} -- post is the
+    closing checkpoint: the call's own, or the next stop's for one
+    cancelled; `full` the whole command, from the hook's file for the call
+    in `d`, when there is one."""
     calls, stops = {}, sorted(e["cp"] for e in events if e.get("event") == "stop" and e.get("cp"))
     for e in events:
         tid = e.get("tool_use_id")
@@ -56,6 +61,15 @@ def calls_of(events):
         elif e["event"] == "post":
             c["post"] = e["cp"]
         c["ms"] += (e["t1"] - e["t0"]) / 1e6
+    for tid, c in calls.items():
+        c["full"] = None
+        if d is not None:
+            try:
+                with open(os.path.join(d, f"{sid}.calls", re.sub(r"[^A-Za-z0-9_-]", "", tid)),
+                          encoding="utf-8", errors="replace") as f:
+                    c["full"] = f.read()
+            except OSError:
+                pass
     for c in calls.values():
         if c["pre"] is not None and c["post"] is None:
             later = [s for s in stops if s > c["pre"]]
@@ -79,10 +93,34 @@ def diff(belay, scope, a, b):
     return out
 
 
+def printable(s):
+    return "".join(ch if ch.isprintable() else "?" for ch in s)
+
+
 def label(c):
+    """The call as a heading and the Stop line name it, read in one glance:
+    cut to LABEL characters, with an ellipsis when anything is left out --
+    the rest of the line, or other lines (the receipt's detail has them)."""
     who = "" if not c["agent"] else c["agent"] + " "
-    s = (c["summary"] or "").replace("\n", " ")
-    s = "".join(ch if ch.isprintable() else "?" for ch in s)
+    first = printable((c["summary"] or "").replace("\n", " "))
+    text = f"{who}{c['tool']}: {first}" if first else f"{who}{c['tool']}"
+    if len(text) > LABEL:
+        return text[:LABEL - 1] + "\u2026"
+    return text + "\u2026" if cut(c) else text
+
+
+def cut(c):
+    """Whether the heading leaves part of the call's command out."""
+    who = "" if not c["agent"] else c["agent"] + " "
+    first = printable((c["summary"] or "").replace("\n", " "))
+    text = f"{who}{c['tool']}: {first}" if first else f"{who}{c['tool']}"
+    return len(text) > LABEL or bool(c.get("full")) and c["full"] != (c["summary"] or "")
+
+
+def full_label(c):
+    """The whole command, as the hook kept it (its first line otherwise)."""
+    who = "" if not c["agent"] else c["agent"] + " "
+    s = c.get("full") or c["summary"] or ""
     return f"{who}{c['tool']}: {s}" if s else f"{who}{c['tool']}"
 
 
@@ -105,11 +143,11 @@ def line_of(r, outside):
     return "".join(ch if ch.isprintable() else "?" for ch in s)
 
 
-def sections(events, belay, scope, lo, hi, persistent=None):
+def sections(events, belay, scope, lo, hi, persistent=None, d=None, sid=None):
     """[(heading, records)] for the checkpoints in [lo, hi], and the errors.
     `persistent`: (path, reasons) unknown in every interval of the session so
     far, or None at its first turn; returned narrowed to this turn's."""
-    calls = calls_of(events)
+    calls = calls_of(events, d, sid)
     cps = sorted({e["cp"] for e in events if e.get("cp") is not None and lo <= e["cp"] <= hi})
     groups, errors = {}, [e for e in events if e.get("event") == "error"]
     seen, intervals = {}, 0
@@ -143,7 +181,7 @@ def sections(events, belay, scope, lo, hi, persistent=None):
     out = []
     if throughout:
         out.append(("unknown throughout the session (never reported unchanged)",
-                    [{"path": p, "outcome": "unknown", "unknown": list(u)} for p, u in sorted(throughout)], set()))
+                    [{"path": p, "outcome": "unknown", "unknown": list(u)} for p, u in sorted(throughout)], set(), []))
     for key, recs in groups.items():
         # One line per path in a section: its last record (several intervals
         # of one call, or of the time between calls, touch the same path).
@@ -158,8 +196,30 @@ def sections(events, belay, scope, lo, hi, persistent=None):
             head = label(c) + ("   (cancelled)" if c["cancelled"] else "")
         else:
             head = "during these concurrent calls: " + "; ".join(label(calls[t]) for t in key)
-        out.append((head, recs, outside if key else set()))
+        out.append((head, recs, outside if key else set(), [calls[t] for t in key]))
     return out, errors, calls, throughout
+
+
+def folded_git(r):
+    """The repository a record's path is git's bookkeeping of ("" for the
+    scope's own), or None: what the git interpreter reports -- refs, HEAD,
+    hooks, reflog moves, the index (a finding of a git_ kind) -- and every
+    path under hooks/ stay visible, as do privilege changes; the rest under a
+    .git directory folds to one line (decision 105)."""
+    if "event" in r:
+        return None
+    m = GIT.match(path_of(r))
+    if not m or (m.group(2) == "" and r.get("type") != "dir"):     # a .git file points elsewhere
+        return None
+    if path_of(r)[m.end():].startswith("hooks/") or path_of(r)[m.end():] == "hooks":
+        return None
+    if any(f.get("kind", "").startswith("git_") for f in r.get("findings") or []):
+        return None
+    ch = set(r.get("changed") or [])
+    b, a = r.get("before", {}), r.get("after", {})
+    if ch & {"caps", "iflags"} or "mode" in ch and (b.get("mode", 0) ^ a.get("mode", 0)) & 0o7000:
+        return None
+    return m.group(1)
 
 
 def render(scope, belay, secs, errors):
@@ -172,32 +232,52 @@ def render(scope, belay, secs, errors):
     except OSError:
         pass
     ver = subprocess.run([belay, "--version"], capture_output=True, text=True).stdout.strip()
-    n = sum(len([r for r in recs if "event" not in r]) for h, recs, _ in secs
+    n = sum(len([r for r in recs if "event" not in r]) for h, recs, _, _ in secs
             if not h.startswith("unknown throughout"))     # not a change: the same each time
-    bg = sum(len(recs) for h, recs, _ in secs if h == "between tool calls")
+    bg = sum(len(recs) for h, recs, _, _ in secs if h == "between tool calls")
     lines.append(f"belay receipt  {scope}   {ver} (sha256 {sha}...)")
     head = f"  {n} change{'s' if n != 1 else ''}"
     if bg:
         head += f" · background writers were active ({bg} change{'s' if bg != 1 else ''} outside any tool call)"
     lines.append(head)
     for e in errors:
-        lines.append("  receipt incomplete: " + "".join(ch if ch.isprintable() else "?" for ch in e.get("message", "")))
-    for head, recs, outside in secs:
+        lines.append("  receipt incomplete: " + printable(e.get("message", "")))
+    detail = []
+    for head, recs, outside, calls in secs:
+        refs = []
+        for c in calls:
+            if cut(c):
+                detail.append(c)
+                refs.append(f"[{len(detail)}]")
         lines.append("")
-        lines.append(head)
+        lines.append(head + ("   " + " ".join(refs) if refs else ""))
         build = [r for r in recs if "event" not in r and path_of(r).startswith(BUILD)]
+        git = {}
         for r in recs:
             if r in build:
+                continue
+            repo = folded_git(r)
+            if repo is not None:
+                git[repo] = git.get(repo, 0) + 1
                 continue
             lines.append(line_of(r, outside))
         if build:
             lines.append(f"  build output: {len(build)} change{'s' if len(build) != 1 else ''} under build/, bin/")
+        for repo, k in git.items():
+            lines.append(f"  git bookkeeping: {k} change{'s' if k != 1 else ''} under {repo}.git/")
+    if detail:
+        lines.append("")
+        lines.append("the calls in full")
+        for k, c in enumerate(detail, 1):
+            text = full_label(c).split("\n")
+            lines.append(f"  [{k}] " + printable(text[0]))
+            lines.extend("      " + printable(t) for t in text[1:])
     return "\n".join(lines) + "\n", n
 
 
 def interesting(secs):
     why = set()
-    for _, recs, _ in secs:
+    for _, recs, _, _ in secs:
         for r in recs:
             if "event" in r:
                 why.add("events")
@@ -242,7 +322,7 @@ def turn(events, belay, scope, d, sid, lo, hi):
             persistent = {(p, tuple(u)) for p, u in json.load(f)}
     except (OSError, ValueError):
         persistent = None
-    secs, errors, _, throughout = sections(events, belay, scope, lo, hi, persistent)
+    secs, errors, _, throughout = sections(events, belay, scope, lo, hi, persistent, d, sid)
     with open(pf, "w") as f:
         json.dump([[p, list(u)] for p, u in sorted(throughout)], f)
     text, n = render(scope, belay, secs, errors)
@@ -251,8 +331,9 @@ def turn(events, belay, scope, d, sid, lo, hi):
         f.write(text)
     with open(os.path.join(d, f"{sid}.turn-{hi}.json"), "w") as f:
         json.dump({"lo": lo, "hi": hi, "changes": n, "interesting": interesting(secs),
-                   "sections": [{"section": h, "records": r} for h, r, _ in secs]}, f)
-    heads = [h for h, _, _ in secs if not h.startswith("unknown throughout")][:3]
+                   "sections": [{"section": h, "calls": [full_label(c) for c in cs], "records": r}
+                                for h, r, _, cs in secs]}, f)
+    heads = [h for h, _, _, _ in secs if not h.startswith("unknown throughout")][:3]
     return text, n, path, errors, heads
 
 
