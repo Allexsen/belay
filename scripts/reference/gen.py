@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Deterministic corpus for the dpkg/pip/reflog reference (scripts/reference/).
+"""Deterministic corpus for the dpkg, pip and git reference (scripts/reference/).
 
 A case is two trees, before and after, written as two manifest files (v1,
 or v2 -- docs/spec/manifest-v2.md -- when a side excludes something or the
@@ -8,7 +8,9 @@ case asks for it) plus a store: copies at <store>/<first two hex of sha256>/<oth
 each; random cases come from a seeded random.Random. Nothing here retries.
 
 Each case says which modes it runs in ("store": belay_diff given the store;
-"nostore": given none) and, per mode, the cells it was built to hit.
+"nostore": given none) and, per mode, the cells it was built to hit. git's
+repositories are built by hand for E12's cells (cell_git_events) and, in the
+random cases, from a simulated history (random_git).
 """
 
 import base64
@@ -701,6 +703,8 @@ def random_case(rng, i):
             c.v2.add(side)
     if rng.random() < 0.4:
         random_reflog(rng, c)
+    if rng.random() < 0.5:
+        random_git(rng, c)
     c.tag("random")
     return c
 
@@ -883,6 +887,686 @@ def random_reflog(rng, c):
     else:                                        # both big without a copy
         c.put("before", p, big(0))
         c.put("after", p, big(1))
+
+
+# ---------------------------------------------------------------- git events (E12)
+
+ZERO = b"0" * 40
+
+
+def goid(label):
+    """A deterministic object id for a label."""
+    return hashlib.sha1(b"belay-ref " + (label if isinstance(label, bytes) else label.encode())
+                        ).hexdigest().encode()
+
+
+def glog(entries, t=0):
+    """A reflog of (old, new, message) entries."""
+    return b"".join(reflog_entry(o, n, m, t + i) for i, (o, n, m) in enumerate(entries))
+
+
+def gpacked(refs, header=True, peeled=None):
+    """packed-refs: refs a list of (refname, id) in the order given; peeled:
+    {refname: id} written as `^id` after that ref's line."""
+    out = [b"# pack-refs with: peeled fully-peeled sorted \n"] if header else []
+    for name, oid in refs:
+        out.append(oid + b" " + name + b"\n")
+        if peeled and name in peeled:
+            out.append(b"^" + peeled[name] + b"\n")
+    return b"".join(out)
+
+
+class GitRepo:
+    """Files of one repository in a case: `root` is the work tree, its
+    repository `root/.git` (E12's `repo`)."""
+
+    def __init__(self, case, root=b"proj"):
+        self.c = case
+        self.repo = join(root, b".git")
+
+    def p(self, rest):
+        return self.repo + b"/" + rest
+
+    def put(self, side, rest, data, **kw):
+        kw.setdefault("gen", 1 if side == "after" else 0)
+        self.c.put(side, self.p(rest), reg(data, **kw))
+
+    def both(self, rest, data):
+        self.c.both(self.p(rest), reg(data))
+
+    def head(self, side, branch=None, oid=None, **kw):
+        self.put(side, b"HEAD", (b"ref: refs/heads/" + branch + b"\n") if branch else oid + b"\n",
+                 **kw)
+
+    def ref(self, side, name, oid, **kw):
+        """A loose ref: name is a branch, or a full name starting refs/."""
+        full = name if name.startswith(b"refs/") else b"refs/heads/" + name
+        self.put(side, full, oid + b"\n", **kw)
+
+    def log(self, side, name, entries, **kw):
+        """A reflog: name HEAD, a branch, or a full name starting refs/."""
+        rest = b"logs/HEAD" if name == b"HEAD" else b"logs/" + (
+            name if name.startswith(b"refs/") else b"refs/heads/" + name)
+        self.put(side, rest, glog(entries), **kw)
+
+    def packed(self, side, refs, **kw):
+        self.put(side, b"packed-refs", gpacked([(n if n.startswith(b"refs/") else
+                                                  b"refs/heads/" + n, o) for n, o in refs]), **kw)
+
+    def unchanged(self, branch=b"main", oid=None, head=True):
+        """A repository's unchanged files: HEAD on `branch`, its loose ref."""
+        oid = oid or goid(b"unchanged " + self.repo + branch)
+        if head:
+            self.both(b"HEAD", b"ref: refs/heads/" + branch + b"\n")
+        self.both(b"refs/heads/" + branch, oid + b"\n")
+        self.both(b"logs/refs/heads/" + branch, glog([(ZERO, oid, b"commit (initial): start")]))
+        return oid
+
+
+def cell_git_events():
+    """Required cells for git's repository-level events (diff-events E12),
+    one builder each; run.py's check names what each must show."""
+    out = []
+    X, Y, Z, W, V, U = (goid(c) for c in "XYZWVU")
+
+    # ---- created: absent before by the reflog's zeros
+    c = Case("git-e12-created-reflog-zeros", modes=BOTH)
+    g = GitRepo(c)
+    m = g.unchanged()
+    g.ref("after", b"topic", m)
+    g.log("after", b"topic", [(ZERO, m, b"branch: Created from HEAD")])
+    c.tag("git.e12.created.reflog_zeros", "store")
+    c.tag("git.e12.nostore_cu_only", "nostore")
+    out.append(c)
+
+    # ---- created: absent before by packed-refs (a path of this diff); a
+    # branch created as a packed line alone
+    c = Case("git-e12-created-packed-absence")
+    g = GitRepo(c)
+    g.unchanged()
+    g.packed("before", [(b"refs/tags/v1", X)])
+    g.packed("after", [(b"refs/heads/rel", Z), (b"refs/tags/v1", X), (b"refs/tags/v2", Y)])
+    g.ref("after", b"feat", W)
+    c.tag("git.e12.created.packed_absence")
+    c.tag("git.e12.created.packed_line")
+    out.append(c)
+
+    # ---- moved with no `from`: present after, no evidence of before
+    c = Case("git-e12-moved-no-from")
+    g = GitRepo(c, b"a")
+    g.unchanged()
+    g.ref("after", b"feat", W)
+    # ... and a reflog rewritten: it gained nothing, so no before either
+    g = GitRepo(c, b"b")
+    g.unchanged()
+    g.ref("after", b"feat", W)
+    g.log("before", b"feat", [(ZERO, X, b"branch: Created from HEAD")])
+    g.log("after", b"feat", [(ZERO, Y, b"branch: Created from HEAD"), (Y, W, b"commit: w")])
+    # ... and before from the reflog's first gained entry (the branch was
+    # packed and unchanged; a commit wrote its loose ref)
+    g = GitRepo(c, b"c")
+    g.unchanged()
+    g.both(b"packed-refs", gpacked([(b"refs/heads/feat", X)]))
+    g.ref("after", b"feat", Y)
+    g.log("before", b"feat", [(ZERO, X, b"branch: Created from HEAD")])
+    g.log("after", b"feat", [(ZERO, X, b"branch: Created from HEAD"), (X, Y, b"commit: y")])
+    c.tag("git.e12.moved.no_from")
+    c.tag("git.e12.moved.no_from_reflog_rewritten")
+    c.tag("git.e12.before_from_reflog")
+    out.append(c)
+
+    # ---- deleted
+    c = Case("git-e12-deleted")
+    g = GitRepo(c, b"a")            # loose removed, packed-refs not a path
+    g.unchanged()
+    g.ref("before", b"old", X)
+    g.log("before", b"old", [(ZERO, X, b"branch: Created from HEAD")])
+    g = GitRepo(c, b"b")            # loose removed, its packed line too
+    g.unchanged()
+    g.ref("before", b"old", X)
+    g.packed("before", [(b"old", V), (b"refs/tags/v1", Y)])
+    g.packed("after", [(b"refs/tags/v1", Y)])
+    g = GitRepo(c, b"c")            # a packed branch deleted, no loose ref
+    g.unchanged()
+    g.packed("before", [(b"gone", X), (b"refs/tags/v1", Y)])
+    g.packed("after", [(b"refs/tags/v1", Y)])
+    g = GitRepo(c, b"d")            # pack-refs: the loose ref moves into packed-refs
+    g.unchanged()
+    g.ref("before", b"kept", X)
+    g.packed("before", [(b"refs/tags/v1", Y)])
+    g.packed("after", [(b"kept", X), (b"refs/tags/v1", Y)])
+    c.tag("git.e12.deleted.loose")
+    c.tag("git.e12.deleted.loose_and_packed")
+    c.tag("git.e12.deleted.packed_only")
+    c.tag("git.e12.pack_refs_nothing")
+    out.append(c)
+
+    # ---- renamed, ordered by `from`; HEAD follows the rename
+    c = Case("git-e12-renamed")
+    g = GitRepo(c)
+    g.head("before", b"a-old")
+    g.head("after", b"z-new")
+    g.ref("before", b"a-old", X)
+    g.ref("after", b"z-new", X)
+    born = [(ZERO, Y, b"branch: Created from HEAD"), (Y, X, b"commit: x")]
+    g.log("before", b"a-old", born)
+    g.log("after", b"z-new", born + [(X, X, b"Branch: renamed refs/heads/a-old to refs/heads/z-new")])
+    g.ref("before", b"m", Y)
+    g.ref("after", b"m", Z)
+    g.log("before", b"m", [(ZERO, Y, b"branch: Created from HEAD")])
+    g.log("after", b"m", [(ZERO, Y, b"branch: Created from HEAD"), (Y, Z, b"commit: z")])
+    c.tag("git.e12.renamed")
+    out.append(c)
+
+    # ---- a deletion and a creation at one commit, no rename said
+    c = Case("git-e12-same-commit-not-renamed")
+    g = GitRepo(c)
+    g.unchanged()
+    g.ref("before", b"one", X)
+    g.ref("after", b"two", X)
+    g.log("before", b"one", [(ZERO, X, b"branch: Created from HEAD")])
+    g.log("after", b"two", [(ZERO, X, b"branch: Created from HEAD")])
+    c.tag("git.e12.same_commit_not_renamed")
+    out.append(c)
+
+    # ---- commits added, counted and not
+    def moved(g, br, frm, to, entries, before_entries=None):
+        g.ref("before", br, frm)
+        g.ref("after", br, to)
+        old = before_entries if before_entries is not None else [(ZERO, frm, b"branch: Created")]
+        g.log("before", br, old)
+        g.log("after", br, old + entries)
+
+    c = Case("git-e12-commits-added")
+    g = GitRepo(c)
+    g.unchanged()
+    a, b2, d, e = goid("ca"), goid("cb"), goid("cd"), goid("ce")
+    moved(g, b"counted", X, Z, [(X, a, b"commit: a"), (a, b2, b"cherry-pick: b"),
+                                (b2, d, b"revert: \"b\""), (d, e, b"am: e"),
+                                (e, Z, b"commit (merge): Merge branch 'x'")])
+    moved(g, b"ff", X, Y, [(X, a, b"commit: a"), (a, Y, b"merge topic: Fast-forward")])
+    moved(g, b"merge", X, Y, [(X, Y, b"merge topic: Merge made by the 'ort' strategy.")])
+    moved(g, b"pull", X, Y, [(X, a, b"pull: Fast-forward"), (a, Y, b"pull origin main: Merge made")])
+    c.tag("git.e12.commits_added.counted")
+    c.tag("git.e12.commits_added.uncounted")
+    out.append(c)
+
+    # ---- each rewrite trigger; `how` each operation once, in order
+    c = Case("git-e12-rewritten")
+    g = GitRepo(c)
+    g.unchanged()
+    a, b2, d = goid("ra"), goid("rb"), goid("rd")
+    triggers = {
+        b"r-reset": [(X, Y, b"reset: moving to HEAD~1")],
+        b"r-amend": [(X, Y, b"commit (amend): fix")],
+        b"r-rebase": [(X, Y, b"rebase (finish): refs/heads/r-rebase onto " + Z)],
+        b"r-rebase-i": [(X, a, b"commit: a"), (a, Y, b"rebase -i (finish): refs/heads/r-rebase-i onto " + Z)],
+        b"r-pull-rebase": [(X, Y, b"pull --rebase (finish): refs/heads/r-pull-rebase onto " + Z)],
+        b"r-branch-reset": [(X, Y, b"branch: Reset to " + Y)],
+        b"r-forced": [(X, Y, b"update by push: forced-update")],
+        b"r-mixed": [(X, a, b"commit: a"), (a, b2, b"reset: moving to HEAD~1"),
+                     (b2, d, b"commit (amend): b"), (d, Y, b"reset: moving to " + Y)],
+    }
+    for br, entries in triggers.items():
+        moved(g, br, X, Y, entries)
+    c.tag("git.e12.rewritten.reset")
+    c.tag("git.e12.rewritten.amend")
+    c.tag("git.e12.rewritten.rebase")
+    c.tag("git.e12.rewritten.branch_reset")
+    c.tag("git.e12.rewritten.forced_update")
+    c.tag("git.e12.rewritten.how_each_once")
+    out.append(c)
+
+    # ---- moved: entries that do not lead from before to after, another
+    # operation, no reflog, a reflog rewritten
+    c = Case("git-e12-moved")
+    g = GitRepo(c)
+    g.unchanged()
+    a = goid("na")
+    moved(g, b"n-first", X, Y, [(W, Y, b"commit: y")])
+    moved(g, b"n-gap", X, Y, [(X, a, b"commit: a"), (W, Y, b"commit: y")])
+    moved(g, b"n-last", X, Y, [(X, a, b"commit: a")])
+    moved(g, b"n-other", X, Y, [(X, a, b"commit: a"), (a, Y, b"checkout: moving from a to b")])
+    g.ref("before", b"n-none", X)
+    g.ref("after", b"n-none", Y)
+    g.ref("before", b"n-rewritten", X)
+    g.ref("after", b"n-rewritten", Y)
+    g.log("before", b"n-rewritten", [(ZERO, X, b"branch: Created"), (X, X, b"commit: q")])
+    g.log("after", b"n-rewritten", [(ZERO, X, b"branch: Created"), (X, Y, b"commit: y")])
+    c.tag("git.e12.not_chaining.first")
+    c.tag("git.e12.not_chaining.gap")
+    c.tag("git.e12.not_chaining.last")
+    c.tag("git.e12.other_operation")
+    c.tag("git.e12.moved.no_reflog")
+    c.tag("git.e12.moved.reflog_rewritten")
+    out.append(c)
+
+    # ---- HEAD: switched, detached, attached; the detached branch HEAD
+    c = Case("git-e12-head")
+    g = GitRepo(c, b"h1")           # switched; a branch named below `HEAD`
+    g.head("before", b"main")       # bytewise still comes after it
+    g.head("after", b"topic")
+    g.ref("after", b"A", X)
+    g.log("after", b"A", [(ZERO, X, b"branch: Created from HEAD")])
+    g = GitRepo(c, b"h2")
+    g.head("before", b"main")
+    g.head("after", oid=X)
+    g = GitRepo(c, b"h3")
+    g.head("before", oid=X)
+    g.head("after", b"main")
+    g = GitRepo(c, b"h4")
+    g.head("before", oid=X)
+    g.head("after", oid=Y)
+    g.log("before", b"HEAD", [(ZERO, X, b"commit (initial): x")])
+    g.log("after", b"HEAD", [(ZERO, X, b"commit (initial): x"), (X, Y, b"commit: y")])
+    g = GitRepo(c, b"h5")
+    g.head("before", oid=X)
+    g.head("after", oid=Y)
+    g.log("before", b"HEAD", [(ZERO, X, b"commit (initial): x")])
+    g.log("after", b"HEAD", [(ZERO, X, b"commit (initial): x"),
+                             (X, Y, b"checkout: moving from " + X + b" to " + Y)])
+    g = GitRepo(c, b"h6")
+    g.head("before", oid=X)
+    g.head("after", oid=Y)
+    g.log("before", b"HEAD", [(ZERO, X, b"commit (initial): x")])
+    g.log("after", b"HEAD", [(ZERO, X, b"commit (initial): x"), (X, Y, b"reset: moving to " + Y)])
+    g = GitRepo(c, b"h7")
+    g.head("before", oid=X)
+    g.head("after", oid=Y)
+    c.tag("git.e12.head.switch")
+    c.tag("git.e12.head.detach")
+    c.tag("git.e12.head.attach")
+    c.tag("git.e12.head.detached_commits")
+    c.tag("git.e12.head.detached_moved")
+    c.tag("git.e12.head.detached_rewritten")
+    c.tag("git.e12.head.detached_no_reflog")
+    c.tag("git.e12.order.head_first")
+    out.append(c)
+
+    # ---- a repository made: HEAD added switches nothing; main created
+    c = Case("git-e12-new-repo")
+    g = GitRepo(c)
+    g.head("after", b"main")
+    g.ref("after", b"main", X)
+    g.log("after", b"main", [(ZERO, X, b"commit (initial): start")])
+    g.log("after", b"HEAD", [(ZERO, X, b"commit (initial): start")])
+    c.tag("git.e12.head.added_no_switch")
+    out.append(c)
+
+    # ---- `git checkout -b topic` and a commit on it
+    c = Case("git-e12-checkout-b")
+    g = GitRepo(c)
+    g.head("before", b"main")
+    g.head("after", b"topic")
+    g.both(b"refs/heads/main", X + b"\n")
+    g.ref("after", b"topic", Y)
+    g.log("after", b"topic", [(ZERO, X, b"branch: Created from HEAD"), (X, Y, b"commit: y")])
+    hl = [(ZERO, X, b"commit (initial): x")]
+    g.log("before", b"HEAD", hl)
+    g.log("after", b"HEAD", hl + [(X, X, b"checkout: moving from main to topic"),
+                                  (X, Y, b"commit: y")])
+    c.tag("git.e12.checkout_b")
+    out.append(c)
+
+    # ---- nested repositories, ordered by repo; branch names bytewise
+    c = Case("git-e12-nested")
+    for root in (b"proj", b"a/vendor/lib", b"a", b"", b"a-b"):
+        g = GitRepo(c, root)
+        g.unchanged(oid=X)
+        for br in (b"z", b"a/b", b"a-b"):
+            g.ref("after", br, Y)
+            g.log("after", br, [(ZERO, Y, b"branch: Created from HEAD")])
+    c.tag("git.e12.nested")
+    c.tag("git.e12.branch_order")
+    out.append(c)
+
+    # ---- an unknown ref, read where its copy can be: provisional
+    c = Case("git-e12-unknown-with-copy", modes=BOTH)
+    g = GitRepo(c)
+    g.unchanged()
+    g.ref("before", b"main2", X)
+    g.ref("after", b"main2", Y, raced=True)
+    g.log("before", b"main2", [(ZERO, X, b"branch: Created")])
+    g.log("after", b"main2", [(ZERO, X, b"branch: Created"), (X, Y, b"commit: y")])
+    g.ref("before", b"dev", X)                       # its reflog raced
+    g.ref("after", b"dev", Z)
+    g.log("before", b"dev", [(ZERO, X, b"branch: Created")])
+    g.log("after", b"dev", [(ZERO, X, b"branch: Created"), (X, Z, b"reset: moving to " + Z)],
+          raced=True)
+    g.ref("before", b"plain", X)                     # nothing unknown: not provisional
+    g.ref("after", b"plain", W)
+    c.tag("git.e12.unknown.with_copy", "store")
+    c.tag("git.e12.unknown.reflog", "store")
+    c.tag("git.e12.unknown.no_store", "nostore")
+    out.append(c)
+
+    c = Case("git-e12-unknown-no-copy")
+    g = GitRepo(c)
+    g.unchanged()
+    g.ref("before", b"main2", X)
+    g.ref("after", b"main2", Y, raced=True, store="none")
+    g.ref("before", b"plain", X)
+    g.ref("after", b"plain", W)
+    c.tag("git.e12.unknown.no_copy")
+    out.append(c)
+
+    # ---- refs that cannot be parsed: could_not_interpret (E10); the rest stand
+    c = Case("git-e12-unparseable")
+    g = GitRepo(c, b"r")
+    g.unchanged()
+    g.ref("before", b"bad", X)
+    g.put("after", b"refs/heads/bad", b"not an object id\n")
+    g.ref("before", b"good", X)
+    g.ref("after", b"good", Y)
+    g = GitRepo(c, b"p")
+    g.unchanged()
+    g.packed("before", [(b"refs/tags/v1", X)])
+    g.put("after", b"packed-refs", gpacked([(b"refs/tags/v1", X)]) + b"this is no ref line\n")
+    g.ref("after", b"needs-packed", Y)              # its before is packed-refs': nothing
+    g.ref("before", b"loose-both", X)               # both sides loose: stands
+    g.ref("after", b"loose-both", Y)
+    g = GitRepo(c, b"q")
+    g.head("before", b"main")
+    g.put("after", b"HEAD", b"\xff\xfe not a HEAD\n")
+    g.both(b"refs/heads/main", X + b"\n")
+    c.tag("git.e12.unparseable_ref")
+    c.tag("git.e12.unparseable_packed")
+    c.tag("git.e12.unparseable_head")
+    out.append(c)
+
+    # ---- tags and remote-tracking refs derive nothing (path findings stand)
+    c = Case("git-e12-tags-remotes")
+    g = GitRepo(c)
+    g.unchanged()
+    g.ref("after", b"refs/tags/v2", Y)
+    g.ref("before", b"refs/tags/v0", W)
+    g.ref("before", b"refs/remotes/origin/main", X)
+    g.ref("after", b"refs/remotes/origin/main", Y)
+    g.log("before", b"refs/remotes/origin/main", [(ZERO, X, b"fetch: storing head")])
+    g.log("after", b"refs/remotes/origin/main", [(ZERO, X, b"fetch: storing head"),
+                                                  (X, Y, b"fetch: forced-update")])
+    g.put("before", b"packed-refs", gpacked([(b"refs/remotes/origin/dev", X),
+                                            (b"refs/tags/v1", Z)], peeled={b"refs/tags/v1": X}))
+    g.put("after", b"packed-refs", gpacked([(b"refs/remotes/origin/dev", Y), (b"refs/tags/v1", W),
+                                           (b"refs/tags/v3", U)], peeled={b"refs/tags/v1": Y}))
+    c.tag("git.e12.tags_remotes_nothing")
+    out.append(c)
+
+    # ---- a ref or packed-refs git needs and cannot read decides nothing
+    c = Case("git-e12-cu")
+    g = GitRepo(c, b"r")
+    g.unchanged()
+    # its before cannot be read (bytes no other entry has: one state per object)
+    g.ref("before", b"lost", goid("lost"), store="absent")
+    g.ref("after", b"lost", Y)
+    g.ref("before", b"fine", X)
+    g.ref("after", b"fine", Y)
+    g = GitRepo(c, b"p")
+    g.unchanged()
+    g.packed("before", [(b"refs/tags/v1", X)])
+    g.packed("after", [(b"refs/tags/v1", Y)], store="corrupt")
+    g.ref("after", b"needs-packed", Y)              # needs packed-refs: nothing
+    g.ref("before", b"loose-both", X)               # does not: stands
+    g.ref("after", b"loose-both", Y)
+    c.tag("git.e12.cu.ref")
+    c.tag("git.e12.cu.packed")
+    out.append(c)
+
+    # ... and a reflog it needs to say how a branch moved
+    c = Case("git-e12-cu-reflog")
+    g = GitRepo(c)
+    g.unchanged()
+    moved(g, b"dev", X, Y, [(X, Y, b"commit: y")])
+    c.before[g.p(b"logs/refs/heads/dev")]["store"] = "corrupt"
+    c.tag("git.e12.cu.reflog_classify")
+    out.append(c)
+
+    # ---- E11: refs not captured on one side derive nothing
+    c = Case("git-e12-e11", modes=BOTH)
+    g = GitRepo(c)
+    g.unchanged()
+    g.ref("after", b"hidden", X)
+    g.log("after", b"hidden", [(ZERO, X, b"branch: Created from HEAD")])
+    c.hide("before", g.p(b"refs/heads"), "unreadable")
+    c.hide("before", g.p(b"logs"), "unreadable")
+    g2 = GitRepo(c, b"other")
+    g2.unchanged()
+    g2.ref("after", b"seen", Y)
+    g2.log("after", b"seen", [(ZERO, Y, b"branch: Created from HEAD")])
+    c.tag("git.e12.e11", "store")
+    c.tag("git.e12.e11_nostore", "nostore")
+    out.append(c)
+
+    # ---- E9: a branch whose name is not UTF-8
+    c = Case("git-e12-e9-not-utf8", modes=BOTH)
+    g = GitRepo(c)
+    g.unchanged()
+    g.ref("after", b"caf\xe9", X)
+    g.log("after", b"caf\xe9", [(ZERO, X, b"branch: Created from HEAD")])
+    g.ref("after", b"ok", Y)
+    g.log("after", b"ok", [(ZERO, Y, b"branch: Created from HEAD")])
+    c.tag("git.e12.e9_branch_not_utf8", "store")
+    c.tag("git.e12.e9_nostore", "nostore")
+    out.append(c)
+
+    # ---- a tag and a remote-tracking ref that cannot be parsed: E10 (diff-v1,
+    # "pip, dpkg and git emit one `could_not_interpret` event naming it") is
+    # about any file git claims; they derive no event otherwise
+    c = Case("git-e12-unparseable-tag-remote")
+    g = GitRepo(c)
+    g.unchanged()
+    g.ref("before", b"refs/tags/v1", X)
+    g.put("after", b"refs/tags/v1", b"no tag here\n")
+    g.ref("before", b"refs/remotes/origin/main", X)
+    g.put("after", b"refs/remotes/origin/main", b"no remote here\n")
+    g.ref("before", b"dev", X)
+    g.ref("after", b"dev", Y)
+    c.tag("git.e12.unparseable_tag_remote")
+    out.append(c)
+
+    # ---- copies git cannot read that it derives no event from: a tag, a
+    # remote-tracking ref and its reflog (Content: "git names only the paths
+    # it derives events from"), and a removed reflog ("a reflog removed needs
+    # no copy"): their records say so, no event names them
+    c = Case("git-e12-cu-not-named", modes=BOTH)
+    g = GitRepo(c)
+    g.unchanged()
+    g.ref("before", b"refs/tags/v1", goid("t-before"), store="absent")
+    g.ref("after", b"refs/tags/v1", goid("t-after"))
+    g.ref("before", b"refs/remotes/origin/main", goid("r-before"))
+    g.ref("after", b"refs/remotes/origin/main", goid("r-after"), store="corrupt")
+    g.log("before", b"refs/remotes/origin/main", [(ZERO, goid("r-before"), b"fetch: x")])
+    g.log("after", b"refs/remotes/origin/main", [(ZERO, goid("r-before"), b"fetch: x"),
+                                                  (goid("r-before"), goid("r-after"), b"fetch: y")],
+          store="none")
+    g.ref("before", b"gone", goid("gone"))
+    g.log("before", b"gone", [(ZERO, goid("gone"), b"branch: Created from HEAD")], store="absent")
+    c.tag("git.e12.cu_not_named", "store")
+    c.tag("git.e12.cu_not_named_nostore", "nostore")
+    out.append(c)
+
+    # ---- a loose ref replaced by a directory: `a` deleted, `a/b` appears
+    c = Case("git-e12-ref-type-changed")
+    g = GitRepo(c)
+    g.unchanged()
+    g.ref("before", b"a", X)
+    g.ref("after", b"a/b", Y)
+    c.tag("git.e12.ref_type_changed")
+    out.append(c)
+    return out
+
+
+def random_git(rng, c):
+    """A repository's history, simulated: a few operations before, more
+    after, each written as git writes it (loose refs, packed-refs, HEAD,
+    reflogs); now and then a copy lost, a file raced, a ref garbled or a
+    reflog entry dropped."""
+    root = rng.choice([b"", b"proj", b"proj/vendor/lib", b"w"])
+    repo = join(root, b".git")
+    st = {"loose": {}, "packed": {}, "logs": {}, "head": ("sym", b"main"), "t": 0}
+    n = [0]
+
+    def new():
+        n[0] += 1
+        return rng.randbytes(20).hex().encode()
+
+    def value(ref):
+        return st["loose"].get(ref, st["packed"].get(ref))
+
+    def cur():
+        h = st["head"]
+        return value(b"refs/heads/" + h[1]) if h[0] == "sym" else h[1]
+
+    def log(ref, old, nw, msg):
+        st["logs"].setdefault(ref, []).append((old, nw, msg, st["t"]))
+        st["t"] += 1
+
+    def set_branch(br, nw, msg, head_too=True):
+        ref = b"refs/heads/" + br
+        old = value(ref) or ZERO
+        st["loose"][ref] = nw
+        log(ref, old, nw, msg)
+        if head_too and st["head"] == ("sym", br):
+            log(b"HEAD", old, nw, msg)
+
+    def branches():
+        return sorted({r[len(b"refs/heads/"):] for r in list(st["loose"]) + list(st["packed"])
+                       if r.startswith(b"refs/heads/")})
+
+    first = new()
+    set_branch(b"main", first, b"commit (initial): start")
+    names = [b"main", b"dev", b"topic", b"feature/x", b"fix-1", b"rel"]
+
+    def step():
+        h = st["head"]
+        op = rng.randrange(17)
+        brs = branches()
+        if op in (0, 1, 2):                                  # a commit
+            msg = rng.choice([b"commit: c", b"commit: c", b"commit (merge): m", b"cherry-pick: p",
+                              b"revert: r", b"am: a", b"commit (amend): fix"])
+            nw = new()
+            if h[0] == "sym":
+                set_branch(h[1], nw, msg)
+            else:
+                log(b"HEAD", h[1], nw, msg)
+                st["head"] = ("oid", nw)
+        elif op == 3 and h[0] == "sym":                      # reset
+            nw = new() if rng.random() < 0.5 else first
+            set_branch(h[1], nw, b"reset: moving to " + nw[:7])
+        elif op == 4 and h[0] == "sym":                      # a merge
+            nw = new()
+            set_branch(h[1], nw, rng.choice([b"merge dev: Fast-forward", b"pull: Fast-forward",
+                                             b"merge dev: Merge made by the 'ort' strategy."]))
+        elif op == 5 and h[0] == "sym":                      # a rebase
+            nw = new()
+            ref = b"refs/heads/" + h[1]
+            old = value(ref)
+            st["loose"][ref] = nw
+            log(ref, old, nw, b"rebase (finish): " + ref + b" onto " + first)
+            log(b"HEAD", old, first, b"rebase (start): checkout " + first[:7])
+            log(b"HEAD", first, nw, b"rebase (pick): p")
+            log(b"HEAD", nw, nw, b"rebase (finish): returning to " + ref)
+        elif op == 6 and brs:                                # checkout
+            br = rng.choice(brs)
+            frm = cur()
+            to = value(b"refs/heads/" + br)
+            log(b"HEAD", frm, to, b"checkout: moving from " + (h[1] if h[0] == "sym" else h[1][:7])
+                + b" to " + br)
+            st["head"] = ("sym", br)
+        elif op == 7:                                        # checkout -b
+            br = rng.choice(names)
+            if value(b"refs/heads/" + br) is None:
+                at = cur()
+                ref = b"refs/heads/" + br
+                st["loose"][ref] = at
+                log(ref, ZERO, at, b"branch: Created from HEAD")
+                log(b"HEAD", at, at, b"checkout: moving from x to " + br)
+                st["head"] = ("sym", br)
+        elif op == 8:                                        # branch, no checkout
+            br = rng.choice(names)
+            ref = b"refs/heads/" + br
+            if value(ref) is None:
+                at = cur()
+                st["loose"][ref] = at
+                log(ref, ZERO, at, b"branch: Created from " + rng.choice([b"HEAD", b"main"]))
+        elif op == 9 and len(brs) > 1:                       # branch -d
+            br = rng.choice([b for b in brs if st["head"] != ("sym", b)])
+            ref = b"refs/heads/" + br
+            st["loose"].pop(ref, None)
+            st["packed"].pop(ref, None)
+            st["logs"].pop(ref, None)
+        elif op == 10 and brs:                               # branch -m
+            br = rng.choice(brs)
+            to = rng.choice(names)
+            if value(b"refs/heads/" + to) is None:
+                old, ref = b"refs/heads/" + br, b"refs/heads/" + to
+                v = value(old)
+                st["loose"].pop(old, None)
+                st["packed"].pop(old, None)
+                st["loose"][ref] = v
+                st["logs"][ref] = st["logs"].pop(old, [])
+                log(ref, v, v, b"Branch: renamed " + old + b" to " + ref)
+                if st["head"] == ("sym", br):
+                    st["head"] = ("sym", to)
+        elif op == 11 and brs:                               # branch -f
+            br = rng.choice([b for b in brs if st["head"] != ("sym", b)] or [None])
+            if br:
+                nw = rng.choice([first, new()])
+                set_branch(br, nw, b"branch: Reset to " + nw[:7], head_too=False)
+        elif op == 12:                                       # detach
+            at = cur()
+            log(b"HEAD", at, at, b"checkout: moving from x to " + at)
+            st["head"] = ("oid", at)
+        elif op == 13:                                       # pack-refs --all
+            st["packed"].update(st["loose"])
+            st["loose"] = {}
+        elif op == 14:                                       # fetch
+            ref = b"refs/remotes/origin/main"
+            nw = new()
+            old = value(ref) or ZERO
+            st["loose"][ref] = nw
+            log(ref, old, nw, rng.choice([b"fetch: fast-forward", b"fetch: forced-update"]))
+        elif op == 15:                                       # a tag
+            st["loose"][b"refs/tags/v%d" % rng.randrange(4)] = new()
+        elif op == 16 and h[0] == "sym":                     # push --force-like
+            set_branch(h[1], new(), b"update by push: forced-update")
+
+    def files():
+        out = {}
+        h = st["head"]
+        out[b"HEAD"] = (b"ref: refs/heads/" + h[1] if h[0] == "sym" else h[1]) + b"\n"
+        for ref, v in st["loose"].items():
+            out[ref] = v + b"\n"
+        if st["packed"] or rng.random() < 0.2:
+            out[b"packed-refs"] = gpacked(sorted(st["packed"].items()))
+        for ref, es in st["logs"].items():
+            if es:
+                out[b"logs/" + ref] = b"".join(reflog_entry(o, nw, m, t) for o, nw, m, t in es)
+        return out
+
+    for _ in range(rng.randrange(1, 6)):
+        step()
+    bf = files()
+    for _ in range(rng.randrange(1, 7)):
+        step()
+    af = files()
+    store_choices = ["ok"] * 14 + ["none", "absent", "corrupt"]
+    for side, fs in (("before", bf), ("after", af)):
+        for rest, data in fs.items():
+            other = af if side == "before" else bf
+            same = other.get(rest) == data
+            r = rng.random()
+            if not same and rest.startswith(b"logs/") and side == "after" and r < 0.04:
+                lines = data.split(b"\n")[:-1]     # an entry dropped: no longer a chain
+                if len(lines) > 2:
+                    del lines[-2]
+                    data = b"\n".join(lines) + b"\n"
+            elif not same and rest.startswith(b"refs/") and r < 0.02:
+                data = b"garbled\n"
+            c.put(side, repo + b"/" + rest,
+                  reg(data, gen=0 if same else (1 if side == "after" else 0),
+                      store="ok" if same else rng.choice(store_choices),
+                      raced=(not same) and rng.random() < 0.04))
 
 
 # ---------------------------------------------------------------- required cells
@@ -1989,7 +2673,7 @@ def cell_probes():
 def required_cases():
     return (cell_dpkg_simple() + cell_pip_simple() + cell_pip_e10() + cell_dpkg_e9_e10()
             + cell_p7() + cell_e11() + cell_order() + cell_content_unavailable() + cell_paths_b64()
-            + cell_git_reflog() + cell_probes())
+            + cell_git_reflog() + cell_git_events() + cell_probes())
 
 
 def all_cases(n, seed):
