@@ -515,9 +515,10 @@ static int collect(struct git *g, const struct belay_interp_input *in, enum git_
     size_t len[2] = { 0, 0 };
     int rc = 0;
     bool readable = true;
+    const bool removed_log = kind == GK_LOG && !reg(in, SIDE_AFTER);   /* no copy needed (diff-v1, git) */
     for (int k = SIDE_BEFORE; k <= SIDE_AFTER && rc == 0; k++) {
         x->present[k] = reg(in, k);
-        if (!x->present[k]) { x->known[k] = true; continue; }
+        if (!x->present[k] || removed_log) { x->known[k] = true; continue; }
         const enum stored_why w = copy_of(in, k, max, kind == GK_LOG, &buf[k], &len[k]);
         if (w == SW_OK) { x->known[k] = true; continue; }
         readable = false;
@@ -587,17 +588,29 @@ static struct val packed_val(const struct gfact *p, int k, struct gs b) {
  * the old id of the first entry its reflog gained in this diff (zeros:
  * absent); after, a loose ref removed with packed-refs not in this diff is
  * gone (git removes a branch from both). */
-static struct val value(const struct git *g, const struct grepo *r, struct gs b, int k) {
+static struct val value(const struct git *g, const struct grepo *r, struct gs b, int k,
+                        const struct gfact **src) {
     const struct gfact *lo = find(g, r, GK_LOOSE, b), *pk = find(g, r, GK_PACKED, b),
                        *lg = find(g, r, GK_LOG, b);
-    if (lo != NULL && lo->present[k])
+    *src = NULL;
+    if (lo != NULL && lo->present[k]) {
+        *src = lo;
         return lo->known[k] ? (struct val){ V_VALUE, lo->val[k] } : (struct val){ V_UNKNOWN, { 0 } };
-    if (pk != NULL) return packed_val(pk, k, b);
-    if (k == SIDE_AFTER)
-        return lo != NULL && lo->present[SIDE_BEFORE] ? (struct val){ V_ABSENT, { 0 } } : (struct val){ V_NONE, { 0 } };
-    if (lg != NULL && (!lg->known[0] || !lg->known[1])) return (struct val){ V_UNKNOWN, { 0 } };
-    if (lg != NULL && lg->log_ok && lg->ne > 0)
+    }
+    if (pk != NULL) {
+        *src = pk;
+        return packed_val(pk, k, b);
+    }
+    if (k == SIDE_AFTER) {
+        if (lo == NULL || !lo->present[SIDE_BEFORE]) return (struct val){ V_NONE, { 0 } };
+        *src = lo;
+        return (struct val){ V_ABSENT, { 0 } };
+    }
+    /* A reflog is only evidence: one that cannot be read gives none. */
+    if (lg != NULL && lg->known[0] && lg->known[1] && lg->log_ok && lg->ne > 0) {
+        *src = lg;
         return zeros(lg->e[0].old) ? (struct val){ V_ABSENT, { 0 } } : (struct val){ V_VALUE, lg->e[0].old };
+    }
     return (struct val){ V_NONE, { 0 } };
 }
 
@@ -742,7 +755,8 @@ static int repo_events(struct git *g, const struct grepo *r, struct gev **v, siz
             bool done = false;
             for (size_t j = first; j < *n && !done; j++) done = gs_eq((*v)[j].branch, b);
             if (done) continue;
-            const struct val bv = value(g, r, b, SIDE_BEFORE), av = value(g, r, b, SIDE_AFTER);
+            const struct gfact *bs, *as;
+            const struct val bv = value(g, r, b, SIDE_BEFORE, &bs), av = value(g, r, b, SIDE_AFTER, &as);
             if (bv.st == V_UNKNOWN || av.st == V_UNKNOWN) continue;     /* decides nothing */
             int kind = -1;
             if (av.st == V_VALUE && bv.st == V_ABSENT) kind = FK_GIT_BRANCH_CREATED;
@@ -762,22 +776,20 @@ static int repo_events(struct git *g, const struct grepo *r, struct gev **v, siz
             e->branch = b;
             e->rank = 2;
             e->kind = kind;
-            const struct gfact *lo = find(g, r, GK_LOOSE, b), *pk = find(g, r, GK_PACKED, b),
-                               *lg = find(g, r, GK_LOG, b);
-            add_path(e, lo);
-            if (pk != NULL && (packed_val(pk, 0, b).st == V_VALUE || packed_val(pk, 1, b).st == V_VALUE))
-                add_path(e, pk);
+            /* the paths it is derived from: what decided each side's value
+             * (a ref, packed-refs, or the reflog as evidence), and the
+             * reflog when it says how the branch moved (E12, E3) */
+            add_path(e, bs);
+            add_path(e, as);
             if (kind == FK_GIT_BRANCH_CREATED) {
                 e->a = av.v;
-                if (bv.st == V_ABSENT && lo != NULL && !lo->present[0]) add_path(e, lg);   /* the evidence */
             } else if (kind == FK_GIT_BRANCH_DELETED) {
                 e->a = bv.v;
-                add_path(e, lg);
             } else if (bv.st == V_NONE) {
                 e->from_absent = true;
                 e->b = av.v;
             } else {
-                classify(g, e, lg, bv.v, av.v);
+                classify(g, e, find(g, r, GK_LOG, b), bv.v, av.v);
             }
         }
     }
@@ -803,6 +815,7 @@ static int repo_events(struct git *g, const struct grepo *r, struct gev **v, siz
                 if (x->dead || x->kind != FK_GIT_BRANCH_DELETED || !gs_eq(x->branch, from) || !gs_eq(x->a, c->a))
                     continue;
                 c->kind = FK_GIT_BRANCH_RENAMED;
+                add_path(c, lg);                /* it says so */
                 c->branch = from;               /* sorts by the old name */
                 c->b = c->a;                    /* at */
                 c->a = dest;                    /* to */
