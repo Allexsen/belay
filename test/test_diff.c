@@ -527,6 +527,24 @@ TEST(a_failed_end_hook_is_one_event_naming_its_paths) {
     ASSERT_EQ_INT(1, (int)g_st.events);
 }
 
+/* E6 and E11 (decision 118): a path unknown only as not_captured is given
+ * to no interpreter, so a failed end hook's event never lists it. */
+TEST(a_failed_end_hook_never_names_a_path_not_captured) {
+    for (int k = 0; k < 2; k++) {
+        m_begin(k ? "after" : "before", "/s", 1000); ROOT();
+        E(.path = "a-1.dist-info", .type = "dir", .mode = 0755, .ino = 8);
+        E(.path = PIP_A, .type = "reg", .size = 3, .sha = k ? HB : HA);
+        E(.path = "c-1.dist-info", .type = "dir", .mode = 0755, .ino = 10, .unreadable = k == 1);
+        if (k == 0) E(.path = "c-1.dist-info/RECORD", .type = "reg", .size = 3, .sha = HA);
+        m_end();
+    }
+    const struct belay_interp t = { BELAY_INTERP_PIP, NULL, t_claims, t_end_fails };
+    REQUIRE(run_in(BELAY_INTERP_PIP, &t) == 0);
+    ASSERT_TRUE(strstr(g_text, "{\"path\":\"c-1.dist-info/RECORD\",\"outcome\":\"unknown\"") != NULL);
+    ASSERT_TRUE(strstr(g_text, "{\"event\":\"could_not_interpret\",\"interp\":\"pip\",\"text\":"
+                               "\"could not interpret\",\"paths\":[\"" PIP_A "\"]}\n") != NULL);
+}
+
 /* A diff that fails after begin still ends each interpreter, with no sink:
  * its state is freed, and nothing it adds can reach an output. */
 static int g_null_ends;
@@ -1416,6 +1434,7 @@ int main(void) {
     RUN(events_come_after_the_path_records_and_the_trailer_counts_them);
     RUN(a_diff_with_no_events_says_zero);
     RUN(a_failed_end_hook_is_one_event_naming_its_paths);
+    RUN(a_failed_end_hook_never_names_a_path_not_captured);
     RUN(a_failed_diff_ends_its_interpreters_without_a_sink);
     RUN(a_stored_text_file_is_explained_in_its_record);
     RUN(a_changed_dpkg_status_without_a_store_is_never_no_change);
