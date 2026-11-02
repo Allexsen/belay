@@ -41,7 +41,7 @@ printf 'b\n' > "$S/src/b.c"; printf 'c\n' > "$S/src/c.c"
 hook pre t4 Bash "weaken a test"; printf 'def test_x(): pass\n' > "$S/tests/test_x.py"
 out=$(hook stop)
 [ "$(wc -l < "$LOG")" = 9 ] || fail "the log has $(wc -l < "$LOG") lines, expected 9 (concurrent hooks lost one)"
-printf '%s' "$out" | jq -e '.systemMessage | test("changes this turn")' >/dev/null || fail "no turn line: $out"
+printf '%s' "$out" | jq -e '.systemMessage | test("paths changed this turn")' >/dev/null || fail "no turn line: $out"
 R=$(ls "$T/state/dogfood"/s1.turn-*.txt)
 grep -q '^Bash: edit a$' "$R" && grep -q '  M src/a.c' "$R" || fail "src/a.c not under its call: $(cat "$R")"
 grep -A2 '^between tool calls$' "$R" | grep -q '  A watcher.log' || fail "the background write not between calls"
@@ -57,7 +57,7 @@ out=$(hook stop)
 R2=$(ls -t "$T/state/dogfood"/s1.turn-*.txt | head -1)
 [ "$(grep -c 'locked' "$R2")" = 1 ] || fail "the unreadable directory not said once: $(cat "$R2")"
 grep -q '^unknown throughout the session' "$R2" || fail "no 'unknown throughout' section: $(cat "$R2")"
-printf '%s' "$out" | jq -e '.systemMessage | test("^belay: 2 changes")' >/dev/null || fail "counted the unreadable directory: $out"
+printf '%s' "$out" | jq -e '.systemMessage | test("^belay: 2 paths changed")' >/dev/null || fail "counted the unreadable directory: $out"
 # a turn that changes nothing says nothing
 out=$(hook stop)
 [ -z "$out" ] || fail "a turn without changes said: $out"
@@ -154,4 +154,76 @@ hook end
 [ -f "$T/state/dogfood/s1.receipt.txt" ] || fail "no session receipt"
 ls "$T/notes"/*-s1.md >/dev/null 2>&1 || fail "a test file changed, but the receipt was not kept"
 grep -q 'Kept because: a test file changed' "$T"/notes/*-s1.md || fail "kept for the wrong reason"
-echo "dogfood selftest: sequential, concurrent, background, cancelled, silent turn, other project, git folded, labels cut, background commands: ok"
+# A whole directory added folds to one line; a setuid file, a test file
+# and a finding git made below it stay listed (decision 116). The headline
+# counts paths, and changes across calls when they differ (decision 117).
+hook start
+hook pre t30 Bash "unpack"
+mkdir -p "$S/pkg/lib/deep" "$S/pkg/tests" "$S/pkg/.git/refs/heads"
+for i in 1 2 3 4 5; do printf '%s\n' "$i" > "$S/pkg/lib/deep/f$i.txt"; done
+printf 'x\n' > "$S/pkg/tool"; chmod 4755 "$S/pkg/tool"
+printf 'def test_y(): assert 1\n' > "$S/pkg/tests/test_y.py"
+printf '%s\n' "$H" > "$S/pkg/.git/refs/heads/main"
+hook post t30 Bash
+hook pre t31 Bash "touch"; printf 'again\n' > "$S/pkg/lib/deep/f1.txt"; hook post t31 Bash
+out=$(hook stop)
+R7=$(ls -t "$T/state/dogfood"/s1.turn-*.txt | head -1)
+grep -q '^  A pkg/ and [0-9][0-9,]* entries below it$' "$R7" || fail "a whole added directory not folded: $(cat "$R7")"
+grep -q '  A pkg/tool' "$R7" || fail "a setuid file under it was folded: $(cat "$R7")"
+grep -q '  A pkg/tests/test_y.py' "$R7" || fail "a test file under it was folded"
+grep -q '  A pkg/\.git/refs/heads/main   created' "$R7" || fail "a git finding under it was folded"
+! grep -q 'pkg/lib/deep/f2' "$R7" || fail "a plain file under it was listed: $(cat "$R7")"
+n=$(jq '[.sections[] | select(.section | startswith("unknown throughout") | not) | .records[] | select(.event == null) | .path] | unique | length' "${R7%.txt}.json")
+grep -q "^  $n paths changed ([0-9]* changes across calls)" "$R7" || fail "the headline does not count paths: $(head -2 "$R7")"
+printf '%s' "$out" | jq -e --arg n "$n" '.systemMessage | test("^belay: " + $n + " paths changed this turn \\([0-9]+ changes across calls\\)")' >/dev/null \
+    || fail "the Stop line does not count paths: $out"
+
+# Never silent (decision 114): a hook that fails is said at the next Stop,
+# every Stop while it keeps failing, and no more once it works again.
+hook pre t40 Bash "x" </dev/null >/dev/null
+BELAY=/nonexistent/belay hook pre t41 Bash "y"
+out=$(hook stop)
+printf '%s' "$out" | jq -e '.systemMessage | test("^belay: hooks failing: pre: belay mark failed")' >/dev/null \
+    || fail "a failed mark was not said at the Stop: $out"
+out=$(hook stop)
+[ -z "$out" ] || fail "a failure said again after it stopped: $out"
+for k in 1 2; do
+    out=$(BELAY=/nonexistent/belay hook stop)
+    printf '%s' "$out" | jq -e '.systemMessage | test("^belay: hooks failing: stop: belay mark failed")' >/dev/null \
+        || fail "a lasting failure was not said at Stop $k: $out"
+done
+mkdir -p "$T/broken" && cp "$HOOK" "$T/broken/" && echo 'raise SystemExit(3)' > "$T/broken/receipt.py"
+out=$(jq -cn '{session_id:"s1"}' | "$T/broken/belay-dogfood" stop)
+printf '%s' "$out" | jq -e '.systemMessage | test("hooks failing: stop: the turn.s receipt failed")' >/dev/null \
+    || fail "a failed receipt was not said: $out"
+mkdir -p "$T/nojq" && for c in date cat mkdir chmod tr sed head wc mv rm dirname; do ln -sf "$(command -v $c)" "$T/nojq/$c"; done
+out=$(printf '{}' | PATH="$T/nojq" "$HOOK" stop)
+printf '%s' "$out" | grep -q '"systemMessage":"belay: hooks failing: stop: jq not found' || fail "a missing jq was not said: $out"
+
+# install.sh (decision 115): the settings in a file, one line printed that
+# merges them into settings.json after a backup of its own -- other hooks
+# and keys kept, an earlier belay hook replaced, twice the same as once. A
+# script that no longer matches its checksum is said at every Stop (114).
+FH=$T/home; mkdir -p "$FH/.claude"
+printf '%s' '{"theme":"dark","hooks":{"PreToolUse":[{"matcher":"Bash","hooks":[{"type":"command","command":"other-hook"}]},{"hooks":[{"type":"command","command":"cd / && /old/belay-dogfood pre"}]}]}}' > "$FH/.claude/settings.json"
+m=$(HOME=$FH sh scripts/dogfood/install.sh "$BELAY" "$S" 2>/dev/null)
+[ "$(printf '%s\n' "$m" | wc -l)" = 1 ] || fail "install.sh printed more than the merge command: $m"
+SH=$FH/.local/share/belay/dogfood/settings-hooks.json
+jq -e '.hooks | keys == ["PostToolUse","PostToolUseFailure","PreToolUse","SessionEnd","SessionStart","Stop"]' "$SH" >/dev/null || fail "no settings file"
+sh -c "$m" >/dev/null && sh -c "$m" >/dev/null || fail "the merge command failed"
+jq -e '.theme == "dark" and ([.hooks.PreToolUse[].hooks[].command] | (index("other-hook") != null)
+        and (map(select(test("belay-dogfood"))) | length == 1) and (map(select(test("/old/"))) | length == 0))' \
+    "$FH/.claude/settings.json" >/dev/null || fail "the merge lost or doubled a hook: $(cat "$FH/.claude/settings.json")"
+[ "$(ls "$FH/.claude"/settings.json.bak-* | wc -l)" = 2 ] || fail "each merge does not keep a backup of its own"
+grep -q 'other-hook' "$(ls "$FH/.claude"/settings.json.bak-* | head -1)" && ! grep -q 'belay-dogfood pre"' "$(ls "$FH/.claude"/settings.json.bak-* | head -1)" \
+    || ! grep -q "$FH/.local" "$(ls "$FH/.claude"/settings.json.bak-* | head -1)" || fail "the first backup is not the settings as they were"
+stop=$(jq -r '.hooks.Stop[0].hooks[0].command' "$SH")
+out=$(jq -cn '{session_id:"s1"}' | sh -c "$stop")
+! printf '%s' "$out" | grep -q 'inactive' || fail "the installed Stop hook is inactive: $out"
+echo '#' >> "$FH/.local/share/belay/dogfood/receipt.py"
+for k in 1 2; do
+    out=$(jq -cn '{session_id:"s1"}' | sh -c "$stop")
+    printf '%s' "$out" | jq -e '.systemMessage | test("^belay: hooks inactive: checksum mismatch: .*/receipt.py -- run scripts/dogfood/install.sh$")' >/dev/null \
+        || fail "a checksum mismatch was not said at Stop $k: $out"
+done
+echo "dogfood selftest: sequential, concurrent, background, cancelled, silent turn, other project, git folded, labels cut, background commands, directories folded, paths counted, failures said, install: ok"
