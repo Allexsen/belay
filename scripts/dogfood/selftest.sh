@@ -86,14 +86,28 @@ printf 'c\n' >> "$S/src/a.c"
 hook post t11 Bash
 out=$(hook stop)
 R3=$(ls -t "$T/state/dogfood"/s1.turn-*.txt | head -1)
-grep -q '^  git bookkeeping: 3 changes under \.git/$' "$R3" || fail "git's bookkeeping not folded: $(cat "$R3")"
+grep -q '^  git bookkeeping: 5 changes under \.git/$' "$R3" || fail "git's bookkeeping not folded: $(cat "$R3")"
 grep -q '^  git bookkeeping: [0-9]* changes\{0,1\} under vendor/lib/\.git/$' "$R3" || fail "the nested repository not folded apart"
 ! grep -q 'objects/01\|FETCH_HEAD' "$R3" || fail "a raw .git path listed: $(cat "$R3")"
-grep -q '  M \.git/refs/heads/main ' "$R3" && grep -q '  M \.git/HEAD ' "$R3" || fail "what git reports was folded: $(cat "$R3")"
+# git's events say what its findings did (decision 126): the events listed,
+# the ref and HEAD paths folded with the bookkeeping, their findings in the JSON
+grep -q '^  git HEAD main -> dev$' "$R3" && grep -q "^  git main ${H%????????????????????????????} -> ${H2%????????????????????????????}\$" "$R3" \
+    || fail "git's events not shown, ids cut to 12 for reading: $(cat "$R3")"
+! grep -q '  M \.git/refs/heads/main \|  M \.git/HEAD ' "$R3" || fail "a ref path listed beside its event: $(cat "$R3")"
 grep -q '  A \.git/hooks/pre-commit' "$R3" && grep -q '  ~ \.git/hooks/post-merge' "$R3" || fail "a hook was folded"
 grep -q '  M wt/\.git ' "$R3" && grep -q '  M src/a\.c' "$R3" || fail "a .git file or a real edit was folded"
 J=${R3%.txt}.json
 jq -e '[.sections[].records[].path] | index(".git/objects/01/a") != null' "$J" >/dev/null || fail "the JSON lost a folded path"
+jq -e 'any(.sections[].records[]; .path == ".git/refs/heads/main" and any(.findings[]?; .kind == "git_ref_moved"))' "$J" >/dev/null \
+    || fail "the JSON lost git's finding on the ref"
+# A belay that emits no git events (the pinned release, before E12): git's
+# findings stay listed, as decision 105 had them.
+python3 -I -B -c '
+import importlib.util, sys
+spec = importlib.util.spec_from_file_location("r", sys.argv[1]); R = importlib.util.module_from_spec(spec); spec.loader.exec_module(R)
+ref = {"path": ".git/refs/heads/x", "outcome": "modified", "findings": [{"kind": "git_ref_moved"}]}
+sys.exit(0 if R.folded_git(ref) is None and R.folded_git(ref, True) == "" else 1)' scripts/dogfood/receipt.py \
+    || fail "without git events, git's findings were folded"
 
 # A label is cut for one glance; the call's whole command is in the detail
 # (turn-267: a command cut at 200 characters hid the git fetch that wrote).
@@ -171,7 +185,7 @@ R7=$(ls -t "$T/state/dogfood"/s1.turn-*.txt | head -1)
 grep -q '^  A pkg/ and [0-9][0-9,]* entries below it$' "$R7" || fail "a whole added directory not folded: $(cat "$R7")"
 grep -q '  A pkg/tool' "$R7" || fail "a setuid file under it was folded: $(cat "$R7")"
 grep -q '  A pkg/tests/test_y.py' "$R7" || fail "a test file under it was folded"
-grep -q '  A pkg/\.git/refs/heads/main   created' "$R7" || fail "a git finding under it was folded"
+grep -q "^  git main now at ${H%????????????????????????????}\$" "$R7" || fail "a git finding under it was folded"   # its event: no evidence it was absent (E12)
 ! grep -q 'pkg/lib/deep/f2' "$R7" || fail "a plain file under it was listed: $(cat "$R7")"
 n=$(jq '[.sections[] | select(.section | startswith("unknown throughout") | not) | .records[] | select(.event == null) | .path] | unique | length' "${R7%.txt}.json")
 grep -q "^  $n paths changed ([0-9]* changes across calls)" "$R7" || fail "the headline does not count paths: $(head -2 "$R7")"
@@ -226,6 +240,7 @@ printf 'x\ny\nz\n' >> "$S/src/a.c"
 mkdir -p "$S/newpkg" "$S/build" "$S/venv/lib/python3.12/site-packages/foo-1.0.dist-info"
 printf '1\n' > "$S/newpkg/one.txt"; printf '2\n' > "$S/newpkg/two.txt"; printf 'n\n' > "$S/src/new1.c"
 for i in 1 2 3 4 5; do printf '%s\n' "$i" > "$S/src/m$i.c"; done
+mkdir -p "$S/src/__pycache__"; printf 'p' > "$S/src/__pycache__/a.cpython-312.pyc"; printf 'q' > "$S/stray.pyc"
 rm "$S/src/b.c"
 chmod 4755 "$S/src/c.c"
 printf 'o' > "$S/build/out.o"
@@ -245,10 +260,13 @@ n=$(printf '%s\n' "$sum" | grep -c '^  ')
 printf '%s\n' "$sum" | grep -q '^  edited     .*src/a\.c +3 -0' || fail "the edit's line counts not summarised: $sum"
 printf '%s\n' "$sum" | grep -q '^  files      added [0-9]*: .*newpkg/ (+2).*; removed 1: src/b\.c' || fail "added and removed not summarised: $sum"
 printf '%s\n' "$sum" | grep -q '^  files      added [0-9]*: [^;]* (and [0-9]* more);' || fail "a long list not cut with a count: $sum"
-printf '%s\n' "$sum" | grep -q '^  git        .*branch feature created at' || fail "git not summarised: $sum"
+printf '%s\n' "$sum" | grep -q "^  git        .*feature now at ${H%????????????????????????????}\$" || fail "git not summarised: $sum"   # git's event (E12)
 printf '%s\n' "$sum" | grep -q '^  packages   pip installed foo 1\.0' || fail "the package not summarised: $sum"
 printf '%s\n' "$sum" | grep -q '^  privilege  .*src/c\.c' || fail "the setuid bit not summarised: $sum"
-printf '%s\n' "$sum" | grep -q '^  build      1 change under build/, bin/' || fail "build output not counted: $sum"
+printf '%s\n' "$sum" | grep -q '^  build      2 changes under build/, bin/; 3 compiled Python$' || fail "build output not counted: $sum"
+! printf '%s\n' "$sum" | grep -q 'build/ (+' || fail "build/ listed as an added directory: $sum"
+! printf '%s\n' "$sum" | grep -q 'pyc\|__pycache__' || fail "compiled Python listed as edits: $sum"
+grep -A30 '^Bash: glance$' "$R10" | grep -q '^  compiled Python: 3 changes (__pycache__/, \*\.pyc)$' || fail "compiled Python not folded: $(cat "$R10")"
 printf '%s\n' "$sum" | grep -q '^  unknown    .*locked' || fail "the unknown not summarised: $sum"
 grep -A20 '^Bash: glance$' "$R10" | grep -q '^  ~ 1 file touched, content unchanged   \[t1\]$' || fail "an mtime-only change not folded: $(cat "$R10")"
 grep -A1 '^the files touched, content unchanged$' "$R10" | grep -q '^  \[t1\] src/d\.c$' || fail "the touched file not in the detail"
@@ -312,4 +330,4 @@ grep -A2 '^Bash: before$' "$R9" | grep -q '  A before-gap.txt' && grep -A2 '^Bas
 ! grep -q 'background writers\|^between tool calls' "$R9" || fail "an inactive gap read as background writing: $(cat "$R9")"
 printf '%s' "$out" | jq -e '.systemMessage | test("^belay: hooks failing: [a-z]+: checksum mismatch \\(hooks inactive\\)")' >/dev/null \
     || fail "the first good Stop did not say the hooks had been inactive: $out"
-echo "dogfood selftest: sequential, concurrent, background, cancelled, silent turn, other project, git folded, labels cut, background commands, directories folded, paths counted, failures said, inactive gaps unattributed, summary, touched folded, long commands, install: ok"
+echo "dogfood selftest: sequential, concurrent, background, cancelled, silent turn, other project, git folded, labels cut, background commands, directories folded, paths counted, failures said, inactive gaps unattributed, summary, touched folded, long commands, git events, compiled Python, install: ok"
