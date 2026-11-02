@@ -127,7 +127,12 @@ Manifests of different scopes are refused before any entry is read. Then, for ea
 
 **Present on one side only.** Look at the side that lacks it: its nearest recorded ancestor (the
 deepest entry whose path, followed by `/`, begins this path; the scope root `.` when there is none).
+The first of these that applies decides:
 
+- The side that lacks it excluded the path, or a path above it (manifest v2's `excluded`,
+  `manifest-v2.md`): `unknown`, reason `not_captured`. That manifest did not look there, so its
+  absence says nothing -- never `added` or `removed`. A path both manifests excluded is in neither,
+  and in no record.
 - That ancestor is a directory carrying `unreadable` or `mount`: `unknown`, reason `not_captured`.
 - It is a directory carrying `unstable`: `unknown`, reason `listing_incomplete`.
 - It is not a directory and carries `raced`: `unknown`, reason `raced`. It changed after it was
