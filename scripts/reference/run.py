@@ -330,6 +330,14 @@ def check_cell(cell, mine, belay=None):
         and b"var/lib/dpkg/status" in mine.not_captured,
         "dpkg.E11.excluded_path": lambda: e11_silent(mine, 2) and not K
         and b"x/var/lib/dpkg/status" in mine.not_captured,
+        # E11 (decision 118): "no `could_not_interpret` (E10) nor
+        # `content_unavailable` for it" -- the not-captured statuses cannot
+        # be parsed, yet only the captured one is named
+        "dpkg.E11.unparseable": lambda: e11_silent(mine, 2) and K == ["could_not_interpret"]
+        and E[0]["paths"] == ["var/lib/dpkg/status"] and cni_records(mine) == 1,
+        "dpkg.E11.unparseable_no_store": lambda: e11_silent(mine, 2)
+        and K == ["content_unavailable"] and E[0]["paths"] == ["var/lib/dpkg/status"]
+        and cni_records(mine) == 0,
         "dpkg.E11.with_raced": lambda: e11_silent(mine) and K
         and all(e.get("provisional") is True for e in E)
         and {p for e in E for p in event_paths(e)} == {

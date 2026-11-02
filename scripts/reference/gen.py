@@ -1325,7 +1325,13 @@ def cell_e11():
     excluded it (or a path above it), or it lies below a directory that side
     records as unreadable or a mount -- derives no event: it is no pair
     partner, is never named, and no copy of it is needed. Its record stands.
-    Any other unknown path still derives provisional events (E2, P7)."""
+    Any other unknown path still derives provisional events (E2, P7).
+    The pin spells out the core's events (decision 118): "No interpreter is
+    given it, so no event of the core's names it either: no
+    `could_not_interpret` (E10) nor `content_unavailable` for it, and a
+    failed end hook's event (E6) never lists it." E10 and content_unavailable
+    are built below (pip-e11-unnameable, dpkg-e11-unparseable, the
+    store="absent" sides and every nostore pair); E6 is not (see ref.py)."""
     out = []
     S, S2, S3 = SITES
     rng = random.Random(1111)
@@ -1384,7 +1390,8 @@ def cell_e11():
     out.append(c)
 
     # a dist-info that cannot be named, not captured: never named, so no
-    # could_not_interpret (E10) either
+    # could_not_interpret (E10) either -- E11: "no `could_not_interpret`
+    # (E10) nor `content_unavailable` for it" (its before side has no copy)
     c = Case("pip-e11-unnameable", modes=BOTH)
     c.put("after", S2 + b"/nodash.dist-info/RECORD", reg(b"x,,\n"))
     c.put("before", S2, mount_dir())
@@ -1456,6 +1463,22 @@ def cell_e11():
     c.put("after", b"x/var/lib/dpkg/available", reg(b""))
     c.tag("dpkg.E11.excluded_above")
     c.tag("dpkg.E11.excluded_path")
+    out.append(c)
+
+    # a status that cannot be parsed, not captured on the side that lacks
+    # it, is never parsed: E11, "no `could_not_interpret` (E10) ... for it".
+    # Beside it, a captured one that cannot be parsed still gives E10's
+    # could_not_interpret, naming it alone.
+    c = Case("dpkg-e11-unparseable", modes=BOTH)
+    bad = status_bytes(base_db()) + b"garbage line\n"
+    c.put("after", b"chroot/sid/" + sp, reg(bad))
+    c.hide("before", b"chroot/sid", "unreadable")
+    c.put("before", b"chroot/old/" + sp, reg(bad))
+    c.hide("after", b"chroot/old", "excluded")
+    c.put("before", sp, reg(status_bytes(base_db())))
+    c.put("after", sp, reg(bad, gen=1))
+    c.tag("dpkg.E11.unparseable", "store")
+    c.tag("dpkg.E11.unparseable_no_store", "nostore")
     out.append(c)
 
     # beside a status that raced: its events stay provisional; without a
