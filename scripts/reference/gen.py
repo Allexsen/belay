@@ -1,8 +1,9 @@
 #!/usr/bin/env python3
 """Deterministic corpus for the dpkg/pip/reflog reference (scripts/reference/).
 
-A case is two trees, before and after, written as two manifest-v1 files plus
-a store: copies at <store>/<first two hex of sha256>/<other 62>
+A case is two trees, before and after, written as two manifest files (v1,
+or v2 -- docs/spec/manifest-v2.md -- when a side excludes something or the
+case asks for it) plus a store: copies at <store>/<first two hex of sha256>/<other 62>
 (diff-v1, "Content"). Required cells are built by construction, one builder
 each; random cases come from a seeded random.Random. Nothing here retries.
 
@@ -32,20 +33,34 @@ BIG = {"pip": [ref.PIP_BOUND + 1, ref.PIP_BOUND + 2],
 # ---------------------------------------------------------------- entries
 
 def reg(content=None, store="ok", big=None, gen=0, raced=False, mode=0o100644,
-        unverified=False):
+        unverified=False, mount=False):
     """A regular file. store: ok | none (no `stored` field) | absent (named,
     not in the store) | corrupt (the object holds other bytes) | symlink (a
     symlink to a good copy sits at the object's name). big: a sparse, zero
     copy of that size instead of `content`. unverified: no hash, no copy,
-    larger than hash_max_bytes."""
+    larger than hash_max_bytes. mount: a mounted file (a bind mount), never
+    read -- `unverified`, no hash or copy, its size that of `content`, on
+    another device (manifest-v1, `mount`)."""
     return {"type": "reg", "content": content, "store": store, "big": big, "gen": gen,
-            "raced": raced, "mode": mode, "unverified": unverified}
+            "raced": raced, "mode": mode, "unverified": unverified or mount, "mount": mount}
 
 
 def unreadable_dir():
     """A directory belay could not list: nothing below it on that side, so a
     path that is there on the other side is unknown."""
     return {"type": "dir", "unreadable": True}
+
+
+def unstable_dir():
+    """A directory whose listing is not its listing at the end of the walk:
+    a path missing below it on that side is unknown (listing_incomplete)."""
+    return {"type": "dir", "unstable": True}
+
+
+def mount_dir():
+    """The root of another mount: never descended, nothing below it on that
+    side (manifest-v1, `mount`)."""
+    return {"type": "dir", "mount": True}
 
 
 def lnk(target, gen=0):
@@ -59,6 +74,10 @@ class Case:
         self.after = {}
         self.modes = list(modes)
         self.tags = {m: set() for m in ("store", "nostore")}
+        # manifest v2's `excluded`, per side: path -> reason; a side that
+        # excludes anything is written as v2, and so is one named in `v2`
+        self.excluded = {"before": {}, "after": {}}
+        self.v2 = set()
 
     def tag(self, cell, mode=None):
         for m in ([mode] if mode else self.modes):
@@ -70,6 +89,26 @@ class Case:
 
     def put(self, side, path, e):
         (self.before if side == "before" else self.after)[path] = e
+
+    def exclude(self, side, path, reason=b"user"):
+        self.excluded[side][path] = reason
+
+    def hide(self, side, path, how):
+        """Makes `path` not captured on `side`, or its listing incomplete:
+        how is unreadable | mount | excluded (everything at or below it
+        dropped on that side) or unstable (everything below it dropped)."""
+        tree = self.before if side == "before" else self.after
+        for p in list(tree):
+            if p == path or p.startswith(path + b"/"):
+                del tree[p]
+        for x in list(self.excluded[side]):
+            if x == path or x.startswith(path + b"/"):
+                del self.excluded[side][x]
+        if how == "excluded":
+            self.exclude(side, path)
+        else:
+            tree[path] = {"unreadable": unreadable_dir, "mount": mount_dir,
+                          "unstable": unstable_dir}[how]()
 
 
 # ---------------------------------------------------------------- writing
@@ -120,15 +159,20 @@ def path_field(p):
     return jkey("path_b64", base64.b64encode(p))
 
 
-def complete(tree):
-    """Adds every missing parent directory, and the root."""
+def complete(tree, excluded=()):
+    """Adds every missing parent directory, and the root -- an excluded
+    path's parents too: its name still counts in its parent's listing."""
     out = dict(tree)
-    for p in list(tree):
+    for p in list(tree) + list(excluded):
         parts = p.split(b"/")
         for i in range(1, len(parts)):
             d = b"/".join(parts[:i])
             out.setdefault(d, {"type": "dir"})
     out.setdefault(b".", {"type": "dir"})
+    for x in excluded:
+        # manifest-v2: "A reader rejects a manifest that records an entry at
+        # or below one of its excluded paths."
+        assert not any(p == x or p.startswith(x + b"/") for p in out), x
     return out
 
 
@@ -139,15 +183,21 @@ def entry_line(p, e, digest_of):
         ino = 100 + crc(b"dir", p) % 1000000
         kv += [jkey("mode", 0o40755), jkey("uid", 0), jkey("gid", 0), jkey("size", 4096),
                jkey("mtime_ns", 1750000000000000000), jkey("ctime_ns", 1750000000000000000),
-               jkey("ino", ino), jkey("dev", DEV), jkey("nlink", 2)]
-        if e.get("unreadable"):
-            kv.append(jkey("unreadable", True))
+               jkey("ino", ino), jkey("dev", DEV + 1 if e.get("mount") else DEV),
+               jkey("nlink", 2)]
+        # manifest-v1's key order: ... unstable ... mount, unreadable
+        for flag in ("unstable", "mount", "unreadable"):
+            if e.get(flag):
+                kv.append(jkey(flag, True))
         return b"{" + b",".join(kv) + b"}"
     if t == "lnk":
         size = len(e["target"])
         seed = crc(b"lnk", p, e["target"], e["gen"])
     else:
-        if e["unverified"]:
+        if e.get("mount"):
+            size = len(e["content"])
+            sha = None
+        elif e["unverified"]:
             size = UNVERIFIED_SIZE
             sha = None
         elif e["big"] is not None:
@@ -160,7 +210,7 @@ def entry_line(p, e, digest_of):
     t_ns = 1760000000000000000 + (seed % 1000000) * 1000
     kv += [jkey("mode", e["mode"]), jkey("uid", 0), jkey("gid", 0), jkey("size", size),
            jkey("mtime_ns", t_ns), jkey("ctime_ns", t_ns), jkey("ino", 5000 + seed % 100000000),
-           jkey("dev", DEV), jkey("nlink", 1)]
+           jkey("dev", DEV + 1 if e.get("mount") else DEV), jkey("nlink", 1)]
     if t == "reg":
         if sha is None:
             kv.append(jkey("unverified", True))
@@ -170,21 +220,40 @@ def entry_line(p, e, digest_of):
                 kv.append(jkey("stored", sha))
     else:
         kv.append(jkey("link_target", e["target"]))
+    if e.get("mount"):
+        kv.append(jkey("mount", True))
     if e.get("raced"):
         kv.append(jkey("raced", True))
     return b"{" + b",".join(kv) + b"}"
 
 
-def write_manifest(fn, tree, created_ns, digest_of):
-    t = complete(tree)
-    lines = [b'{"belay_manifest":1,"created_ns":%d,"scopes":[%s],"hash":"sha256",'
-             b'"hash_max_bytes":%d,"store_max_bytes":65536}' % (created_ns, ref.jstr(SCOPE), HASH_MAX)]
+def write_manifest(fn, tree, created_ns, digest_of, version=1, excluded=None):
+    """excluded: {path: reason} (v2 only; manifest-v2.md V2-2)."""
+    excluded = excluded or {}
+    assert version == 2 or not excluded
+    t = complete(tree, excluded)
+    head = (b'{"belay_manifest":%d,"created_ns":%d,"scopes":[%s],"hash":"sha256",'
+            b'"hash_max_bytes":%d,"store_max_bytes":65536'
+            % (version, created_ns, ref.jstr(SCOPE), HASH_MAX))
+    if version == 2:
+        # V2-2: sorted by path bytes, each {"path", "reason", "dev", "ino"}
+        xs = [b"{" + b",".join([path_field(x), jkey("reason", excluded[x]), jkey("dev", DEV),
+                                jkey("ino", 900000 + crc(b"excluded", x) % 100000)]) + b"}"
+              for x in sorted(excluded)]
+        head += b',"excluded":[' + b",".join(xs) + b'],"walk_start_ns":%d' % (created_ns - 10**9)
+    lines = [head + b"}"]
     for p in sorted(t):
         lines.append(entry_line(p, t[p], digest_of))
-    raced = sum(1 for e in t.values() if e.get("raced"))
-    unreadable = sum(1 for e in t.values() if e.get("unreadable"))
-    lines.append(b'{"belay_manifest_end":%d,"vanished":0,"unreadable":%d,"unstable":0,'
-                 b'"mounts":0,"raced":%d}' % (len(t), unreadable, raced))
+
+    def count(flag):
+        return sum(1 for e in t.values() if e.get(flag))
+    trailer = (b'{"belay_manifest_end":%d,"vanished":0,"unreadable":%d,"unstable":%d,'
+               b'"mounts":%d,"raced":%d'
+               % (len(t), count("unreadable"), count("unstable"), count("mount"), count("raced")))
+    if version == 2:
+        # V2-4..6: a full walk -- read_all "check", reference "none", trusted 0
+        trailer += b',"trusted":0,"reference":"none","read_all":"check"'
+    lines.append(trailer + b"}")
     with open(fn, "wb") as f:
         f.write(b"\n".join(lines) + b"\n")
 
@@ -228,8 +297,11 @@ def write_case(case, d, cache_file):
         else:
             with open(target, "wb") as f:
                 f.write(e["content"] + (b"#corrupt" if s == "corrupt" else b""))
-    write_manifest(os.path.join(d, "before.ndjson"), case.before, 1761000000000000000, digest_of)
-    write_manifest(os.path.join(d, "after.ndjson"), case.after, 1761000600000000000, digest_of)
+    for side, tree, t in (("before", case.before, 1761000000000000000),
+                          ("after", case.after, 1761000600000000000)):
+        x = case.excluded[side]
+        write_manifest(os.path.join(d, side + ".ndjson"), tree, t, digest_of,
+                       2 if (x or side in case.v2) else 1, x)
 
 
 # ---------------------------------------------------------------- dpkg content
@@ -598,6 +670,35 @@ def random_case(rng, i):
                 c.put("after", rec, reg(record_bytes(rows, term), mode=0o100600, gen=1))
             else:
                 both_dist(c, site, name, v1, rows)
+    # E11 and E2 mixed: now and then a directory one side could not look
+    # into (unreadable, a mount, excluded: not_captured) or whose listing is
+    # incomplete there (unstable: listing_incomplete), or a status excluded
+    # alone; then the RECORDs and statuses on the other side below it are
+    # unknown, and only those not captured derive nothing.
+    if rng.random() < 0.3:
+        hidden = {"before": [], "after": []}
+        for _ in range(rng.randrange(1, 4)):
+            side = rng.choice(["before", "after"])
+            records = list(c.before) + list(c.after)
+            dirs = (list(sites) + [r + b"var/lib/dpkg" for r in roots]
+                    + [r.rstrip(b"/") for r in roots if r]
+                    + sorted({p.rsplit(b"/", 1)[0] for p in records
+                              if p.endswith(b".dist-info/RECORD")}))
+            files = [r + b"var/lib/dpkg/status" for r in roots]
+            if rng.random() < 0.15:
+                path, how = rng.choice(files), "excluded"
+            else:
+                path = rng.choice(dirs)
+                how = rng.choice(["unreadable", "mount", "excluded", "unstable"])
+            # one hidden path never below another on its side
+            if any(path == h or path.startswith(h + b"/") or h.startswith(path + b"/")
+                   for h in hidden[side]):
+                continue
+            hidden[side].append(path)
+            c.hide(side, path, how)
+    for side in ("before", "after"):
+        if rng.random() < 0.3:
+            c.v2.add(side)
     if rng.random() < 0.4:
         random_reflog(rng, c)
     c.tag("random")
@@ -1164,9 +1265,11 @@ def cell_p7():
     c = Case("pip-p7-unknown-unpaired", modes=BOTH)
     put_dist(c, "after", S, b"six", b"1.16.0", rand_rows(rng, b"six", b"1.16.0"), raced=True)
     put_dist(c, "before", S, b"attrs", b"1.0", rand_rows(rng, b"attrs", b"1.0"), raced=True)
-    # unknown because the directory is unreadable on the side it lacks
+    # unknown because the directory's listing is incomplete on the side that
+    # lacks it (listing_incomplete). Under an unreadable directory it would
+    # be not_captured, and derive nothing (E11: cell_e11).
     put_dist(c, "before", S2, b"numpy", b"2.0", rand_rows(rng, b"numpy", b"2.0"))
-    c.put("after", S2, unreadable_dir())
+    c.put("after", S2, unstable_dir())
     put_dist(c, "before", S, b"wheel", b"0.41", rand_rows(rng, b"wheel", b"0.41"))
     c.tag("pip.P7.unknown_unpaired")
     out.append(c)
@@ -1205,12 +1308,184 @@ def cell_p7():
     c.tag("dpkg.P7.unknown_status_no_store", "nostore")
     out.append(c)
 
-    # unknown through an unreadable directory: the after side's status, read
-    c = Case("dpkg-p7-unknown-dir", modes=BOTH)
-    c.put("before", b"chroot/sid", unreadable_dir())
+    # unknown through a directory whose listing is incomplete on the side that
+    # lacks it (listing_incomplete): the after side's status, read. (Below an
+    # unreadable directory it is not_captured: E11, cell_e11.)
+    c = Case("dpkg-p7-unknown-unstable-dir", modes=BOTH)
+    c.put("before", b"chroot/sid", unstable_dir())
     c.put("after", b"chroot/sid/" + sp, reg(status_bytes(base_db())))
     c.tag("dpkg.P7.unknown_status_readable", "store")
     c.tag("dpkg.P7.unknown_status_no_store", "nostore")
+    out.append(c)
+    return out
+
+
+def cell_e11():
+    """E11: a path unknown only as not_captured -- the side that lacks it
+    excluded it (or a path above it), or it lies below a directory that side
+    records as unreadable or a mount -- derives no event: it is no pair
+    partner, is never named, and no copy of it is needed. Its record stands.
+    Any other unknown path still derives provisional events (E2, P7)."""
+    out = []
+    S, S2, S3 = SITES
+    rng = random.Random(1111)
+    sp = b"var/lib/dpkg/status"
+
+    def rows(n, v):
+        return rand_rows(rng, n, v)
+
+    # ---- pip
+    for how in ("unreadable", "mount"):
+        c = Case("pip-e11-below-" + how, modes=BOTH)
+        # added below a directory the before side could not look into
+        both_dist(c, S2, b"numpy", b"2.0", rows(b"numpy", b"2.0"))
+        put_dist(c, "after", S2, b"scipy", b"1.13.0", rows(b"scipy", b"1.13.0"))
+        put_dist(c, "after", S2, b"numpy", b"2.1", rows(b"numpy", b"2.1"))
+        c.hide("before", S2, how)
+        # removed below one the after side could not look into
+        put_dist(c, "before", S3, b"wheel", b"0.41", rows(b"wheel", b"0.41"))
+        c.hide("after", S3, how)
+        # and a known install beside them
+        put_dist(c, "after", S, b"requests", b"2.31.0", rows(b"requests", b"2.31.0"))
+        c.tag("pip.E11.below_" + how)
+        out.append(c)
+
+    c = Case("pip-e11-excluded", modes=BOTH)
+    # a path above it excluded on the before side
+    put_dist(c, "after", S2, b"numpy", b"2.1", rows(b"numpy", b"2.1"))
+    c.exclude("before", S2)
+    # the RECORD itself excluded on the after side (its METADATA removed)
+    put_dist(c, "before", S3, b"wheel", b"0.41", rows(b"wheel", b"0.41"))
+    c.exclude("after", dist(S3, b"wheel", b"0.41")[0])
+    put_dist(c, "after", S, b"requests", b"2.31.0", rows(b"requests", b"2.31.0"))
+    c.tag("pip.E11.excluded_above")
+    c.tag("pip.E11.excluded_path")
+    out.append(c)
+
+    # a not_captured RECORD is no pair partner: the other one stands alone
+    c = Case("pip-e11-not-a-partner", modes=BOTH)
+    put_dist(c, "before", S, b"six", b"1.15.0", rows(b"six", b"1.15.0"))
+    put_dist(c, "after", S, b"six", b"1.16.0", rows(b"six", b"1.16.0"))
+    c.exclude("before", S + b"/six-1.16.0.dist-info")
+    put_dist(c, "before", S, b"attrs", b"1.0", rows(b"attrs", b"1.0"))
+    c.hide("after", S + b"/attrs-1.0.dist-info", "mount")
+    put_dist(c, "after", S, b"attrs", b"2.0", rows(b"attrs", b"2.0"))
+    c.tag("pip.E11.not_a_partner")
+    out.append(c)
+
+    # two added and one removed under one key, one of the added not
+    # captured: a pair of one each, not E10's ambiguity
+    c = Case("pip-e11-not-in-ambiguity", modes=BOTH)
+    put_dist(c, "before", S, b"six", b"1.15.0", rows(b"six", b"1.15.0"))
+    put_dist(c, "after", S, b"six", b"1.16.0", rows(b"six", b"1.16.0"))
+    put_dist(c, "after", S, b"Six", b"1.17.0", rows(b"Six", b"1.17.0"))
+    c.exclude("before", S + b"/Six-1.17.0.dist-info")
+    c.tag("pip.E11.not_in_ambiguity")
+    out.append(c)
+
+    # a dist-info that cannot be named, not captured: never named, so no
+    # could_not_interpret (E10) either
+    c = Case("pip-e11-unnameable", modes=BOTH)
+    c.put("after", S2 + b"/nodash.dist-info/RECORD", reg(b"x,,\n"))
+    c.put("before", S2, mount_dir())
+    c.put("before", S3 + b"/-1.0.dist-info/RECORD", reg(b"y,,\n", store="absent"))
+    c.exclude("after", S3 + b"/-1.0.dist-info")
+    put_dist(c, "after", S, b"requests", b"2.31.0", rows(b"requests", b"2.31.0"))
+    c.tag("pip.E11.unnameable")
+    out.append(c)
+
+    # not_captured beside unknown for other reasons, in one diff: those stay
+    # provisional (E2) -- a RECORD that raced, one under an unstable
+    # directory, one raced on both sides
+    c = Case("pip-e11-with-raced", modes=BOTH)
+    put_dist(c, "after", S2, b"numpy", b"2.1", rows(b"numpy", b"2.1"))
+    c.hide("before", S2, "unreadable")
+    put_dist(c, "after", S, b"six", b"1.16.0", rows(b"six", b"1.16.0"), raced=True)
+    r = rows(b"attrs", b"2.0")
+    put_dist(c, "before", S, b"attrs", b"2.0", r)
+    put_dist(c, "after", S, b"attrs", b"2.0", mutate_rows(rng, r), gen=1, raced=True)
+    put_dist(c, "before", S3, b"wheel", b"0.41", rows(b"wheel", b"0.41"))
+    c.hide("after", S3, "unstable")
+    c.tag("pip.E11.with_raced")
+    out.append(c)
+
+    # the first rule that applies decides: a RECORD that raced, below a
+    # directory unreadable on the side that lacks it, is not_captured
+    c = Case("pip-e11-first-rule-decides", modes=BOTH)
+    put_dist(c, "after", S2, b"numpy", b"2.1", rows(b"numpy", b"2.1"), raced=True)
+    c.hide("before", S2, "unreadable")
+    put_dist(c, "before", S3, b"wheel", b"0.41", rows(b"wheel", b"0.41"), raced=True)
+    c.hide("after", S3, "excluded")
+    c.tag("pip.E11.first_rule_decides")
+    out.append(c)
+
+    # both sides excluded the same path: in no record, named only in the
+    # header (V2-R7); a v1 manifest against a v2 one
+    c = Case("pip-e11-excluded-both-sides", modes=BOTH)
+    c.exclude("before", S2)
+    c.exclude("after", S2)
+    put_dist(c, "after", S, b"requests", b"2.31.0", rows(b"requests", b"2.31.0"))
+    c.tag("pip.E11.excluded_both_sides")
+    out.append(c)
+    c = Case("pip-e11-v1-against-v2", modes=BOTH)
+    put_dist(c, "before", S2, b"numpy", b"2.0", rows(b"numpy", b"2.0"))
+    c.put("after", S2, unreadable_dir())
+    put_dist(c, "after", S3, b"wheel", b"0.41", rows(b"wheel", b"0.41"))
+    c.exclude("before", S3)
+    put_dist(c, "after", S, b"requests", b"2.31.0", rows(b"requests", b"2.31.0"))
+    c.tag("pip.E11.v1_against_v2")
+    out.append(c)
+
+    # ---- dpkg
+    for how in ("unreadable", "mount"):
+        c = Case("dpkg-e11-below-" + how, modes=BOTH)
+        c.put("after", b"chroot/sid/" + sp, reg(status_bytes(base_db())))
+        c.hide("before", b"chroot/sid", how)
+        c.put("before", b"chroot/buster/" + sp, reg(status_bytes(base_db()), store="absent"))
+        c.put("before", b"chroot/buster/var/lib/dpkg/info/bash.list", reg(b"/bin/bash\n"))
+        c.hide("after", b"chroot/buster/var/lib/dpkg", how)
+        c.tag("dpkg.E11.below_" + how)
+        out.append(c)
+
+    c = Case("dpkg-e11-excluded", modes=BOTH)
+    c.put("before", sp, reg(status_bytes(base_db() + [stanza(b"curl", b"1.0-1")])))
+    c.exclude("after", b"var/lib/dpkg")
+    c.put("after", b"x/" + sp, reg(status_bytes([stanza(b"y", b"1.0")])))
+    c.exclude("before", b"x/" + sp)
+    c.put("before", b"x/var/lib/dpkg/available", reg(b""))
+    c.put("after", b"x/var/lib/dpkg/available", reg(b""))
+    c.tag("dpkg.E11.excluded_above")
+    c.tag("dpkg.E11.excluded_path")
+    out.append(c)
+
+    # beside a status that raced: its events stay provisional; without a
+    # store, one provisional content_unavailable naming it alone
+    c = Case("dpkg-e11-with-raced", modes=BOTH)
+    c.put("after", b"chroot/sid/" + sp, reg(status_bytes(base_db())))
+    c.hide("before", b"chroot/sid", "unreadable")
+    c.put("before", sp, reg(status_bytes(base_db() + [stanza(b"curl", b"1.0-1")])))
+    c.put("after", sp, reg(status_bytes(base_db() + [stanza(b"curl", b"2.0-1")]),
+                           gen=1, raced=True))
+    c.put("before", b"chroot/old/" + sp, reg(status_bytes(base_db())))
+    c.hide("after", b"chroot/old/var", "unstable")
+    c.tag("dpkg.E11.with_raced")
+    out.append(c)
+
+    # READING: a file mounted on one side of a path present on both is
+    # unknown with the reason `mount` (its flag's), not `not_captured`:
+    # E11 does not apply, and its events stay provisional (E2)
+    c = Case("probe-e11-mounted-file", modes=BOTH)
+    r = rows(b"six", b"1.16.0")
+    rec = dist(S, b"six", b"1.16.0")[0]
+    put_dist(c, "before", S, b"six", b"1.16.0", r)
+    put_dist(c, "after", S, b"six", b"1.16.0", r)
+    c.put("after", rec, reg(record_bytes(r), mount=True))
+    c.tag("probe.pip.mounted_record_not_e11")
+    out.append(c)
+    c = Case("probe-e11-mounted-status", modes=BOTH)
+    c.put("before", sp, reg(status_bytes(base_db())))
+    c.put("after", sp, reg(status_bytes(base_db()), mount=True))
+    c.tag("probe.dpkg.mounted_status_not_e11")
     out.append(c)
     return out
 
@@ -1690,7 +1965,7 @@ def cell_probes():
 
 def required_cases():
     return (cell_dpkg_simple() + cell_pip_simple() + cell_pip_e10() + cell_dpkg_e9_e10()
-            + cell_p7() + cell_order() + cell_content_unavailable() + cell_paths_b64()
+            + cell_p7() + cell_e11() + cell_order() + cell_content_unavailable() + cell_paths_b64()
             + cell_git_reflog() + cell_probes())
 
 

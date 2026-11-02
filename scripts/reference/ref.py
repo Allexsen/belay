@@ -3,8 +3,10 @@
 git's reflogs.
 
 Written from docs/spec/diff-v1.md ("Interpreters", "What each interpreter
-reports", the Kinds table and the event rules), docs/spec/manifest-v1.md, the
-pins test/expect/finding-kinds.md and test/expect/diff-events.md, and the
+reports", the Kinds table and the event rules, "Present on one side only"),
+docs/spec/manifest-v1.md, docs/spec/manifest-v2.md (its `excluded`), the
+pins test/expect/finding-kinds.md, test/expect/diff-events.md and
+test/expect/manifest-v2.md, and the
 formats' own documentation: deb-control(5) and Debian Policy 5.6.12 for the
 status database, PEP 376 / "Recording installed projects" for RECORD (rows as
 Python's csv module reads them), PEP 503 for names and PEP 440 for versions
@@ -207,6 +209,9 @@ def entry_path(o):
 
 
 def read_manifest(fn):
+    """(scope, entries by path, excluded): excluded is None for a v1
+    manifest, else its header's `excluded` array as parsed (manifest-v2.md,
+    V2-2), in its order."""
     with open(fn, "rb") as f:
         lines = f.read().split(b"\n")
     if lines and lines[-1] == b"":
@@ -216,11 +221,21 @@ def read_manifest(fn):
         scope = header["scopes"][0].encode("utf-8")
     else:
         scope = base64.b64decode(header["scopes_b64"][0])
+    excluded = header["excluded"] if header["belay_manifest"] == 2 else None
     entries = {}
     for line in lines[1:-1]:
         o = json.loads(line)
         entries[entry_path(o)] = o
-    return scope, entries
+    return scope, entries, excluded
+
+
+def excluded_paths(excluded):
+    return [entry_path(x) for x in (excluded or [])]
+
+
+def under(path, top):
+    """path is top, or below it."""
+    return path == top or path.startswith(top + b"/")
 
 
 def nearest_ancestor(entries, path):
@@ -234,22 +249,43 @@ def nearest_ancestor(entries, path):
             return entries[p]
 
 
-def outcome(b, a, bents, aents, root_dev_b, root_dev_a):
+def outcome(b, a, bents, aents, root_dev_b, root_dev_a, bexcl=(), aexcl=()):
     """The core's verdict for one path (diff-v1, "How an outcome is decided"),
-    for the entries the corpus generates (no xattrs, caps or iflags)."""
+    for the entries the corpus generates (no xattrs, caps or iflags), as
+    (outcome, reason): the reason is the one-sided case's one reason when
+    the outcome is unknown there, else None.
+
+    READING: `not_captured` comes only from "Present on one side only" (its
+    first two rules). On a path present on both sides an unknown outcome's
+    reasons are its flags' ("the reasons of every flag on either side"):
+    `mount` is named as its own reason, and no flag is said to give
+    `not_captured`, so a two-sided path is never E11's."""
     if b is None or a is None:
-        has, lacking_entries = (a, bents) if b is None else (b, aents)
-        anc = nearest_ancestor(lacking_entries, entry_path(has))
+        has, lacking_entries, lacking_excl = (a, bents, bexcl) if b is None else (b, aents, aexcl)
+        p = entry_path(has)
+        # "The first of these that applies decides:"
+        # 1. the lacking side excluded the path, or a path above it
+        if any(under(p, x) for x in lacking_excl):
+            return "unknown", "not_captured"
+        anc = nearest_ancestor(lacking_entries, p)
         if anc is not None:
+            # 2. that ancestor a directory carrying unreadable or mount
             if anc["type"] == "dir" and (anc.get("unreadable") or anc.get("mount")):
-                return "unknown"
+                return "unknown", "not_captured"
+            # 3. a directory carrying unstable
             if anc["type"] == "dir" and anc.get("unstable"):
-                return "unknown"
+                return "unknown", "listing_incomplete"
+            # 4. not a directory, carrying raced
             if anc["type"] != "dir" and anc.get("raced"):
-                return "unknown"
+                return "unknown", "raced"
+        # 5. the absence known; raced on the side that has it
         if has.get("raced"):
-            return "unknown"
-        return "added" if b is None else "removed"
+            return "unknown", "raced"
+        return ("added" if b is None else "removed"), None
+    return two_sided(b, a, root_dev_b, root_dev_a), None
+
+
+def two_sided(b, a, root_dev_b, root_dev_a):
     if b.get("raced") or a.get("raced"):
         return "unknown"
     if b["type"] != a["type"]:
@@ -736,6 +772,8 @@ class Result:
         self.claims = {}        # path -> "pip" | "dpkg" | "git" (a reflog) for those
         self.findings = {}      # path -> bytes of the findings array, or None
         self.events = []        # event lines (bytes), pip's then dpkg's
+        self.not_captured = set()   # paths unknown only as not_captured (E11)
+        self.excluded = (None, None)    # each manifest's `excluded` (None: v1)
 
 
 def row_ok(kind, vals):
@@ -769,13 +807,15 @@ def end_events(interp, named, cni_files, unav, unknown):
 
 
 def interpret(before_fn, after_fn, store):
-    scope_b, bents = read_manifest(before_fn)
-    scope_a, aents = read_manifest(after_fn)
+    scope_b, bents, bexcl = read_manifest(before_fn)
+    scope_a, aents, aexcl = read_manifest(after_fn)
     assert scope_b == scope_a, "the corpus never pairs manifests of different scopes"
     scope = scope_b
     root_dev_b = bents[b"."]["dev"]
     root_dev_a = aents[b"."]["dev"]
     res = Result()
+    res.excluded = (bexcl, aexcl)
+    bx, ax = excluded_paths(bexcl), excluded_paths(aexcl)
 
     unknown = set()                     # claimed paths whose outcome is unknown
     unav = {"pip": [], "dpkg": []}      # (path, side, reason)
@@ -788,7 +828,7 @@ def interpret(before_fn, after_fn, store):
     for path in sorted(set(bents) | set(aents)):
         b = bents.get(path)
         a = aents.get(path)
-        oc = outcome(b, a, bents, aents, root_dev_b, root_dev_a)
+        oc, reason = outcome(b, a, bents, aents, root_dev_b, root_dev_a, bx, ax)
         if oc == "unchanged":
             continue
         res.outcomes[path] = oc
@@ -796,6 +836,16 @@ def interpret(before_fn, after_fn, store):
         if who is None:
             continue
         res.claims[path] = who
+        if oc == "unknown" and reason == "not_captured":
+            # E11: "A path whose outcome is `unknown` with `not_captured` as
+            # its only reason ... derives no event"; diff-v1: "none from a
+            # path `unknown` only as `not_captured`, which no interpreter is
+            # given". So it is no pair partner, is never named (no E10), and
+            # no copy of it is needed (no content_unavailable). Its record
+            # stands, with no finding (its outcome is unknown).
+            res.not_captured.add(path)
+            res.findings[path] = None
+            continue
         if oc == "unknown":
             unknown.add(path)
         findings = []
