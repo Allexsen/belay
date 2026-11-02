@@ -135,3 +135,5 @@
 2026-11-02T15:07:13+04:00	pins: E11 approved; diff.v1's header carries each side's excluded (V2-R7)
 2026-11-02T15:12:06+04:00	diff: E11 -- nothing not captured is interpreted; the header names each side's excluded
 2026-11-02T15:26:56+04:00	oracle: E11 (no event from a path not captured) and V2-R7 (the header's excluded lists)
+# Decision 118: the E11/E6 pin wording lands one commit before the schema's event rules follow it (test_pins fails).
+2026-11-02T20:18:52+04:00	pins: E11 names the core's events it suppresses; E6 lists no path E11 withholds
