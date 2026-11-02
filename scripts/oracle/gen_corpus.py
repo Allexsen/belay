@@ -35,8 +35,8 @@ in a diff (V2-R6) and vary freely; their numbers come from the writer's own
 random stream. manifest_versions() builds the gate's version items
 deterministically.
 
-Exclusions (V2-2; docs/spec/manifest-v2.md, "Readers"): a tree's excluded
-paths have no entry, nothing below them is recorded (no entry, no other
+Exclusions (V2-2; docs/spec/diff-v1.md, "Present on one side only"): a
+tree's excluded paths have no entry, nothing below them is recorded (no entry, no other
 exclusion), and each one's parent is a directory that was listed -- neither
 unreadable nor a mount; it may be unstable (exclusion_violations()). A
 manifest with exclusions has no version 1 counterpart: version 1 cannot say
@@ -2675,9 +2675,10 @@ def manifest_versions(w, rng):
 
 def exclusions(w, rng):
     """Manifest v2's `excluded` (V2-2) and what the diff makes of it
-    (manifest-v2.md, "Readers": a path at or below a path one manifest
-    excluded, held by the other, is `unknown`, reason `not_captured`; a path
-    both excluded is in no record): compare.py's EXCLUDED_SCENARIOS. A side
+    (diff-v1.md, "Present on one side only", its first rule: a path the side
+    lacking it excluded, or below one, held by the other, is `unknown`,
+    reason `not_captured`; a path both excluded is in no record):
+    compare.py's EXCLUDED_SCENARIOS. A side
     with exclusions is written in version 2 only (Writer.pair). Every pair
     is written both ways round, so each one-sided path is held before in one
     and after in the other."""
@@ -2747,9 +2748,10 @@ def exclusions(w, rng):
                scenarios=['excluded on one side: a path not UTF-8 (path_b64), held on the other '
                           'with entries below it'])
 
-    # The other one-sided rules (ambiguity X1, reference.one_sided): the
-    # excluded path's parent unstable on the excluding side (u/e; beside it
-    # u/f, not excluded, held on the other side only: listing_incomplete);
+    # The other one-sided rules, after it in the spec's order
+    # (reference.one_sided): the excluded path's parent unstable on the
+    # excluding side (u/e; beside it u/f, not excluded, held on the other
+    # side only: listing_incomplete);
     # a path held raced on the other side (r); held there as a mount root
     # (m) and as an unreadable directory (z).
     def build(rng):

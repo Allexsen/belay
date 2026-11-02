@@ -90,7 +90,7 @@ the generator's labels (coverage(), required(), gate()):
     with exclusions against a v1 one and against one with its own;
   - every exclusion item (EXCLUDED_SCENARIOS, among the scenarios): what a
     path at or below one manifest's `excluded` gets where the other holds
-    it (manifest-v2.md, "Readers"; V2-2).
+    it (diff-v1.md, "Present on one side only"; V2-2).
 gen_corpus.py builds every required item deterministically and checks each
 targeted pair, and then the targeted pairs alone, with these same functions;
 here the gate runs again over the whole corpus.
@@ -735,17 +735,16 @@ SCENARIOS = (['dev relation: an entry leaves the root device',
                 for f in ('caps', 'xattrs', 'xattrs_sha256')]
              + ['values: caps recorded on one side only, beside another difference',
                 'values: a record line over 64 KiB (V5)'])
-# Manifest v2's `excluded` (docs/spec/manifest-v2.md, "Readers": "A path at
-# or below a path one manifest excluded is not compared where that manifest
-# lacks it: a path the other manifest holds there is `unknown`, reason
-# `not_captured` -- as below a mount, never `removed` or `added`; a path both
-# manifests excluded appears in neither, and in no record"; V2-2): an
+# Manifest v2's `excluded` (docs/spec/diff-v1.md, "Present on one side only",
+# the first rule: "The side that lacks it excluded the path, or a path above
+# it ...: `unknown`, reason `not_captured`. ... never `added` or `removed`. A
+# path both manifests excluded is in neither, and in no record"; V2-2): an
 # excluded directory and an excluded non-directory held on the other side,
 # paths below them, a path not UTF-8, the other one-sided rules it meets (an
 # unstable parent on the excluding side, `raced` or a sealed directory on the
-# other, ambiguity X1), an interpreter's path, excluded on both sides (the
-# same path, or one below the other's), excluded with nothing there on the
-# other side, a name that extends an excluded one without being below it,
+# other: the exclusion decides first), an interpreter's path, excluded on
+# both sides (the same path, or one below the other's), excluded with
+# nothing there on the other side, a name that extends an excluded one without being below it,
 # both reasons, and the list's order by bytes.
 EXCLUDED_SCENARIOS = [
     'excluded on one side: a directory, held on the other with entries below it',

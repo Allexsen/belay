@@ -36,9 +36,10 @@ Its only sources:
     `before_manifest_version` and `after_manifest_version`, each manifest's
     `belay_manifest`; nothing else depends on the version (the entries are
     v1's, and of the keys v2 adds only `excluded` is read: V2-R6);
-  - docs/spec/manifest-v2.md, PROSE ONLY: "Readers", the bullet on a path at
-    or below a path one manifest excluded (checked at start-up), with
-    test/expect/manifest-v2.md V2-2 (what an `excluded` element holds).
+  - docs/spec/diff-v1.md "Present on one side only", its first bullet: a
+    path the side lacking it excluded, or below one (checked at start-up,
+    with the list's order), with test/expect/manifest-v2.md V2-2 (what an
+    `excluded` element holds).
 Never the generated blocks of the spec, never src/ or include/.
 
 Ambiguities this file resolves one way (questions for the author) are
@@ -96,19 +97,24 @@ TRAILER_KEYS = (['belay_diff_end'] + OUTCOMES + [DIR_TIMESTAMPS_ONLY, EVENTS]
                 + ['provisional', 'before_sha256', 'after_sha256'])
 # One-sided reasons, from "Present on one side only".
 NOT_CAPTURED, LISTING_INCOMPLETE, RACED = 'not_captured', 'listing_incomplete', 'raced'
-# docs/spec/manifest-v2.md, "Readers": what a path one manifest excluded
-# means for the diff. Tied to the spec's words at start-up (excluded_rule()).
-MANIFEST_V2_SPEC = os.path.join(REPO, 'docs', 'spec', 'manifest-v2.md')
-EXCLUDED_RULE = ('A path at or below a path one manifest excluded is not compared where that '
-                 'manifest lacks it: a path the other manifest holds there is `unknown`, reason '
-                 '`not_captured` -- as below a mount, never `removed` or `added`; a path both '
-                 'manifests excluded appears in neither, and in no record.')
+# docs/spec/diff-v1.md, "Present on one side only": its rules are ordered,
+# and the first is what a path the side lacking it excluded means for the
+# diff (manifest-v2.md's "Readers" points there). one_sided() takes them in
+# that order. Tied to the spec's words at start-up (excluded_rule()): the
+# order sentence, the exclusion bullet, and the start of the bullet after it
+# -- so the exclusion is still the first.
+EXCLUDED_RULE = ('The first of these that applies decides: '
+                 '- The side that lacks it excluded the path, or a path above it (manifest '
+                 'v2\'s `excluded`, `manifest-v2.md`): `unknown`, reason `not_captured`. That '
+                 'manifest did not look there, so its absence says nothing -- never `added` or '
+                 '`removed`. A path both manifests excluded is in neither, and in no record. '
+                 '- That ancestor is a directory carrying `unreadable` or `mount`')
 
 
 def excluded_rule():
-    text = ' '.join(open(MANIFEST_V2_SPEC, encoding='utf-8').read().split())
+    text = ' '.join(open(SPEC, encoding='utf-8').read().split())
     if EXCLUDED_RULE not in text:
-        raise SystemExit('reference: docs/spec/manifest-v2.md no longer says %r; review '
+        raise SystemExit('reference: docs/spec/diff-v1.md no longer says %r; review '
                          'one_sided() first' % EXCLUDED_RULE)
 
 
@@ -388,22 +394,15 @@ def nearest_ancestor(entries, p):
 
 
 def one_sided(p, present, lacking_entries, added, lacking_excluded):
-    """The four bullets of "Present on one side only", in their order --
-    after manifest v2's rule: "A path at or below a path one manifest
-    excluded is not compared where that manifest lacks it: a path the other
-    manifest holds there is `unknown`, reason `not_captured` -- as below a
-    mount, never `removed` or `added`" (manifest-v2.md, "Readers").
-
-    Ambiguity X1: diff-v1's ordered bullets do not name an exclusion, so
-    where it stands among them is decided here: FIRST, before the side that
-    lacks the path is looked at for an `unstable` ancestor directory
-    (listing_incomplete) and before `raced` on the side that has it. The
-    rule is unconditional ("never `removed` or `added`", one reason named),
-    and "as below a mount" puts it with the first bullet -- the excluded
-    path, had it been recorded, would be the nearest ancestor, deeper than
-    any directory above it, as a mount root is. A path that one side
-    excluded can lack no other way: nothing at or below it is recorded
-    there."""
+    """The bullets of "Present on one side only", in their order: "The first
+    of these that applies decides". The first: "The side that lacks it
+    excluded the path, or a path above it (manifest v2's `excluded`,
+    `manifest-v2.md`): `unknown`, reason `not_captured`" -- before the side
+    that lacks the path is looked at for an `unstable` ancestor directory
+    (listing_incomplete) and before `raced` on the side that has it. (This
+    was ambiguity X1, decided here the same way before the spec stated it.)
+    A path that one side excluded can lack no other way: nothing at or below
+    it is recorded there."""
     trace = ['one-sided']
     if covering(lacking_excluded, p) is not None:
         return 'unknown', [NOT_CAPTURED], trace + ['excluded']
