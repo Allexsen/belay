@@ -634,14 +634,17 @@ struct gev {                    /* one event, before it is written */
     long count;                 /* git_commits_added; -1: absent */
     bool from_absent;           /* git_branch_moved */
     int rank;                   /* E4: 0 HEAD switched, 1 the branch HEAD, 2 a branch */
-    const char *paths[4];
-    size_t pl[4], np;
+    const char *paths[8];       /* each once: a rename merges two branches' */
+    size_t pl[8], np;
     bool prov, dead;
     char *own;                  /* how, for git_history_rewritten: freed with the event */
 };
 
 static void add_path(struct gev *e, const struct gfact *x) {
-    if (x == NULL || e->np == 4) return;
+    if (x == NULL) return;
+    for (size_t i = 0; i < e->np; i++)
+        if (e->paths[i] == x->path.s) { e->prov |= x->prov; return; }
+    if (e->np == sizeof e->paths / sizeof e->paths[0]) return;
     e->paths[e->np] = x->path.s;
     e->pl[e->np++] = x->path.n;
     e->prov |= x->prov;
@@ -656,7 +659,6 @@ static void classify(struct git *g, struct gev *e, const struct gfact *lg, struc
                  gs_eq(lg->e[0].old, b) && gs_eq(lg->e[lg->ne - 1].nw, a);
     for (size_t i = 1; chain && i < lg->ne; i++) chain = gs_eq(lg->e[i].old, lg->e[i - 1].nw);
     if (!chain) return;
-    add_path(e, lg);
     bool rewrite = false, adds = true, counted = true;
     for (size_t i = 0; i < lg->ne; i++) {
         const struct gentry *x = &lg->e[i];
@@ -695,7 +697,9 @@ static void classify(struct git *g, struct gev *e, const struct gfact *lg, struc
         e->own[w] = '\0';
         e->kind = FK_GIT_HISTORY_REWRITTEN;
         e->a = (struct gs){ e->own, w }; e->b = b; e->c = a;
+        add_path(e, lg);                        /* it says how */
     } else if (adds) {
+        add_path(e, lg);
         e->kind = FK_GIT_COMMITS_ADDED;
         e->count = counted ? (long)lg->ne : -1;
         e->a = a;
@@ -761,9 +765,6 @@ static int repo_events(struct git *g, const struct grepo *r, struct gev **v, siz
     const size_t first = *n;
     for (size_t i = r->lo; i < r->hi; i++) {
         const struct gfact *x = &g->f[i];
-        /* packed-refs names a branch by itself only where both its sides
-         * were read: one side alone shows no branch moved (decision 137) */
-        if (x->kind == GK_PACKED && (!x->known[0] || !x->known[1])) continue;
         for (size_t m = 0; m < (x->kind == GK_PACKED ? x->npk[0] + x->npk[1] : 1); m += (x->kind == GK_PACKED ? 2 : 1)) {
             struct gs b;
             if (x->kind == GK_PACKED) b = m < x->npk[0] ? x->pk[0][m] : x->pk[1][m - x->npk[0]];
@@ -836,8 +837,14 @@ static int repo_events(struct git *g, const struct grepo *r, struct gev **v, siz
                 c->branch = from;               /* sorts by the old name */
                 c->b = c->a;                    /* at */
                 c->a = dest;                    /* to */
-                for (size_t q = 0; q < x->np; q++)
-                    if (c->np < 4) { c->paths[c->np] = x->paths[q]; c->pl[c->np++] = x->pl[q]; }
+                for (size_t q = 0; q < x->np; q++) {
+                    bool dup = false;
+                    for (size_t w = 0; w < c->np; w++) dup |= c->paths[w] == x->paths[q];
+                    if (!dup && c->np < sizeof c->paths / sizeof c->paths[0]) {
+                        c->paths[c->np] = x->paths[q];
+                        c->pl[c->np++] = x->pl[q];
+                    }
+                }
                 c->prov |= x->prov;
                 x->dead = true;
                 break;

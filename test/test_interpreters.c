@@ -584,6 +584,9 @@ TEST(git_events_say_how_a_branch_moved_only_by_a_reflog_that_agrees) {
     r_path(&r, "/s/.git/refs/heads/odd", &a, &c, "modified");
     r_path(&r, "/s/.git/logs/refs/heads/odd", NULL, &wrong, "added");
     r_path(&r, "/s/.git/refs/heads/plain", &a, &b, "modified");
+    const struct belay_entry other = file(put(OA " " OB WHO "update-ref: by hand\n"), 0);
+    r_path(&r, "/s/.git/refs/heads/other", &a, &b, "modified");
+    r_path(&r, "/s/.git/logs/refs/heads/other", NULL, &other, "added");        /* leads there, says not how */
     r_path(&r, "/s/.git/refs/heads/seen", NULL, &c, "added");
     ASSERT_EQ_STR(
         GEV("git_commits_added", "\"repo\":\".git\",\"branch\":\"ff\",\"to\":\"" OC "\"", "commits added to ff, now at " OC)
@@ -593,6 +596,8 @@ TEST(git_events_say_how_a_branch_moved_only_by_a_reflog_that_agrees) {
             ",\"paths\":[\".git/logs/refs/heads/fix\",\".git/refs/heads/fix\"]}\n"
         GEV("git_branch_moved", "\"repo\":\".git\",\"branch\":\"odd\",\"from\":\"" OA "\",\"to\":\"" OC "\"", "odd " OA " -> " OC)
             ",\"paths\":[\".git/refs/heads/odd\"]}\n"
+        GEV("git_branch_moved", "\"repo\":\".git\",\"branch\":\"other\",\"from\":\"" OA "\",\"to\":\"" OB "\"", "other " OA " -> " OB)
+            ",\"paths\":[\".git/refs/heads/other\"]}\n"
         GEV("git_branch_moved", "\"repo\":\".git\",\"branch\":\"plain\",\"from\":\"" OA "\",\"to\":\"" OB "\"", "plain " OA " -> " OB)
             ",\"paths\":[\".git/refs/heads/plain\"]}\n"
         GEV("git_branch_moved", "\"repo\":\".git\",\"branch\":\"seen\",\"to\":\"" OC "\"", "seen now at " OC)
@@ -633,6 +638,21 @@ TEST(git_events_rename_and_packed_branches) {
         GEV("git_commits_added", "\"repo\":\".git\",\"branch\":\"main\",\"count\":1,\"to\":\"" OB "\"", "commits added to main: 1, now at " OB)
             ",\"paths\":[\".git/logs/refs/heads/main\",\".git/packed-refs\",\".git/refs/heads/main\"]}\n",
         r_end(&r));
+    r_free(&r);
+    /* packed-refs read after only: it shows the old branch gone, so a rename
+     * lists it with the four other paths it came from (the reference's
+     * author: a rename's paths had room for four, duplicates counted) */
+    r_begin(&r, BELAY_INTERP_GIT, true);
+    const struct belay_entry none = file(NULL, 0);
+    const struct belay_entry pk = file(put("# pack-refs with: peeled fully-peeled sorted\n" OB " refs/heads/main\n"), 0);
+    r_path(&r, "/s/.git/packed-refs", &none, &pk, "modified");
+    r_path(&r, "/s/.git/refs/heads/feat", &a, NULL, "removed");
+    r_path(&r, "/s/.git/logs/refs/heads/feat", &ol, NULL, "removed");
+    r_path(&r, "/s/.git/refs/heads/done", NULL, &a, "added");
+    r_path(&r, "/s/.git/logs/refs/heads/done", NULL, &nlog, "added");
+    ASSERT_TRUE(strstr(r_end(&r),
+        GEV("git_branch_renamed", "\"repo\":\".git\",\"from\":\"feat\",\"to\":\"done\",\"at\":\"" OA "\"", "branch feat renamed to done")
+            ",\"paths\":[\".git/logs/refs/heads/done\",\".git/packed-refs\",\".git/refs/heads/done\",\".git/refs/heads/feat\"]}\n") != NULL);
     r_free(&r);
 }
 
@@ -706,7 +726,8 @@ TEST(git_events_name_only_the_paths_they_came_from) {
 /* Decision 137: what git cannot read reduces what is claimed, never the
  * fact the refs give. A ref unreadable before, readable after: "now at". A
  * packed-refs unreadable before: the reflog's evidence still dates a branch,
- * and without it "now at". Unreadable after: no event, said as unavailable. */
+ * and without it "now at" -- a branch only in packed-refs too. Unreadable
+ * after: no event, said as unavailable. */
 TEST(git_what_cannot_be_read_reduces_the_claim_never_the_fact) {
     struct run r;
     r_begin(&r, BELAY_INTERP_GIT, true);
@@ -726,7 +747,9 @@ TEST(git_what_cannot_be_read_reduces_the_claim_never_the_fact) {
         GEV("git_branch_moved", "\"repo\":\".git\",\"branch\":\"dated\",\"to\":\"" OA "\"", "dated now at " OA)
             ",\"paths\":[\".git/refs/heads/dated\"]}\n"
         GEV("git_branch_moved", "\"repo\":\".git\",\"branch\":\"fresh\",\"to\":\"" OB "\"", "fresh now at " OB)
-            ",\"paths\":[\".git/refs/heads/fresh\"]}\n",
+            ",\"paths\":[\".git/refs/heads/fresh\"]}\n"
+        GEV("git_branch_moved", "\"repo\":\".git\",\"branch\":\"main\",\"to\":\"" OA "\"", "main now at " OA)
+            ",\"paths\":[\".git/packed-refs\"]}\n",
         r_end(&r));
     r_free(&r);
     /* packed-refs unreadable before; the reflog's first entry from zeros
