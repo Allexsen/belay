@@ -206,6 +206,14 @@ def check_e12(cell, mine):
         f = mine.findings.get(path.encode())
         return json.loads(f) if f else None
 
+    CNI_REC = [{"kind": "could_not_interpret", "text": "could not interpret"}]
+
+    def cni_event(path, provisional=False):
+        """One E10 event names the file alone, provisional only when asked."""
+        es = [e for e in E if e["event"] == "could_not_interpret" and path in e["paths"]]
+        return (len(es) == 1 and es[0]["paths"] == [path]
+                and es[0].get("provisional", False) is provisional)
+
     checks = {
         "git.e12.created.reflog_zeros": lambda: K == ["git_branch_created"] and created(
             P, "topic", [P + "/logs/refs/heads/topic", P + "/refs/heads/topic"]),
@@ -302,25 +310,89 @@ def check_e12(cell, mine):
         and (E[0]["reason"], E[0]["side"], E[0].get("provisional")) == ("missing", "after", True)
         and E[0]["paths"] == [P + "/refs/heads/main2"] and rec(P + "/refs/heads/main2") is None
         and "provisional" not in E[1],
-        "git.e12.unparseable_ref": lambda: any(
-            e["event"] == "could_not_interpret" and e["paths"] == ["r/.git/refs/heads/bad"]
-            for e in E) and kinds_of("r/.git") == [("git_branch_moved", "good")]
-        and rec("r/.git/refs/heads/bad") == [{"kind": "could_not_interpret",
-                                              "text": "could not interpret"}],
-        # packed-refs not interpreted gives no value on either side: the
-        # branch it would date is moved, no `from`
-        "git.e12.unparseable_packed": lambda: any(
-            e["event"] == "could_not_interpret" and e["paths"] == ["p/.git/packed-refs"]
-            for e in E) and kinds_of("p/.git") == [("git_branch_moved", "loose-both"),
-                                                   ("git_branch_moved", "needs-packed")]
-        and moved_no_from("p/.git", "needs-packed")
-        and ev("p/.git", branch="needs-packed")["paths"] == ["p/.git/refs/heads/needs-packed"],
-        "git.e12.unparseable_ref_before": lambda: any(
-            e["event"] == "could_not_interpret" and e["paths"] == ["s/.git/refs/heads/bad-before"]
-            for e in E) and not repo_events("s/.git"),
-        "git.e12.unparseable_head": lambda: any(
-            e["event"] == "could_not_interpret" and e["paths"] == ["q/.git/HEAD"] for e in E)
-        and not repo_events("q/.git"),
+        # decision 141: "A side git cannot parse counts as one it cannot read
+        # (and is a `could_not_interpret` event, E10)" -- per side
+        "git.e12.unparseable_ref": lambda: cni_event("r/.git/refs/heads/bad")
+        and kinds_of("r/.git") == [("git_branch_moved", "good")]
+        and rec("r/.git/refs/heads/bad") == CNI_REC,
+        # packed-refs parsed before, not after: before's value stands; after,
+        # the branch whose value is packed-refs' derives no event
+        "git.e12.unparseable_packed": lambda: cni_event("p/.git/packed-refs")
+        and rec("p/.git/packed-refs") == CNI_REC
+        and kinds_of("p/.git") == [("git_branch_moved", "dated-by-packed"),
+                                   ("git_branch_moved", "loose-both"),
+                                   ("git_branch_created", "needs-packed")]
+        and created("p/.git", "needs-packed", ["p/.git/packed-refs",
+                                               "p/.git/refs/heads/needs-packed"])
+        and (ev("p/.git", branch="dated-by-packed") or {}).get("from") == X
+        and ev("p/.git", branch="dated-by-packed")["to"] == Y
+        and ev("p/.git", branch="dated-by-packed")["paths"] == [
+            "p/.git/packed-refs", "p/.git/refs/heads/dated-by-packed"],
+        # not parsed before, parsed after: no evidence of before -- now at
+        "git.e12.unparseable_ref_before": lambda: cni_event("s/.git/refs/heads/bad-before")
+        and rec("s/.git/refs/heads/bad-before") == CNI_REC
+        and kinds_of("s/.git") == [("git_branch_moved", "bad-before")]
+        and moved_no_from("s/.git", "bad-before") and ev("s/.git")["to"] == Y
+        and ev("s/.git")["paths"] == ["s/.git/refs/heads/bad-before"]
+        and "provisional" not in ev("s/.git"),
+        "git.e12.unparseable_ref_before_unknown": lambda: cni_event(
+            "u/.git/refs/heads/raced", provisional=True)
+        and mine.outcomes.get(b"u/.git/refs/heads/raced") == "unknown"
+        and rec("u/.git/refs/heads/raced") is None
+        and kinds_of("u/.git") == [("git_branch_moved", "raced")]
+        and moved_no_from("u/.git", "raced") and ev("u/.git")["to"] == Z
+        and ev("u/.git").get("provisional") is True,
+        # "`HEAD` that cannot be read on a side derives none"
+        "git.e12.unparseable_head": lambda: cni_event("q/.git/HEAD")
+        and rec("q/.git/HEAD") == CNI_REC and not repo_events("q/.git"),
+        "git.e12.unparseable_head_before": lambda: cni_event("q2/.git/HEAD")
+        and rec("q2/.git/HEAD") == CNI_REC and not repo_events("q2/.git"),
+        # a loose ref not parsed before: as one not read (decision 137's cells)
+        "git.e12.unparsed.ref_before_dated": lambda: kinds_of("a/.git") == [
+            ("git_commits_added", "dated")] and ev("a/.git")["count"] == 1
+        and ev("a/.git")["paths"] == ["a/.git/logs/refs/heads/dated", "a/.git/refs/heads/dated"]
+        and cni_event("a/.git/refs/heads/dated") and rec("a/.git/refs/heads/dated") == CNI_REC,
+        "git.e12.unparsed.ref_before_reflog_zeros": lambda: kinds_of("b/.git") == [
+            ("git_branch_moved", "zeros")] and moved_no_from("b/.git", "zeros")
+        and ev("b/.git")["paths"] == ["b/.git/refs/heads/zeros"]
+        and cni_event("b/.git/refs/heads/zeros"),
+        # "A branch removed whose value before cannot be told derives no event"
+        "git.e12.unparsed.ref_before_removed": lambda: not repo_events("c/.git")
+        and cni_event("c/.git/refs/heads/gone") and rec("c/.git/refs/heads/gone") == CNI_REC
+        and not any(e["event"] == "content_unavailable" for e in E),
+        "git.e12.removed.loose_hides_packed_unparsed": lambda: not repo_events("d/.git")
+        and cni_event("d/.git/refs/heads/hid") and rec("d/.git/refs/heads/hid") == CNI_REC
+        and [f["kind"] for f in rec("d/.git/packed-refs")] == ["git_ref_deleted", "git_ref_moved"],
+        "git.e12.removed.loose_hides_packed_unread": lambda: not repo_events("e/.git")
+        and rec("e/.git/refs/heads/hid") == [cu("missing", "before")]
+        and [(e["event"], e["paths"]) for e in E] == [
+            ("could_not_interpret", ["d/.git/refs/heads/hid"]),
+            ("content_unavailable", ["e/.git/refs/heads/hid"])],
+        # packed-refs not parsed before, parsed after: decision 137's cells
+        # for one not read before
+        "git.e12.unparsed.packed_before": lambda: [e["event"] for e in E][:1] == [
+            "could_not_interpret"] and E[0]["paths"] == [P + "/packed-refs"]
+        and rec(P + "/packed-refs") == CNI_REC
+        and not any(e["event"] == "content_unavailable" for e in E)
+        and kinds_of(P) == [
+            ("git_branch_deleted", "gone"), ("git_branch_moved", "kept"),
+            ("git_branch_moved", "later"), ("git_commits_added", "moved-dated"),
+            ("git_branch_created", "new-dated"), ("git_branch_moved", "undated")]
+        and moved_no_from(P, "kept") and ev(P, branch="kept")["to"] == X
+        and ev(P, branch="kept")["paths"] == [P + "/packed-refs"]
+        and created(P, "new-dated", [P + "/logs/refs/heads/new-dated",
+                                     P + "/refs/heads/new-dated"])
+        and ev(P, branch="moved-dated")["paths"] == [
+            P + "/logs/refs/heads/moved-dated", P + "/refs/heads/moved-dated"]
+        and moved_no_from(P, "undated") and ev(P, branch="undated")["paths"] == [
+            P + "/refs/heads/undated"]
+        and ev(P, branch="later")["from"] == X and ev(P, branch="later")["to"] == Z
+        and ev(P, branch="later")["paths"] == [P + "/packed-refs", P + "/refs/heads/later"]
+        and ev(P, branch="gone")["was"] == X
+        and ev(P, branch="gone")["paths"] == [P + "/packed-refs", P + "/refs/heads/gone"],
+        "git.e12.unparsed.packed_before_removed": lambda: not any(
+            e.get("branch", e.get("from")) in ("po", "old-packed") for e in N)
+        and rec(P + "/logs/refs/heads/po")[0]["kind"] == "git_reflog_rewritten",
         "git.e12.tags_remotes_nothing": lambda: not E and rec(P + "/packed-refs") is not None
         and rec(P + "/refs/tags/v2") is not None,
         # decision 137: what cannot be read reduces the claim, never the fact

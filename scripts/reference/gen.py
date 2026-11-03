@@ -1261,38 +1261,54 @@ def cell_git_events():
     c.tag("git.e12.unknown.no_copy")
     out.append(c)
 
-    # ---- refs that cannot be parsed: could_not_interpret (E10); the rest stand
+    # ---- refs that cannot be parsed: could_not_interpret (E10), and "A side
+    # git cannot parse counts as one it cannot read" (decision 141): per
+    # side, as a side not read (decision 137); the rest stand
     c = Case("git-e12-unparseable")
-    g = GitRepo(c, b"r")
+    g = GitRepo(c, b"r")            # parsed before, not after: no event
     g.unchanged()
     g.ref("before", b"bad", X)
     g.put("after", b"refs/heads/bad", b"not an object id\n")
     g.ref("before", b"good", X)
     g.ref("after", b"good", Y)
-    g = GitRepo(c, b"p")
+    g = GitRepo(c, b"p")            # packed-refs parsed before, not after
     g.unchanged()
-    g.packed("before", [(b"refs/tags/v1", X)])
+    g.packed("before", [(b"refs/heads/dated-by-packed", X), (b"refs/heads/only-before", X),
+                        (b"refs/tags/v1", X)])
     g.put("after", b"packed-refs", gpacked([(b"refs/tags/v1", X)]) + b"this is no ref line\n")
-    # packed-refs not interpreted gives no value on either side (diff-v1:
-    # "nothing more is read from it"): its before, no evidence -- moved, no
-    # `from`
-    g.ref("after", b"needs-packed", Y)
+    g.ref("after", b"needs-packed", Y)              # absent before by packed-refs: created
+    g.ref("after", b"dated-by-packed", Y)           # before from packed-refs: moved, `from`
+    g.ref("before", b"needs-after", X)              # its after is packed-refs': no event
+    # (`only-before`, only in packed-refs, parsed before only: no value
+    # after, no event)
     g.ref("before", b"loose-both", X)               # both sides loose: stands
     g.ref("after", b"loose-both", Y)
-    g = GitRepo(c, b"q")
+    g = GitRepo(c, b"q")            # HEAD parsed before, not after: none
     g.head("before", b"main")
     g.put("after", b"HEAD", b"\xff\xfe not a HEAD\n")
     g.both(b"refs/heads/main", X + b"\n")
-    # a loose ref that cannot be parsed before only: not interpreted, it
-    # gives no value after either -- "after, the branch derives no event"
+    g = GitRepo(c, b"q2")           # HEAD not parsed before, detached after: none
+    g.put("before", b"HEAD", b"not a HEAD before\n")
+    g.head("after", oid=Y)
+    g.both(b"refs/heads/main", X + b"\n")
+    # a loose ref that cannot be parsed before only: no value before, no
+    # reflog -- "now at", and its E10 event
     g = GitRepo(c, b"s")
     g.unchanged()
     g.put("before", b"refs/heads/bad-before", b"not an object id either\n")
     g.ref("after", b"bad-before", Y)
+    # ... and its outcome unknown (raced after): read where its copy can be,
+    # both events provisional, its record no finding
+    g = GitRepo(c, b"u")
+    g.unchanged()
+    g.put("before", b"refs/heads/raced", b"no id, and raced after\n")
+    g.ref("after", b"raced", Z, raced=True)
     c.tag("git.e12.unparseable_ref")
     c.tag("git.e12.unparseable_packed")
     c.tag("git.e12.unparseable_head")
+    c.tag("git.e12.unparseable_head_before")
     c.tag("git.e12.unparseable_ref_before")
+    c.tag("git.e12.unparseable_ref_before_unknown")
     out.append(c)
 
     # ---- tags and remote-tracking refs derive nothing (path findings stand)
@@ -1592,11 +1608,87 @@ def cell_git_unread():
     return out
 
 
+def cell_git_unparsed():
+    """Required cells for a side git cannot parse (E12, decision 141): "A
+    side git cannot parse counts as one it cannot read (and is a
+    `could_not_interpret` event, E10). A branch removed whose value before
+    cannot be told derives no event (`git_branch_deleted` needs `was`)" --
+    the cells of cell_git_unread, a side not parsed in place of one not
+    read, and removals with no value before."""
+    out = []
+    X, Y, Z, W = (goid(c) for c in "XYZW")
+
+    # ---- a loose ref that cannot be parsed before
+    c = Case("git-e12-unparsed-ref")
+    g = GitRepo(c, b"a")            # the reflog's evidence dates it
+    g.unchanged()
+    g.put("before", b"refs/heads/dated", b"no id: dated\n")
+    g.ref("after", b"dated", Y)
+    g.log("before", b"dated", [(ZERO, X, b"branch: Created from HEAD")])
+    g.log("after", b"dated", [(ZERO, X, b"branch: Created from HEAD"), (X, Y, b"commit: y")])
+    g = GitRepo(c, b"b")            # its reflog starts from zeros: never absent
+    g.unchanged()
+    g.put("before", b"refs/heads/zeros", b"no id: zeros\n")
+    g.ref("after", b"zeros", Y)
+    g.log("after", b"zeros", [(ZERO, Y, b"branch: Created from HEAD")])
+    g = GitRepo(c, b"c")            # removed after, no evidence: no event
+    g.unchanged()
+    g.put("before", b"refs/heads/gone", b"no id: gone\n")
+    c.tag("git.e12.unparsed.ref_before_dated")
+    c.tag("git.e12.unparsed.ref_before_reflog_zeros")
+    c.tag("git.e12.unparsed.ref_before_removed")
+    out.append(c)
+
+    # ---- a loose ref removed whose before cannot be told, a line of
+    # packed-refs (read on both sides) under it before: the loose ref is the
+    # value there (ref.branch_value's READING), so no `was` -- no event
+    c = Case("git-e12-removed-loose-hides-packed")
+    g = GitRepo(c, b"d")            # its before not parsed
+    g.unchanged()
+    g.packed("before", [(b"hid", X), (b"refs/tags/v1", X)])
+    g.packed("after", [(b"refs/tags/v1", Y)])
+    g.put("before", b"refs/heads/hid", b"no id: hid\n")
+    g = GitRepo(c, b"e")            # its before not read
+    g.unchanged()
+    g.packed("before", [(b"hid", X), (b"refs/tags/v1", X)])
+    g.packed("after", [(b"refs/tags/v1", Z)])
+    g.ref("before", b"hid", goid("unread hid e"), store="absent")
+    c.tag("git.e12.removed.loose_hides_packed_unparsed")
+    c.tag("git.e12.removed.loose_hides_packed_unread")
+    out.append(c)
+
+    # ---- packed-refs that cannot be parsed before, parsed after
+    c = Case("git-e12-unparsed-packed-before")
+    g = GitRepo(c)
+    g.unchanged()
+    g.put("before", b"packed-refs",
+          gpacked([(b"refs/heads/kept", X), (b"refs/heads/old-packed", X), (b"refs/heads/po", W),
+                   (b"refs/tags/v1", X)]) + b"no ref line before\n")
+    # `kept`, only in packed-refs, parsed after only: moved, no `from`; `old-
+    # packed`, only in the side not parsed, is named by nothing
+    g.packed("after", [(b"kept", X), (b"later", Z), (b"refs/tags/v1", X)])
+    g.ref("after", b"new-dated", Y)                 # the reflog's zeros: created
+    g.log("after", b"new-dated", [(ZERO, Y, b"branch: Created from HEAD")])
+    g.ref("after", b"moved-dated", Y)               # the reflog's old id: dated
+    g.log("before", b"moved-dated", [(ZERO, X, b"branch: Created from HEAD")])
+    g.log("after", b"moved-dated", [(ZERO, X, b"branch: Created from HEAD"), (X, Y, b"commit: y")])
+    g.ref("after", b"undated", W)                   # no evidence: moved, no `from`
+    g.ref("before", b"later", X)                    # loose before, packed after: parsed
+    g.ref("before", b"gone", X)                     # loose before, not packed after: deleted
+    # `po`, only in the packed-refs not parsed, its reflog removed (git
+    # removes it with the branch): removed, no value before -- no event
+    g.log("before", b"po", [(ZERO, W, b"branch: Created from HEAD")])
+    c.tag("git.e12.unparsed.packed_before")
+    c.tag("git.e12.unparsed.packed_before_removed")
+    out.append(c)
+    return out
+
+
 def random_git(rng, c):
     """A repository's history, simulated: a few operations before, more
     after, each written as git writes it (loose refs, packed-refs, HEAD,
-    reflogs); now and then a copy lost, a file raced, a ref garbled or a
-    reflog entry dropped."""
+    reflogs); now and then a copy lost, a file raced, a ref, HEAD or
+    packed-refs garbled on a side or a reflog entry dropped."""
     root = rng.choice([b"", b"proj", b"proj/vendor/lib", b"w"])
     repo = join(root, b".git")
     st = {"loose": {}, "packed": {}, "logs": {}, "head": ("sym", b"main"), "t": 0}
@@ -1759,6 +1851,10 @@ def random_git(rng, c):
                     data = b"\n".join(lines) + b"\n"
             elif not same and rest.startswith(b"refs/") and r < 0.02:
                 data = b"garbled\n"
+            elif not same and rest == b"HEAD" and r < 0.03:
+                data = b"garbled HEAD\n"
+            elif not same and rest == b"packed-refs" and r < 0.06:
+                data += b"garbled, no ref line\n"
             c.put(side, repo + b"/" + rest,
                   reg(data, gen=0 if same else (1 if side == "after" else 0),
                       store="ok" if same else rng.choice(store_choices),
@@ -2869,7 +2965,8 @@ def cell_probes():
 def required_cases():
     return (cell_dpkg_simple() + cell_pip_simple() + cell_pip_e10() + cell_dpkg_e9_e10()
             + cell_p7() + cell_e11() + cell_order() + cell_content_unavailable() + cell_paths_b64()
-            + cell_git_reflog() + cell_git_events() + cell_git_unread() + cell_probes())
+            + cell_git_reflog() + cell_git_events() + cell_git_unread() + cell_git_unparsed()
+            + cell_probes())
 
 
 def all_cases(n, seed):
