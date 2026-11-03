@@ -170,3 +170,5 @@
 2026-11-03T15:15:00+04:00	pins: E12 follows git on unterminated lines -- G15 corrected, G17
 2026-11-03T15:21:19+04:00	spec: a reflog that gained no entry says nothing
 2026-11-03T15:23:25+04:00	spec: a blank reflog line is no entry, as git skips it
+# Decision 198 (manifest v3): the code fails make policy-model until its author follows (B-4: the bundle's manifest version).
+2026-11-03T16:49:20+04:00	manifest v3: a capture says where it came from (source); different sources are not compared
