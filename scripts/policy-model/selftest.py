@@ -247,6 +247,43 @@ def fixture_pip_reinstall_judged():
         '"why":"other bytes","at_reset":"match","text":"pkg: installed file pkg/core.py other bytes","paths":["pkg/core.py"]}'])
 
 
+def fixture_pyc_decision_186():
+    core, pyc = b"def run():\n    return 1\n", b"\xcb\x0d\x0d\x0a bytecode"
+    record = ("pkg/core.py,sha256=%s,%d\npkg/__pycache__/core.cpython-312.pyc,,\npkg-1.0.dist-info/RECORD,,\n"
+              % (b64sha(core), len(core))).encode()
+    B = {b".": raw("dir", D), b"pkg": raw("dir", D), b"pkg/core.py": raw("reg", F, core, ino=5),
+         b"pkg/__pycache__": raw("dir", D), b"pkg/__pycache__/core.cpython-312.pyc": raw("reg", F, pyc, ino=6),
+         b"pkg-1.0.dist-info": raw("dir", D), b"pkg-1.0.dist-info/RECORD": raw("reg", F, record, ino=7)}
+    code, exp = model.export_expect("/w", "/out/b.bundle", b'{"belay_protect":1,"protect":[]}', [], B)
+
+    def judge(A):
+        ctx = {"scope": "/w", "bundle_sha256": "b" * 64, "spec": exp["spec"],
+               "before": model.Side(exp["B"], 10, []), "after": model.Side(model.view(A, exp["hash_max"]), 10, []),
+               "bundle_lines": exp["lines"], "outside_scope": 0, "before_sha256": "1" * 64, "after_sha256": "2" * 64}
+        out, _f, _r, _e = model.verify_lines(ctx)
+        return [model.enc(o) for o in out[1:-1]], json.loads(model.enc(out[-1]))["packages_no_hash"]
+    A = dict(B)
+    A[b"pkg/__pycache__/core.cpython-312.pyc"] = raw("reg", F, pyc + b" PATCHED", ino=6, mtime=200)
+    got, nohash = judge(A)
+    check("a .pyc patched under its unchanged source (decision 186)", got, [
+        '{"flag":"tampered_installed_package","level":"signal","db":"pip","package":"pkg",'
+        '"path":"pkg/__pycache__/core.cpython-312.pyc","why":"other bytes","at_reset":"no_hash",'
+        '"text":"pkg: installed file pkg/__pycache__/core.cpython-312.pyc other bytes",'
+        '"paths":["pkg/__pycache__/core.cpython-312.pyc"]}'])
+    check("packages_no_hash counts the .pyc's line too (P38)", nohash, 2)
+    A[b"pkg/core.py"] = raw("reg", F, b"def run():\n    return 2\n", ino=5, mtime=200)
+    got, _n = judge(A)
+    check("a .pyc recompiled beside its changed source: only the source", got, [
+        '{"flag":"tampered_installed_package","level":"signal","db":"pip","package":"pkg","path":"pkg/core.py",'
+        '"why":"other bytes","at_reset":"match","text":"pkg: installed file pkg/core.py other bytes","paths":["pkg/core.py"]}'])
+    A = dict(B)
+    del A[b"pkg/__pycache__/core.cpython-312.pyc"]
+    got, _n = judge(A)
+    check("a .pyc removed: nothing", got, [])
+    check("pyc sources", [model.pyc_source(p) for p in (b"a/__pycache__/m.cpython-312.opt-2.pyc", b"a/m.pyc", b"a/m.py")],
+          [b"a/m.py", b"a/m.py", None])
+
+
 def fixture_git_reset():
     c1, c2 = "1" * 40, "2" * 40
     log1 = ("0000000000000000000000000000000000000000 %s A <a@b> 1 +0000\tcommit (initial): x\n" % c1).encode()
@@ -333,7 +370,7 @@ def tables():
 def run():
     del FAILS[:]
     for f in (tables, fixture_protected_write, fixture_privilege_path, fixture_iflags_decision_163, fixture_text_cut,
-              fixture_pip_reinstall_judged, fixture_pip_bundle,
+              fixture_pip_reinstall_judged, fixture_pyc_decision_186, fixture_pip_bundle,
               fixture_dpkg_bundle_and_tamper, fixture_git_reset):
         try:
             f()
