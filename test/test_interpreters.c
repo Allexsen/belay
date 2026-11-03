@@ -796,6 +796,31 @@ TEST(git_unparseable_unknown_before_and_unread_head) {
     r_free(&r);
 }
 
+/* Decision 144 (G13): a reflog is parsed by the entries it gained in this
+ * diff; its older entries are never read, git's or not. A before that ends
+ * inside a line is no prefix: nothing gained, nothing parsed, so no how
+ * and nothing it could not interpret. */
+TEST(git_a_reflog_is_parsed_by_the_entries_it_gained) {
+    struct run r;
+    r_begin(&r, BELAY_INTERP_GIT, true);
+    const struct belay_entry a = file(put(OA "\n"), 0), b = file(put(OB "\n"), 0);
+    const struct belay_entry lb = file(put("not a reflog line at all\n"), 0);
+    const struct belay_entry la = file(put("not a reflog line at all\n" OA " " OB WHO "commit: two\n"), 0);
+    r_path(&r, "/s/.git/refs/heads/main", &a, &b, "modified");
+    r_path(&r, "/s/.git/logs/refs/heads/main", &lb, &la, "modified");
+    const struct belay_entry mb = file(put(OA " " OB WHO "commit: tw"), 0);
+    const struct belay_entry ma = file(put(OA " " OB WHO "commit: two\n"), 0);
+    r_path(&r, "/s/.git/refs/heads/mid", &a, &b, "modified");
+    r_path(&r, "/s/.git/logs/refs/heads/mid", &mb, &ma, "modified");
+    ASSERT_EQ_STR(GEV("git_commits_added", "\"repo\":\".git\",\"branch\":\"main\",\"count\":1,\"to\":\"" OB "\"",
+                      "commits added to main: 1, now at " OB)
+                  ",\"paths\":[\".git/logs/refs/heads/main\",\".git/refs/heads/main\"]}\n"
+                  GEV("git_branch_moved", "\"repo\":\".git\",\"branch\":\"mid\",\"from\":\"" OA "\",\"to\":\"" OB "\"",
+                      "mid " OA " -> " OB)
+                  ",\"paths\":[\".git/refs/heads/mid\"]}\n", r_end(&r));
+    r_free(&r);
+}
+
 /* E10: a loose ref git cannot parse decides nothing and is said. */
 TEST(git_a_ref_that_cannot_be_parsed_is_one_could_not_interpret_event) {
     struct run r;
@@ -1396,6 +1421,7 @@ int main(void) {
     RUN(git_events_name_only_the_paths_they_came_from);
     RUN(git_what_cannot_be_read_reduces_the_claim_never_the_fact);
     RUN(git_unparseable_unknown_before_and_unread_head);
+    RUN(git_a_reflog_is_parsed_by_the_entries_it_gained);
     RUN(git_reflog_that_is_not_appended_to_is_rewritten);
     RUN(git_reflog_without_a_copy_is_content_unavailable);
     RUN(git_ref_that_cannot_be_parsed_could_not_be_interpreted);
