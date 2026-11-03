@@ -250,8 +250,8 @@ def corrupt_bundle(data, how):
 
 def rewrite_manifest(data, how):
     """The bundle with its manifest member's header rewritten: "v2" (as an earlier release wrote
-    it, no source) or "container" (a host reader's source). -> (bytes, its manifest's sha256,
-    its source)."""
+    it, no source), "container" (a host reader's source) or "other-scope" (the bundle's and its
+    manifest's scopes another path). -> (bytes, its manifest's sha256, its source)."""
     out = []
     pos = 0
     msha = source = None
@@ -260,12 +260,16 @@ def rewrite_manifest(data, how):
         hdr = json.loads(data[pos:nl])
         content = data[nl + 1:nl + 1 + hdr["size"]]
         pos = nl + 1 + hdr["size"]
+        if how == "other-scope" and "belay_bundle" in hdr:
+            hdr["scopes"] = [hdr["scopes"][0] + "-other"]
         if hdr.get("member") == "manifest":
             first, rest = content.split(b"\n", 1)
             mh = json.loads(first)
             if how == "v2":
                 mh.pop("source")
                 mh["belay_manifest"] = 2
+            elif how == "other-scope":
+                mh["scopes"] = [mh["scopes"][0] + "-other"]
             else:
                 mh["source"] = source = {"docker": "4f1c" * 16, "image": "sha256:" + "91ef" * 16}
             content = model.enc(mh).encode() + b"\n" + rest
@@ -397,15 +401,13 @@ def _run(sc, rep, cov, vstate, tmp):
             rep.notes.append("%s: the second mark trusted no file, so its premise does not hold" % sc["name"])
     vbundle, vdigest_true = out, digest
     before_sha, before_source = exp["manifest_sha256"], None
+    cdata = bundle
     if v.get("manifest"):
-        vbundle = os.path.join(outdir, "rewritten.bundle")
-        cdata, before_sha, before_source = rewrite_manifest(bundle, v["manifest"])
-        with open(vbundle, "wb") as f:
-            f.write(cdata)
-        vdigest_true = hashlib.sha256(cdata).hexdigest()
+        cdata, before_sha, before_source = rewrite_manifest(cdata, v["manifest"])
     if v.get("corrupt"):
-        vbundle = os.path.join(outdir, "corrupt.bundle")
-        cdata = corrupt_bundle(bundle, v["corrupt"])
+        cdata = corrupt_bundle(cdata, v["corrupt"])
+    if cdata is not bundle:
+        vbundle = os.path.join(outdir, "altered.bundle")
         with open(vbundle, "wb") as f:
             f.write(cdata)
         vdigest_true = hashlib.sha256(cdata).hexdigest()
@@ -434,9 +436,8 @@ def _run(sc, rep, cov, vstate, tmp):
 
     # the model's expectation, built whether verify exists or not
     refusal = model.verify_refusal(exp, vspec_raw, vdigest, vdigest_true, excl_a, to == "trusted",
-                                   before_source)
-    if refusal is None and v.get("corrupt"):
-        refusal = 4
+                                   before_source, corrupt=bool(v.get("corrupt")),
+                                   other_scope=v.get("manifest") == "other-scope")
     lines = flags = None
     if refusal is None:
         ctx = {"scope": scope_real, "bundle_sha256": vdigest_true, "spec": exp["spec"],

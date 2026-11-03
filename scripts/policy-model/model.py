@@ -186,13 +186,19 @@ P34 New with decision 175. The test-file rule's "a path none of whose components
     counts any component, the last included, as P12 did. `.build` is the only dot-name among them;
     `*.test.<ext>` and `*.spec.<ext>` take only the six extensions listed.
 
-P39 New with manifest v3 (decision 198). B-4: a bundle's manifest is v3; one "an earlier release
-    wrote holds a v2 one, whose source is `null`" and is read as such. Export writes v3 with
-    `"source": null` (every capture here is in-sandbox). V3-R4: verify refuses (exit 3) a bundle
-    whose manifest's source is not `null`, its own capture being the walker's. Order: after the
-    bundle's digest (B-R2: a bundle whose bytes hash otherwise is never read), with the other
-    refusals of exit 3, so which comes first is not observable. A v2 bundle compares as v3 with
-    a null source (V3-R5: `source` decides nothing else).
+P39 SETTLED (decision 214). B-4: a bundle holding a v2 manifest "is accepted and judged as a v3
+    one with that source" (null) -- this model's reading. Where the source refusal comes is
+    pinned by B-R6, "the first refusal is the one said": no `--baseline-sha256`; bytes that do
+    not hash to it; a row the bundle breaks (exit 4); a bundle of another scope; then, after its
+    own capture, a manifest of another source (`verify_refusal`). Exit codes show the order
+    where a 4 meets a 3: a corrupt bundle with another source or scope is 4; one whose digest
+    is wrong or missing is 3. Between the exit-3 refusals only stderr would tell.
+
+P40 New with decision 214. B-R6 lists the bundle's refusals, not the spec's. A spec PS-R2
+    refuses is refused first (2, P24: "nothing is judged"); the spec's digest against the
+    bundle's (3, PS-R3) needs the bundle read, so it comes after B-R6's scope; `--to` a
+    checkpoint that trusted files and an exclusion over a protected pattern come after it.
+    Every one of those is exit 3 but the first, so only the spec refusal's place shows.
 
 P36 New with decision 186. The `.pyc` judged is one "modified or of another type": its outcome
     `modified` (why `other bytes`, or `cannot be verified` when unverified after, as P9) or
@@ -2010,29 +2016,37 @@ def export_expect(scope, out_real, spec_raw, excluded, B_raw):
 
 
 def verify_refusal(exported, spec_raw, digest_given, digest_true, excluded_after, to_trusted,
-                   before_source=None):
-    """The refusal verify must give before judging, or None (policy-v1's exit codes)."""
+                   before_source=None, corrupt=False, other_scope=False):
+    """The refusal verify gives before judging, or None. baseline-bundle B-R6 (decision 214):
+    "verify refuses in this order, and the first refusal is the one said: no --baseline-sha256
+    (exit 3); bytes that do not hash to it (B-R2, exit 3 ...); a row the bundle breaks (B-R3,
+    exit 4); a bundle of another scope (exit 3); then, after its own capture, a manifest of
+    another source (manifest-v3 V3-R4, exit 3)". The spec's own refusals are placed by P40."""
     spec = None
     if spec_raw is not None:
         try:
             spec = parse_spec(spec_raw)
         except Refused as r:
-            return r.code                                                             # P24
+            return r.code                                                     # P24, P40
     if digest_given is None:
-        return 3                                                                      # P23
+        return 3                                                              # B-R6 (P23)
     if digest_given != digest_true:
-        return 3
-    if before_source is not None:          # V3-R4: verify's own capture is the walker's, null
-        return 3                                                                      # P39
+        return 3                                                              # B-R6, B-R2
+    if corrupt:
+        return 4                                                              # B-R6, B-R3
+    if other_scope:
+        return 3                                                              # B-R6
     if (spec.digest if spec else None) != exported["protect_sha256"]:
-        return 3                                                                      # P30
+        return 3                                                              # P30, P40
     if spec is not None:
+        if to_trusted:
+            return 3                                                          # PS-C1
         for x in excluded_after:
             for r in spec.rules:
                 if covers(r.comps, x["path"]):
-                    return 3
-        if to_trusted:
-            return 3
+                    return 3                                                  # PS-C2
+    if before_source is not None:
+        return 3                                                              # B-R6, V3-R4
     return None
 
 
