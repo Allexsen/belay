@@ -695,6 +695,41 @@ def scenarios():
           [("write", SITE + "/pyc/__pycache__/__init__.cpython-312.pyc", b"\x00compiled 2, patched")],
           spec_of(), tags=["P8"]))
 
+    # -- decision 186: a .pyc listed without a hash, judged against its source
+    PY = SITE + "/pycpkg/"
+    PYC = PY + "__pycache__/"
+    pyc_files = {PYC + "__init__.cpython-312.pyc": b"\xcb\x0d\x0d\x0a init", PYC + "core.cpython-312.pyc": b"\xcb\x0d\x0d\x0a core",
+                 PYC + "core.cpython-312.opt-1.pyc": b"\xcb\x0d\x0d\x0a core opt", PY + "legacy.pyc": b"\xcb\x0d\x0d\x0a legacy",
+                 PYC + "gone.cpython-312.pyc": b"\xcb\x0d\x0d\x0a sourceless"}
+    PYCPKG = (pip_ops("pycpkg", "1.0", {"pycpkg/__init__.py": (b"X = 1\n", 0o644),
+                                        "pycpkg/core.py": (b"def run():\n    return 1\n", 0o644),
+                                        "pycpkg/legacy.py": (b"L = 1\n", 0o644)},
+                      extra_rows=[p[len(SITE) + 1:] + ",," for p in sorted(pyc_files)])
+              + [("file", p, d) for p, d in sorted(pyc_files.items())])
+    for frozen in (False, True):
+        f = "-frozen" if frozen else "-free"
+        add(S("pyc-patched" + f, BASE + PYCPKG, [("write", PYC + "core.cpython-312.pyc", b"\xcb\x0d\x0d\x0a PATCHED")],
+              spec_of(frozen=frozen), tags=["P37"]))
+    add(S("pyc-recompiled", BASE + PYCPKG, [("write", PY + "core.py", b"def run():\n    return 2\n"),
+                                            ("write", PYC + "core.cpython-312.pyc", b"\xcb\x0d\x0d\x0a core, recompiled")],
+          spec_of(), tags=["P37"]))
+    add(S("pyc-removed", BASE + PYCPKG, [("rm", PYC + "core.cpython-312.pyc"), ("rm", PY + "legacy.pyc")], spec_of(), tags=["P36"]))
+    add(S("pyc-opt1-patched", BASE + PYCPKG, [("write", PYC + "core.cpython-312.opt-1.pyc", b"\xcb\x0d\x0d\x0a PATCHED opt")],
+          spec_of(frozen=True), tags=["P37"]))
+    add(S("pyc-legacy-patched", BASE + PYCPKG, [("write", PY + "legacy.pyc", b"\xcb\x0d\x0d\x0a PATCHED legacy")],
+          spec_of(), tags=["P37"]))
+    add(S("pyc-type-changed", BASE + PYCPKG, [("rm", PYC + "__init__.cpython-312.pyc"),
+                                              ("symlink", PYC + "__init__.cpython-312.pyc", "/tmp/evil.pyc")],
+          spec_of(), tags=["P37"]))
+    add(S("pyc-sourceless-patched", BASE + PYCPKG, [("write", PYC + "gone.cpython-312.pyc", b"\xcb\x0d\x0d\x0a PATCHED gone")],
+          spec_of(), tags=["P37"]))
+    add(S("pyc-metadata-only-unknown", BASE + PYCPKG, [("chmod", PYC + "core.cpython-312.pyc", 0o600),
+                                                       ("chmod", PY + "legacy.pyc", 0o000)],
+          spec_of(), tags=["P36", "P25"]))
+    add(S("pyc-recompiled-opt1-patched", BASE + PYCPKG, [("write", PY + "core.py", b"def run():\n    return 3\n"),
+                                                         ("write", PYC + "core.cpython-312.opt-1.pyc", b"\xcb\x0d\x0d\x0a recompiled opt")],
+          spec_of(), tags=["P37"]))
+
     # -- decision 175: the test-file rule, narrowed
     T175 = [("build/test/test_gen.py", b"def test_g():\n    assert 1\n"), ("build/san/test/x.c", b"int x;\n"),
             ("docs/spec/policy.md", b"# spec\n"), ("doc/tests/a.txt", b"a\n"), ("out/tests/r.txt", b"r\n"),

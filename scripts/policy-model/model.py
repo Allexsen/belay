@@ -51,10 +51,14 @@ P7  expected_sha256 against an after entry that is a regular file without a hash
     does not hold.
 
 P8  tampered_installed_package and a file listed without a hash: P-T6 says such files are
-    "never checked", so they give none (a pip RECORD's own row included). A listed file whose
-    outcome is `added` (missing at reset) or `metadata_only` gives none: no `why` fits. Which
-    packages are judged is SETTLED (decision 173): those no event names, "or one whose event is
-    a reinstall at the same version (`pip_reinstalled`) ... frozen or not".
+    "never checked", so they give none (a pip RECORD's own row included) -- SETTLED as this
+    model read it, with one exception pinned by decision 186: "A `.pyc` its RECORD lists without
+    a hash is judged too ... one modified or of another type while its source did not change
+    ... is `tampered_installed_package`; one rewritten while its source changed (recompiled), or
+    removed, is not" (see P36-P38). A listed file whose outcome is `added` (missing at reset) or
+    `metadata_only` gives none: no `why` fits. Which packages are judged is SETTLED (decision
+    173): those no event names, "or one whose event is a reinstall at the same version
+    (`pip_reinstalled`) ... frozen or not".
 
 P9  tampered `why`, in this order: `removed`; `type changed`; `cannot be verified` (outcome
     `unknown`, or the after entry `unverified`); else `other bytes`.
@@ -181,6 +185,23 @@ P34 New with decision 175. The test-file rule's "a path none of whose components
     named `build` included), and "either is or lies below a test directory (a component ...)"
     counts any component, the last included, as P12 did. `.build` is the only dot-name among them;
     `*.test.<ext>` and `*.spec.<ext>` take only the six extensions listed.
+
+P36 New with decision 186. The `.pyc` judged is one "modified or of another type": its outcome
+    `modified` (why `other bytes`, or `cannot be verified` when unverified after, as P9) or
+    `type_changed` (why `type changed`). One whose outcome is `unknown`, `metadata_only`,
+    `removed` or `added` is not judged: the exception names only the two, and a file "listed
+    without a hash: never checked" stays so outside it.
+
+P37 New with decision 186. The forms: in a directory `__pycache__`, `<name>.<tag>.pyc` and
+    `<name>.<tag>.opt-<n>.pyc`, `<name>` the file name up to its first `.` (a module name holds
+    none), `<tag>` the rest, non-empty, `<n>` decimal digits; the source is `<name>.py` in the
+    directory above `__pycache__`. Any other `<dir>/<name>.pyc` is the legacy form, its source
+    `<dir>/<name>.py`. "Its source did not change" is "with no record in the diff", read as
+    written: a source absent on both sides has none, so a sourceless `.pyc` is judged.
+
+P38 New with decision 186. packages_no_hash still counts every line without a hash, `.pyc`
+    included: the row's subject is "Files a database lists without a hash", and "never checked
+    -- a `.pyc` aside" says what becomes of them, not what is counted.
 """
 
 import base64
@@ -1667,7 +1688,11 @@ def package_flags(ctx, recs, B, A, events):
                                   [p], False))
             continue
         if line["at_reset"] == "no_hash":                                              # P8
-            continue
+            src = pyc_source(p)                                                       # decision 186
+            if src is None or rec is None or rec["outcome"] not in ("modified", "type_changed"):
+                continue                                                              # P36
+            if src in recs:                                       # the source changed: recompiled
+                continue
         if line["db"] == "pip" and pep503(line["package"]) in named_pip:
             continue
         if line["db"] == "dpkg" and line["package"] in named_dpkg:
@@ -1692,6 +1717,23 @@ def package_flags(ctx, recs, B, A, events):
                           "%s: installed file %s %s" % (line["package"], show(p), why),
                           [p], o == "unknown"))
     return flags
+
+
+def pyc_source(p):
+    """The source of a `.pyc` (decision 186; P37), or None when `p` is not one."""
+    if not p.endswith(b".pyc"):
+        return None
+    d = _parent(p)
+    base = _name(p)[:-len(b".pyc")]
+    if d != b"." and _name(d) == b"__pycache__":
+        stem = re.sub(rb"\.opt-[0-9]+$", b"", base)
+        name, dot, tag = stem.partition(b".")
+        if name and dot and tag:
+            top = _parent(d)
+            return (b"" if top == b"." else top + b"/") + name + b".py"
+    if not base:
+        return None
+    return (b"" if d == b"." else d + b"/") + base + b".py"
 
 
 def self_consistent(ev, recs, A, scope):
