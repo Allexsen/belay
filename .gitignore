@@ -31,3 +31,9 @@ bin/
 tmp/
 repos/
 __pycache__/
+python/pybelay/_bin/
+python/pybelay/_keys.json
+python/build/
+python/dist/
+python/*.egg-info/
+python/pybelay/_version.py

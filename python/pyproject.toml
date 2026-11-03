@@ -1,0 +1,26 @@
+# pybelay (test/expect/pybelay.md): wheels only, each vendoring its release's
+# binary (python/build_keys.py first). No sdist: it could not carry a checked binary.
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "pybelay"
+dynamic = ["version"]
+description = "State-integrity checks for RL environments and agents: belay from Python"
+readme = "README.md"
+requires-python = ">=3.9"
+license = { text = "Apache-2.0" }
+classifiers = ["Programming Language :: Python :: 3", "Operating System :: POSIX :: Linux", "Operating System :: MacOS"]
+
+[project.urls]
+Source = "https://github.com/Allexsen/belay"
+
+[tool.setuptools]
+packages = ["pybelay"]
+
+[tool.setuptools.package-data]
+pybelay = ["_bin/belay", "_bin/SHA256", "_keys.json"]
+
+[tool.setuptools.dynamic]
+version = { attr = "pybelay._version.__version__" }

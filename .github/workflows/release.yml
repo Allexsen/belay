@@ -84,3 +84,55 @@ jobs:
           test -f "$notes"
           gh release create "$GITHUB_REF_NAME" dist/* --draft --prerelease --verify-tag \
             --title "belay ${GITHUB_REF_NAME} (pre-alpha)" --notes-file "$notes"
+
+  # pybelay (test/expect/pybelay.md, PY-D3/PY-D4): a wheel per target, each
+  # carrying that target's binary of this release, taken from the release's
+  # assets after their SHA256SUMS and provenance attestations are checked. The
+  # key sets come from the linux-x86_64 binary (the formats are the release's,
+  # whatever the platform). Attached to the draft; never published to PyPI by
+  # this workflow (a release needs the author's OK).
+  wheels:
+    name: pybelay wheels
+    needs: draft
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+      id-token: write
+      attestations: write
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+      - name: the binaries are the release's (SHA256SUMS, provenance)
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release download "$GITHUB_REF_NAME" -p SHA256SUMS -D released
+          (cd dist && sha256sum belay-*) | sort > got
+          sort released/SHA256SUMS > want
+          diff want got
+          for f in dist/belay-*; do gh attestation verify "$f" --repo "$GITHUB_REPOSITORY"; done
+      - name: build the wheels
+        run: |
+          python3 -m pip install -q build wheel
+          chmod +x dist/belay-*
+          keys="dist/belay-${GITHUB_REF_NAME}-linux-x86_64"
+          for t in linux-x86_64:manylinux_2_17_x86_64.musllinux_1_1_x86_64 \
+                   linux-arm64:manylinux_2_17_aarch64.musllinux_1_1_aarch64 \
+                   macos-arm64:macosx_15_0_arm64; do
+            python3 python/build_keys.py "$keys" "dist/belay-${GITHUB_REF_NAME}-${t%%:*}"
+            rm -rf python/build python/*.egg-info
+            python3 -m build --wheel --outdir "wheels-${t%%:*}" python
+            python3 -m wheel tags --remove --python-tag py3 --abi-tag none --platform-tag "${t#*:}" "wheels-${t%%:*}"/*.whl
+          done
+          mkdir wheels && mv wheels-*/*.whl wheels/
+          (cd wheels && sha256sum *.whl > WHEELS-SHA256SUMS && cat WHEELS-SHA256SUMS)
+      - uses: actions/attest-build-provenance@v2
+        with:
+          subject-path: wheels/*.whl
+      - name: attach the wheels to the draft
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh release upload "$GITHUB_REF_NAME" wheels/*
