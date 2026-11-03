@@ -1,5 +1,6 @@
 #define _GNU_SOURCE
 #include "state.h"
+#include "docker.h"
 
 #include "util/jsonr.h"
 #include "receipt.h"
@@ -41,6 +42,7 @@ void (*scope_resolve_hook)(const char *resolved) = NULL;
 void (*state_capture_hook)(const char *scope) = NULL;
 
 int scope_resolve(const char *arg, struct scope *out) {
+    memset(out, 0, sizeof *out);                    /* the walker's: no container */
     if (arg == NULL || arg[0] == '\0') {
         belay_err_set(BELAY_ERR_INVALID, 0, "the scope is empty");
         return -1;
@@ -281,6 +283,7 @@ static bool within(const char *path, const char *dir) {
 }
 
 const char *state_rel(const struct state *st) {
+    if (st->scope.docker[0] != '\0') return NULL;  /* the state is on the host, the scope in a container */
     const size_t n = strlen(st->scope.path);
     if (strcmp(st->root, st->scope.path) == 0 || !within(st->root, st->scope.path)) return NULL;
     return st->root + (n == 1 ? 1 : n + 1);
@@ -296,6 +299,10 @@ int state_open(const struct scope *sc, bool create, struct state *st, FILE *note
         struct belay_sha256 h;
         uint8_t d[32];
         belay_sha256_init(&h);
+        if (sc->docker_id[0] != '\0') {              /* a container's scope: by its id and its path */
+            belay_sha256_update(&h, "docker", 7);
+            belay_sha256_update(&h, sc->docker_id, strlen(sc->docker_id) + 1);
+        }
         belay_sha256_update(&h, sc->path, strlen(sc->path));
         belay_sha256_final(&h, d);
         belay_hex_encode(hex, d, sizeof d);
@@ -723,6 +730,37 @@ int state_excludes_write(const struct state *st, const struct excludes *x) {
     return write_whole(st->dir_fd, "excludes", buf, w, shown);
 }
 
+/* The walker, or for a container the host reader (host-reader.md). */
+static int capture_scope(struct state *st, const char *manifest, struct belay_manifest_opts *o,
+                         struct belay_manifest_stats *s) {
+    if (st->scope.docker[0] == '\0') return belay_manifest_write(manifest, st->scope.path, o, s);
+    return docker_capture(st->scope.docker, st->scope.path, st->scope.need_paused, manifest, o, s, stderr);
+}
+
+int scope_resolve_docker(const char *name, const char *path, bool need_paused, struct scope *out, FILE *warn) {
+    memset(out, 0, sizeof *out);
+    struct docker_info d;
+    struct union_fs *u;
+    if (docker_open(name, need_paused, &d, &u, warn) == -1) return -1;
+    char canon[PATH_MAX];
+    const int fd = union_open_scope(u, path, canon, sizeof canon);
+    struct stat st;
+    const int r = fd == -1 ? -1 : fstat(fd, &st);
+    if (fd != -1) close(fd);
+    union_free(u);
+    if (r == -1) {
+        if (fd != -1) belay_err_set(BELAY_ERR_IO, errno, "--docker %s: cannot stat the scope", name);
+        return -1;
+    }
+    snprintf(out->path, sizeof out->path, "%s", canon);
+    out->dev = (uint64_t)st.st_dev;
+    out->ino = (uint64_t)st.st_ino;
+    snprintf(out->docker, sizeof out->docker, "%s", name);
+    snprintf(out->docker_id, sizeof out->docker_id, "%s", d.id);
+    out->need_paused = need_paused;
+    return 0;
+}
+
 int state_capture(struct state *st, const struct capture_req *req, struct checkpoint *out) {
     struct checkpoint *list = NULL;
     size_t n = 0;
@@ -793,14 +831,15 @@ int state_capture(struct state *st, const struct capture_req *req, struct checkp
         .store_max_bytes = BELAY_STORE_MAX_BYTES_DEFAULT,
         .store_dir = st->store, .previous = previous,
         .full_reason = c.full_reason[0] != '\0' ? c.full_reason : NULL,   /* the trailer's read_all */
-        .exclude = st->root_ino != 0, .exclude_dev = st->root_dev, .exclude_ino = st->root_ino,
+        .exclude = st->root_ino != 0 && st->scope.docker[0] == '\0',
+        .exclude_dev = st->root_dev, .exclude_ino = st->root_ino,
         .exclude_rel = state_rel(st),
         .expect_root = true, .root_dev = st->scope.dev, .root_ino = st->scope.ino,
     };
     struct belay_manifest_stats s;
     if (state_capture_hook != NULL) state_capture_hook(st->scope.path);
     int rc = -1;
-    if (belay_manifest_write(manifest, st->scope.path, &o, &s) == -1) goto out;
+    if (capture_scope(st, manifest, &o, &s) == -1) goto out;
     if (previous != NULL && !s.prefilter && s.prefilter_skipped != NULL) {
         snprintf(c.full_reason, sizeof c.full_reason, "%s", s.prefilter_skipped);
     } else if (previous != NULL && s.prefilter && s.previous_newest_ns != INT64_MIN &&
@@ -812,7 +851,7 @@ int state_capture(struct state *st, const struct capture_req *req, struct checkp
                  (long long)s.newest_ctime_ns, (long long)s.previous_newest_ns);
         o.previous = NULL;
         o.full_reason = c.full_reason;
-        if (belay_manifest_write(manifest, st->scope.path, &o, &s) == -1) goto out;
+        if (capture_scope(st, manifest, &o, &s) == -1) goto out;
     } else if (previous != NULL) {
         c.full = false;
         c.trusted = s.trusted;

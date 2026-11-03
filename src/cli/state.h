@@ -31,7 +31,16 @@
 struct scope {
     char path[PATH_MAX];
     uint64_t dev, ino;
+    /* --docker (host-reader.md): the container as given, and its id; the
+     * path is inside it. Paused required for export and verify (H-C4). */
+    char docker[256];
+    char docker_id[65];
+    bool need_paused;
 };
+
+/* --docker: `path` resolved inside the container `name` (H-C3), every check
+ * of host-reader.md made on the way; a warning (H-C9) on `warn`. */
+int scope_resolve_docker(const char *name, const char *path, bool need_paused, struct scope *out, FILE *warn);
 
 /* The state root to use instead of the environment's, when not NULL:
  * `belay verify` sets it to a directory it has just created, so no state a

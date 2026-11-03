@@ -40,6 +40,8 @@ jobs:
         run: make oracle
       - name: package reference (dpkg and pip against an independent reference)
         run: make reference
+      - name: union model (the host reader's union against an independent overlayfs model)
+        run: make union-model
       - name: dogfood hooks (scripted sessions)
         run: make dogfood-test
 

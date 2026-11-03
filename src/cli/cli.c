@@ -40,6 +40,8 @@ static const char USAGE[] =
     "  help [command]                        this, or one command's options\n"
     "  --version\n"
     "\n"
+    "  --docker CONTAINER on any of these: the scope is a path inside a Docker container, read from its\n"
+    "                                        layers on the host (Linux, root; export and verify: paused)\n"
     "exit codes: 0 done, 1 diff --exit-code found a change (verify: a violation), 2 usage, 3 refused, 4 failed\n";
 
 static const struct { const char *cmd, *text; } HELP[] = {
@@ -119,7 +121,7 @@ void cli_err_line(FILE *err) { err_line(err); }
 /* ---- options ---- */
 
 struct opts {
-    const char *scope, *since, *to, *add, *remove;
+    const char *scope, *since, *to, *add, *remove, *docker;
     bool json, full, exit_code, all, full_every_set;
     long full_every;
 };
@@ -135,6 +137,7 @@ static int parse(int argc, char **argv, struct opts *o, FILE *err) {
         else if (!strcmp(a, "--exit-code")) o->exit_code = true;
         else if (!strcmp(a, "--all")) o->all = true;
         else if (!strcmp(a, "--scope")) val = &o->scope;
+        else if (!strcmp(a, "--docker")) val = &o->docker;
         else if (!strcmp(a, "--since")) val = &o->since;
         else if (!strcmp(a, "--to")) val = &o->to;
         else if (!strcmp(a, "--add")) val = &o->add;
@@ -375,10 +378,11 @@ static void text_checkpoint(FILE *out, const struct state *st, const struct chec
 
 /* A scope that cannot be resolved is refused (3) whatever the cause, but
  * memory; state that cannot be opened follows its error (3 or 4). */
-static int open_scope(const struct opts *o, bool create, struct state *st, FILE *err) {
+static int open_scope_paused(const struct opts *o, bool need_paused, bool create, struct state *st, FILE *err) {
     struct scope sc;
     st->dir_fd = st->cp_fd = st->lock_fd = -1;
-    if (scope_resolve(o->scope, &sc) == -1) {
+    if ((o->docker != NULL ? scope_resolve_docker(o->docker, o->scope, need_paused, &sc, err)
+                           : scope_resolve(o->scope, &sc)) == -1) {
         if (belay_err_code() == BELAY_ERR_NOMEM) return failed(err);
         err_line(err);
         belay_err_clear();
@@ -391,11 +395,16 @@ static int open_scope(const struct opts *o, bool create, struct state *st, FILE 
     return 0;
 }
 
-int cli_open_scope(const char *scope, bool create, struct state *st, FILE *err) {
+static int open_scope(const struct opts *o, bool create, struct state *st, FILE *err) {
+    return open_scope_paused(o, false, create, st, err);
+}
+
+int cli_open_scope(const char *scope, const char *docker, bool create, struct state *st, FILE *err) {
     struct opts o;
     memset(&o, 0, sizeof o);
     o.scope = scope;
-    return open_scope(&o, create, st, err);
+    o.docker = docker;
+    return open_scope_paused(&o, docker != NULL, create, st, err);   /* export: paused (H-C4) */
 }
 
 static int cmd_capture(const struct opts *o, const char *kind, FILE *out, FILE *err) {
