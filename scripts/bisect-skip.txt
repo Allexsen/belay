@@ -161,3 +161,6 @@
 2026-11-03T10:41:56+04:00	git: a side it cannot parse counts as one it cannot read
 2026-11-03T10:59:01+04:00	spec: for git, nothing more is read from the side that failed to parse
 2026-11-03T11:05:01+04:00	oracle: a side git cannot parse counts as one it cannot read (E12, decision 141)
+# Decision 144 (G13): the pin fails make oracle until its author follows (the start-up quote of E12), and so does the git fix after it.
+2026-11-03T11:34:14+04:00	pins: E12 states G13 -- a reflog is parsed by the entries it gained
+2026-11-03T11:49:02+04:00	git: a reflog it cannot parse tells no rename
