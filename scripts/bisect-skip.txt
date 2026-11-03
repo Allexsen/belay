@@ -172,3 +172,8 @@
 2026-11-03T15:23:25+04:00	spec: a blank reflog line is no entry, as git skips it
 # Decision 198 (manifest v3): the code fails make policy-model until its author follows (B-4: the bundle's manifest version).
 2026-11-03T16:49:20+04:00	manifest v3: a capture says where it came from (source); different sources are not compared
+# Decision 202 (git leniency): the pin and the spec sentence fail make oracle and make reference until their authors follow; the oracle's first commit fails make oracle until its second, and both fail make reference.
+2026-11-03T16:37:43+04:00	pins: E12 reads refs and reflogs as git does -- the lines git skips skipped and counted (decision 202)
+2026-11-03T16:50:52+04:00	spec: a reflog record's findings in the kinds table's order; an operation of any length read (E9 for its move)
+2026-11-03T16:47:52+04:00	oracle: decision 202 -- refs and reflog lines read as git reads them, the lines git skips counted
+2026-11-03T16:55:54+04:00	oracle: a reflog record's findings in the kinds table's order; an operation of any length read (88454c8)
