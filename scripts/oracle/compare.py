@@ -1306,10 +1306,22 @@ GIT_INPUT_ITEMS = ['an unknown ref read from its copy: provisional',
                    # of after's ending at a line's end, and none otherwise":
                    # a prefix by its bytes ending inside a line gained none.
                    'a reflog whose before ends inside a line of after: none gained',
-                   # ... "a last line without its newline is an entry like
-                   # any other, as git reads it" (decision 160): counted and
-                   # used for events.
-                   'a reflog whose last entry gained has no newline: an entry']
+                   # ... "A reflog's last line without its newline is no
+                   # entry: git does not read it as one" (decisions 160,
+                   # 183): not counted, not used for events.
+                   'a reflog whose last line gained has no newline: no entry',
+                   # ... "-- and says nothing when it gained none (decision
+                   # 183) --" (diff-v1).
+                   'a reflog that gained only a line without its newline: no finding',
+                   # ... "nor is a blank line, which git skips" (diff-v1).
+                   'a reflog that gained a blank line, then an entry: the entry counted',
+                   # ... "A loose ref's or `HEAD`'s last line without its
+                   # newline is read, as git reads it; a `packed-refs` that
+                   # ends without a newline is one git refuses, so a side git
+                   # cannot parse (E10)" (decision 183).
+                   'HEAD switched, its file without a final newline',
+                   'a loose ref moved, its file without a final newline',
+                   'a packed-refs that ends without a newline: not parsed']
 
 
 def git_coverage(records, traces, tags):
@@ -1332,9 +1344,28 @@ def git_coverage(records, traces, tags):
                 'git-ev:moved:a reflog that gained none' in end:
             tags.add('git events: a reflog whose before ends inside a line of after: '
                      'none gained')
-        if 'git-reflog-last-unterminated' in tr and 'git-reflog-appended' in tr and \
+        if 'git-reflog-appended' in tr and 'git-reflog-last-unterminated' in tr and \
                 'git-ev:commits added:counted' in end:
-            tags.add('git events: a reflog whose last entry gained has no newline: an entry')
+            tags.add('git events: a reflog whose last line gained has no newline: no entry')
+        if 'git-reflog-appended-none' in tr and 'git-reflog-last-unterminated' in tr and \
+                'git-ev:moved:a reflog that gained none' in end:
+            tags.add('git events: a reflog that gained only a line without its newline: '
+                     'no finding')
+        if 'git-reflog-blank-line' in tr and 'git-reflog-appended' in tr and \
+                'git-ev:commits added:counted' in end:
+            tags.add('git events: a reflog that gained a blank line, then an entry: '
+                     'the entry counted')
+        for what, t, item in (
+                ('HEAD', 'git-ev:HEAD switched', 'HEAD switched, its file without a final '
+                                                 'newline'),
+                ('ref', 'git-ev:moved:no entries', 'a loose ref moved, its file without a '
+                                                   'final newline')):
+            if 'git-unterminated-' + what in tr and 'interp:git:' + what in tr and \
+                    'git-cannot-parse' not in tr and t in end:
+                tags.add('git events: ' + item)
+        if 'git-unterminated-packed-refs' in tr and 'interp:git:packed-refs' in tr and \
+                'git-cannot-parse' in tr:
+            tags.add('git events: a packed-refs that ends without a newline: not parsed')
         if 'interp:git:ref' not in tr and 'interp:git:reflog' not in tr:
             continue
         place = ref.git_place(p)
