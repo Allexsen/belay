@@ -131,10 +131,26 @@ TEST(databases_rewritten_to_match_a_tampered_file_still_tampered) {
        "printf 'pkg/core.py,sha256=%%s,5\\n' $h > lib/site-packages/pkg-1.0.dist-info/RECORD");
     ASSERT_EQ_INT(EXIT_CHANGES, verify_());
     VIOLATION("tampered_installed_package", "usr/bin/tool", "\"why\":\"other bytes\"");
-    /* pip: a RECORD rewritten is a reinstall to the interpreter, so the
-     * package changed -- frozen, a violation all the same (decision 146) */
+    /* pip: a RECORD rewritten is a reinstall to the interpreter -- the
+     * package changed, and its files are judged against the bundle all the
+     * same (decision 173) */
     ASSERT_TRUE(strstr(g_out, "{\"flag\":\"package_changed\",\"level\":\"violation\",\"db\":\"pip\",\"package\":\"pkg\","
                               "\"event\":\"pip_reinstalled\",") != NULL);
+    VIOLATION("tampered_installed_package", "lib/site-packages/pkg/core.py", "\"why\":\"other bytes\"");
+}
+
+/* Decision 173: without frozen packages too, a patched library hidden by
+ * a RECORD rewritten to match is named as tampering. */
+TEST(a_forged_record_is_named_as_tampering_unfrozen) {
+    fresh("{\"belay_protect\":1,\"protect\":[]}");
+    packages();
+    REQUIRE_MSG(export_() == EXIT_DONE, "%s", g_err);
+    sh("printf 'evil\\n' > lib/site-packages/pkg/core.py && "
+       "h=$(python3 -c \"import hashlib,base64;print(base64.urlsafe_b64encode(hashlib.sha256(b'evil\\\\n').digest()).rstrip(b'=').decode())\") && "
+       "printf 'pkg/core.py,sha256=%%s,5\\n' $h > lib/site-packages/pkg-1.0.dist-info/RECORD");
+    ASSERT_EQ_INT(EXIT_DONE, verify_());            /* signals only: not frozen */
+    ASSERT_TRUE(strstr(g_out, "{\"flag\":\"tampered_installed_package\",\"level\":\"signal\",\"db\":\"pip\",\"package\":\"pkg\","
+                              "\"path\":\"lib/site-packages/pkg/core.py\",\"why\":\"other bytes\",\"at_reset\":\"match\"") != NULL);
 }
 
 /* Step 4: verify reads every file -- an edit with its size and mtime put
@@ -231,6 +247,7 @@ int main(void) {
     snprintf(g_bundle, sizeof g_bundle, "%s/b.bundle", g_dir);
     snprintf(g_spec, sizeof g_spec, "%s/spec.json", g_dir);
     RUN(databases_rewritten_to_match_a_tampered_file_still_tampered);
+    RUN(a_forged_record_is_named_as_tampering_unfrozen);
     RUN(an_edit_with_size_and_mtime_put_back_is_still_seen);
     RUN(a_state_directory_prepared_by_the_policy_is_never_read);
     RUN(a_symlink_swapped_in_a_rename_over_and_a_hard_link_write_are_writes);

@@ -580,6 +580,76 @@ TEST(a_path_not_utf8_reads_as_the_receipt_writes_it) {
     ASSERT_TRUE(strstr(g_out, "\"text\":\"tests/test_\\\\xff.py: test file added\"") != NULL);
 }
 
+/* Decision 175: test files by test directory and per-language name, never
+ * below build output or documentation. */
+TEST(the_test_file_rule_keeps_to_tests) {
+    fresh(NULL);
+    const char *yes[] = { "tests/data/fixture.json", "pkg/test/helpers.go", "web/__tests__/a.js", "lib/spec/x_spec.rb",
+                          "src/foo_test.go", "src/FooTest.java", "src/BarTests.kt", "ui/a.spec.ts", "ui/b.test.jsx",
+                          "lib/test_util.c", "lib/x_test.cpp", "py/test_api.py", "py/api_test.py", "lib/test_.py", NULL };
+    const char *no[] = { "build/test/test_policy", "build/san/test/x", "docs/spec/diff-v1.md", "docs/tests/test_a.py",
+                         "node_modules/a/test/x.js", "dist/tests/t.py", "src/latest.py", "src/contest.go",
+                         "notes/testing.md", "src/attest.rb", NULL };
+    char cmd[8192] = "true";
+    for (int k = 0; k < 2; k++)
+        for (const char *const *p = k ? no : yes; *p != NULL; p++) {
+            char one[512];
+            snprintf(one, sizeof one, " && mkdir -p \"$(dirname '%s')\" && printf 'a\\n' > '%s'", *p, *p);
+            strcat(cmd, one);
+        }
+    sh("%s", cmd);
+    REQUIRE(export_(false) == EXIT_DONE);
+    for (int k = 0; k < 2; k++)
+        for (const char *const *p = k ? no : yes; *p != NULL; p++) sh("printf 'b\\n' > '%s'", *p);
+    ASSERT_EQ_INT(EXIT_DONE, verify_(false));
+    for (const char *const *p = yes; *p != NULL; p++) HAS("touches_tests", *p, NULL);
+    for (const char *const *p = no; *p != NULL; p++) NONE("touches_tests", *p);
+}
+
+/* Decision 171: a file added gets an iflags record only when its flags
+ * lock it (immutable, append-only) -- never for a filesystem's own (ext4
+ * sets the extents flag on every new file). Locking one takes privilege,
+ * so this shows the other side: an ordinary new file, no iflags record. */
+TEST(an_added_file_s_own_iflags_are_no_privilege) {
+    fresh(NULL);
+    REQUIRE(export_(false) == EXIT_DONE);
+    sh("printf 'n\\n' > new.txt && mkdir newdir");
+    ASSERT_EQ_INT(EXIT_DONE, verify_(false));
+    ASSERT_TRUE(strstr(g_out, "\"what\":\"iflags\"") == NULL);
+}
+
+/* Decision 176 (P2): protected_path_unverifiable's reasons in a fixed
+ * order -- here the diff's own (raced before unverified) is reordered. */
+TEST(unverifiable_reasons_come_in_the_pinned_order) {
+    fresh("{\"belay_protect\":1,\"protect\":[{\"path\":\"x\",\"mode\":[\"no_write\"]}]}");
+    char dir[600], m1[600], d[600], dd[600], st[600], cmd[8192];
+    snprintf(dir, sizeof dir, "%s/one", g_dir);
+    snprintf(m1, sizeof m1, "%s/m1", g_dir);
+    snprintf(d, sizeof d, "%s/d", g_dir);
+    snprintf(dd, sizeof dd, "%s/dd", g_dir);
+    snprintf(st, sizeof st, "%s/st", g_dir);
+    snprintf(cmd, sizeof cmd, "mkdir -p '%s' '%s' && printf 'x\\n' > '%s/x'", dir, st, dir);
+    REQUIRE(system(cmd) == 0);
+    struct belay_manifest_opts o = { .hash_max_bytes = BELAY_HASH_MAX_BYTES_DEFAULT, .store_max_bytes = BELAY_STORE_MAX_BYTES_DEFAULT };
+    REQUIRE(belay_manifest_write(m1, dir, &o, NULL) == 0);
+    REQUIRE(belay_diff(m1, m1, d, NULL, NULL) == 0);
+    snprintf(cmd, sizeof cmd, "head -n 1 '%s' > '%s' && printf '%%s\\n' '{\"path\":\"x\",\"outcome\":\"unknown\",\"type\":\"reg\","
+             "\"unknown\":[\"raced\",\"unverified\"]}' >> '%s' && tail -n 1 '%s' >> '%s'", d, dd, dd, d, dd);
+    REQUIRE(system(cmd) == 0);
+    struct protect_spec spec;
+    REQUIRE(protect_load(g_spec, &spec) == 0);
+    struct bundle b = { 0 };
+    const struct policy_in in = { m1, m1, dd, st, dir, true, &b,
+                                  "0000000000000000000000000000000000000000000000000000000000000000", &spec };
+    free(g_out);
+    size_t on;
+    FILE *out = open_memstream(&g_out, &on);
+    REQUIRE_MSG(policy_run(&in, out, NULL) == 0, "%s", belay_err_msg());
+    fclose(out);
+    protect_free(&spec);
+    HAS("protected_path_unverifiable", "x", ",\"reasons\":[\"unverified\",\"raced\"],");
+}
+
 /* ---- refusals ---- */
 
 TEST(verify_refuses_what_it_must_never_judge) {
@@ -672,6 +742,9 @@ int main(void) {
     RUN(an_unverifiable_entry_names_every_flag_it_carries);
     RUN(a_side_never_looked_at_is_not_counted);
     RUN(a_path_not_utf8_reads_as_the_receipt_writes_it);
+    RUN(the_test_file_rule_keeps_to_tests);
+    RUN(an_added_file_s_own_iflags_are_no_privilege);
+    RUN(unverifiable_reasons_come_in_the_pinned_order);
     RUN(verify_refuses_what_it_must_never_judge);
     char cmd[600];
     snprintf(cmd, sizeof cmd, "chmod -R u+rwx '%s' 2>/dev/null; rm -rf '%s'", g_dir, g_dir);

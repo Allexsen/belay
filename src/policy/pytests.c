@@ -13,28 +13,52 @@ static const char *name_of(const char *p, size_t n, size_t *nl) {
     return p + i;
 }
 
-static bool has(const char *s, size_t n, const char *sub) {
-    const size_t l = strlen(sub);
-    for (size_t i = 0; i + l <= n; i++)
-        if (memcmp(s + i, sub, l) == 0) return true;
+static bool comp_is(const char *c, size_t l, const char *const *names) {
+    for (; *names != NULL; names++)
+        if (l == strlen(*names) && memcmp(c, *names, l) == 0) return true;
     return false;
 }
 
+static bool ends(const char *s, size_t n, const char *suf) {
+    const size_t l = strlen(suf);
+    return n >= l && memcmp(s + n - l, suf, l) == 0;
+}
+
+/* A test file (policy-v1, "Test file"; decision 175): never below a build
+ * output directory or documentation; at or below a test directory, or
+ * named as a test by its language. */
 bool test_file(const char *path, size_t n) {
+    static const char *const SKIP[] = { "build", "dist", "out", "target", "_build", ".build", "obj", "node_modules",
+                                        "__pycache__", "docs", "doc", NULL };
+    static const char *const TESTDIR[] = { "test", "tests", "__tests__", "spec", NULL };
+    bool in_tests = false;
     size_t i = 0;
     while (i < n) {
         const char *sl = memchr(path + i, '/', n - i);
         const size_t e = sl != NULL ? (size_t)(sl - path) : n, l = e - i;
-        const char *c = path + i;
-        if ((l == 4 && memcmp(c, "test", 4) == 0) || (l == 5 && memcmp(c, "tests", 5) == 0) ||
-            (l == 4 && memcmp(c, "spec", 4) == 0) || (l == 9 && memcmp(c, "__tests__", 9) == 0))
-            return true;
+        if (comp_is(path + i, l, SKIP)) return false;
+        in_tests = in_tests || comp_is(path + i, l, TESTDIR);
         i = e + 1;
     }
+    if (in_tests) return true;
     size_t nl;
     const char *nm = name_of(path, n, &nl);
-    return (nl >= 5 && memcmp(nm, "test_", 5) == 0) || has(nm, nl, "_test.") || has(nm, nl, ".test.") ||
-           has(nm, nl, ".spec.");
+    static const char *const JS[] = { "js", "jsx", "ts", "tsx", "mjs", "cjs", NULL };
+    for (const char *const *x = JS; *x != NULL; x++) {
+        char t[16], sp[16];
+        snprintf(t, sizeof t, ".test.%s", *x);
+        snprintf(sp, sizeof sp, ".spec.%s", *x);
+        if ((ends(nm, nl, t) && nl > strlen(t)) || (ends(nm, nl, sp) && nl > strlen(sp))) return true;
+    }
+    static const char *const SUFFIX[] = { "_test.py", "_test.go", "Test.java", "Tests.java", "Test.kt", "Tests.kt",
+                                          "_spec.rb", "_test.rb", "_test.c", "_test.cc", "_test.cpp", NULL };
+    for (const char *const *x = SUFFIX; *x != NULL; x++)
+        if (ends(nm, nl, *x) && nl > strlen(*x)) return true;
+    static const char *const PREFIXED[] = { ".py", ".c", ".cc", ".cpp", NULL };   /* test_*.<ext> */
+    if (nl > 5 && memcmp(nm, "test_", 5) == 0)
+        for (const char *const *x = PREFIXED; *x != NULL; x++)
+            if (ends(nm, nl, *x) && nl > 5 + strlen(*x) - 1) return true;
+    return false;
 }
 
 bool py_test_file(const char *path, size_t n) {

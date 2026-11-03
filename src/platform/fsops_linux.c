@@ -95,6 +95,8 @@ static ssize_t linux_xattr_get(void *ctx, const struct xsrc *x, const char *name
     return x->path != NULL ? getxattr(x->path, name, buf, n) : fgetxattr(x->fd, name, buf, n);
 }
 
+const uint64_t belay_iflags_locking = FS_IMMUTABLE_FL | FS_APPEND_FL;
+
 /* Through an fd only: a symlink, FIFO or device has no safe one to ask. */
 static int linux_inode_flags(void *ctx, int fd, const struct stat *st, uint64_t *out) {
     (void)ctx; (void)st;

@@ -21,6 +21,12 @@
 #include <sys/types.h>
 #include <time.h>
 
+/* The inode flags that lock a file -- immutable or append-only -- as this
+ * platform's iflags spell them (FS_IMMUTABLE_FL, FS_APPEND_FL on Linux;
+ * UF_ and SF_IMMUTABLE, UF_ and SF_APPEND on macOS): an added or removed
+ * file's iflags matter to policy.v1 only when they hold one (decision 171). */
+extern const uint64_t belay_iflags_locking;
+
 /* Where an entry's extended attributes are read from: its open fd, or a
  * handle the platform opened for the purpose (see xattr_source_open). */
 struct xsrc { int fd; const char *path; int own; char buf[64]; };
