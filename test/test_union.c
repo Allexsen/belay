@@ -185,6 +185,10 @@ static int union_child(void) {
         fprintf(stderr, "refused: %s\n", why);
         return 30;
     }
+    /* the end-of-walk re-check agrees with the walk: nothing unstable or raced
+     * (found in CI: lower contributors re-listed through a dup were empty) */
+    for (size_t i = 0; i < g_n; i++)
+        if (g_e[i].unstable || g_e[i].raced) { fprintf(stderr, "%s unstable or raced\n", g_e[i].path); return 41; }
     static const char *const present[] = { ".", "a", "a/f", "a/g", "a/new", "keep", "lock", "mv", "mv/q",
                                            "op", "op/w", "rn2", "rn2/y", "sub", "vol" };
     static const char *const absent[] = { "d", "d/x", "rn", "rn/y", "op/z", "sub/deep", "sub/deep/q", "vol/inner" };
