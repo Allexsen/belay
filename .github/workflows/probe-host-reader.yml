@@ -39,3 +39,18 @@ jobs:
           echo "--- merged view:"; sudo getfattr -d -m - --absolute-names m/d2 m/g 2>&1 | sed "s|$D/||"; echo "(end)"
           echo "--- st_ino of g: merged $(stat -c %i m/g), lower $(stat -c %i l/g), upper $(sudo stat -c %i u/g)"
           sudo umount m
+      - name: privileged and SYS_ADMIN fields, the data root, mount points with a space
+        run: |
+          set -u
+          echo "--- docker info DockerRootDir: $(docker info -f '{{.DockerRootDir}}')"
+          for a in "" "--privileged" "--cap-add SYS_ADMIN" "--cap-add ALL"; do
+            C=$(docker run -d $a alpine:3.20 sleep 60)
+            echo "--- run [$a]: HostConfig.Privileged=$(docker inspect -f '{{.HostConfig.Privileged}}' $C) CapAdd=$(docker inspect -f '{{json .HostConfig.CapAdd}}' $C) CapEff=$(docker exec $C grep CapEff /proc/1/status | cut -f2)"
+            docker rm -f $C >/dev/null
+          done
+          mkdir -p "/tmp/v d"
+          C=$(docker run -d -v "/tmp/v d:/work dir" -v vol1:/data alpine:3.20 sleep 60)
+          P=$(docker inspect -f '{{.State.Pid}}' $C)
+          echo "--- mountinfo mount points (field 5), all:"; sudo awk '{print $5, $9}' /proc/$P/mountinfo
+          echo "--- mounts at /: $(sudo awk '$5 == "/"' /proc/$P/mountinfo | wc -l)"
+          docker rm -f $C >/dev/null
