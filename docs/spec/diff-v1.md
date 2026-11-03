@@ -439,7 +439,8 @@ same `size` rule, like one recorded without a copy.
 
 Where an interpreter fails on a path (a file it claims cannot be parsed, a dist-info cannot be
 named), that path's record carries `could_not_interpret` (R11) unless its outcome is `unknown`,
-nothing more is read from it, and pip, dpkg and git emit one `could_not_interpret` event naming it (E10);
+nothing more is read from it (git: nothing more from the side that failed; the other side still
+gives its value, E12), and pip, dpkg and git emit one `could_not_interpret` event naming it (E10);
 their other events stand. An event a value of which is not a string field's value, or whose text
 would exceed 1,024 bytes, is one `invalid_finding` event naming its paths (E9). Events with no name
 -- `could_not_interpret` for a file, `content_unavailable` -- come before every named event, in the
