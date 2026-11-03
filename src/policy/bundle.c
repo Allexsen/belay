@@ -98,7 +98,7 @@ static int put_line(struct out *o, struct jw *w) {
         belay_err_set(w->oom ? BELAY_ERR_NOMEM : BELAY_ERR_RANGE, 0, "bundle: a header line does not fit");
         return -1;
     }
-    jw_raw(w, "\n", 1);
+    JW_LIT(w, "\n");
     return w->oom ? -1 : put(o, w->b, w->n);
 }
 
@@ -174,11 +174,11 @@ static int package_lines(const struct pkg_list *l, struct jw *w) {
         }
         jw_fmt(w, "{\"db\":\"%s\",\"package\":", pkg_db_name(x->db));
         jw_str(w, x->package, strlen(x->package));
-        jw_raw(w, ",\"version\":", 11);
+        JW_LIT(w, ",\"version\":");
         jw_str(w, x->version, strlen(x->version));
-        jw_raw(w, ",", 1);
+        JW_LIT(w, ",");
         jw_bytes(w, "path", x->path, x->path_len);
-        if (x->conffile) jw_raw(w, ",\"conffile\":true", 16);
+        if (x->conffile) JW_LIT(w, ",\"conffile\":true");
         jw_fmt(w, ",\"at_reset\":\"%s\"}\n", pkg_at_reset_name(x->at_reset));
     }
     if (w->oom) {
@@ -210,9 +210,9 @@ int bundle_write(const char *out_path, const char *manifest, const char *store_d
 
     jw_fmt(&w, "{\"belay_bundle\":1,\"size\":0,\"created_ns\":%lld,\"belay_version\":", (long long)m->created_ns);
     jw_str(&w, m->belay_version, strlen(m->belay_version));
-    jw_raw(&w, ",", 1);
+    JW_LIT(&w, ",");
     if (belay_utf8_valid(m->scope, strlen(m->scope))) {
-        jw_raw(&w, "\"scopes\":[", 10);
+        JW_LIT(&w, "\"scopes\":[");
         jw_str(&w, m->scope, strlen(m->scope));
     } else {                                    /* as the manifest writes it: base64 */
         char b64[4 * ((sizeof m->scope + 2) / 3) + 1];
@@ -221,7 +221,7 @@ int bundle_write(const char *out_path, const char *manifest, const char *store_d
     }
     jw_fmt(&w, "],\"hash_max_bytes\":%llu,\"protect_sha256\":", (unsigned long long)m->hash_max_bytes);
     if (m->has_protect) jw_fmt(&w, "\"%s\"}", m->protect_sha256);
-    else jw_raw(&w, "null}", 5);
+    else JW_LIT(&w, "null}");
     if (put_line(&o, &w) == -1) goto out;
     members++;
 

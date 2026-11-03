@@ -20,6 +20,8 @@ struct jw {
 void jw_reset(struct jw *w);            /* empty, keeping the buffer */
 void jw_free(struct jw *w);
 void jw_raw(struct jw *w, const char *s, size_t n);
+/* A string literal, its length counted by the compiler. */
+#define JW_LIT(w, lit) jw_raw((w), "" lit "", sizeof(lit) - 1)
 void jw_fmt(struct jw *w, const char *fmt, ...) __attribute__((format(printf, 2, 3)));
 /* "<s>", escaped: s must be UTF-8 (a key, a name belay chose). */
 void jw_str(struct jw *w, const char *s, size_t n);

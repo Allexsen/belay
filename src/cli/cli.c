@@ -34,11 +34,13 @@ static const char USAGE[] =
     "                                        paths the scope's captures do not walk (each one named in every manifest)\n"
     "  baseline export --scope DIR --out FILE [--protect SPEC] [--json]\n"
     "                                        the baseline bundle a later verify judges against\n"
+    "  verify --scope DIR --baseline FILE --baseline-sha256 HEX [--protect SPEC] [--to ID] [--exit-code]\n"
+    "                                        what the changes since the baseline mean: policy.v1\n"
 
     "  help [command]                        this, or one command's options\n"
     "  --version\n"
     "\n"
-    "exit codes: 0 done, 1 diff --exit-code found a change, 2 usage, 3 refused, 4 failed\n";
+    "exit codes: 0 done, 1 diff --exit-code found a change (verify: a violation), 2 usage, 3 refused, 4 failed\n";
 
 static const struct { const char *cmd, *text; } HELP[] = {
     { "check", "usage: belay check --scope DIR [--json]\n"
@@ -71,6 +73,15 @@ static const struct { const char *cmd, *text; } HELP[] = {
                "  --protect  the task's protect spec (test/expect/protect-spec.md): its files\n"
                "             always hashed (up to 4 GiB), never excludable\n"
                "  --json     one JSON line: bundle, sha256, baseline_integrity\n" },
+    { "verify", "usage: belay verify --scope DIR --baseline FILE --baseline-sha256 HEX [--protect SPEC] [--to ID] [--exit-code]\n"
+               "  After the episode, the policy stopped: records DIR reading every file, in a state\n"
+               "  directory of its own made fresh, and writes policy.v1 (test/expect/policy-v1.md):\n"
+               "  what changed since the bundle, against the task's expectations. The bundle is read\n"
+               "  only when its bytes hash to HEX.\n"
+               "  --protect    the protect spec the bundle was exported with, and only it\n"
+               "  --to ID      judge checkpoint ID of the scope's own state instead (with a spec,\n"
+               "               only one that read every file)\n"
+               "  --exit-code  exit 1 when any record is a violation (signals never)\n" },
     { "log",   "usage: belay log --scope DIR [--json]\n"
                "  The scope's checkpoints: id, kind, time, entries.\n"
                "  --json  one checkpoint a line (schema/checkpoint.v1.json)\n" },
@@ -562,6 +573,7 @@ static int run(int argc, char **argv, FILE *out, FILE *err) {
             for (size_t k = 0; k < sizeof HELP / sizeof HELP[0]; k++)
                 if (!strcmp(cmd, HELP[k].cmd)) { fputs(HELP[k].text, out); return EXIT_DONE; }
     if (!strcmp(cmd, "baseline")) return cmd_baseline(argc, argv, out, err);
+    if (!strcmp(cmd, "verify")) return cmd_verify(argc, argv, out, err);
     struct opts o;
     const bool known = !strcmp(cmd, "check") || !strcmp(cmd, "mark") || !strcmp(cmd, "diff") || !strcmp(cmd, "log") ||
                        !strcmp(cmd, "exclude");

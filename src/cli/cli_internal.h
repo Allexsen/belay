@@ -17,5 +17,6 @@ void cli_err_line(FILE *err);                   /* belay_err as one line */
 int  cli_open_scope(const char *scope, bool create, struct state *st, FILE *err);   /* 0, or an exit code */
 
 int  cmd_baseline(int argc, char **argv, FILE *out, FILE *err);
+int  cmd_verify(int argc, char **argv, FILE *out, FILE *err);
 
 #endif
