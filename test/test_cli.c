@@ -260,6 +260,9 @@ TEST(mark_says_when_it_reads_every_file) {
     fresh();
     ASSERT_EQ_INT(0, belay("mark", "--scope", g_scope, "--json", NULL));
     ASSERT_TRUE(strstr(g_out, "\"full_reason\":\"no checkpoint before\"") != NULL);
+    /* checkpoint.v1 CK-16 (decision 210): the manifest's source, last; a walk here is null */
+    const size_t ol = strlen(g_out);
+    ASSERT_TRUE(ol > 16 && strcmp(g_out + ol - 16, ",\"source\":null}\n") == 0);
     ASSERT_EQ_INT(0, belay("mark", "--scope", g_scope, "--json", NULL));
     ASSERT_TRUE(strstr(g_out, "\"used\":true") != NULL);
     /* The state directory is on the scope's filesystem here: the previous

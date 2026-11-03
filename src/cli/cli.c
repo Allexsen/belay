@@ -205,10 +205,13 @@ static void json_checkpoint(FILE *out, const struct state *st, const struct chec
     static char xs[BELAY_EXCLUDED_MAX * (6 * PATH_MAX + 64) + 8];
     size_t xw = (size_t)snprintf(xs, sizeof xs, "[");
     struct belay_manifest_reader *r = NULL;
-    if (c->excluded && state_check_manifest(st, c->id) == 0 && belay_manifest_open(man, &r) == 0) {
+    char src[200] = "null";             /* CK-16: the manifest's source (manifest-v3 V3-2) */
+    if (state_check_manifest(st, c->id) == 0 && belay_manifest_open(man, &r) == 0) {
         const struct belay_manifest_header *h = belay_manifest_header(r);
+        if (h->source_docker[0] != '\0')
+            snprintf(src, sizeof src, "{\"docker\":\"%s\",\"image\":\"%s\"}", h->source_docker, h->source_image);
         static char one[6 * PATH_MAX + 32];
-        for (size_t i = 0; i < h->n_excluded; i++) {
+        for (size_t i = 0; c->excluded && i < h->n_excluded; i++) {
             if (state_json_member(one, sizeof one, "path", h->excluded[i].path) == -1) continue;
             xw += (size_t)snprintf(xs + xw, sizeof xs - xw, "%s{%s,\"reason\":\"%s\"}", xw > 1 ? "," : "", one,
                                    h->excluded[i].reason == BELAY_EXCLUDE_STATE_DIR ? "state_dir" : "user");
@@ -220,11 +223,11 @@ static void json_checkpoint(FILE *out, const struct state *st, const struct chec
     fprintf(out, "{\"id\":%ld,\"kind\":\"%s\",\"created_ns\":%lld,%s,%s,"
                  "\"entries\":%llu,\"raced\":%llu,\"unstable\":%llu,\"vanished\":%llu,\"provisional\":%s,"
                  "\"excluded\":%llu,\"excluded_paths\":%s,\"prefilter\":{\"used\":%s,\"reference\":\"%s\",\"trusted\":%llu,"
-                 "\"racy\":%llu,\"full_reason\":\"%s\"}}\n",
+                 "\"racy\":%llu,\"full_reason\":\"%s\"},\"source\":%s}\n",
             c->id, c->kind, (long long)c->created_ns, esc, mesc, (unsigned long long)c->entries,
             (unsigned long long)c->raced, (unsigned long long)c->unstable, (unsigned long long)c->vanished,
             c->provisional ? "true" : "false", (unsigned long long)c->excluded, xs, c->full ? "false" : "true",
-            state_reference(c), (unsigned long long)c->trusted, (unsigned long long)c->racy, why);
+            state_reference(c), (unsigned long long)c->trusted, (unsigned long long)c->racy, why, src);
 }
 
 /* What a manifest's header says was not walked, one line each (Q6;
