@@ -241,6 +241,12 @@ $(UNION_DRIVER): scripts/union/driver.c $(CORE_OBJ)
 .PHONY: union-model
 union-model: $(UNION_DRIVER)
 	python3 -I -B scripts/union/agree.py $(UNION_DRIVER) $(UNION_N) $(UNION_SEED)
+# pybelay (python/): the built binary vendored, its key sets recorded, its API
+# and the reward helper tested against it.
+.PHONY: pybelay-test
+pybelay-test: $(BIN)
+	python3 -I python/build_keys.py $(BIN)
+	python3 -I -B python/tests/test_pybelay.py
 
 # `baseline export` and `verify` against an independent model of policy.v1 written
 # from the pins alone (scripts/policy-model/, decision 150). Exits 3 while verify is
