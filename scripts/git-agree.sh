@@ -7,6 +7,7 @@
 # looked at again -- then what belay's diff says:
 #
 #   a reflog whose last line has no newline   git: not an entry    belay: no entry gained
+#   a blank line in a reflog                  git: skipped         belay: skipped
 #   a packed-refs that ends without a newline git: refused         belay: could_not_interpret
 #   a loose ref, HEAD, without the newline    git: read            belay: read
 #
@@ -50,6 +51,13 @@ third() { G commit -q --allow-empty -m three; }
 run reflog-control third
 [ "$(G reflog show main | wc -l | tr -d " ")" = 3 ] || fail "the control's reflog is not three entries"
 has "$R.diff" '"event":"git_commits_added","interp":"git","repo":".git","branch":"main","count":1' "the control's commit not counted"
+
+# ---- a blank line in a reflog: git skips it ----
+blank_then_third() { printf '\n' >> "$R/.git/logs/refs/heads/main"; G commit -q --allow-empty -m three; }
+run reflog-blank blank_then_third
+[ "$(G reflog show main | wc -l | tr -d " ")" = 3 ] || fail "git does not skip a blank reflog line: the words no longer hold"
+has "$R.diff" '"event":"git_commits_added","interp":"git","repo":".git","branch":"main","count":1' "a blank reflog line read as an entry"
+hasnt "$R.diff" 'could_not_interpret' "a blank reflog line not skipped"
 
 # ---- a packed-refs that ends without a newline ----
 packed_cut() {

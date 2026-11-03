@@ -515,7 +515,7 @@ whose own mode says nothing about its target. `target` is the link's target, emp
 index: `git_index_changed` when it is added, removed or its content changed (hashed, never stored).
 A reflog (`logs/HEAD` is ref `HEAD`, `logs/refs/...` is `refs/...`): when before's bytes are a
 prefix of after's ending at a line's end (an absent before is empty), `git_reflog_appended` counts
-the entries after it (a last line without its newline is none: git does not read it as an entry) -- and says nothing when it gained none (decision 183) -- and each of those that is not a plain commit (operation `commit` or `commit
+the entries after it (a last line without its newline is none: git does not read it as an entry; nor is a blank line, which git skips) -- and says nothing when it gained none (decision 183) -- and each of those that is not a plain commit (operation `commit` or `commit
 (initial)`) or a fast-forward (its message contains `Fast-forward`) is a `git_reflog_move`, its
 operation being the message before its first `:`; otherwise, or when the reflog was removed (no copy
 needed), `git_reflog_rewritten`. **The reflog is written by the process being watched: it is
