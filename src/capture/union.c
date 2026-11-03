@@ -423,8 +423,8 @@ static int u_openat(void *ctx, int dfd, const char *name, int flags) {
         c[0] = (struct contrib){ d->c[0].layer, u->base->openat(u->base->ctx, dfd, ".", flags) };
         if (c[0].fd == -1) return -1;
         size_t n = 1;
-        for (size_t i = 1; i < d->n; i++) {
-            c[n] = (struct contrib){ d->c[i].layer, dup(d->c[i].fd) };
+        for (size_t i = 1; i < d->n; i++) {      /* a new open each: a dup would share its offset */
+            c[n] = (struct contrib){ d->c[i].layer, u->base->openat(u->base->ctx, d->c[i].fd, ".", DIR_FLAGS) };
             if (c[n].fd == -1) break;
             n++;
         }
@@ -511,7 +511,12 @@ static void *u_dir_open(void *ctx, int dfd) {
     size_t cap = 0, all = 0;
     char **raw = NULL;
     for (size_t i = 0; i < d->n; i++) {
-        void *it = u->base->dir_open(u->base->ctx, d->c[i].fd);
+        /* each contributor listed through a new open of it: a stream shares
+         * its offset with every dup of the fd, and an earlier listing ran
+         * to the end (consistency.c's relist says the same of the walk) */
+        const int lfd = u->base->openat(u->base->ctx, d->c[i].fd, ".", DIR_FLAGS);
+        void *it = lfd == -1 ? NULL : u->base->dir_open(u->base->ctx, lfd);
+        if (lfd != -1) close(lfd);
         if (it == NULL) goto fail;
         const char *nm;
         while ((nm = u->base->dir_next(u->base->ctx, it)) != NULL) {
@@ -547,7 +552,7 @@ static void *u_dir_open(void *ctx, int dfd) {
         }
     }
     /* by name (up to its NUL); among equal names, the lowest rank wins */
-    qsort(raw, all, sizeof *raw, by_name);
+    if (all > 1) qsort(raw, all, sizeof *raw, by_name);   /* raw is NULL when the directory is empty */
     l->names = malloc((all ? all : 1) * sizeof *l->names);
     if (l->names == NULL) goto fail;
     for (size_t i = 0; i < all;) {
