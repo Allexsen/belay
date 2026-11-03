@@ -1,5 +1,6 @@
 #define _GNU_SOURCE
 #include "cli.h"
+#include "cli_internal.h"
 
 #include "receipt.h"
 #include "state.h"
@@ -31,6 +32,9 @@ static const char USAGE[] =
     "  log   --scope DIR [--json]            the scope's checkpoints\n"
     "  exclude --scope DIR [--add PATH | --remove PATH]\n"
     "                                        paths the scope's captures do not walk (each one named in every manifest)\n"
+    "  baseline export --scope DIR --out FILE [--protect SPEC] [--json]\n"
+    "                                        the baseline bundle a later verify judges against\n"
+
     "  help [command]                        this, or one command's options\n"
     "  --version\n"
     "\n"
@@ -58,6 +62,15 @@ static const struct { const char *cmd, *text; } HELP[] = {
                "  (node_modules), never for noise: each one is a blind spot, named in every\n"
                "  manifest's header and every receipt. Lists them; --add or --remove one first.\n"
                "  Matched exactly; at most 31.\n" },
+    { "baseline", "usage: belay baseline export --scope DIR --out FILE [--protect SPEC] [--json]\n"
+               "  At reset, before the policy runs: records DIR reading every file, and writes the\n"
+               "  baseline bundle (test/expect/baseline-bundle.md) to FILE, outside DIR -- the\n"
+               "  manifest, its stored copies, and what each package database says of its files.\n"
+               "  Prints the bundle's sha256, which verify needs, and every file not as its\n"
+               "  database says (already so at reset: never blamed on the episode).\n"
+               "  --protect  the task's protect spec (test/expect/protect-spec.md): its files\n"
+               "             always hashed (up to 4 GiB), never excludable\n"
+               "  --json     one JSON line: bundle, sha256, baseline_integrity\n" },
     { "log",   "usage: belay log --scope DIR [--json]\n"
                "  The scope's checkpoints: id, kind, time, entries.\n"
                "  --json  one checkpoint a line (schema/checkpoint.v1.json)\n" },
@@ -87,6 +100,10 @@ static int failed(FILE *err) {
     belay_err_clear();
     return code == BELAY_ERR_INVALID ? EXIT_REFUSED : EXIT_FAILED;
 }
+
+int cli_usage(FILE *err, const char *why) { return usage(err, why); }
+int cli_failed(FILE *err) { return failed(err); }
+void cli_err_line(FILE *err) { err_line(err); }
 
 /* ---- options ---- */
 
@@ -363,11 +380,18 @@ static int open_scope(const struct opts *o, bool create, struct state *st, FILE 
     return 0;
 }
 
+int cli_open_scope(const char *scope, bool create, struct state *st, FILE *err) {
+    struct opts o;
+    memset(&o, 0, sizeof o);
+    o.scope = scope;
+    return open_scope(&o, create, st, err);
+}
+
 static int cmd_capture(const struct opts *o, const char *kind, FILE *out, FILE *err) {
     struct state st;
     int rc = open_scope(o, true, &st, err);
     if (rc) return rc;
-    const struct capture_req req = { kind, strcmp(kind, "mark") == 0, o->full, o->full_every };
+    const struct capture_req req = { kind, strcmp(kind, "mark") == 0, o->full, o->full_every, 0 };
     struct checkpoint c;
     if (state_capture(&st, &req, &c) == -1) {
         rc = failed(err);
@@ -453,7 +477,7 @@ static int cmd_diff(const struct opts *o, FILE *out, FILE *err) {
     }
     if (to == 0) {
         /* Q3: the capture is kept as a checkpoint, prefiltered as a mark. */
-        const struct capture_req req = { "diff", true, false, o->full_every };
+        const struct capture_req req = { "diff", true, false, o->full_every, 0 };
         if (state_capture(&st, &req, &now) == -1) { rc = failed(err); goto done; }
         to = now.id;
         snprintf(label_b, sizeof label_b, "now (checkpoint %ld)", to);
@@ -537,6 +561,7 @@ static int run(int argc, char **argv, FILE *out, FILE *err) {
         if (!strcmp(argv[i], "--help") || !strcmp(argv[i], "-h"))
             for (size_t k = 0; k < sizeof HELP / sizeof HELP[0]; k++)
                 if (!strcmp(cmd, HELP[k].cmd)) { fputs(HELP[k].text, out); return EXIT_DONE; }
+    if (!strcmp(cmd, "baseline")) return cmd_baseline(argc, argv, out, err);
     struct opts o;
     const bool known = !strcmp(cmd, "check") || !strcmp(cmd, "mark") || !strcmp(cmd, "diff") || !strcmp(cmd, "log") ||
                        !strcmp(cmd, "exclude");

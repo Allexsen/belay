@@ -6,6 +6,7 @@ belay mark  --scope DIR [--full] [--full-every N] [--json]
 belay diff  --scope DIR --since ID [--to ID] [--full-every N] [--json] [--exit-code] [--all]
 belay log   --scope DIR [--json]
 belay exclude --scope DIR [--add PATH | --remove PATH]
+belay baseline export --scope DIR --out FILE [--protect SPEC] [--json]
 belay help [command]  |  belay <command> --help  |  belay --version
 ```
 
@@ -101,6 +102,25 @@ there).
 Nothing in it is deleted by belay. The store keeps one copy of every version of every file it
 copies -- small text files, and up to 16 MiB for each git reflog -- so a busy repository's
 reflogs, changing between marks, grow it by up to their size each time.
+
+## baseline export: the bundle a later verify judges against
+
+At reset, before the policy being judged runs, `belay baseline export` records `DIR` reading every
+file (a `check`) and writes the baseline bundle to `FILE`
+([test/expect/baseline-bundle.md](../test/expect/baseline-bundle.md)): the manifest, every copy it
+names, and what each package database says of each file it lists -- dpkg's `md5sums` and
+`Conffiles` (MD5, checked in the same read that hashes the file, whose sha256 must be the
+manifest's: a file changed meanwhile fails the export), pip's `RECORD` (sha256, compared with the
+manifest's own). It prints the bundle's sha256 -- keep it outside the sandbox: verify reads a
+bundle only when its bytes hash to it -- and every file not as its database says: already so at
+reset, a baseline-integrity finding, never an episode's. Files a database lists outside the scope
+are counted, never checked.
+
+`--out` inside the scope is refused (exit 3): the bundle must leave what it describes. With
+`--protect SPEC` (the task's protect spec, [test/expect/protect-spec.md](../test/expect/protect-spec.md)):
+every file within 4 GiB is hashed, protected or not, since a manifest holds a hash only within its
+limit; an exclude, or belay's state directory, covering a protected pattern is refused (exit 3);
+a spec it refuses is a usage error (exit 2).
 
 ## mark: which files are read
 

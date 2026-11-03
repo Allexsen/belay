@@ -110,8 +110,10 @@ int scope_resolve(const char *arg, struct scope *out) {
 
 /* ---- the state directory ---- */
 
+const char *state_root_override;
+
 static int state_root(char *buf, size_t cap) {
-    const char *d = getenv("BELAY_STATE_DIR");
+    const char *d = state_root_override != NULL ? state_root_override : getenv("BELAY_STATE_DIR");
     int n;
     if (d != NULL && d[0] != '\0' && d[0] != '/') {
         belay_err_set(BELAY_ERR_INVALID, 0, "BELAY_STATE_DIR must be an absolute path");
@@ -787,7 +789,8 @@ int state_capture(struct state *st, const struct capture_req *req, struct checkp
     for (size_t i = 0; i < ex.n; i++) exp[i] = ex.path[i];
     struct belay_manifest_opts o = {
         .exclude_paths = exp, .n_exclude_paths = ex.n,
-        .hash_max_bytes = BELAY_HASH_MAX_BYTES_DEFAULT, .store_max_bytes = BELAY_STORE_MAX_BYTES_DEFAULT,
+        .hash_max_bytes = req->hash_max_bytes ? req->hash_max_bytes : BELAY_HASH_MAX_BYTES_DEFAULT,
+        .store_max_bytes = BELAY_STORE_MAX_BYTES_DEFAULT,
         .store_dir = st->store, .previous = previous,
         .full_reason = c.full_reason[0] != '\0' ? c.full_reason : NULL,   /* the trailer's read_all */
         .exclude = st->root_ino != 0, .exclude_dev = st->root_dev, .exclude_ino = st->root_ino,
