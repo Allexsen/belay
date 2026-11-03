@@ -90,17 +90,22 @@ int capture_write(const struct fsops *ops, const char *out_path, const char *sco
         free(real);
         return -1;
     }
+    const int rc = capture_write_root(ops, out_path, real, root_fd, opts, stats);
+    free(real);
+    return rc;
+}
+
+int capture_write_root(const struct fsops *ops, const char *out_path, const char *real, int root_fd,
+                       const struct belay_manifest_opts *opts, struct belay_manifest_stats *stats) {
     struct stat rst;
     if (ops->fstat(ops->ctx, root_fd, &rst) == -1) {
         belay_err_set(BELAY_ERR_IO, errno, "manifest: fstat scope");
         close(root_fd);
-        free(real);
         return -1;
     }
     if (opts->expect_root && ((uint64_t)rst.st_dev != opts->root_dev || (uint64_t)rst.st_ino != opts->root_ino)) {
         belay_err_set(BELAY_ERR_INVALID, 0, "manifest: the scope %s changed during resolution", real);
         close(root_fd);
-        free(real);
         return -1;
     }
 
@@ -400,7 +405,6 @@ cleanup:
     free(wc);
     free(rel);
     close(root_fd);
-    free(real);
     return rc;
 }
 
