@@ -244,6 +244,14 @@ TEST(refs_are_read_as_git_reads_them) {
             memcmp(v, "refs/heads/main", 15) != 0)
             BELAY_FAIL("not read as git reads it: %s", symbolic[i]);
     }
+    /* a line with no id at all is malformed, as before (found by the fuzzer:
+     * an empty id once matched its own length, 0) */
+    static const char *const nopk[] = { " refs/heads/main\n", "^\n" };
+    for (size_t i = 0; i < sizeof nopk / sizeof *nopk; i++) {
+        if (git_packed_each(mut(nopk[i]), strlen(nopk[i]), keep_packed, NULL) != -1)
+            BELAY_FAIL("read a packed-refs line with no id: %s", nopk[i]);
+        belay_err_clear();
+    }
     /* uppercase in packed-refs too, lowercased */
     const char *pk = "0123456789ABCDEF0123456789ABCDEF01234567 refs/heads/main\n";
     g_n = 0;
