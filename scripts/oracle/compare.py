@@ -1246,10 +1246,8 @@ GIT_EVENT_ITEMS = collections.OrderedDict([
      'a branch whose loose ref cannot be parsed after: no event'),
     ('git-ev:removed, no value before, no event: its loose ref unparsed',
      'a loose ref removed, not parsed before: no event'),
-    ('git-ev:moved, its reflog unparsed',
-     'a branch whose reflog cannot be parsed: no evidence of before'),
-    ('git-ev:moved:its reflog unparsed',
-     'a branch moved, its reflog not parsed: from the refs, without a how'),
+    # (No reflog git cannot parse: decision 202 -- a line git does not read
+    # as an entry it skips, counted in git_reflog_lines_ignored.)
     ('git-ev:HEAD not read on a side, no event: unread',
      'HEAD that cannot be read on a side: no event'),
     ('git-ev:HEAD not read on a side, no event: unparsed',
@@ -1315,6 +1313,16 @@ GIT_INPUT_ITEMS = ['an unknown ref read from its copy: provisional',
                    'a reflog that gained only a line without its newline: no finding',
                    # ... "nor is a blank line, which git skips" (diff-v1).
                    'a reflog that gained a blank line, then an entry: the entry counted',
+                   # Decision 202 (E12): reflog lines and refs read as git reads them.
+                   'a reflog entry git reads in a form not its own: counted',
+                   'a reflog that gained lines git skips: counted beside its entries',
+                   'a reflog that gained only lines git skips: counted, no entry',
+                   'a loose ref git reads in a form not its own: its value',
+                   'a loose ref whose bytes changed but not its value as git reads it: nothing',
+                   'HEAD git reads in a form not its own: switched',
+                   'a loose ref git calls broken: a word glued to its id',
+                   'a loose ref git calls broken: a leading space',
+                   'a loose ref git calls broken: a short id',
                    # ... "A loose ref's or `HEAD`'s last line without its
                    # newline is read, as git reads it; a `packed-refs` that
                    # ends without a newline is one git refuses, so a side git
@@ -1351,6 +1359,30 @@ def git_coverage(records, traces, tags):
                 'git-ev:moved:a reflog that gained none' in end:
             tags.add('git events: a reflog that gained only a line without its newline: '
                      'no finding')
+        kinds = [dict(f).get('kind') if isinstance(f, list) else f.get('kind')
+                 for f in rec.get('findings', [])]
+        if 'git-reflog-entry-lenient' in tr and 'git-reflog-appended' in tr and \
+                'git-ev:commits added:counted' in end:
+            tags.add('git events: a reflog entry git reads in a form not its own: counted')
+        if 'git-reflog-lines-ignored' in tr and 'git_reflog_lines_ignored' in kinds:
+            if 'git-reflog-appended' in tr and 'git-ev:commits added:counted' in end:
+                tags.add('git events: a reflog that gained lines git skips: counted beside '
+                         'its entries')
+            if 'git-reflog-appended-none' in tr:
+                tags.add('git events: a reflog that gained only lines git skips: counted, '
+                         'no entry')
+        if 'git-ref-lenient-ref' in tr and 'interp:git:ref' in tr:
+            if 'git_ref_moved' in kinds and 'git-ev:moved:no entries' in end:
+                tags.add('git events: a loose ref git reads in a form not its own: its value')
+            if rec['outcome'] == 'modified' and not kinds:
+                tags.add('git events: a loose ref whose bytes changed but not its value as '
+                         'git reads it: nothing')
+        if 'git-ref-lenient-HEAD' in tr and 'git-ev:HEAD switched' in end:
+            tags.add('git events: HEAD git reads in a form not its own: switched')
+        for form, item in (('glued', 'a word glued to its id'), ('leading-space',
+                           'a leading space'), ('short', 'a short id')):
+            if 'git-ref-broken:' + form in tr and 'could_not_interpret' in kinds:
+                tags.add('git events: a loose ref git calls broken: ' + item)
         if 'git-reflog-blank-line' in tr and 'git-reflog-appended' in tr and \
                 'git-ev:commits added:counted' in end:
             tags.add('git events: a reflog that gained a blank line, then an entry: '

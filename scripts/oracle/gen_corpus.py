@@ -4012,23 +4012,25 @@ def git_events(w, rng):
         ev(['a ref that cannot be parsed',
             'a loose ref removed, not parsed before: no event']))
 
-    # A reflog that cannot be parsed counts as one that cannot be read: no
-    # evidence of before (no from), nor of how (moved, from the refs). E12
-    # (decision 144): "parsing a reflog is parsing only the entries it gained
-    # in this diff -- those after before's bytes when they are a prefix of
-    # after's ending at a line's end, and none otherwise (diff-v1, git:
-    # `git_reflog_rewritten`) -- never its older entries" -- what cannot be
-    # parsed is the entries it gained (each reverse: not a prefix,
-    # rewritten, nothing parsed).
-    one('git: a branch created, its reflog not parsed',
+    # Decision 202: a reflog line git does not read as an entry it skips, and
+    # so does belay, counting the lines the reflog gained that git skips in
+    # `git_reflog_lines_ignored` -- a reflog is never one git cannot parse.
+    # A reflog whose only line gained is one git skips: no entry, so no
+    # evidence of before (no from) and no appended (G20), the line counted.
+    # Its reverse: the branch deleted (its reflog removed).
+    one('git: a branch created, its reflog\'s only line one git skips',
         lambda rng: [(f[0], f[1], b'not a reflog line\n' if b'logs/' in f[0] else f[2], f[3])
                      for f in created_by_reflog(rng)],
-        ev(['a branch whose reflog cannot be parsed: no evidence of before']))
-    one('git: commits made, the reflog\'s new entry not parsed',
+        ev(['a reflog that gained only lines git skips: counted, no entry',
+            'a branch moved with no evidence of before (no from)']))
+    # ... and one that gained only such a line after its own entries: the
+    # branch moved, its reflog gained none. Each reverse: not a prefix.
+    one('git: commits made, the reflog\'s new line one git skips',
         lambda rng: [(f[0], f[1], f[1] + b'not a reflog line\n' if b'/logs/' in b'/' + f[0]
                       else f[2], f[3])
                      for f in moved(rng, lambda c: ([(c[0], c[1], 'commit: one')], 1))],
-        ev(['a branch moved, its reflog not parsed: from the refs, without a how']))
+        ev(['a reflog that gained only lines git skips: counted, no entry',
+            'a branch moved, its reflog gained none']))
     # ... and old entries that are not git's, before one it gained: "never
     # its older entries", so the entry gained is evidence like any other --
     # git_commits_added.
@@ -4092,6 +4094,101 @@ def git_events(w, rng):
         ev(['a reflog whose last line gained has no newline: no entry',
             'a reflog that gained only a line without its newline: no finding',
             'commits added, counted', 'a branch moved, its reflog gained none']))
+
+    # Decision 202, E12: "A reflog's line is an entry when git reads it as
+    # one: `<old> <new> <identity>> <time> <zone>` and the message -- the ids
+    # 40 or 64 hex digits of either case, the identity up to the first `>`
+    # with a space after it, the time a number other than 0 as `strtoumax`
+    # reads it, the zone `+` or `-` and four digits, the message after one
+    # tab when there is one; every other line, a blank one included, git
+    # skips, and so does belay, counting the lines ... in
+    # `git_reflog_lines_ignored`". Each form below was checked against git
+    # 2.43.0 (`git reflog show`) before it was written here (decision 184).
+    def raw_line(old, new, ident='A U Thor <a@example.com>', time='1761000000',
+                 zone='+0000', tail='\tcommit: x'):
+        return ('%s %s %s> %s %s%s\n' % (old, new, ident.rstrip('>'), time, zone, tail)) \
+            .encode()
+
+    # Entries in forms git reads but does not write: an upper-case id (the
+    # next entry's old id lower-case: they chain, as git reads them), an
+    # identity with no `<`, a time after spaces, a tab and `+`, a negative
+    # time -- main's three commits counted, commits added. dev: an entry
+    # with no tab and nothing after its zone -- an empty message, so not a
+    # commit: a git_reflog_move and the branch moved by another operation.
+    # Their reverses: not a prefix, rewritten.
+    def reflog_lenient_entries(rng):
+        r, c, d = repo(rng), [oid() for _ in range(4)], [oid() for _ in range(2)]
+        base = git_reflog((Z, c[0], 'commit (initial): root'))
+        dbase = git_reflog((Z, d[0], 'branch: Created from HEAD'))
+        new = (raw_line(c[0], c[1].upper(), tail='\tcommit: one')
+               + raw_line(c[1], c[2], ident='just a name', time=' \t+1761000001',
+                          tail='\tcommit: two')
+               + raw_line(c[2], c[3], time='-5', tail='\tcommit: three'))
+        return [(r + b'refs/heads/main', git_loose(c[0]), git_loose(c[3]), O),
+                (r + b'logs/refs/heads/main', base, base + new, O),
+                (r + b'refs/heads/dev', git_loose(d[0]), git_loose(d[1]), O),
+                (r + b'logs/refs/heads/dev', dbase, dbase + raw_line(d[0], d[1], tail=''), O)]
+    one('git: commits made, reflog entries in forms git reads', reflog_lenient_entries,
+        ev(['a reflog entry git reads in a form not its own: counted',
+            'commits added, counted', 'a branch moved by another operation',
+            'a branch moved, its reflog gained none']))
+
+    # Lines git skips among the entries a reflog gained -- a line that is not
+    # one, a blank line, spaces, a time of 0, two spaces before the zone, a
+    # zone of three digits, no space after `>` -- each counted, the two
+    # entries counted and commits added. Its reverse: not a prefix.
+    def reflog_lines_skipped(rng):
+        r, c = repo(rng), [oid() for _ in range(3)]
+        base = git_reflog((Z, c[0], 'commit (initial): root'))
+        new = (b'not a reflog line\n' + raw_line(c[0], c[1], tail='\tcommit: one') + b'\n'
+               + b'   \n' + raw_line(c[1], c[2], time='0') + raw_line(c[1], c[2], zone=' +0000')
+               + raw_line(c[1], c[2], zone='+000')
+               + ('%s %s A <a@b>1761000000 +0000\tcommit: x\n' % (c[1], c[2])).encode()
+               + raw_line(c[1], c[2], tail='\tcommit: two'))
+        return [(r + b'refs/heads/main', git_loose(c[0]), git_loose(c[2]), O),
+                (r + b'logs/refs/heads/main', base, base + new, O)]
+    one('git: commits made, lines git skips among the reflog\'s entries', reflog_lines_skipped,
+        ev(['a reflog that gained lines git skips: counted beside its entries',
+            'commits added, counted', 'a branch moved, its reflog gained none']))
+
+    # A loose ref and HEAD as git reads them (E12, decision 202): "an object
+    # id of either case at the start, followed by the end or by whitespace,
+    # whatever follows ignored"; "`ref:`, any spaces or tabs, then the name
+    # to the line's end, trailing whitespace cut". main: moved, after its id
+    # in upper case and words after it -- `git_ref_moved` to the id in lower
+    # case, the branch moved. dev: the same id, in upper case before a
+    # carriage return -- its bytes changed, its value not: no finding, no
+    # event. HEAD, in another repository: `ref:` and a tab and spaces around
+    # the name -- switched to dev. Their reverses: the same, back.
+    def refs_lenient(rng):
+        ra, rb = rng.sample([b'', b'repo/', b'work/src/proj/'], 2)
+        c = [oid() for _ in range(3)]
+        return [(ra + b'.git/refs/heads/main', git_loose(c[0]),
+                 c[1].upper().encode() + b'  moved by hand\n', O),
+                (ra + b'.git/refs/heads/dev', git_loose(c[2]), c[2].upper().encode() + b'\r\n', O),
+                (rb + b'.git/HEAD', git_head('main'), b'ref:\t refs/heads/dev \t\n', O)]
+    one('git: a loose ref and HEAD in forms git reads', refs_lenient,
+        ev(['a loose ref git reads in a form not its own: its value',
+            'a loose ref whose bytes changed but not its value as git reads it: nothing',
+            'HEAD git reads in a form not its own: switched',
+            'a branch moved, no reflog entries', 'HEAD switched to another branch']))
+
+    # Values git calls a broken ref (E12, decision 202: "a value git calls a
+    # broken ref is one git cannot parse (E10)"): a word glued to the id, a
+    # leading space, a short id -- each after only: could_not_interpret, no
+    # event (no value after). Their reverses: no value before -- each branch
+    # now at, no from.
+    def refs_broken(rng):
+        r, c = repo(rng), [oid() for _ in range(6)]
+        return [(r + b'refs/heads/glued', git_loose(c[0]), (c[1] + 'x\n').encode(), O),
+                (r + b'refs/heads/spaced', git_loose(c[2]), b' ' + git_loose(c[3]), O),
+                (r + b'refs/heads/short', git_loose(c[4]), (c[5][:39] + '\n').encode(), O)]
+    one('git: loose refs git calls broken', refs_broken,
+        ev(['a loose ref git calls broken: a word glued to its id',
+            'a loose ref git calls broken: a leading space',
+            'a loose ref git calls broken: a short id',
+            'a branch whose loose ref cannot be parsed after: no event',
+            'a branch whose loose ref cannot be parsed before: now at (no from)']))
 
     # G21 (decision 183): diff-v1, "nor is a blank line, which git skips".
     # After gains a blank line, then git's entry: the entry counted, commits
