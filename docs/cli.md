@@ -11,6 +11,9 @@ belay verify --scope DIR --baseline FILE --baseline-sha256 HEX [--protect SPEC] 
 belay help [command]  |  belay <command> --help  |  belay --version
 ```
 
+Every command that takes `--scope` also takes `--docker CONTAINER`: the scope is then a path inside
+that container, read from its layers on the host (below).
+
 - **check** records `DIR` as a new checkpoint, reading every file (no prefilter) up to the hash
   limit: a file over 64 MiB is recorded `unverified`, without its hash.
 - **mark** records a new checkpoint after the scope's latest one, reading only the files that may
@@ -144,6 +147,55 @@ record is a violation; signals never fail a run.
 
 `--to ID` judges checkpoint `ID` of the scope's own state instead of capturing now; with a spec,
 only a checkpoint that read every file (a `check`, or `mark --full`: its trailer's `trusted` is 0).
+
+## --docker: a container, read from the host
+
+    sudo belay baseline export --docker C --scope /workspace --out bundle --protect spec.json
+    ... the episode ...
+    docker pause C
+    sudo belay verify --docker C --scope /workspace --baseline bundle --baseline-sha256 HEX --protect spec.json
+    docker unpause C
+
+With `--docker CONTAINER` (a name or an id, as `docker inspect` takes it), belay reads the
+container's filesystem from its overlay layers on the host. It never enters the container: nothing
+the policy can reach takes part, and no binary is copied in. The manifest is the same as the one a
+walk inside the container would write. The scope is a path in the container, and the header's
+`source` names the container and its image (manifest v3).
+
+- **Linux, root, a local daemon.** The layers are root's, so belay must run as root. The
+  container's first process must be on this host: Docker Desktop's VM and remote daemons are
+  refused. The image store is overlay2 or the containerd store (Docker 29's default).
+- **Paused for export and verify.** `baseline export` and `verify` read a paused container
+  (`docker pause`): that is the protocol's freeze, and belay checks it. `check`, `mark`, `diff` and
+  `log` take a running container too. A stopped container is refused, since it has no mount to
+  read. belay inspects the container again after the read, and a different container or process,
+  or one no longer paused, leaves nothing kept.
+- **What is refused, and why.** Each is refused with exit 3 and the reason said:
+  - a container that can gain `CAP_SYS_ADMIN` (`--privileged`, `--cap-add SYS_ADMIN` or `ALL`): it
+    can mount over a path inside itself, so its writes would never reach the layers the host
+    reads;
+  - an overlay feature belay does not handle (metacopy, index, nfs_export, verity, data-only lower
+    layers, userxattr);
+  - layers that are not the daemon's, or that lie on more than one filesystem;
+  - a scope that is a volume or a bind mount, or lies in one: capture its host source as a scope
+    of its own, without `--docker`;
+  - anything in the layers the union rules do not cover, such as an unknown overlay xattr or a
+    malformed redirect.
+
+  A container that can set immutable flags (`CAP_LINUX_IMMUTABLE`) is read, with a warning: it can
+  lock the files Docker bind-mounts from the host (`/etc/hostname`, `/etc/hosts`,
+  `/etc/resolv.conf`), and `docker rm` then fails.
+- **What differs from a walk inside.** An entry's `dev`, `ino` and `nlink` are those of the layer
+  file that supplies it. So a file the container copied up (any write, a `chmod`, a `touch`) shows
+  as replaced, with its content unchanged, which is what happened on disk. Inside the container, the
+  kernel keeps the old inode number. A manifest from the host and one from inside are therefore
+  never compared: different sources are refused (exit 3), as are two containers, even of one image.
+- **Mounts inside the scope** (volumes, bind mounts, the files Docker binds) are recorded as
+  boundaries, with nothing below them read.
+
+The rules are pinned in [host-reader.md](../test/expect/host-reader.md). `make union-model` checks
+belay's reading of the layers against an independent model of overlayfs, which is itself checked
+against the kernel.
 
 ## mark: which files are read
 

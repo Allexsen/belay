@@ -42,6 +42,8 @@ jobs:
         run: make reference
       - name: union model (the host reader's union against an independent overlayfs model)
         run: make union-model
+      - name: policy model (baseline export and verify against an independent model of policy.v1)
+        run: make policy-model
       - name: pybelay (the Python API and the reward helper against the binary)
         run: make pybelay-test
       - name: dogfood hooks (scripted sessions)
