@@ -13,7 +13,8 @@ records (as far as policy.v1 reads one), the diff.v1 records (outcome, changed, 
 interpreters' findings and events policy.v1 rests on, the bundle's package lines, and then
 export's and verify's output and exit codes.
 
-AMBIGUITIES -- where a pin reads more than one way: the reading chosen, and why.
+AMBIGUITIES -- where a pin reads more than one way: the reading chosen, and why. One the
+author has since pinned says SETTLED, with its decision and the words it now reads.
 
 P1  `changed` and ctime_ns. diff-values.md's first example gives a chmod
     `"changed":["mode","ctime_ns"]`; diff-v1 ("`ctime_ns` only under rule 5"), diff-fields.md
@@ -21,18 +22,17 @@ P1  `changed` and ctime_ns. diff-values.md's first example gives a chmod
     (`["size","mtime_ns","sha256"]` for a write, which moves ctime too) name ctime_ns only when
     nothing else differs. Chosen: the three.
 
-P2  The order of a record's `unknown` reasons. diff-v1 orders them "in the order of the reasons
-    table", which is generated and closed to this author. policy-v1 lists the entry flags
-    `unverified, unstable, unreadable, raced, mount` (protected_path_unverifiable); chosen for
-    both, followed by xattrs_unknown, iflags_unknown, not_captured, listing_incomplete.
+P2  SETTLED (decision 176). The order of `unknown` reasons: policy-v1 now reads "in the order
+    `unverified`, `unstable`, `unreadable`, `raced`, `mount`, `xattrs_unknown`,
+    `iflags_unknown`, `not_captured`, `listing_incomplete`" -- this model's reading.
 
-P3  privilege_changed `iflags`: "the values, `none` when absent", on "any file ... an added file
-    included". Read as written: a side's value is the `iflags` its entry records (decimal, as the
-    manifest writes it), `none` when the entry is absent or records none; a record whenever the
-    two differ. So every entry added or removed where flags are readable is `none -> 0` (on ext4,
-    `none -> 524288`, its extents flag), and a file that becomes unreadable is `0 -> none`.
-    The other reading -- 0 and absent alike, "no flags" -- was set aside on the coordinator's
-    word that the pin's words are what the author approved (the noise is taken to the author).
+P3  SETTLED (decision 163). privilege_changed `iflags`, read as written at first (every added
+    file `none -> 0`, on ext4 `none -> 524288`). The row now reads: "For a file added or
+    removed, `iflags` only when they hold the immutable or append-only flag (Linux
+    `FS_IMMUTABLE_FL`, `FS_APPEND_FL`; ...)". Modelled: an entry on one side only gives an
+    iflags record only when that side's flags hold 0x10 or 0x20 (`none -> 16`); an entry on both
+    sides gives one whenever the two values differ, `none` where one is not recorded (so a file
+    that becomes unreadable is `0 -> none`). See P32.
 
 P4  privilege_changed "any file": any entry type, directories included (setgid and sticky
     matter most on directories).
@@ -52,7 +52,9 @@ P7  expected_sha256 against an after entry that is a regular file without a hash
 
 P8  tampered_installed_package and a file listed without a hash: P-T6 says such files are
     "never checked", so they give none (a pip RECORD's own row included). A listed file whose
-    outcome is `added` (missing at reset) or `metadata_only` gives none: no `why` fits.
+    outcome is `added` (missing at reset) or `metadata_only` gives none: no `why` fits. Which
+    packages are judged is SETTLED (decision 173): those no event names, "or one whose event is
+    a reinstall at the same version (`pip_reinstalled`) ... frozen or not".
 
 P9  tampered `why`, in this order: `removed`; `type changed`; `cannot be verified` (outcome
     `unknown`, or the after entry `unverified`); else `other bytes`.
@@ -63,19 +65,19 @@ P10 package_changed: only the package kinds (pip_*, dpkg_*); the core's events u
     A bundle line's package is "named by an event" when, for pip, the PEP 503-normalised names
     are equal, for dpkg, `<package>:<arch>` is.
 
-P11 package_changed `self_consistent`: present exactly when frozen_packages is false --
-    finding-kinds: an optional field is "absent exactly when the kind's meaning says", and the
-    row's meaning names only "without frozen packages". pip: every RECORD row after that has a
-    sha256 and lies in the scope names a regular file after with that sha256; dpkg: every
-    md5sums row after names a regular file after with that MD5; Conffiles are left out (admins
-    edit them, decision 148). A package with no database after (pip_removed, dpkg_removed) lists
-    no file after, so none contradicts it: `true`. (Revised: the first reading left the field
-    out there; that read a condition into the `?` the row does not state.)
+P11 SETTLED (decision 176). `self_consistent`: "present exactly when frozen_packages is
+    false"; "for a package with no database after (`pip_removed`, `dpkg_removed`) `true`" --
+    this model's revised reading. Still this model's: pip, every RECORD row after that has a
+    sha256 and lies in the scope names a regular file after with that sha256; dpkg, every
+    md5sums row after names a regular file after with that MD5; Conffiles left out (admins edit
+    them, decision 148).
 
-P12 "Test file" (touches_tests, tests_weakened): any entry type (a directory `tests` is "a
-    path with a component `tests`"); `test_*`, `*_test.*`, `*.test.*`, `*.spec.*` are matched
-    against the name with `*` any run of bytes -- the dogfood receipt's rule, not a protect
-    pattern, so no dot rule.
+P12 "Test file" (decision 175 narrowed it; the words are policy-v1's paragraph above the flag
+    table). Read: no component of the path (its name included) is one of the build output or
+    documentation names; and some component (its name included, any entry type, so a directory
+    `tests` is one) is `test`, `tests`, `__tests__` or `spec`, or the name matches one of the
+    language patterns, case-sensitively, `*` any run of bytes, none included (`_test.py` is
+    `*_test.py`), with no dot rule (it is not a protect pattern). See P34.
 
 P13 tests_weakened. "Held": a side's copy is held when its entry is stored, or is a regular file
     of size 0 (its content is known); a side where the path is absent or not a regular file
@@ -112,12 +114,10 @@ P18 new_executable_on_path. "A file whose execute bits were added": a regular fi
     change to a symlink, or to a regular file with an execute bit. A venv's `bin` is one beside
     a regular file `pyvenv.cfg` in the after manifest.
 
-P19 A `bytes` value in `text` (policy-v1 does not say how). A UTF-8 value is written as it is:
-    the JSON string carries it exactly. One that is not UTF-8 is written with docs/cli.md's
-    escaping of bytes, so that the text still names them: each byte outside a valid UTF-8
-    sequence as `\\xNN` (lowercase hex, as every hex digit belay writes), a backslash as `\\\\`.
-    The rest of that rule (control, invisible and bidi characters) is the receipt's, for a
-    terminal; JSON escapes control characters itself.
+P19 SETTLED (decision 174). A `bytes` value in `text`: P-F2 now reads "a `bytes` field as it is
+    when it is UTF-8, else as the receipt writes it (docs/cli.md): each byte not in a valid UTF-8
+    sequence as `\\xNN` (lowercase hex), a backslash doubled" -- this model's reading. See P33
+    for the 1,024-byte cut the same row adds.
 
 P20 The pin fixes keys, their order and their values, not the bytes of a line: lines are
     compared as JSON objects with their key order (run.py), not byte for byte.
@@ -157,15 +157,30 @@ P30 A bundle exported with a spec, and verify given none: refused (exit 3) -- "t
     are the same at both ends" (PS-R3); the reverse too (a spec whose digest is not the null the
     bundle records).
 
-P31 Which exclusions verify's own capture makes. The pins say verify refuses "an exclusion that
-    covers one of its patterns" (PS-C2: "a manifest header's `excluded`, any reason") but not
-    where verify's capture takes its excludes from. docs/cli.md, verify, says it: "verify's
-    capture leaves out what the bundle's did -- its manifest's excludes, never the scope's
-    configured ones, which are state a policy could have changed -- so both sides walked the
-    same paths." Taken as the rule (`after_excludes`): an exclude configured after the export is
-    not applied, and judged nothing. With `--to ID` the after manifest is the checkpoint's, with
-    whatever it excluded, and PS-C2 applies to it. (Revised: the first reading took the scope's
-    configured excludes, from docs/cli.md's `belay exclude`, written before verify existed.)
+P31 SETTLED (decision 174). Which paths verify's capture leaves out: baseline-bundle B-R5 now
+    reads "exactly what the bundle's manifest's header lists as user excludes -- never the
+    scope's configured excludes ...; with `--to`, the checkpoint's own" (`after_excludes`).
+
+P32 New with decision 163. "For a file added or removed": an entry present in one manifest only,
+    whatever its outcome -- `added` and `removed`, and also `unknown` one-sided (not_captured
+    beside an exclusion, raced). The rule reads the manifests themselves, and its reason --
+    "the flags a filesystem sets on every new file ... are no privilege" -- holds as much for a
+    path one side did not capture; read otherwise, every not-captured file would be `0 -> none`.
+
+P33 New with decision 174. "`text` is at most 1,024 bytes: a longer one is cut at a character and
+    ends `...`": the whole text, `...` (three ASCII dots) included, is at most 1,024 bytes -- the
+    longest prefix of whole UTF-8 characters within 1,021 bytes, then `...`. The cut is applied
+    to every kind's text; the fields keep their full values.
+
+P35 New with decision 174. The cut and P-F2's escaping together: "cut at a character" is read as
+    a character of the text as filled, so a `\\xNN` written for a byte not UTF-8 may itself be
+    cut (`...\\xf...`); the pin does not say to keep an escape whole.
+
+P34 New with decision 175. The test-file rule's "a path none of whose components is a build output
+    directory ... or documentation" excludes the path whatever the type of the component (a file
+    named `build` included), and "either is or lies below a test directory (a component ...)"
+    counts any component, the last included, as P12 did. `.build` is the only dot-name among them;
+    `*.test.<ext>` and `*.spec.<ext>` take only the six extensions listed.
 """
 
 import base64
@@ -1258,6 +1273,15 @@ def git_events(recs, B, A):
 # Test files, Python counts, pytest configuration, CI, PATH
 
 TEST_DIRS = (b"test", b"tests", b"spec", b"__tests__")
+NOT_TEST_DIRS = (b"build", b"dist", b"out", b"target", b"_build", b".build", b"obj", b"node_modules",
+                 b"__pycache__", b"docs", b"doc")                                    # decision 175
+_JS = (b"js", b"jsx", b"ts", b"tsx", b"mjs", b"cjs")
+TEST_NAMES = ((b"test_*.py", b"*_test.py")                                           # Python
+              + tuple(b"*.test." + e for e in _JS) + tuple(b"*.spec." + e for e in _JS)
+              + (b"*_test.go",                                                         # Go
+                 b"*Test.java", b"*Tests.java", b"*Test.kt", b"*Tests.kt",             # Java, Kotlin
+                 b"*_spec.rb", b"*_test.rb",                                           # Ruby
+                 b"test_*.c", b"*_test.c", b"test_*.cc", b"*_test.cc", b"test_*.cpp", b"*_test.cpp"))
 
 
 def fn_glob(pat, name):
@@ -1274,14 +1298,15 @@ def fn_glob(pat, name):
 
 
 def is_test_file(p):
+    """policy-v1, "Test file" (decision 175; P12, P34)."""
     if p == b".":
         return False
     cs = p.split(b"/")
+    if any(c in NOT_TEST_DIRS for c in cs):
+        return False
     if any(c in TEST_DIRS for c in cs):
         return True
-    n = cs[-1]
-    return (n.startswith(b"test_") or fn_glob(b"*_test.*", n) or fn_glob(b"*.test.*", n)
-            or fn_glob(b"*.spec.*", n))
+    return any(fn_glob(pat, cs[-1]) for pat in TEST_NAMES)
 
 
 def is_counted(p):
@@ -1471,7 +1496,7 @@ class Flag:
         self.kind = kind
         self.level = level
         self.fields = fields          # [(key, value)]: bytes values are `bytes` fields
-        self.text = text
+        self.text = cut(text)
         self.paths = sorted(set(paths))
         self.provisional = provisional
 
@@ -1496,6 +1521,22 @@ class Flag:
     def sort_key(self):
         return (0 if self.level == "violation" else 1, KIND_INDEX[self.kind],
                 self.paths[0] if self.paths else b"", self.text.encode("utf-8"))
+
+
+def cut(text):
+    """P-F2: "`text` is at most 1,024 bytes: a longer one is cut at a character and ends `...`"
+    (P33)."""
+    if len(text.encode("utf-8")) <= 1024:
+        return text
+    out = []
+    n = 0
+    for c in text:
+        k = len(c.encode("utf-8"))
+        if n + k > 1021:
+            break
+        out.append(c)
+        n += k
+    return "".join(out) + "..."
 
 
 def joined(xs):
@@ -1605,7 +1646,8 @@ def package_flags(ctx, recs, B, A, events):
             continue                                                                  # P10
         if ev.interp == "pip":
             package = ev.fields["name"]
-            named_pip.add(pep503(package))
+            if ev.kind != "pip_reinstalled":                                          # decision 173
+                named_pip.add(pep503(package))
         else:
             package = "%s:%s" % (ev.fields["package"], ev.fields["arch"])
             named_dpkg.add(package)
@@ -1777,6 +1819,9 @@ def other_flags(ctx, recs, B, A, events):
     return flags
 
 
+LOCKING_IFLAGS = 0x10 | 0x20          # Linux FS_IMMUTABLE_FL, FS_APPEND_FL
+
+
 def privilege(p, b, a, prov):
     out = []
 
@@ -1792,7 +1837,11 @@ def privilege(p, b, a, prov):
         out.append(("caps", cb or "none", ca or "none"))
     ib = b.get("iflags") if b is not None else None
     ia = a.get("iflags") if a is not None else None
-    if ib != ia:                                                                        # P3
+    if (b is None) != (a is None):                                                      # P32
+        report = bool(((ib if b is not None else ia) or 0) & LOCKING_IFLAGS)              # decision 163
+    else:
+        report = ib != ia
+    if report:
         out.append(("iflags", "none" if ib is None else str(ib), "none" if ia is None else str(ia)))
     return [Flag("privilege_changed", "signal",
                  [("path", p), ("what", w), ("before", x), ("after", y)],

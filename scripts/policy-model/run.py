@@ -10,7 +10,8 @@ refusal must have been both expected and seen at least once.
   python3 -I -B scripts/policy-model/run.py [NAME-SUBSTRING ...]
 
 BELAY_BIN names the binary (default: the repository's bin/belay); PM_WORKDIR the directory the
-scenarios are built in (default: /dev/shm when it is a directory, else $TMPDIR).
+scenarios are built in (default: /dev/shm when it is a directory, else $TMPDIR); PM_DISKDIR the
+one for scenarios built on disk (default: $TMPDIR, else /tmp).
 
 Exit: 0 every line agreed and the gate holds; 1 a disagreement, a self-test failed, or the gate
 failed; 3 `belay verify` is not built yet (export was checked; nothing else failed), or
@@ -268,7 +269,8 @@ class Coverage:
 
 
 def run_scenario(sc, rep, cov, state_of_verify):
-    tmp = tempfile.mkdtemp(prefix="pm-", dir=workroot())
+    root = os.environ.get("PM_DISKDIR") or tempfile.gettempdir() if sc.get("workdir") == "disk" else workroot()
+    tmp = tempfile.mkdtemp(prefix="pm-", dir=root)
     try:
         return _run(sc, rep, cov, state_of_verify, tmp)
     finally:

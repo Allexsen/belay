@@ -7,6 +7,7 @@ so the model stands on its own before belay can be compared with it.
 
 import base64
 import hashlib
+import json
 import os
 import sys
 
@@ -122,17 +123,52 @@ def fixture_privilege_path():
         '"before_excluded":[],"after_excluded":[],' % ("b" * 64) + NOT_EMITTED,
         '{"flag":"new_executable_on_path","level":"signal","path":"bin/x","outcome":"added","mode":35309,'
         '"text":"bin/x: executable on PATH, added","paths":["bin/x"]}',
-        '{"flag":"privilege_changed","level":"signal","path":"bin/x","what":"iflags","before":"none","after":"0",'
-        '"text":"bin/x: iflags none -> 0","paths":["bin/x"]}',
         '{"flag":"privilege_changed","level":"signal","path":"bin/x","what":"setuid","before":"off","after":"on",'
         '"text":"bin/x: setuid off -> on","paths":["bin/x"]}',
-        '{"belay_policy_end":3,"violations":0,"signals":3,'
-        + kinds(new_executable_on_path=1, privilege_changed=2)
+        '{"belay_policy_end":2,"violations":0,"signals":2,'
+        + kinds(new_executable_on_path=1, privilege_changed=1)
         + ',"unknown":0,"packages_outside_scope":0,"packages_no_hash":0,"provisional":false,'
         '"before_sha256":"%s","after_sha256":"%s"}' % ("1" * 64, "2" * 64),
     ]
-    check("privilege and PATH, an added setuid file", got, want)
+    check("privilege and PATH, an added setuid file (its iflags 0: no record, decision 163)", got, want)
     check("signals never fail a run", model.verify_exit(flags, True), 0)
+
+
+def fixture_iflags_decision_163():
+    before = {b".": raw("dir", D, ino=2), b"d": raw("dir", D, ino=3),
+              b"d/gone": raw("reg", F, b"g\n", ino=4, iflags=0x80020),       # extents + append-only
+              b"d/plain-gone": raw("reg", F, b"p\n", ino=5, iflags=0x80000),
+              b"d/kept": raw("reg", F, b"k\n", ino=6, iflags=0x80000)}
+    after = {b".": raw("dir", D, ino=2), b"d": raw("dir", D, ino=3),
+             b"d/new": raw("reg", F, b"n\n", ino=7, iflags=0x80010),         # extents + immutable
+             b"d/plain-new": raw("reg", F, b"q\n", ino=8, iflags=0x80000),   # extents only: no privilege
+             b"d/kept": raw("reg", F, b"k\n", ino=6, iflags=0x80040)}        # + nodump: a change on both sides
+    got, _f = verify(None, before, after)
+    check("iflags: locking flags on one side, any change on both", got[1:-1], [
+        '{"flag":"privilege_changed","level":"signal","path":"d/gone","what":"iflags","before":"524320","after":"none",'
+        '"text":"d/gone: iflags 524320 -> none","paths":["d/gone"]}',
+        '{"flag":"privilege_changed","level":"signal","path":"d/kept","what":"iflags","before":"524288","after":"524352",'
+        '"text":"d/kept: iflags 524288 -> 524352","paths":["d/kept"]}',
+        '{"flag":"privilege_changed","level":"signal","path":"d/new","what":"iflags","before":"none","after":"524304",'
+        '"text":"d/new: iflags none -> 524304","paths":["d/new"]}'])
+
+
+def fixture_text_cut():
+    long_dir = "\u00e9" * 300                       # 600 bytes, two to a character
+    p = ("tests/%s/%s/test_x.py" % (long_dir, long_dir)).encode()
+    before = {b".": raw("dir", D, ino=2)}
+    after = {b".": raw("dir", D, ino=2), b"tests": raw("dir", D, ino=3),
+             ("tests/" + long_dir).encode(): raw("dir", D, ino=4), p[:-10]: raw("dir", D, ino=5),
+             p: raw("reg", F, b"def test_x():\n    assert 1\n", ino=6)}
+    got, _f = verify(None, before, after)
+    rec = json.loads(got[-2])
+    # "tests/" (6 bytes) + 300 two-byte characters (600) + "/" (1) = 607; 207 more (414) make 1021,
+    # the 208th would make 1023 > 1021: the cut keeps 1021 bytes and adds "...", 1024 in all.
+    check("text cut at a character", rec["text"], "tests/" + "\u00e9" * 300 + "/" + "\u00e9" * 207 + "...")
+    check("text cut, its length", len(rec["text"].encode()), 1024)
+    odd = "tests/" + "\u00e9" * 300 + "/a" + "\u00e9" * 300
+    check("text cut, an odd boundary", model.cut(odd + ": test file added"), "tests/" + "\u00e9" * 300 + "/a" + "\u00e9" * 206 + "...")
+    check("text cut, the field kept whole", rec["path"], p.decode())
 
 
 def b64sha(d):
@@ -186,6 +222,29 @@ def fixture_dpkg_bundle_and_tamper():
         '"text":"tool:amd64: installed file usr/bin/tool other bytes","paths":["usr/bin/tool"]}',
         '{"flag":"conffile_changed","level":"signal","package":"tool:amd64","path":"etc/tool.conf","outcome":"modified",'
         '"text":"tool:amd64: conffile etc/tool.conf modified","paths":["etc/tool.conf"]}'])
+
+
+def fixture_pip_reinstall_judged():
+    core1, core2 = b"def run():\n    return 1\n", b"def run():\n    return 2\n"
+
+    def rec(core):
+        return ("pkg/core.py,sha256=%s,%d\npkg-1.0.dist-info/RECORD,,\n" % (b64sha(core), len(core))).encode()
+    B = {b".": raw("dir", D), b"pkg": raw("dir", D), b"pkg/core.py": raw("reg", F, core1, ino=5),
+         b"pkg-1.0.dist-info": raw("dir", D), b"pkg-1.0.dist-info/RECORD": raw("reg", F, rec(core1), ino=6)}
+    code, exp = model.export_expect("/w", "/out/b.bundle", b'{"belay_protect":1,"protect":[]}', [], B)
+    A = dict(B)
+    A[b"pkg/core.py"] = raw("reg", F, core2, ino=5, mtime=200)
+    A[b"pkg-1.0.dist-info/RECORD"] = raw("reg", F, rec(core2), ino=6, mtime=200)
+    ctx = {"scope": "/w", "bundle_sha256": "b" * 64, "spec": exp["spec"],
+           "before": model.Side(exp["B"], 10, []), "after": model.Side(model.view(A, exp["hash_max"]), 10, []),
+           "bundle_lines": exp["lines"], "outside_scope": 0, "before_sha256": "1" * 64, "after_sha256": "2" * 64}
+    out, _flags, _r, _e = model.verify_lines(ctx)
+    check("a forged RECORD: reinstalled, and its file judged (decision 173)", [model.enc(o) for o in out[1:-1]], [
+        '{"flag":"package_changed","level":"signal","db":"pip","package":"pkg","event":"pip_reinstalled",'
+        '"change":"reinstalled pkg 1.0: +0 -0 ~1 files","self_consistent":true,'
+        '"text":"pip: reinstalled pkg 1.0: +0 -0 ~1 files","paths":["pkg-1.0.dist-info/RECORD"]}',
+        '{"flag":"tampered_installed_package","level":"signal","db":"pip","package":"pkg","path":"pkg/core.py",'
+        '"why":"other bytes","at_reset":"match","text":"pkg: installed file pkg/core.py other bytes","paths":["pkg/core.py"]}'])
 
 
 def fixture_git_reset():
@@ -248,9 +307,16 @@ def tables():
                                                 b"        assert(x)\n"), (3, 2))
     check("markers", model.markers_added(TEST_API, TEST_API.replace(b"def test_two", b'@pytest.mark.skip(reason="flaky")\ndef test_two')),
           ['@pytest.mark.skip(reason="flaky")'])
-    check("test files", [model.is_test_file(p) for p in (b"tests", b"a/spec/b", b"x/test_y.c", b"y_test.go", b"a.test.js",
-                                                          b"b.spec.ts", b"src/app.py", b"testing/x", b"attest_x")],
-          [True, True, True, True, True, True, False, False, False])
+    T = [(b"tests", True), (b"a/spec/b", True), (b"x/test_y.c", True), (b"y_test.go", True), (b"a.test.js", True),
+         (b"b.spec.ts", True), (b"src/app.py", False), (b"testing/x", False), (b"attest_x", False),
+         (b"build/test/x.py", False), (b"docs/spec/a.md", False), (b"src/doc/test_a.py", False),
+         (b"node_modules/x/tests/a.js", False), (b"a/__pycache__/test_x.py", False), (b".build/tests/x", False),
+         (b"src/foo_test.go", True), (b"src/FooTest.java", True), (b"src/FooTests.kt", True), (b"lib/x_spec.rb", True),
+         (b"lib/y_test.rb", True), (b"src/test_a.cpp", True), (b"src/b_test.cc", True), (b"web/c.spec.mjs", True),
+         (b"src/web.test.py", False), (b"src/Foo.test.java", False), (b"src/footest.go", False), (b"src/x.spec.rb", False),
+         (b"src/test_x.h", False), (b"src/Test.java", True), (b"src/a.test.jsx", True), (b"src/a.test.vue", False),
+         (b"src/__tests__/a.vue", True), (b"src/_test.py", True), (b"pkg/test", True), (b"doc_test.go", True)]
+    check("test files (decision 175)", [model.is_test_file(p) for p, _w in T], [w for _p, w in T])
     check("CI paths", [model.is_ci(p) for p in (b".github/workflows/ci.yml", b".github/workflows", b".github/CODEOWNERS",
                                                 b".circleci/config.yml", b"a/.gitlab-ci.yml", b"Jenkinsfile.bak")],
           [True, False, False, True, True, False])
@@ -266,7 +332,8 @@ def tables():
 
 def run():
     del FAILS[:]
-    for f in (tables, fixture_protected_write, fixture_privilege_path, fixture_pip_bundle,
+    for f in (tables, fixture_protected_write, fixture_privilege_path, fixture_iflags_decision_163, fixture_text_cut,
+              fixture_pip_reinstall_judged, fixture_pip_bundle,
               fixture_dpkg_bundle_and_tamper, fixture_git_reset):
         try:
             f()
