@@ -7,6 +7,7 @@ belay diff  --scope DIR --since ID [--to ID] [--full-every N] [--json] [--exit-c
 belay log   --scope DIR [--json]
 belay exclude --scope DIR [--add PATH | --remove PATH]
 belay baseline export --scope DIR --out FILE [--protect SPEC] [--json]
+belay verify --scope DIR --baseline FILE --baseline-sha256 HEX [--protect SPEC] [--to ID] [--exit-code]
 belay help [command]  |  belay <command> --help  |  belay --version
 ```
 
@@ -121,6 +122,26 @@ are counted, never checked.
 every file within 4 GiB is hashed, protected or not, since a manifest holds a hash only within its
 limit; an exclude, or belay's state directory, covering a protected pattern is refused (exit 3);
 a spec it refuses is a usage error (exit 2).
+
+## verify: what the changes mean
+
+After the episode -- every process of the policy stopped first -- `belay verify` records `DIR`
+reading every file, in a state directory of its own it creates fresh (in `$TMPDIR`, removed when it
+is done: no state a policy prepared is ever read), diffs it against the bundle, and writes
+[policy.v1](../test/expect/policy-v1.md) to standard output: one record per flag, each a
+`violation` (a declared expectation broken: protected paths, frozen packages) or a `signal`
+(informational: tests touched or weakened, CI and pytest configuration, startup and git hooks,
+history rewritten, new executables on PATH, privilege changes). diff.v1 and the manifest are
+unchanged: judgement is apart from description.
+
+The bundle is read only when its bytes hash to `--baseline-sha256` (exit 3 otherwise, or without
+it), and only for the scope it describes. `--protect` must be the spec the bundle was exported
+with, or none when it had none (exit 3). Installed files are judged against the bundle, never
+against the databases as the episode left them. With `--exit-code`, verify exits 1 when any
+record is a violation; signals never fail a run.
+
+`--to ID` judges checkpoint `ID` of the scope's own state instead of capturing now; with a spec,
+only a checkpoint that read every file (a `check`, or `mark --full`: its trailer's `trusted` is 0).
 
 ## mark: which files are read
 
