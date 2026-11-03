@@ -684,17 +684,89 @@ def turn(events, belay, scope, d, sid, lo, hi):
         f.write(text)
     with open(os.path.join(d, f"{sid}.turn-{hi}.json"), "w") as f:
         json.dump({"lo": lo, "hi": hi, "changes": n, "paths": paths, "interesting": interesting(secs),
+                   "errors": len(errors), "heads": stop_heads(secs),
                    "sections": [{"section": h, "calls": [full_label(c) for c in cs], "records": r}
                                 for h, r, _, cs in secs]}, f)
-    # Each call once (decision 185): the background note is the section's,
-    # not the Stop line's.
+    return text, n, paths, path, errors, stop_heads(secs)
+
+
+def stop_heads(secs):
+    """The calls a Stop line names: each once (decision 185) -- the background
+    note is the section's, not the line's."""
     heads = []
     for h, _, _, _ in secs:
         h = h.split(BG_NOTE)[0]
         if not h.startswith("unknown throughout") and h not in heads:
             heads.append(h)
-    heads = heads[:3]
-    return text, n, paths, path, errors, heads
+    return heads[:3]
+
+
+def prompted_ns(transcript):
+    """When the user's last message came (ns), from the session's transcript:
+    the last main-thread entry whose origin is human. A turn a background
+    task woke is no message of theirs (decision 197). None when not found."""
+    import datetime
+    last = None
+    try:
+        with open(transcript, encoding="utf-8", errors="replace") as f:
+            for line in f:
+                if '"human"' not in line:
+                    continue
+                try:
+                    e = json.loads(line)
+                except ValueError:
+                    continue
+                if e.get("type") == "user" and not e.get("isSidechain") and \
+                        (e.get("origin") or {}).get("kind") == "human" and e.get("timestamp"):
+                    last = e["timestamp"]
+    except OSError:
+        return None
+    if last is None:
+        return None
+    try:
+        t = datetime.datetime.fromisoformat(last.replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    return int(t.timestamp()) * 10**9 + t.microsecond * 1000
+
+
+def since_prompt(events, d, sid, hi, transcript):
+    """Every turn since the user's message, ending with this Stop's
+    (decision 197): (paths, changes, turns, errors, heads, receipt path), or
+    None when the message cannot be placed."""
+    at = prompted_ns(transcript) if transcript else None
+    if at is None:
+        return None
+    his = [e["cp"] for e in events if e.get("event") == "stop" and e.get("cp") is not None
+           and int(e.get("t0") or 0) >= at and e["cp"] <= hi]
+    if hi not in his:
+        his.append(hi)
+    turns = []
+    for h in sorted(set(his)):
+        try:
+            with open(os.path.join(d, f"{sid}.turn-{h}.json")) as f:
+                turns.append(json.load(f))
+        except (OSError, ValueError):
+            return None                             # a turn without its receipt: not summed silently
+    paths, n, errors, heads = set(), 0, 0, []
+    for t in turns:
+        for s in t["sections"]:
+            if not s["section"].startswith("unknown throughout"):
+                for r in s["records"]:
+                    if "event" not in r:
+                        paths.add(path_of(r))
+                        n += 1
+        errors += t.get("errors", 0)
+        heads += [h for h in t.get("heads", []) if h not in heads]
+    if len(turns) == 1:
+        path = os.path.join(d, f"{sid}.turn-{turns[0]['hi']}.txt")
+    else:
+        path = os.path.join(d, f"{sid}.since-{hi}.txt")
+        with open(path, "w") as out:
+            for t in turns:
+                with open(os.path.join(d, f"{sid}.turn-{t['hi']}.txt")) as f:
+                    out.write(f"--- checkpoints {t['lo']} -> {t['hi']}\n" + f.read())
+    return len(paths), n, len(turns), errors, heads[:3], path
 
 
 def main():
@@ -717,15 +789,28 @@ def main():
         earlier = stops[:-1] + starts
         lo = max([s for s in earlier if s < hi], default=min(cps))
         _, n, paths, path, errors, heads = turn(events, belay, scope, d, sid, lo, hi)
+        errors = len(errors)
+        # The span is the user's: every turn since their message, however many
+        # a background task woke (decision 197); this turn alone, said so,
+        # when their message cannot be placed.
+        span = since_prompt(events, d, sid, hi, sys.argv[6] if len(sys.argv) > 6 else "")
+        note = ""
+        if span:
+            paths, n, k, errors, heads, path = span
+            when = f"since your message ({k} turn{'s' if k != 1 else ''})"
+        else:
+            when, note = "this turn", "; your message not found in the transcript"
         if n or errors:
-            msg = "belay: " + changed_line(paths, n).replace(" changed", " changed this turn", 1)
+            msg = f"belay: {paths:,} path{'s' if paths != 1 else ''} changed {when}"
+            if n != paths:
+                msg += f" ({n:,} changes across calls)"
             if heads:
                 msg += " (" + "; ".join(heads) + ")"
             if errors:
-                msg += f"; receipt incomplete ({len(errors)} error{'s' if len(errors) != 1 else ''})"
+                msg += f"; receipt incomplete ({errors} error{'s' if errors != 1 else ''})"
         else:                                       # said too: no line is never a quiet turn (decision 156)
-            msg = "belay: nothing changed this turn"
-        print(msg + f" -- {path}")                 # the hook makes the Stop's JSON
+            msg = f"belay: nothing changed {when}"
+        print(msg + note + f" -- {path}")          # the hook makes the Stop's JSON
         return
     # The session: what happened after the last stop as a last turn, then
     # every turn's receipt in order -- nothing diffed twice, so SessionEnd

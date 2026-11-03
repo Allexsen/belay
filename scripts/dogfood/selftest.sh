@@ -23,7 +23,9 @@ export BELAY BELAY_DOGFOOD_SCOPE="$S" BELAY_STATE_DIR="$T/state" CLAUDE_PROJECT_
 fail() { echo "dogfood selftest: FAIL: $*" >&2; exit 1; }
 hook() {  # hook EVENT [tool_use_id tool summary]
     jq -cn --arg tid "${2:-}" --arg tool "${3:-}" --arg s "${4:-}" \
-        '{session_id:"s1", tool_use_id:$tid, tool_name:$tool, tool_input:{command:$s}}' | "$HOOK" "$1"
+        --arg tr "${TRANSCRIPT:-}" \
+        '{session_id:"s1", tool_use_id:$tid, tool_name:$tool, tool_input:{command:$s}}
+         + (if $tr == "" then {} else {transcript_path:$tr} end)' | "$HOOK" "$1"
 }
 LOG=$T/state/dogfood/s1.jsonl
 # The session receipt is made detached (decision 143): wait for its mark to go.
@@ -67,10 +69,38 @@ printf '%s' "$out" | jq -e '.systemMessage | test("^belay: 2 paths changed")' >/
 # a turn that changes nothing says so: a Stop always says its line, or why
 # it could not (decision 156) -- no line is never a quiet turn
 out=$(hook stop)
-printf '%s' "$out" | jq -e '.systemMessage | test("^belay: nothing changed this turn -- .*/s1[.]turn-[0-9]+[.]txt$")' \
+printf '%s' "$out" | jq -e '.systemMessage | test("^belay: nothing changed this turn; your message not found in the transcript -- .*/s1[.]turn-[0-9]+[.]txt$")' \
     >/dev/null || fail "a turn without changes said nothing, or not that: $out"
 # what each Stop said is kept, so a missing line can be told from one never made
 tail -1 "$T/state/dogfood/s1.said" | grep -q 'nothing changed this turn' || fail "the Stop's line was not kept"
+# The Stop covers every turn since the user's message, not since the last
+# Stop (decision 197): a turn a background task woke is no message of theirs.
+TRANSCRIPT=$T/transcript.jsonl; export TRANSCRIPT
+said() {  # said KIND: a main-thread transcript entry, now
+    jq -cn --arg k "$1" --arg ts "$(date -u +%Y-%m-%dT%H:%M:%S.000Z)" \
+        '{type:"user", isSidechain:false, origin:{kind:$k}, timestamp:$ts, message:{content:"x"}}' >> "$TRANSCRIPT"
+}
+sleep 1; said human; sleep 1
+hook pre t7s Bash "write sp1"; printf "f\n" > "$S/src/sp1.c"; hook post t7s Bash
+out=$(hook stop)
+printf '%s' "$out" | jq -e '.systemMessage | test("^belay: 1 path changed since your message [(]1 turn[)] [(]Bash: write sp1[)] -- .*/s1[.]turn-[0-9]+[.]txt$")' \
+    >/dev/null || fail "the first turn since the message: $out"
+sleep 1; said task-notification; sleep 1      # woken by a background task: only the report
+hook pre t8s Bash "write sp2"; printf 'g\n' > "$S/src/sp2.c"; hook post t8s Bash
+out=$(hook stop)
+said task-notification
+out=$(hook stop)
+printf '%s' "$out" | jq -e '.systemMessage | test("^belay: 2 paths changed since your message [(]3 turns[)] [(]Bash: write sp1; Bash: write sp2[)] -- .*/s1[.]since-[0-9]+[.]txt$")' \
+    >/dev/null || fail "a turn the user did not start said only itself: $out"
+F=$(printf '%s' "$out" | jq -r '.systemMessage' | sed 's/.* -- //')
+[ "$(grep -c '^--- checkpoints ' "$F")" = 3 ] && grep -q '  A src/sp1.c' "$F" && grep -q '  A src/sp2.c' "$F" \
+    || fail "the span's receipt is not its three turns: $(cat "$F")"
+sleep 1; said human
+out=$(hook stop)
+printf '%s' "$out" | jq -e '.systemMessage | test("^belay: nothing changed since your message [(]1 turn[)] -- ")' \
+    >/dev/null || fail "a new message did not start a new span: $out"
+unset TRANSCRIPT
+
 # another project: ignored, nothing logged
 n=$(wc -l < "$LOG")
 CLAUDE_PROJECT_DIR=$T/elsewhere hook pre t9 Bash x
