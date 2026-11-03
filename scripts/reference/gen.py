@@ -1801,12 +1801,149 @@ def cell_git_reflog_gained():
     return out
 
 
+def cell_git_last_line():
+    """Required cells for a last line without its newline, as git reads it
+    (decision 183). A reflog's, E12: "A reflog's last line without its
+    newline is no entry: git does not read it as one". `HEAD`'s and a loose
+    ref's: "A loose ref's or `HEAD`'s last line without its newline is
+    read, as git reads it". `packed-refs`: "a `packed-refs` that ends
+    without a newline is one git refuses, so a side git cannot parse (E10)".
+    diff-v1, git, says each the same, and of a reflog's blank line: "nor is
+    a blank line, which git skips"."""
+    out = []
+    X, Y = goid("X"), goid("Y")
+    born = (ZERO, X, b"branch: Created from HEAD")
+    c = Case("git-e12-last-line-no-newline")
+
+    # ---- a reflog's last gained line without its newline: no entry, so
+    # no how -- moved, the reflog not listed, its record saying nothing
+    # ("and says nothing when it gained none")
+    g = GitRepo(c, b"r")
+    g.unchanged()
+    g.ref("before", b"feat", X)
+    g.ref("after", b"feat", Y)
+    g.log("before", b"feat", [born])
+    g.put("after", b"logs/refs/heads/feat", glog([born, (X, Y, b"reset: moving to y")])[:-1])
+    # ... its control, the same entry with its newline: rewritten by it
+    g = GitRepo(c, b"r0")
+    g.unchanged()
+    g.ref("before", b"feat", X)
+    g.ref("after", b"feat", Y)
+    g.log("before", b"feat", [born])
+    g.log("after", b"feat", [born, (X, Y, b"reset: moving to y")])
+    # ... a reflog added whose one line has no newline: no evidence of
+    # absence -- moved, no `from`
+    g = GitRepo(c, b"c")
+    g.unchanged()
+    g.ref("after", b"topic", Y)
+    g.put("after", b"logs/refs/heads/topic", glog([(ZERO, Y, b"branch: Created from HEAD")])[:-1])
+    # ... git's entries gained, then a last line not git's without its
+    # newline: not read, so not parsed -- no E10; the entries stand
+    g = GitRepo(c, b"g")
+    g.unchanged()
+    g.ref("before", b"feat", X)
+    g.ref("after", b"feat", Y)
+    g.log("before", b"feat", [born])
+    g.put("after", b"logs/refs/heads/feat",
+          glog([born, (X, Y, b"commit: y")]) + NOT_AN_ENTRY[:-1])
+
+    # ---- a blank line gained, then git's entry: the blank line is none
+    # ("nor is a blank line, which git skips") -- commits added, no E10
+    g = GitRepo(c, b"b")
+    g.unchanged()
+    g.ref("before", b"feat", X)
+    g.ref("after", b"feat", Y)
+    g.log("before", b"feat", [born])
+    g.put("after", b"logs/refs/heads/feat", glog([born]) + b"\n" + glog([(X, Y, b"commit: y")], 5))
+    # ... a blank line alone gained: no entry -- the record says nothing,
+    # and the branch moved, no how
+    g = GitRepo(c, b"b2")
+    g.unchanged()
+    g.ref("before", b"feat", X)
+    g.ref("after", b"feat", Y)
+    g.log("before", b"feat", [born])
+    g.put("after", b"logs/refs/heads/feat", glog([born]) + b"\n")
+
+    # ---- HEAD after without its newline: read -- switched
+    g = GitRepo(c, b"h")
+    g.unchanged(head=False)
+    g.both(b"refs/heads/topic", Y + b"\n")
+    g.head("before", b"main")
+    g.put("after", b"HEAD", b"ref: refs/heads/topic")
+    # ... HEAD before, detached, without its newline: the branch `HEAD`
+    g = GitRepo(c, b"h2")
+    g.put("before", b"HEAD", X)
+    g.head("after", oid=Y)
+    g.log("before", b"HEAD", [(ZERO, X, b"commit (initial): x")])
+    g.log("after", b"HEAD", [(ZERO, X, b"commit (initial): x"), (X, Y, b"commit: y")])
+
+    # ---- a loose ref after without its newline: read -- moved, created
+    g = GitRepo(c, b"l")
+    g.unchanged()
+    g.ref("before", b"feat", X)
+    g.put("after", b"refs/heads/feat", Y)
+    g.log("before", b"feat", [born])
+    g.log("after", b"feat", [born, (X, Y, b"commit: y")])
+    g.put("after", b"refs/heads/made", Y)
+    g.log("after", b"made", [(ZERO, Y, b"branch: Created from HEAD")])
+    # ... a loose ref before without its newline, removed: its `was`
+    g.put("before", b"refs/heads/gone", X)
+
+    # ---- packed-refs after, ending without a newline: refused -- E10, and
+    # the branches whose value after is its derive no event
+    g = GitRepo(c, b"p")
+    g.unchanged()
+    g.packed("before", [(b"kept", X), (b"rel", X)])
+    g.put("after", b"packed-refs", gpacked([(b"refs/heads/kept", X), (b"refs/heads/rel", Y)])[:-1])
+    # ... its last line a peeled one
+    g = GitRepo(c, b"p2")
+    g.unchanged()
+    g.packed("before", [(b"a", X)])
+    g.put("after", b"packed-refs", gpacked([(b"refs/heads/a", Y), (b"refs/tags/v1", X)],
+                                           peeled={b"refs/tags/v1": Y})[:-1])
+    # ... its header alone
+    g = GitRepo(c, b"p4")
+    g.unchanged()
+    g.packed("before", [(b"h", X)])
+    g.put("after", b"packed-refs", gpacked([])[:-1])
+    # ... packed-refs before, refused: no value before -- now at
+    g = GitRepo(c, b"p3")
+    g.unchanged()
+    g.put("before", b"packed-refs", gpacked([(b"refs/heads/b", X)])[:-1])
+    g.packed("after", [(b"b", Y)])
+    # ... and empty (0 bytes): no last line, so read -- it lists no ref
+    g = GitRepo(c, b"p5")
+    g.unchanged()
+    g.packed("before", [(b"e", X)])
+    g.put("after", b"packed-refs", b"")
+
+    # ---- HEAD and a loose ref that lost only their newline: the same
+    # value -- no finding, no event
+    g = GitRepo(c, b"n")
+    g.head("before", b"main")
+    g.put("after", b"HEAD", b"ref: refs/heads/main")
+    g.ref("before", b"same", X)
+    g.put("after", b"refs/heads/same", X)
+
+    for cell in ("reflog_no_entry", "reflog_control", "reflog_only_line", "reflog_not_gits",
+                 "reflog_blank_line", "reflog_blank_line_alone",
+                 "head", "head_before", "loose_ref_after", "loose_ref_before",
+                 "packed_refused", "packed_refused_peeled", "packed_refused_header",
+                 "packed_refused_before", "packed_empty", "newline_only",
+                 "only_packed_refused"):
+        c.tag("git.e12.last_line." + cell)
+    out.append(c)
+    return out
+
+
 def random_git(rng, c):
     """A repository's history, simulated: a few operations before, more
     after, each written as git writes it (loose refs, packed-refs, HEAD,
     reflogs); now and then a copy lost, a file raced, a ref, HEAD or
-    packed-refs garbled on a side, a reflog entry dropped, or a reflog line
-    not git's -- among its older entries, or gained."""
+    packed-refs garbled on a side, a reflog entry dropped, a reflog line
+    not git's -- among its older entries, or gained -- or a file's last line
+    without its newline (decision 183: a reflog's no entry, `HEAD`'s and a
+    loose ref's read, a `packed-refs` so ending refused)."""
     root = rng.choice([b"", b"proj", b"proj/vendor/lib", b"w"])
     repo = join(root, b".git")
     st = {"loose": {}, "packed": {}, "logs": {}, "head": ("sym", b"main"), "t": 0}
@@ -1981,6 +2118,8 @@ def random_git(rng, c):
                 data = b"garbled HEAD\n"
             elif not same and rest == b"packed-refs" and r < 0.06:
                 data += b"garbled, no ref line\n"
+            elif not same and r > 0.92 and data.endswith(b"\n"):
+                data = data[:-1]                # its last line without its newline
             c.put(side, repo + b"/" + rest,
                   reg(data, gen=0 if same else (1 if side == "after" else 0),
                       store="ok" if same else rng.choice(store_choices),
@@ -3092,7 +3231,7 @@ def required_cases():
     return (cell_dpkg_simple() + cell_pip_simple() + cell_pip_e10() + cell_dpkg_e9_e10()
             + cell_p7() + cell_e11() + cell_order() + cell_content_unavailable() + cell_paths_b64()
             + cell_git_reflog() + cell_git_events() + cell_git_unread() + cell_git_unparsed()
-            + cell_git_reflog_gained() + cell_probes())
+            + cell_git_reflog_gained() + cell_git_last_line() + cell_probes())
 
 
 def all_cases(n, seed):

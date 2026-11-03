@@ -208,6 +208,11 @@ def check_e12(cell, mine):
 
     CNI_REC = [{"kind": "could_not_interpret", "text": "could not interpret"}]
 
+    def cni_named(repo):
+        """Does a could_not_interpret event name a path of this repository?"""
+        return any(e["event"] == "could_not_interpret"
+                   and any(p.startswith(repo + "/") for p in e["paths"]) for e in E)
+
     def cni_event(path, provisional=False):
         """One E10 event names the file alone, provisional only when asked."""
         es = [e for e in E if e["event"] == "could_not_interpret" and path in e["paths"]]
@@ -468,6 +473,98 @@ def check_e12(cell, mine):
             ("git_branch_moved", "HEAD")] and ev("h/.git")["from"] == X
         and ev("h/.git")["paths"] == ["h/.git/HEAD"]
         and cni_event("h/.git/logs/HEAD") and rec("h/.git/logs/HEAD") == CNI_REC,
+        # a reflog that gained no entry "says nothing when it gained none"
+        # (diff-v1, git; decision 183).
+        # decision 183, as git reads them: "A reflog's last line without its
+        # newline is no entry: git does not read it as one. A loose ref's or
+        # `HEAD`'s last line without its newline is read, as git reads it; a
+        # `packed-refs` that ends without a newline is one git refuses, so a
+        # side git cannot parse (E10)."
+        "git.e12.last_line.reflog_no_entry": lambda: not cni_named("r/.git")
+        and kinds_of("r/.git") == [("git_branch_moved", "feat")]
+        and moved_from("r/.git", "feat", ["r/.git/refs/heads/feat"])
+        and rec("r/.git/logs/refs/heads/feat") is None,
+        "git.e12.last_line.reflog_control": lambda: kinds_of("r0/.git") == [
+            ("git_history_rewritten", "feat")] and ev("r0/.git")["how"] == "reset"
+        and ev("r0/.git")["paths"] == ["r0/.git/logs/refs/heads/feat", "r0/.git/refs/heads/feat"]
+        and [(f["kind"], f.get("entries"), f.get("operation"))
+             for f in rec("r0/.git/logs/refs/heads/feat")] == [
+            ("git_reflog_appended", 1, None), ("git_reflog_move", None, "reset")],
+        "git.e12.last_line.reflog_only_line": lambda: not cni_named("c/.git")
+        and kinds_of("c/.git") == [("git_branch_moved", "topic")]
+        and moved_no_from("c/.git", "topic") and ev("c/.git")["to"] == Y
+        and ev("c/.git")["paths"] == ["c/.git/refs/heads/topic"]
+        and rec("c/.git/logs/refs/heads/topic") is None,
+        "git.e12.last_line.reflog_not_gits": lambda: not cni_named("g/.git")
+        and kinds_of("g/.git") == [("git_commits_added", "feat")] and ev("g/.git")["count"] == 1
+        and ev("g/.git")["paths"] == ["g/.git/logs/refs/heads/feat", "g/.git/refs/heads/feat"]
+        and [(f["kind"], f.get("entries")) for f in rec("g/.git/logs/refs/heads/feat")] == [
+            ("git_reflog_appended", 1)],
+        # diff-v1, git: "nor is a blank line, which git skips"
+        "git.e12.last_line.reflog_blank_line": lambda: not cni_named("b/.git")
+        and kinds_of("b/.git") == [("git_commits_added", "feat")] and ev("b/.git")["count"] == 1
+        and ev("b/.git")["paths"] == ["b/.git/logs/refs/heads/feat", "b/.git/refs/heads/feat"]
+        and [(f["kind"], f.get("entries")) for f in rec("b/.git/logs/refs/heads/feat")] == [
+            ("git_reflog_appended", 1)],
+        "git.e12.last_line.reflog_blank_line_alone": lambda: not cni_named("b2/.git")
+        and rec("b2/.git/logs/refs/heads/feat") is None
+        and mine.outcomes.get(b"b2/.git/logs/refs/heads/feat") == "modified"
+        and kinds_of("b2/.git") == [("git_branch_moved", "feat")]
+        and moved_from("b2/.git", "feat", ["b2/.git/refs/heads/feat"]),
+        "git.e12.last_line.head": lambda: not cni_named("h/.git")
+        and kinds_of("h/.git") == [("git_head_switched", "main")]
+        and ev("h/.git")["to"] == "topic" and ev("h/.git")["paths"] == ["h/.git/HEAD"]
+        and [(f["kind"], f["from"], f["to"]) for f in rec("h/.git/HEAD")] == [
+            ("git_head_changed", "refs/heads/main", "refs/heads/topic")],
+        "git.e12.last_line.head_before": lambda: not cni_named("h2/.git")
+        and kinds_of("h2/.git") == [("git_commits_added", "HEAD")] and ev("h2/.git")["count"] == 1
+        and ev("h2/.git")["paths"] == ["h2/.git/HEAD", "h2/.git/logs/HEAD"]
+        and [(f["kind"], f["from"], f["to"]) for f in rec("h2/.git/HEAD")] == [
+            ("git_head_changed", X, Y)],
+        "git.e12.last_line.loose_ref_after": lambda: not cni_named("l/.git")
+        and kinds_of("l/.git") == [("git_commits_added", "feat"), ("git_branch_deleted", "gone"),
+                                   ("git_branch_created", "made")]
+        and ev("l/.git", branch="feat")["count"] == 1
+        and ev("l/.git", branch="feat")["paths"] == ["l/.git/logs/refs/heads/feat",
+                                                     "l/.git/refs/heads/feat"]
+        and created("l/.git", "made", ["l/.git/logs/refs/heads/made", "l/.git/refs/heads/made"])
+        and ev("l/.git", branch="made")["at"] == Y
+        and [(f["kind"], f["from"], f["to"]) for f in rec("l/.git/refs/heads/feat")] == [
+            ("git_ref_moved", X, Y)],
+        "git.e12.last_line.loose_ref_before": lambda: not cni_named("l/.git")
+        and ev("l/.git", "git_branch_deleted", "gone")["was"] == X
+        and ev("l/.git", branch="gone")["paths"] == ["l/.git/refs/heads/gone"]
+        and [(f["kind"], f["from"]) for f in rec("l/.git/refs/heads/gone")] == [
+            ("git_ref_deleted", X)],
+        # refused after: "after, the branch derives no event"
+        "git.e12.last_line.packed_refused": lambda: cni_event("p/.git/packed-refs")
+        and rec("p/.git/packed-refs") == CNI_REC and not repo_events("p/.git"),
+        "git.e12.last_line.packed_refused_peeled": lambda: cni_event("p2/.git/packed-refs")
+        and rec("p2/.git/packed-refs") == CNI_REC and not repo_events("p2/.git"),
+        "git.e12.last_line.packed_refused_header": lambda: cni_event("p4/.git/packed-refs")
+        and rec("p4/.git/packed-refs") == CNI_REC and not repo_events("p4/.git"),
+        # refused before: no value before, "(a branch only in `packed-refs` too)"
+        "git.e12.last_line.packed_refused_before": lambda: cni_event("p3/.git/packed-refs")
+        and rec("p3/.git/packed-refs") == CNI_REC
+        and kinds_of("p3/.git") == [("git_branch_moved", "b")] and moved_no_from("p3/.git", "b")
+        and ev("p3/.git")["to"] == Y and ev("p3/.git")["paths"] == ["p3/.git/packed-refs"],
+        "git.e12.last_line.packed_empty": lambda: not cni_named("p5/.git")
+        and kinds_of("p5/.git") == [("git_branch_deleted", "e")]
+        and ev("p5/.git")["was"] == X and ev("p5/.git")["paths"] == ["p5/.git/packed-refs"]
+        and [(f["kind"], f["ref"]) for f in rec("p5/.git/packed-refs")] == [
+            ("git_ref_deleted", "refs/heads/e")],
+        # only the newline lost: the same value -- "only when the value
+        # differs", "nothing when the two are equal"
+        "git.e12.last_line.newline_only": lambda: not cni_named("n/.git")
+        and not repo_events("n/.git")
+        and all(mine.outcomes.get(("n/.git/" + r).encode()) == "modified"
+                and rec("n/.git/" + r) is None for r in ("HEAD", "refs/heads/same")),
+        # the E10 events are the four packed-refs refused, and nothing else
+        # is unavailable
+        "git.e12.last_line.only_packed_refused": lambda: [
+            (e["event"], e["paths"]) for e in E if e["event"] in (
+                "could_not_interpret", "content_unavailable")] == [
+            ("could_not_interpret", [r + "/.git/packed-refs"]) for r in ("p", "p2", "p3", "p4")],
         "git.e12.tags_remotes_nothing": lambda: not E and rec(P + "/packed-refs") is not None
         and rec(P + "/refs/tags/v2") is not None,
         # decision 137: what cannot be read reduces the claim, never the fact

@@ -787,14 +787,23 @@ def is_zero(v):
 
 def parse_ref_value(data):
     """("oid", id) or ("sym", name). READING: git's loose-ref format, not
-    spelled out by the spec: an object id (40 lowercase hex digits) and one
-    newline, or `ref: <name>` and one newline (HEAD's symbolic form; the
-    spec: "the symbolic ref's name or the object id"). Anything else cannot
-    be parsed. The corpus writes only those two forms, and content that is
-    plainly neither."""
-    if not data.endswith(b"\n") or data.count(b"\n") != 1:
+    spelled out by the spec: one line, an object id (40 lowercase hex
+    digits) or `ref: <name>` (HEAD's symbolic form; the spec: "the symbolic
+    ref's name or the object id"). Anything else cannot be parsed. The
+    corpus writes only those two forms, and content that is plainly neither.
+
+    The line's newline (decision 183): E12, "A loose ref's or `HEAD`'s last
+    line without its newline is read, as git reads it"; diff-v1, git,
+    "`HEAD` and a loose ref are read without their last newline, as git
+    reads them". So `<id>` alone is the ref `<id>\\n` is (lines_of: "the
+    bytes up to and including a newline, or the bytes after the last
+    newline"), and a file that only gained or lost that newline keeps its
+    value. Nothing else of git's leniency is read in (no other
+    whitespace)."""
+    lines = lines_of(data)
+    if len(lines) != 1:
         raise InterpFailure("ref: not one line")
-    v = data[:-1]
+    v = lines[0]
     if v.startswith(b"ref: ") and len(v) > 5:
         return ("sym", v[5:])
     if is_oid(v):
@@ -807,13 +816,21 @@ def parse_packed(data):
     is in file order). READING: git's packed-refs format: a line starting
     `#` is its header, a line starting `^` the peeled id of the ref before
     it; every other line is `<id> <refname>`. Anything else cannot be
-    parsed. Only refs are lines here: a header or peeled line is no ref."""
+    parsed. Only refs are lines here: a header or peeled line is no ref.
+
+    One that ends without a newline cannot be parsed (decision 183): E12,
+    "a `packed-refs` that ends without a newline is one git refuses, so a
+    side git cannot parse (E10)"; diff-v1, git, "a `packed-refs` that ends
+    without one is refused, as git refuses it: `could_not_interpret`" --
+    whatever its last line is (a ref line, a peeled line, the header).
+    READING: an empty one (0 bytes) has no last line, so it does not "end
+    without a newline": it is read, and lists no ref."""
     out = {}
     if data == b"":
         return out
     if not data.endswith(b"\n"):
-        raise InterpFailure("packed-refs: no final newline")
-    for line in data[:-1].split(b"\n"):
+        raise InterpFailure("packed-refs: ends without a newline")
+    for line in lines_of(data):
         if line.startswith(b"#"):
             continue
         if line.startswith(b"^"):
@@ -833,12 +850,33 @@ def ref_display(v):
 
 
 def lines_of(data):
-    """READING: a reflog's entries are lines as text's are: "the bytes up to
-    and including a newline, or the bytes after the last newline"."""
+    """A file's lines, as text's are: "the bytes up to and including a
+    newline, or the bytes after the last newline" (newlines dropped).
+
+    The lines of `HEAD`, a loose ref and `packed-refs` (decision 183: a
+    loose ref's or `HEAD`'s last line without its newline "is read, as git
+    reads it"; a `packed-refs` ending without one never gets here --
+    parse_packed refuses it). A reflog's entries are not these: see
+    reflog_entries."""
     out = data.split(b"\n")
     if out[-1] == b"":
         out.pop()
     return out
+
+
+def reflog_entries(data):
+    """A reflog's entries: its lines that end in a newline, blank lines
+    skipped. Its last line without its newline is none (decisions 160,
+    183): E12, "A reflog's last line without its newline is no entry: git
+    does not read it as one"; diff-v1, git, `git_reflog_appended` "counts
+    the entries after it (a last line without its newline is none: git does
+    not read it as an entry; nor is a blank line, which git skips)". Not
+    read, neither is parsed: one not git's fails nothing.
+
+    READING: a blank line is an empty one (its newline alone). A line of
+    spaces or tabs is not blank here: it is an entry, and not git's (the
+    corpus builds none)."""
+    return [x for x in data.split(b"\n")[:-1] if x != b""]
 
 
 def appended(before, after):
@@ -851,10 +889,13 @@ def appended(before, after):
     a line's end, and none otherwise (diff-v1, git: `git_reflog_rewritten`)
     -- never its older entries". before's bytes are compared here, never
     split into entries nor parsed; None (not a prefix, or one ending inside
-    a line of after) is "none otherwise": nothing is parsed."""
+    a line of after) is "none otherwise": nothing is parsed. Of the bytes
+    after before's, only the lines ending in a newline are entries
+    (reflog_entries, decision 183). A reflog that gained none says nothing
+    (reflog_findings)."""
     bb = before or b""
     if after.startswith(bb) and (bb == b"" or bb.endswith(b"\n") or bb == after):
-        return lines_of(after[len(bb):])
+        return reflog_entries(after[len(bb):])
     return None
 
 
@@ -907,6 +948,10 @@ def reflog_findings(ref, before, after):
     new = appended(before, after)
     if new is None:
         return [checked("git_reflog_rewritten", {"ref": ref})]
+    if not new:
+        # diff-v1, git: `git_reflog_appended` "counts the entries after it
+        # ... -- and says nothing when it gained none (decision 183)"
+        return []
     out = [checked("git_reflog_appended", {"ref": ref, "entries": len(new)})]
     for line in new:
         old, nw, msg = reflog_entry_fields(line)
