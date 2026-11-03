@@ -111,6 +111,7 @@ class Checkpoint:
     excluded: int
     excluded_paths: Tuple[dict, ...]
     prefilter: Prefilter
+    source: Optional[dict]          # checkpoint.v1 CK-16: None, or {"docker": ..., "image": ...}
 
 
 def _checkpoint(obj: dict) -> Checkpoint:

@@ -15,7 +15,8 @@
     "provisional",
     "excluded",
     "excluded_paths",
-    "prefilter"
+    "prefilter",
+    "source"
   ],
   "properties": {
     "id": {
@@ -140,6 +141,32 @@
           "type": "string"
         }
       }
+    },
+    "source": {
+      "description": "the manifest's source (manifest v3): null for a scope walked where belay ran, or the container a host-reader capture read",
+      "oneOf": [
+        {
+          "type": "null"
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "docker",
+            "image"
+          ],
+          "properties": {
+            "docker": {
+              "type": "string",
+              "pattern": "^[0-9a-f]{64}$"
+            },
+            "image": {
+              "type": "string",
+              "pattern": "^sha256:[0-9a-f]{64}$"
+            }
+          }
+        }
+      ]
     }
   },
   "allOf": [

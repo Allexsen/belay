@@ -4,8 +4,8 @@
 checkpoint, one per line; `diff` keeps its capture to now as a checkpoint of kind `diff`, which `log` lists.
 Published since v0.1.0-alpha as `schema/checkpoint.v1.json` and in `docs/cli.md`, but never pinned; pybelay's
 `Checkpoint` makes it public API, so it is pinned before pybelay ships (decision 200). Every row below is what
-the binary prints today (main at the time of this PR, run on Linux), except CK-16, which is proposed with it.
-Written by hand; *proposed 2026-11-03, awaiting the author's OK*.
+the binary prints (run on Linux): CK-1..CK-15 as it printed before this pin, CK-16 added with it.
+Written by hand; approved by the author 2026-11-03 (decision 210), CK-16 included: checkpoint.v1 had not shipped publicly.
 
 **Changing it.** In its own PR, presented as a table, after the author's explicit OK. A key added, removed or
 changed in meaning is a `checkpoint.v2`.
@@ -29,7 +29,7 @@ changed in meaning is a `checkpoint.v2`.
 | CK-13 | `prefilter` | object | How the walk read, keys in this order: `used` (bool: mark's shortcut was used), `reference` (`none`, `walk_start` or `newest_ctime`: the manifest trailer's `reference`), `trusted` (int: files whose hash came from the previous manifest), `racy` (int: files unchanged but at or past the reference point, read), `full_reason` (string: why every file was read, the trailer's `read_all`; `""` when the shortcut was used). |
 | CK-14 | (none other) | -- | No other key, at any level. A reader that knows checkpoint.v1 rejects an unknown key. |
 | CK-15 | (lines) | -- | `check` and `mark` print one line, `log` one per checkpoint, oldest first. Each line is one JSON object, keys in the order of this table, ending in `\n`. |
-| CK-16 | `source` | null or object | **Proposed with this pin (M3):** the manifest's `source` (manifest-v3 V3-2) -- `null`, or `{"docker": ..., "image": ...}` for a container capture -- after `prefilter`. A v1 or v2 manifest's checkpoint gives `null`. Without it, a checkpoint of a container would not say which container it is. |
+| CK-16 | `source` | null or object | The manifest's `source` (manifest-v3 V3-2) -- `null`, or `{"docker": ..., "image": ...}` for a container capture -- after `prefilter`. A v1 or v2 manifest's checkpoint gives `null`. Without it, a checkpoint of a container would not say which container it is. |
 
 ## Example
 
