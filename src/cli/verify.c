@@ -216,7 +216,7 @@ static int bundle_excludes(const char *manifest, struct excludes *ex, const stru
         const struct belay_excluded *x = &h->excluded[i];
         for (size_t k = 0; spec != NULL && k < spec->n_rules; k++) {
             if (!protect_covers(spec->rules[k].path, spec->rules[k].path_len, x->path, x->path_len)) continue;
-            fputs("belay: refused: the bundle's capture did not walk ", err);
+            fputs("belay: refused: a capture did not walk ", err);
             receipt_fputs(err, x->path);
             fputs(", which covers the protected ", err);
             receipt_fputs(err, spec->rules[k].path);
@@ -380,6 +380,8 @@ int cmd_verify(int argc, char **argv, FILE *out, FILE *err) {
     if (to_id != 0) {
         if ((rc = checkpoint_after(&sc, to_id, protect != NULL ? &spec : NULL, st.store, after, sizeof after, err)) != 0)
             goto done;
+        static struct excludes ignored;         /* its own exclusions, against the spec too (PS-C2) */
+        if ((rc = bundle_excludes(after, &ignored, protect != NULL ? &spec : NULL, err)) != 0) goto done;
     } else {
         const struct capture_req req = { "check", false, false, 0, bd.meta.hash_max_bytes };
         struct checkpoint c;

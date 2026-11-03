@@ -164,21 +164,27 @@ static void flag_free(struct flag *f) {
 
 /* ---- the text: the template, each {field} its value (P-F2) ---- */
 
-/* Bytes into text: as they are when UTF-8, else each byte that does not
- * begin a valid sequence as U+FFFD. */
+/* Bytes into text: as they are when UTF-8; else as the receipt writes
+ * them (docs/cli.md): each byte not in a valid sequence as \xNN, a
+ * backslash doubled, so two paths never read the same. */
 static void text_bytes(struct jw *w, const char *s, size_t n) {
     if (belay_utf8_valid(s, n)) {
         jw_raw(w, s, n);
         return;
     }
-    for (size_t i = 0; i < n; i++) {
-        size_t l = 1;
-        while (l <= 4 && i + l <= n && !belay_utf8_valid(s + i, l)) l++;
-        if (l <= 4 && i + l <= n) {
-            jw_raw(w, s + i, l);
-            i += l - 1;
+    for (size_t i = 0; i < n;) {
+        const unsigned char c = (unsigned char)s[i];
+        size_t k = c < 0x80 ? 1 : c >= 0xC2 && c <= 0xDF ? 2 : c >= 0xE0 && c <= 0xEF ? 3 : c >= 0xF0 && c <= 0xF4 ? 4 : 0;
+        if (k > 1 && (i + k > n || !belay_utf8_valid(s + i, k))) k = 0;
+        if (k == 0) {
+            jw_fmt(w, "\\x%02x", c);
+            i++;
+        } else if (c == '\\') {
+            JW_LIT(w, "\\\\");
+            i++;
         } else {
-            JW_LIT(w, "\xef\xbf\xbd");
+            jw_raw(w, s + i, k);
+            i += k;
         }
     }
 }
@@ -426,7 +432,7 @@ static bool pkg_has_event(const struct state *s, enum pkg_db db, const char *pkg
 
 static const char *entry_flag_names(const struct belay_entry *e, const char **out, size_t *n) {
     if (e == NULL) return NULL;
-    if (e->unverified && e->type == BELAY_T_REG && !e->unstable && !e->unreadable && !e->is_mount) out[(*n)++] = "unverified";
+    if (e->unverified) out[(*n)++] = "unverified";        /* every flag set: "the entry's flags" */
     if (e->unstable) out[(*n)++] = "unstable";
     if (e->unreadable) out[(*n)++] = "unreadable";
     if (e->raced) out[(*n)++] = "raced";
@@ -786,7 +792,8 @@ static int signals(struct state *s, const char *p, size_t n, const struct belay_
         fstr(c, f, "outcome", o);
         fpath(c, f, p, n);
     }
-    if (tests_weakened(s, p, n, b, a, prov) == -1) return -1;
+    /* a side never looked at (not_captured, E11) is not held, nor absent */
+    if (!(prov && has_str(jget(&d->v, "unknown"), "not_captured")) && tests_weakened(s, p, n, b, a, prov) == -1) return -1;
     if (ci_path(p, n)) {
         struct flag *f = add(c, PK_EDITS_CI_CONFIG, prov);
         fs(c, f, "path", p, n);
@@ -1076,11 +1083,9 @@ int policy_run(const struct policy_in *in, FILE *out, struct policy_stats *st) {
         const struct belay_entry *a = ha == 1 && pathcmp(ea.path, ea.path_len, key, kl) == 0 ? &ea : NULL;
         if (have_d && pathcmp(d.path, d.path_len, key, kl) < 0) { corrupt("a record out of the manifests' order"); goto out; }
         const struct rec *dr = have_d && pathcmp(d.path, d.path_len, key, kl) == 0 ? &d : NULL;
-        if (!(kl == 1 && key[0] == '.')) {      /* the scope root: nothing to protect or mean */
-            protected(&s, key, kl, b, a, dr);
-            packages(&s, key, kl, a, dr);
-            if (signals(&s, key, kl, b, a, dr) == -1) goto out;
-        }
+        protected(&s, key, kl, b, a, dr);       /* the scope root too: privilege on any file */
+        packages(&s, key, kl, a, dr);
+        if (signals(&s, key, kl, b, a, dr) == -1) goto out;
         if (c.oom) { nomem(); goto out; }
         if (dr != NULL) have_d = false;
         if (b != NULL) hb = belay_manifest_next(rb, &eb);

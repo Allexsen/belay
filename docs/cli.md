@@ -135,7 +135,9 @@ history rewritten, new executables on PATH, privilege changes). diff.v1 and the 
 unchanged: judgement is apart from description.
 
 The bundle is read only when its bytes hash to `--baseline-sha256` (exit 3 otherwise, or without
-it), and only for the scope it describes. `--protect` must be the spec the bundle was exported
+it), and only for the scope it describes. verify's capture leaves out what the bundle's did --
+its manifest's excludes, never the scope's configured ones, which are state a policy could have
+changed -- so both sides walked the same paths. `--protect` must be the spec the bundle was exported
 with, or none when it had none (exit 3). Installed files are judged against the bundle, never
 against the databases as the episode left them. With `--exit-code`, verify exits 1 when any
 record is a violation; signals never fail a run.
