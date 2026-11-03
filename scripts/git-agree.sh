@@ -88,4 +88,38 @@ G rev-parse -q --verify main >/dev/null && [ "$(G symbolic-ref HEAD)" = refs/hea
 has "$R.diff" '"event":"git_commits_added","interp":"git","repo":".git","branch":"main","count":1' "a loose ref without its newline not read"
 hasnt "$R.diff" 'could_not_interpret' "a loose ref or HEAD without its newline refused"
 
+# ---- loose refs and HEAD with trailing bytes git ignores (decision 202) ----
+for t in spaces cr word; do
+    eval "loose_$t() {
+        G commit -q --allow-empty -m three
+        id=\$(G rev-parse main)
+        case $t in spaces) printf '%s   \\n' \"\$id\" ;; cr) printf '%s\\r\\n' \"\$id\" ;; word) printf '%s junk\\n' \"\$id\" ;; esac > \"\$R/.git/refs/heads/main\"
+        printf 'ref:  refs/heads/main  \\n' > \"\$R/.git/HEAD\"
+    }"
+    run loose-$t loose_$t
+    [ "$(G rev-parse -q --verify main)" = "$(G rev-parse -q --verify HEAD)" ] && [ "$(G symbolic-ref HEAD)" = refs/heads/main ] \
+        || fail "git does not read a loose ref with trailing $t, or HEAD with spaces: the pin no longer holds"
+    has "$R.diff" '"event":"git_commits_added","interp":"git","repo":".git","branch":"main","count":1' "a loose ref with trailing $t not read as git reads it"
+    hasnt "$R.diff" 'could_not_interpret' "a loose ref with trailing $t refused"
+done
+# a word glued to the id: git calls the ref broken, belay cannot parse it
+loose_glued() { G commit -q --allow-empty -m three; printf '%sjunk\n' "$(G rev-parse main)" > "$R/.git/refs/heads/main"; }
+run loose-glued loose_glued
+if G rev-parse -q --verify refs/heads/main >/dev/null 2>&1; then fail "git reads a ref with a word glued to its id: the pin no longer holds"; fi
+has "$R.diff" '{"event":"could_not_interpret","interp":"git","text":"could not interpret","paths":[".git/refs/heads/main"]}' \
+    "a ref git calls broken not said could_not_interpret"
+
+# ---- reflog lines git skips: skipped, the rest read, counted (decision 202) ----
+garbage_then_third() {
+    L=$R/.git/logs/refs/heads/main
+    printf 'not a reflog entry\n   \n' >> "$L"
+    sed -n 1p "$L" | sed 's/> [0-9]* /> 0 /' >> "$L"        # a zero time: git skips it
+    G commit -q --allow-empty -m three
+}
+run reflog-garbage garbage_then_third
+[ "$(G reflog show main | wc -l | tr -d " ")" = 3 ] || fail "git does not skip the lines it cannot read: the pin no longer holds"
+has "$R.diff" '"event":"git_commits_added","interp":"git","repo":".git","branch":"main","count":1' "the entry after skipped lines not read"
+hasnt "$R.diff" 'could_not_interpret' "lines git skips refused"
+has "$R.diff" '"kind":"git_reflog_lines_ignored","ref":"refs/heads/main","lines":3' "the lines git skips not counted"
+
 echo "git-agree: belay reads the reflog, packed-refs, loose refs and HEAD as $(git --version | cut -d' ' -f3) does: ok"

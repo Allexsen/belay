@@ -165,26 +165,33 @@ static int keep_log(const struct git_reflog_entry *e, void *c) {
     return 0;
 }
 
+/* The parsers lowercase ids in place: each case gets its own copy. */
+static char g_buf[4096];
+static char *mut(const char *s) {
+    snprintf(g_buf, sizeof g_buf, "%s", s);
+    return g_buf;
+}
+
 TEST(git_ref_files_packed_refs_and_reflogs_parse) {
     bool sym;
     const char *v;
     size_t vl;
-    ASSERT_EQ_INT(0, git_ref_value("ref: refs/heads/main\n", 21, &sym, &v, &vl));
+    ASSERT_EQ_INT(0, git_ref_value(mut("ref: refs/heads/main\n"), 21, &sym, &v, &vl));
     ASSERT_TRUE(sym && vl == 15 && memcmp(v, "refs/heads/main", 15) == 0);
-    ASSERT_EQ_INT(0, git_ref_value(O1 "\n", 41, &sym, &v, &vl));
+    ASSERT_EQ_INT(0, git_ref_value(mut(O1 "\n"), 41, &sym, &v, &vl));
     ASSERT_TRUE(!sym && vl == 40);
-    ASSERT_EQ_INT(-1, git_ref_value("not a ref\n", 10, &sym, &v, &vl));
+    ASSERT_EQ_INT(-1, git_ref_value(mut("not a ref\n"), 10, &sym, &v, &vl));
     belay_err_clear();
     /* an object id is 40 or 64 lowercase hex digits, nothing else */
     ASSERT_TRUE(git_oid(O1, 40) && git_oid(O1 O1 "012345678901234567890123", 64));
     ASSERT_FALSE(git_oid(O1, 39) || git_oid(O1 "0", 41) || git_oid(O1 O1, 80));
     ASSERT_FALSE(git_oid("0123456789ABCDEF0123456789abcdef01234567", 40));
-    ASSERT_EQ_INT(-1, git_ref_value("0123456789abcdef0123456789abcdef0123456\n", 40, &sym, &v, &vl));
+    ASSERT_EQ_INT(-1, git_ref_value(mut("0123456789abcdef0123456789abcdef0123456\n"), 40, &sym, &v, &vl));
     belay_err_clear();
     const char *packed = "# pack-refs with: peeled fully-peeled sorted \n"
                          O1 " refs/heads/main\n" O2 " refs/tags/v1\n^" O1 "\n";
     g_n = 0;
-    ASSERT_EQ_INT(0, git_packed_each(packed, strlen(packed), keep_packed, NULL));
+    ASSERT_EQ_INT(0, git_packed_each(mut(packed), strlen(packed), keep_packed, NULL));
     ASSERT_EQ_INT(2, g_n);
     ASSERT_TRUE(strcmp(g_seen[1], "refs/tags/v1=" O2) == 0);
     const char *log =
@@ -193,20 +200,94 @@ TEST(git_ref_files_packed_refs_and_reflogs_parse) {
         O1 " " O2 " A U Thor <a@example.com> 1761000200 +0400\trebase (finish): returning\n"
         O2 " " O1 " A U Thor <a@example.com> 1761000300 +0400\tno colon here\n";
     g_n = 0;
-    ASSERT_EQ_INT(0, git_reflog_each(log, strlen(log), keep_log, NULL));
+    size_t ign = 9;
+    ASSERT_EQ_INT(0, git_reflog_each(mut(log), strlen(log), keep_log, NULL, &ign));
     ASSERT_EQ_INT(4, g_n);
+    ASSERT_EQ_INT(0, (int)ign);
     ASSERT_TRUE(strcmp(g_seen[0], "01>89:commit (amend)") == 0);
     ASSERT_TRUE(strcmp(g_seen[1], "89>01:reset") == 0);
     ASSERT_TRUE(strcmp(g_seen[2], "01>89:rebase (finish)") == 0);
     ASSERT_TRUE(strcmp(g_seen[3], "89>01:no colon here") == 0);
-    static const char *const bad[] = {
-        O1 " " O2 " no tab\n", "short " O2 " x\tm\n", O1 O2 " x\tm\n",
+}
+
+/* Refs as git 2.43.0 reads them (decision 202): each case below was probed
+ * with `git rev-parse --verify` and `git symbolic-ref` first. */
+TEST(refs_are_read_as_git_reads_them) {
+    static const char *const read[] = {
+        O1 "   \n", O1 "\r\n", O1 " junk\n", O1 "\tx\n", O1 "\n" O2 "\n", O1,
+        "0123456789ABCDEF0123456789ABCDEF01234567\n", "0123456789ABCDEF0123456789ABCDEF01234567 x\n",
     };
-    for (size_t i = 0; i < sizeof bad / sizeof bad[0]; i++) {
-        if (git_reflog_each(bad[i], strlen(bad[i]), keep_log, NULL) != -1) BELAY_FAIL("accepted: %s", bad[i]);
+    for (size_t i = 0; i < sizeof read / sizeof read[0]; i++) {
+        bool sym = true;
+        const char *v;
+        size_t vl;
+        if (git_ref_value(mut(read[i]), strlen(read[i]), &sym, &v, &vl) != 0 || sym || !git_oid(v, vl))
+            BELAY_FAIL("not read as git reads it: %s", read[i]);
+    }
+    static const char *const broken[] = { O1 "junk\n", " " O1 "\n", "0123456789abcdef0123456789abcdef0123456\n",
+                                          "REF: refs/heads/main\n", "ref: refs/heads/main junk\n", "ref:\n" };
+    for (size_t i = 0; i < sizeof broken / sizeof broken[0]; i++) {
+        bool sym;
+        const char *v;
+        size_t vl;
+        if (git_ref_value(mut(broken[i]), strlen(broken[i]), &sym, &v, &vl) != -1)
+            BELAY_FAIL("read a ref git calls broken: %s", broken[i]);
         belay_err_clear();
     }
+    static const char *const symbolic[] = { "ref: refs/heads/main   \n", "ref: refs/heads/main\r\n",
+                                            "ref:  refs/heads/main\n", "ref:refs/heads/main\n", "ref:\trefs/heads/main\n" };
+    for (size_t i = 0; i < sizeof symbolic / sizeof symbolic[0]; i++) {
+        bool sym = false;
+        const char *v;
+        size_t vl;
+        if (git_ref_value(mut(symbolic[i]), strlen(symbolic[i]), &sym, &v, &vl) != 0 || !sym || vl != 15 ||
+            memcmp(v, "refs/heads/main", 15) != 0)
+            BELAY_FAIL("not read as git reads it: %s", symbolic[i]);
+    }
+    /* uppercase in packed-refs too, lowercased */
+    const char *pk = "0123456789ABCDEF0123456789ABCDEF01234567 refs/heads/main\n";
+    g_n = 0;
+    ASSERT_EQ_INT(0, git_packed_each(mut(pk), strlen(pk), keep_packed, NULL));
+    ASSERT_TRUE(g_n == 1 && strcmp(g_seen[0], "refs/heads/main=" O1) == 0);
 }
+
+/* Reflog lines as git 2.43.0 reads them (decision 202): each probed with
+ * `git reflog show` between two good entries. */
+#define ID O1 " " O2 " "
+TEST(reflog_lines_git_skips_are_skipped_and_counted) {
+    static const char *const entry[] = {
+        ID "a <a@b> 1700000000 +0000\tcommit: x", ID "a <a@b> 1700000000 +0000", ID "a <a@b> 1700000000 +0000 x",
+        ID "a <a@b> 1700000000 +0000x\tx", ID "a a@b> 1700000000 +0000\tx", ID "<> 1700000000 +0000\tx",
+        ID "a <a@b>  1700000000 +0000\tx", ID "a <a@b> +1700000000 +0000\tx", ID "a <a@b> -5 +0000\tx",
+        ID "a <a@b> 99999999999999999999999999999999999999 +0000\tx", ID "a <a@b> 1700000000 +0000\tx\r",
+        "0123456789ABCDEF0123456789ABCDEF01234567 " O2 " a <a@b> 1700000000 +0000\tx",
+    };
+    static const char *const skipped[] = {
+        "", "   ", "this is not a reflog entry", "123456789abcdef0123456789abcdef01234567 " O2 " a <a@b> 1 +0000\tx",
+        ID "a <a@b> notatime +0000\tx", O1 " " O2 " 1700000000 +0000\tx", "a\001b", ID "a <a@b> 0 +0000\tx",
+        ID "a <a@b> 1700000000 +00\tx", ID "a <a@b> 1700000000 0000\tx", O1 "  " O2 " a <a@b> 1700000000 +0000\tx",
+        " " ID "a <a@b> 1700000000 +0000\tx", ID "a> <a@b> 1700000000 +0000\tx", ID "a <a@b>\t1700000000 +0000\tx",
+    };
+    char log[4096];
+    for (int want = 1; want >= 0; want--) {
+        const char *const *set = want ? entry : skipped;
+        const size_t n = want ? sizeof entry / sizeof entry[0] : sizeof skipped / sizeof skipped[0];
+        for (size_t i = 0; i < n; i++) {
+            const int w = snprintf(log, sizeof log, "%s%s\n%s", ID "a <a@b> 1 +0000\tc\n", set[i], ID "a <a@b> 2 +0000\td\n");
+            size_t ign = 99;
+            g_n = 0;
+            if (git_reflog_each(log, (size_t)w, keep_log, NULL, &ign) != 0) BELAY_FAIL("refused: %s", set[i]);
+            if (g_n != 2 + want || ign != (size_t)!want) BELAY_FAIL("%s: %d entries, %zu ignored", set[i], g_n, ign);
+        }
+    }
+    /* a last line without its newline: neither an entry nor counted (decision 183) */
+    const int w = snprintf(log, sizeof log, "%s%s", ID "a <a@b> 1 +0000\tc\n", "garbage, cut");
+    size_t ign = 99;
+    g_n = 0;
+    ASSERT_EQ_INT(0, git_reflog_each(log, (size_t)w, keep_log, NULL, &ign));
+    ASSERT_TRUE(g_n == 1 && ign == 0);
+}
+#undef ID
 
 /* ---- line counts, against an independent O(NM) dynamic program ---- */
 
@@ -282,6 +363,8 @@ int main(void) {
     RUN(a_pip_record_gives_each_row);
     RUN(a_malformed_pip_record_is_an_error);
     RUN(git_ref_files_packed_refs_and_reflogs_parse);
+    RUN(refs_are_read_as_git_reads_them);
+    RUN(reflog_lines_git_skips_are_skipped_and_counted);
     RUN(line_counts_match_the_longest_common_subsequence);
     RUN(a_rewrite_past_the_bound_is_not_counted);
     return belay_test_report();

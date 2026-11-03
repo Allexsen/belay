@@ -384,6 +384,45 @@ TEST(git_reflog_entries_appended_and_the_moves_that_are_not_commits) {
     r_free(&r);
 }
 
+/* Decision 202: the lines git skips are skipped -- the entries around them
+ * read, the rename told -- and their count is said. */
+TEST(git_reflog_lines_git_skips_are_counted_and_the_rest_read) {
+    struct run r;
+    r_begin(&r, BELAY_INTERP_GIT, true);
+    const char *first = "0000000000000000000000000000000000000000 " OA WHO "commit (initial): start\n";
+    char after[1024];
+    snprintf(after, sizeof after, "%s" "not a reflog line at all\n" "   \n" OA " " OB WHO "reset: moving to x\n"
+             OB " " OA " A U Thor <author@example.com> 0 +0000\tcommit: a zero time\n", first);
+    const struct belay_entry b = file(put(first), 0), a = file(put(after), 0);
+    ASSERT_EQ_STR(F1("{\"kind\":\"git_reflog_appended\",\"ref\":\"HEAD\",\"entries\":1,"
+                     "\"text\":\"HEAD: 1 reflog entries\"},"
+                     "{\"kind\":\"git_reflog_move\",\"ref\":\"HEAD\",\"from\":\"" OA "\",\"to\":\"" OB "\","
+                     "\"operation\":\"reset\",\"text\":\"HEAD " OA " -> " OB " by reset\"},"
+                     "{\"kind\":\"git_reflog_lines_ignored\",\"ref\":\"HEAD\",\"lines\":3,"
+                     "\"text\":\"HEAD: 3 lines git ignores\"}"),
+                  r_path(&r, "/s/r/.git/logs/HEAD", &b, &a, "modified"));
+    /* only lines git skips: no entry, so no appended (G20), but the count */
+    const struct belay_entry g = file(put("0000000000000000000000000000000000000000 " OA WHO "commit (initial): start\ngarbage\n"), 0);
+    ASSERT_EQ_STR(F1("{\"kind\":\"git_reflog_lines_ignored\",\"ref\":\"HEAD\",\"lines\":1,"
+                     "\"text\":\"HEAD: 1 lines git ignores\"}"),
+                  r_path(&r, "/s/r/.git/logs/HEAD", &b, &g, "modified"));
+    r_free(&r);
+    /* the rename a garbage line once hid is told: git reads around it */
+    r_begin(&r, BELAY_INTERP_GIT, true);
+    const struct belay_entry ra = file(put(OA "\n"), 0);
+    const struct belay_entry nlog = file(put("0000000000000000000000000000000000000000 " OA WHO "branch: Created from main\n" OA " " OA WHO
+                                             "Branch: renamed refs/heads/feat to refs/heads/done\nnot a reflog line\n"), 0);
+    const struct belay_entry ol = file(put("0000000000000000000000000000000000000000 " OA WHO "branch: Created from main\n"), 0);
+    r_path(&r, "/s/.git/refs/heads/feat", &ra, NULL, "removed");
+    r_path(&r, "/s/.git/logs/refs/heads/feat", &ol, NULL, "removed");
+    r_path(&r, "/s/.git/refs/heads/done", NULL, &ra, "added");
+    r_path(&r, "/s/.git/logs/refs/heads/done", NULL, &nlog, "added");
+    const char *ev = r_end(&r);
+    if (strstr(ev, "\"event\":\"git_branch_renamed\"") == NULL || strstr(ev, "could_not_interpret") != NULL)
+        BELAY_FAIL("the rename around a skipped line: %s", ev);
+    r_free(&r);
+}
+
 TEST(git_reflog_that_is_not_appended_to_is_rewritten) {
     struct run r;
     r_begin(&r, BELAY_INTERP_GIT, true);
@@ -805,9 +844,13 @@ TEST(git_a_reflog_not_parsed_tells_no_rename) {
     struct run r;
     r_begin(&r, BELAY_INTERP_GIT, true);
     const struct belay_entry a = file(put(OA "\n"), 0);
-    char nl[1024];
+    /* an entry whose operation is over belay's bound (GIT_NAME_MAX): the
+     * reflog cannot be parsed (a line git skips no longer does that: E12) */
+    char nl[4096], op[1100];
+    memset(op, 'x', 1025);
+    op[1025] = '\0';
     snprintf(nl, sizeof nl, Z40 " " OA WHO "branch: Created from main\n" OA " " OA WHO
-             "Branch: renamed refs/heads/feat to refs/heads/done\nnot a reflog line at all\n");
+             "Branch: renamed refs/heads/feat to refs/heads/done\n" OA " " OA WHO "%s: y\n", op);
     const struct belay_entry nlog = file(put(nl), 0), ol = file(put(Z40 " " OA WHO "branch: Created from main\n"), 0);
     r_path(&r, "/s/.git/refs/heads/feat", &a, NULL, "removed");
     r_path(&r, "/s/.git/logs/refs/heads/feat", &ol, NULL, "removed");
@@ -1531,6 +1574,7 @@ int main(void) {
     RUN(git_a_reflog_not_parsed_tells_no_rename);
     RUN(git_a_last_reflog_line_without_its_newline_is_no_entry);
     RUN(git_refs_without_their_last_newline_as_git_reads_them);
+    RUN(git_reflog_lines_git_skips_are_counted_and_the_rest_read);
     RUN(git_reflog_that_is_not_appended_to_is_rewritten);
     RUN(git_reflog_without_a_copy_is_content_unavailable);
     RUN(git_ref_that_cannot_be_parsed_could_not_be_interpreted);

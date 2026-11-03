@@ -82,14 +82,20 @@ int LLVMFuzzerTestOneInput(const uint8_t *data, size_t size) {
         g_count = 0; r2 = record_each(b, n, on_row, NULL);
         if (r1 != r2 || first != g_count) abort();
         break;
-    case 2: {
+    case 2: {                               /* the git parsers lowercase ids in place: a copy */
+        static char w[65536];
+        memcpy(w, b, n);
+        g_buf = w;
         g_count = 0;
-        (void)git_packed_each(b, n, on_packed, NULL);
-        (void)git_reflog_each(b, n, on_log, NULL);
+        (void)git_packed_each(w, n, on_packed, NULL);
+        g_count = 0;
+        size_t ignored = 0, lines = 0;
+        for (size_t i = 0; i < n; i++) lines += w[i] == '\n';
+        if (git_reflog_each(w, n, on_log, NULL, &ignored) == 0 && g_count + ignored != lines) abort();
         bool sym;
         const char *v;
         size_t vl;
-        if (git_ref_value(b, n, &sym, &v, &vl) == 0) {
+        if (git_ref_value(w, n, &sym, &v, &vl) == 0) {
             inside(v, vl, GIT_NAME_MAX);
             if (!sym && !git_oid(v, vl)) abort();
         }

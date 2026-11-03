@@ -104,7 +104,7 @@ static int ref_value(const struct sides *s, int k, const char **v, size_t *vl) {
     *vl = 0;
     if (s->buf[k] == NULL) return 0;
     bool sym;
-    return git_ref_value((const char *)s->buf[k], s->len[k], &sym, v, vl);
+    return git_ref_value((char *)s->buf[k], s->len[k], &sym, v, vl);
 }
 
 static enum belay_interp_result ref_file(const struct belay_interp_input *in, enum git_file f,
@@ -188,7 +188,7 @@ static enum belay_interp_result packed(const struct belay_interp_input *in,
     struct prefs p[2] = { { 0 }, { 0 } };
     for (int k = 0; k < 2 && s.ok && r == BELAY_INTERP_FINDINGS; k++)
         if (s.buf[k] != NULL &&
-            git_packed_each((const char *)s.buf[k], s.len[k], pref_add, &p[k]) != 0) {
+            git_packed_each((char *)s.buf[k], s.len[k], pref_add, &p[k]) != 0) {
             belay_err_clear();
             r = BELAY_INTERP_ERROR;
         }
@@ -311,7 +311,7 @@ static enum belay_interp_result reflog(const struct belay_interp_input *in, cons
     read_sides(in, GIT_LOG_MAX, true, out, &s);
     enum belay_interp_result r = s.error ? BELAY_INTERP_ERROR : BELAY_INTERP_FINDINGS;
     if (s.ok && r == BELAY_INTERP_FINDINGS) {
-        const char *a = (const char *)s.buf[1];
+        char *a = (char *)s.buf[1];
         const size_t bl = s.buf[0] ? s.len[0] : 0;
         /* Appended only when before is a prefix of after, ending a line. */
         if (bl > s.len[1] || (bl && memcmp(s.buf[0], a, bl) != 0) || (bl && a[bl - 1] != '\n')) {
@@ -319,13 +319,21 @@ static enum belay_interp_result reflog(const struct belay_interp_input *in, cons
             if (belay_finding(out, FK_GIT_REFLOG_REWRITTEN, v, 1) == -1) r = BELAY_INTERP_ERROR;
         } else {
             struct appended ap = { out, ref, rl, 0, 0 };
-            if (git_reflog_each(a + bl, s.len[1] - bl, count_entries, &ap) != 0) {
+            size_t ignored = 0;
+            if (git_reflog_each(a + bl, s.len[1] - bl, count_entries, &ap, &ignored) != 0) {
                 belay_err_clear();
                 r = BELAY_INTERP_ERROR;
-            } else if (ap.n > 0) {
-                const struct belay_fv v[] = { FV(ref, rl), { .i = ap.n } };
-                if (belay_finding(out, FK_GIT_REFLOG_APPENDED, v, 2) == -1 ||
-                    git_reflog_each(a + bl, s.len[1] - bl, moves, &ap) != 0)
+            } else {
+                if (ap.n > 0) {
+                    const struct belay_fv v[] = { FV(ref, rl), { .i = ap.n } };
+                    if (belay_finding(out, FK_GIT_REFLOG_APPENDED, v, 2) == -1 ||
+                        git_reflog_each(a + bl, s.len[1] - bl, moves, &ap, NULL) != 0)
+                        r = BELAY_INTERP_ERROR;
+                }
+                /* the lines git skips, said (decision 202) */
+                const struct belay_fv v[] = { FV(ref, rl), { .i = ignored } };
+                if (r == BELAY_INTERP_FINDINGS && ignored > 0 &&
+                    belay_finding(out, FK_GIT_REFLOG_LINES_IGNORED, v, 2) == -1)
                     r = BELAY_INTERP_ERROR;
             }
         }
@@ -534,10 +542,10 @@ static int collect(struct git *g, const struct belay_interp_input *in, enum git_
         if (kind == GK_HEAD || kind == GK_LOOSE) {
             const char *v;
             size_t vl;
-            if (git_ref_value((const char *)buf[k], len[k], &x->sym[k], &v, &vl) == -1) side_ok = false;
+            if (git_ref_value((char *)buf[k], len[k], &x->sym[k], &v, &vl) == -1) side_ok = false;
             else rc = keep(g, &x->val[k], v, vl);
         } else if (kind == GK_PACKED) {
-            const int r = git_packed_each((const char *)buf[k], len[k], pk_add, &pc[k]);
+            const int r = git_packed_each((char *)buf[k], len[k], pk_add, &pc[k]);
             if (r > 0) rc = -1;                 /* state over its bound, or memory */
             else if (r != 0) side_ok = false;
         }
@@ -549,12 +557,12 @@ static int collect(struct git *g, const struct belay_interp_input *in, enum git_
         }
     }
     if (rc == 0 && kind == GK_LOG && readable && parsed && x->present[SIDE_AFTER]) {
-        const char *a = (const char *)buf[SIDE_AFTER];
+        char *a = (char *)buf[SIDE_AFTER];
         const size_t bl = buf[SIDE_BEFORE] ? len[SIDE_BEFORE] : 0;
         x->log_ok = !(bl > len[SIDE_AFTER] || (bl && memcmp(buf[SIDE_BEFORE], a, bl) != 0) || (bl && a[bl - 1] != '\n'));
         struct log_ctx lc = { g, x, 0 };
         if (x->log_ok) {
-            const int r = git_reflog_each(a + bl, len[SIDE_AFTER] - bl, log_add, &lc);
+            const int r = git_reflog_each(a + bl, len[SIDE_AFTER] - bl, log_add, &lc, NULL);
             if (r > 0) rc = -1;                 /* state over its bound, or memory */
             else if (r != 0) {
                 parsed = false;
