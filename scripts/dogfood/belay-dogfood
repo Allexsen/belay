@@ -146,14 +146,46 @@ elif [ -d "$B" ] && [ -n "$cp" ]; then
     done
 fi
 
+# A receipt is marked while it is made: <session>.receipt-running.<turn|
+# session>, holding the pid making it (or "starting") and when it began
+# (decision 143). A mark whose process is gone was never finished -- a
+# hook's timeout killed it, say -- and is said at the next Stop, by any
+# session's hook, once; one still "starting" after a minute likewise.
+now=$(date +%s%N)
+for m in "$D"/*.receipt-running.*; do
+    [ -f "$m" ] || continue
+    read -r pid began _ < "$m" 2>/dev/null || continue
+    if [ "$pid" = starting ]; then
+        [ $(( (now - began) / 1000000000 )) -lt 60 ] && continue
+    elif kill -0 "$pid" 2>/dev/null; then
+        continue
+    fi
+    rm -f "$m" || continue
+    who=${m##*/}
+    fail "the ${who##*.} receipt of session ${who%%.receipt-running.*} was lost: begun $(date -u -d "@$((began / 1000000000))" +%H:%M:%S 2>/dev/null) UTC and never finished (the hook's timeout?)"
+done
+
 case $ev in
 stop)
+    M=$D/$sid.receipt-running.turn
+    printf '%s %s turn\n' "$$" "$now" > "$M"
     line=$(python3 -I "$HERE/receipt.py" turn "$LOG" "$BELAY" "$SCOPE" "$D" 2>>"$D/$sid.err") \
         || fail "the turn's receipt failed (see $D/$sid.err)"
+    rm -f "$M"
     say "$line" ;;
 end)
-    python3 -I "$HERE/receipt.py" session "$LOG" "$BELAY" "$SCOPE" "$D" \
-        "${BELAY_DOGFOOD_NOTES:-$SCOPE/NOTES/dogfood}" 2>>"$D/$sid.err" >/dev/null \
-        || fail "the session's receipt failed (see $D/$sid.err)" ;;
+    # Detached, so the hook's timeout (10 s) cannot kill a long session's
+    # receipt: the hook returns at once, the job clears its mark when done.
+    M=$D/$sid.receipt-running.session
+    printf 'starting %s session\n' "$now" > "$M"
+    detach=; command -v setsid >/dev/null 2>&1 && detach=setsid
+    $detach sh -c '
+        printf "%s %s session\n" "$$" "$(date +%s%N)" > "$1"
+        if ! python3 -I "$2/receipt.py" session "$3" "$4" "$5" "$6" "$7" 2>>"$6/$8.err" >/dev/null; then
+            printf "%s\tend: the session'"'"'s receipt failed (see %s)\n" "$(date +%s%N)" "$6/$8.err" >> "$6/failing"
+        fi
+        rm -f "$1"' sh "$M" "$HERE" "$LOG" "$BELAY" "$SCOPE" "$D" \
+        "${BELAY_DOGFOOD_NOTES:-$SCOPE/NOTES/dogfood}" "$sid" </dev/null >/dev/null 2>&1 &
+    ;;
 esac
 exit 0
