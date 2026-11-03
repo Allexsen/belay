@@ -17,7 +17,7 @@ jobs:
           echo "--- inspect Id / Image: $(docker inspect -f '{{.Id}} {{.Image}}' $C)"
           P=$(docker inspect -f '{{.State.Pid}}' $C)
           U=$(sudo awk '$5 == "/"' /proc/$P/mountinfo | grep -o 'upperdir=[^,]*' | cut -d= -f2)
-          docker exec $C sh -c 'echo a > /etc/imm; chattr +i /etc/imm; echo b > /etc/app; chattr +a /etc/app; lsattr /etc/imm /etc/app; chattr +i /etc/hostname 2>&1; chattr +i /etc/os-release; lsattr /etc/os-release' 2>&1
+          docker exec $C sh -c 'echo a > /etc/imm; chattr +i /etc/imm; echo b > /etc/app; chattr +a /etc/app; lsattr /etc/imm /etc/app; chattr +i /etc/os-release; lsattr /etc/os-release' 2>&1
           echo "--- in the upper layer: flags and xattrs of the files made immutable / append-only inside"
           for f in etc/imm etc/app etc/os-release; do sudo lsattr -d "$U/$f" 2>&1 | sed "s|$U/||"; sudo getfattr -d -m - --absolute-names "$U/$f" 2>&1 | sed "s|$U/||"; done
           docker pause $C
@@ -30,7 +30,7 @@ jobs:
           docker stop -t 0 $C >/dev/null
           echo "--- stopped: State $(docker inspect -f 'Status={{.State.Status}} Paused={{.State.Paused}} Running={{.State.Running}} Pid={{.State.Pid}}' $C)"
           echo "--- stopped: GraphDriver $(docker inspect -f '{{json .GraphDriver}}' $C | cut -c1-200)"
-          docker rm $C >/dev/null
+          docker rm $C >/dev/null || true
           echo "=== trusted.overlay.* through a merged view (a mount made by root, like Docker's)"
           D=$(mktemp -d) && cd $D && mkdir l u w m && mkdir l/d && echo x > l/d/f && echo y > l/g
           sudo mount -t overlay overlay -o lowerdir=l,upperdir=u,workdir=w m
