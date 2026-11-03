@@ -171,20 +171,24 @@ copy"):
      "says nothing when there are none". And an operation over 1,024 bytes
      is read: its `git_reflog_move` is `invalid_finding` (E9's class, the
      prose's string bound);
-  G25 an object id of either case is its lower-case spelling, in every
-     value it gives (a ref's, HEAD's, a reflog entry's): "read as git
-     reads it", and git reads it as the object it names, which git
-     2.43.0 prints in lower case; so two spellings of one id are one value;
-  G26 a loose ref's `ref:` value is its name, as HEAD's, and is that
-     ref's value wherever a value is used -- E12 reads "A loose ref's or
-     `HEAD`'s value" alike but says nothing of what a symbolic branch's
-     value means for its events; `ref:` with no name is a broken ref. The
-     corpus writes neither;
+  G25 and G26 are settled by E12 and diff-v1 (decision 213): "An id read
+     in either case is written lowercased, as git prints it" -- as this
+     file read it; and "A branch whose loose ref is symbolic (`ref:
+     refs/heads/<other>`) on a side is an alias of its target there, as git
+     lists it (`alias -> main`), not a branch of its own: it derives no
+     event, its path finding stands, and the target's events are the
+     target's own" (repo_events()). Its value in its path finding is its
+     target's name, as before;
   G27 a reflog entry with no tab after its zone has as its message what
      follows the zone ("the message after one tab when there is one"):
      git 2.43.0 does so (`git log -g --format=%gs`: `+0000xyz: q` gives
      `xyz: q`); the corpus writes only such an entry with nothing after
-     its zone, an empty message, which both readings give.
+     its zone, an empty message, which both readings give;
+  G28 any `ref:` value of a loose branch makes it an alias, whatever it
+     names (diff-v1: "a loose branch that is symbolic is an alias of its
+     target"), not only `refs/heads/<other>` (E12's parenthesis); and on a
+     side means either side, the other whatever it is -- absent, a branch,
+     an alias, unread. The corpus writes only `refs/heads/` targets.
 
 Deliberately naive: both manifests in memory as dictionaries, the union of
 their paths sorted, ancestors found by walking a path's prefixes.
@@ -1323,6 +1327,13 @@ def load_event_rules():
                 'follows ignored -- a value git calls a broken ref is one git cannot parse (E10).',
                 'A last line without its newline is read, as git reads it; a `packed-refs` that '
                 'ends without a newline is one git refuses, so a side git cannot parse (E10).',
+                # Decision 213: G25 and G26 (parse_ref_value(), repo_events()).
+                'An id read in either case is written lowercased, as git prints it (decision '
+                '213).',
+                'A branch whose loose ref is symbolic (`ref: refs/heads/<other>`) on a side is an '
+                'alias of its target there, as git lists it (`alias -> main`), not a branch of '
+                'its own: it derives no event, its path finding stands, and the target\'s events '
+                'are the target\'s own (decision 213).',
                 'A branch removed whose value before cannot be told derives no event '
                 '(`git_branch_deleted` needs `was`), and `HEAD` that cannot be read on a side '
                 'derives none.',
@@ -1505,8 +1516,10 @@ def _check_claims():
               # G17, decision 183 (parse_git()).
               '`HEAD` and a loose ref are read as git reads them: without their last newline, '
               'and an object id of either case followed by whitespace and anything at all is '
-              'that id (decision 202); a `packed-refs` that ends without a newline is refused, '
-              'as git refuses it: `could_not_interpret` (decision 183).',
+              'that id, written lowercased (decisions 202, 213); a loose branch that is '
+              'symbolic is an alias of its target, as git lists it, and derives no branch event '
+              'of its own (decision 213); a `packed-refs` that ends without a newline is '
+              'refused, as git refuses it: `could_not_interpret` (decision 183).',
               "A reflog (`logs/HEAD` is ref `HEAD`, `logs/refs/...` is `refs/...`): when "
               "before's bytes are a prefix of after's ending at a line's end (an absent before "
               'is empty), `git_reflog_appended` counts the entries after it (a last line '
@@ -2713,6 +2726,19 @@ def repo_events(repo, R, unk, trace):
                 names |= {n[len(b'refs/heads/'):] for n in v if n.startswith(b'refs/heads/')}
     ev = {}
     for br in sorted(names):
+        # G26, decision 213: "A branch whose loose ref is symbolic (`ref:
+        # refs/heads/<other>`) on a side is an alias of its target there
+        # ..., not a branch of its own: it derives no event, its path
+        # finding stands, and the target's events are the target's own."
+        # On either side, whatever the other (G28: any `ref:` value).
+        L = R['loose'].get(br)
+        sym = {s: L is not None and isinstance(L[s], bytes) for s in SIDES}
+        if sym['before'] or sym['after']:
+            other = lambda s: 'absent' if L[s] is ABSENT else 'an alias' if sym[s] \
+                else 'a branch'
+            trace.append('git-ev:alias, no event: %s before, %s after'
+                         % (other('before'), other('after')))
+            continue
         vb, pb, how_b = side_value(R, br, 'before')
         va, pa, how_a = side_value(R, br, 'after')
         paths = pb + pa
