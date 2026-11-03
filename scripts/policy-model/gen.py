@@ -12,7 +12,9 @@ A scenario is a dict:
   episode    ops applied after the export
   verify     options: exit_code (default True), spec ("same", None, dict or bytes), digest
              ("right", "wrong", "missing"), to (None, "check", "trusted"), excludes_add,
-             corrupt (None, "trailing", "unknown-key", "short"), tmpdir ("inside": verify's
+             corrupt (None, "trailing", "unknown-key", "short"), manifest ("v2": the bundle's
+             manifest rewritten as an earlier release wrote it; "container": with a host
+             reader's source), tmpdir ("inside": verify's
              $TMPDIR, where it makes its own state directory, is the scope's `tmp`)
   refusal    the refusal label it exercises (coverage), if any
   workdir    "disk": built on the disk's temporary directory (ext4 here) rather than PM_WORKDIR,
@@ -589,6 +591,9 @@ def scenarios():
                                     ("append", ".git/logs/refs/heads/main",
                                      reflog([(C[1], C[3], "commit: third"), (C[3], C[2], "commit (amend): third, amended")]))],
           tags=["P17"]))
+    add(S("git-history-unterminated", G, [("write", ".git/refs/heads/main", (C[0] + "\n").encode()),
+                                           ("append", ".git/logs/refs/heads/main",
+                                            reflog([(C[1], C[0], "reset: moving to HEAD~1")])[:-1])]))
     add(S("git-commits-added", G, [("write", ".git/refs/heads/main", (C[2] + "\n").encode()),
                                     ("append", ".git/logs/refs/heads/main", reflog([(C[1], C[2], "commit: third")]))]))
     add(S("git-reflog-rewritten", G, [("write", ".git/logs/refs/heads/main",
@@ -812,6 +817,14 @@ def scenarios():
           tags=["P13", "P32"]))
     add(S("verify-own-state-dir-covered", BASE + [("dir", "tmp")], [], spec_of(rule("tmp/**", "no_write")),
           verify={"tmpdir": "inside"}, refusal="verify:state-dir-covers"))
+    add(S("verify-v2-bundle", BASE, [("write", "tests/test_api.py", TEST_API.replace(b"        assert True\n", b""))], TW,
+          verify={"manifest": "v2"}, tags=["P39"]))
+    add(S("verify-v2-bundle-packages", BASE + FOO, [("write", SITE + "/foo/core.py", b"x = 1\n")], spec_of(frozen=True),
+          verify={"manifest": "v2"}, tags=["P39"]))
+    add(S("verify-container-source", BASE, [], TW, verify={"manifest": "container"}, tags=["P39"],
+          refusal="verify:source-differs"))
+    add(S("verify-container-source-nospec", BASE, [("write", "README.md", b"x\n")], None, verify={"manifest": "container"},
+          tags=["P39"], refusal="verify:source-differs-nospec"))
     for c in ("trailing", "unknown-key", "short"):
         add(S("verify-corrupt-" + c, BASE, [], TW, verify={"corrupt": c}, refusal="verify:corrupt-" + c))
     names = [s["name"] for s in out]
