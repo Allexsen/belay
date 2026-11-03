@@ -342,6 +342,19 @@ def touched(r):
             and not hook_path(path_of(r)))
 
 
+def replaced(r):
+    """Replaced with identical content (decision 177) -- a branch switch's
+    rewrite: a new inode, and nothing else but the mtime -- content, mode,
+    owner, caps, xattrs and inode flags all equal; a directory, its inode
+    alone. A hook never."""
+    if "event" in r or r["outcome"] != "metadata_only" or hook_path(path_of(r)):
+        return False
+    changed = set(r.get("changed") or [])
+    if "ino" not in changed:
+        return False
+    return changed == {"ino"} if r.get("type") == "dir" else changed <= {"ino", "mtime_ns"}
+
+
 def listed(items, total=None):
     """Up to LISTED items, then how many more: a summary never drops one
     silently."""
@@ -527,8 +540,9 @@ def render(scope, belay, secs, errors):
             shown.append(r)
         roots, under = folded_dirs(shown)
         same = [r for r in shown if touched(r) and id(r) not in under and id(r) not in roots]
+        repl = [r for r in shown if replaced(r) and id(r) not in under and id(r) not in roots]
         for r in shown:
-            if id(r) in under or r in same:
+            if id(r) in under or r in same or r in repl:
                 continue
             if id(r) in roots and roots[id(r)]:
                 k = roots[id(r)]
@@ -539,6 +553,10 @@ def render(scope, belay, secs, errors):
         if same:
             touches.append([path_of(r) for r in same])
             lines.append(f"  ~ {len(same):,} file{'s' if len(same) != 1 else ''} touched, content unchanged   "
+                         f"[t{len(touches)}]")
+        if repl:
+            touches.append([path_of(r) for r in repl])
+            lines.append(f"  ~ {len(repl):,} entr{'ies' if len(repl) != 1 else 'y'} replaced with identical content   "
                          f"[t{len(touches)}]")
         if build:
             lines.append(f"  build output: {len(build)} change{'s' if len(build) != 1 else ''} under build/, bin/")
@@ -558,7 +576,7 @@ def render(scope, belay, secs, errors):
                 lines.append(f"      \u2026 {more:,} more line{'s' if more != 1 else ''}")
     if touches:
         lines.append("")
-        lines.append("the files touched, content unchanged")
+        lines.append("the paths with content unchanged")
         for k, ps in enumerate(touches, 1):
             lines.append(f"  [t{k}] " + printable(ps[0]))
             lines.extend("       " + printable(p) for p in ps[1:])
