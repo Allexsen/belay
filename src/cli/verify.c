@@ -124,7 +124,7 @@ static void export_out(FILE *out, bool json, const char *path, const char *sha, 
 
 int cmd_baseline(int argc, char **argv, FILE *out, FILE *err) {
     if (argc < 3 || strcmp(argv[2], "export") != 0) return cli_usage(err, "baseline needs a subcommand: export");
-    const char *scope = NULL, *outp = NULL, *protect = NULL;
+    const char *scope = NULL, *outp = NULL, *protect = NULL, *docker = NULL;
     bool json = false;
     for (int i = 3; i < argc; i++) {
         const char *a = argv[i];
@@ -134,6 +134,7 @@ int cmd_baseline(int argc, char **argv, FILE *out, FILE *err) {
             continue;
         }
         if (!strcmp(a, "--scope")) val = &scope;
+        else if (!strcmp(a, "--docker")) val = &docker;
         else if (!strcmp(a, "--out")) val = &outp;
         else if (!strcmp(a, "--protect")) val = &protect;
         else {
@@ -160,12 +161,12 @@ int cmd_baseline(int argc, char **argv, FILE *out, FILE *err) {
     int rc = protect != NULL ? load_spec(protect, &spec, err) : 0;
     if (rc) return rc;
     struct state st;
-    if ((rc = cli_open_scope(scope, true, &st, err)) != 0) {
+    if ((rc = cli_open_scope(scope, docker, true, &st, err)) != 0) {
         protect_free(&spec);
         return rc;
     }
     struct pkg_list pk = { 0 };
-    const int in = inside_scope(outp, st.scope.path);
+    const int in = docker != NULL ? 0 : inside_scope(outp, st.scope.path);   /* a container's scope is not the host's */
     if (in != 0) {
         if (in == 1) belay_err_set(BELAY_ERR_INVALID, 0, "--out %s is inside the scope: the bundle must leave it", outp);
         rc = cli_failed(err);
@@ -238,7 +239,8 @@ static int checkpoint_after(const struct scope *sc, long id, const struct protec
     const char *saved = state_root_override;
     state_root_override = NULL;
     struct state own;
-    int rc = cli_open_scope(sc->path, false, &own, err);
+    int rc = sc->docker[0] != '\0' ? (state_open(sc, false, &own, err) == -1 ? cli_failed(err) : 0)
+                                    : cli_open_scope(sc->path, NULL, false, &own, err);
     state_root_override = saved;
     if (rc) return rc;
     if (state_check_manifest(&own, id) == -1) {
@@ -286,7 +288,7 @@ out:
 }
 
 int cmd_verify(int argc, char **argv, FILE *out, FILE *err) {
-    const char *scope = NULL, *baseline = NULL, *sha = NULL, *protect = NULL, *to = NULL;
+    const char *scope = NULL, *baseline = NULL, *sha = NULL, *protect = NULL, *to = NULL, *docker = NULL;
     bool exit_code = false;
     for (int i = 2; i < argc; i++) {
         const char *a = argv[i];
@@ -296,6 +298,7 @@ int cmd_verify(int argc, char **argv, FILE *out, FILE *err) {
             continue;
         }
         if (!strcmp(a, "--scope")) val = &scope;
+        else if (!strcmp(a, "--docker")) val = &docker;
         else if (!strcmp(a, "--baseline")) val = &baseline;
         else if (!strcmp(a, "--baseline-sha256")) val = &sha;
         else if (!strcmp(a, "--protect")) val = &protect;
@@ -329,7 +332,7 @@ int cmd_verify(int argc, char **argv, FILE *out, FILE *err) {
     int rc = protect != NULL ? load_spec(protect, &spec, err) : 0;
     if (rc) return rc;
     struct scope sc;
-    if (scope_resolve(scope, &sc) == -1) {
+    if ((docker != NULL ? scope_resolve_docker(docker, scope, true, &sc, err) : scope_resolve(scope, &sc)) == -1) {
         protect_free(&spec);
         return cli_failed(err);
     }

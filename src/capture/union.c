@@ -56,6 +56,9 @@ struct union_fs {
     size_t ndir;
     int root;                           /* the merged "/", the union's own */
     char scope[4096];                   /* the scope union_open_scope resolved */
+    ino_t last_ino;                     /* the last file opened, and its layer (in_upper) */
+    dev_t last_dev;
+    int last_layer;
     char refused[512];
 };
 
@@ -197,7 +200,8 @@ static int find(struct union_fs *u, const struct udir *d, const char *name, int 
 /* A directory at `path` (absolute, in the container) within one layer,
  * component by component, no link followed: its fd, or -1 (ENOENT: none
  * there; ENOTDIR: a whiteout or a non-directory on the way). */
-static int layer_dir(struct union_fs *u, int layer, const char *path) {
+static int layer_dir(struct union_fs *u, int layer, const char *path, bool *stop) {
+    *stop = false;
     int fd = u->base->openat(u->base->ctx, u->layer[layer], ".", DIR_FLAGS);
     if (fd == -1) return -1;
     char comp[256];
@@ -215,8 +219,9 @@ static int layer_dir(struct union_fs *u, int layer, const char *path) {
         comp[l] = '\0';
         p += l;
         struct stat st;
-        if (u->base->fstatat(u->base->ctx, fd, comp, &st, AT_SYMLINK_NOFOLLOW) != 0 || !S_ISDIR(st.st_mode)) {
-            const int err = errno == ENOENT ? ENOENT : ENOTDIR;
+        const int sr = u->base->fstatat(u->base->ctx, fd, comp, &st, AT_SYMLINK_NOFOLLOW);
+        if (sr != 0 || !S_ISDIR(st.st_mode)) {
+            const int err = sr != 0 && errno == ENOENT ? ENOENT : ENOTDIR;   /* a whiteout or a file: hidden */
             close(fd);
             errno = err;
             return -1;
@@ -225,8 +230,29 @@ static int layer_dir(struct union_fs *u, int layer, const char *path) {
         close(fd);
         if (nfd == -1) return -1;
         fd = nfd;
+        /* an opaque directory on the way: nothing below this layer (the
+         * union model's U5, as the kernel looks a path up layer by layer) */
+        char v[8];
+        while (*p == '/') p++;
+        if (*p != '\0' && ovl_get(u, fd, "opaque", v, sizeof v) >= 0) *stop = true;
     }
     return fd;
+}
+
+/* A redirect belay follows (the union model's U10): not empty, no NUL; a
+ * relative one a single name; an absolute one components that are neither
+ * empty, `.` nor `..` ("/" alone included). */
+static bool redirect_ok(const char *v, size_t n) {
+    if (n == 0 || memchr(v, '\0', n) != NULL) return false;
+    if (v[0] != '/') return strchr(v, '/') == NULL && strcmp(v, ".") != 0 && strcmp(v, "..") != 0;
+    for (const char *p = v; *p != '\0';) {
+        p++;                                            /* past the '/' */
+        const char *e = strchr(p, '/');
+        const size_t l = e != NULL ? (size_t)(e - p) : strlen(p);
+        if (l == 0 || (l == 1 && p[0] == '.') || (l == 2 && p[0] == '.' && p[1] == '.')) return false;
+        p += l;
+    }
+    return true;
 }
 
 /* H-U3..H-U5: the directories that make up the merged directory `name` of
@@ -242,9 +268,13 @@ static ssize_t stack(struct union_fs *u, const struct udir *d, const char *name,
     const int top = d->c[0].layer;
     for (int L = top; L < (int)u->n; L++) {
         int fd = -1;
+        bool stop = false;
         if (abs) {
-            fd = layer_dir(u, L, look);
-            if (fd == -1 && errno == ENOENT) continue;
+            fd = layer_dir(u, L, look, &stop);
+            if (fd == -1 && errno == ENOENT) {
+                if (stop) break;
+                continue;
+            }
             if (fd == -1 && errno == ENOTDIR) break;          /* hidden from here down */
             if (fd == -1) goto err;
         } else {
@@ -263,6 +293,7 @@ static ssize_t stack(struct union_fs *u, const struct udir *d, const char *name,
         }
         out[n++] = (struct contrib){ L, fd };
         redirected = false;
+        if (stop) break;
         check_dir_xattrs(u, fd, path);
         char v[4096];
         ssize_t vl = ovl_get(u, fd, "opaque", v, sizeof v);
@@ -271,9 +302,9 @@ static ssize_t stack(struct union_fs *u, const struct udir *d, const char *name,
             break;
         }
         vl = ovl_get(u, fd, "redirect", v, sizeof v - 1);
-        if (vl > 0) {
+        if (vl >= 0) {
             v[vl] = '\0';
-            if (memchr(v, '\0', (size_t)vl) != NULL) {
+            if (!redirect_ok(v, (size_t)vl)) {
                 refuse(u, "H-U5: a malformed redirect on %s", path);
                 break;
             }
@@ -330,6 +361,20 @@ static int u_stat_mount(void *ctx, int dfd, const char *name, struct stat *st, b
     int pfd;
     if (find(u, d, name, &pfd, st) != 0) return -1;
     *mount_root = is_mount(u, d->path, name);
+    if (!S_ISDIR(st->st_mode)) {                       /* H-U3, H-U5: those are a directory's alone */
+        struct xsrc x = { .fd = -1, .path = NULL, .own = -1 };
+        if (u->base->xattr_source_open(u->base->ctx, pfd, name, st, &x) == 0) {
+            char v[8];
+            char nm[64];
+            snprintf(nm, sizeof nm, "%sopaque", u->pfx);
+            if (u->base->xattr_get(u->base->ctx, &x, nm, v, sizeof v) >= 0)
+                refuse(u, "H-U3: an opaque xattr on a non-directory, %s/%s", d->path, name);
+            snprintf(nm, sizeof nm, "%sredirect", u->pfx);
+            if (u->base->xattr_get(u->base->ctx, &x, nm, v, sizeof v) >= 0 || errno == ERANGE)
+                refuse(u, "H-U5: a redirect on a non-directory, %s/%s", d->path, name);
+            u->base->xattr_source_close(u->base->ctx, &x);
+        }
+    }
     return 0;
 }
 
@@ -396,7 +441,14 @@ static int u_openat(void *ctx, int dfd, const char *name, int flags) {
     if (find(u, d, name, &pfd, &st) != 0) return -1;
     if (!S_ISDIR(st.st_mode)) {
         const int fd = u->base->openat(u->base->ctx, pfd, name, flags);
-        if (fd >= 0) drop(u, fd);
+        if (fd >= 0) {
+            drop(u, fd);
+            u->last_ino = st.st_ino;
+            u->last_dev = st.st_dev;
+            u->last_layer = -1;
+            for (size_t i = 0; i < d->n; i++)
+                if (d->c[i].fd == pfd) u->last_layer = d->c[i].layer;
+        }
         return fd;
     }
     struct contrib c[UNION_LAYERS_MAX];
@@ -584,14 +636,25 @@ static ssize_t u_xattr_get(void *ctx, const struct xsrc *x, const char *name, vo
     return u->base->xattr_get(u->base->ctx, x, name, buf, n);
 }
 
-/* H-U8: the layer file's flags, with protattr's added. */
+/* Whether the open file `fd` (stat `st`) is the upper layer's: a merged
+ * directory by its topmost layer; a file by the last one opened through the
+ * union, which capture reads right after opening it. */
+static bool in_upper(struct union_fs *u, int fd, const struct stat *st) {
+    const struct udir *d = dir_of(u, fd);
+    if (d != NULL) return d->c[0].layer == 0;
+    return st->st_ino == u->last_ino && st->st_dev == u->last_dev && u->last_layer == 0;
+}
+
+/* H-U8: the layer file's flags, with protattr's added -- from the upper
+ * layer only, where the kernel reads it (the union model's U15, probed). */
 static int u_inode_flags(void *ctx, int fd, const struct stat *st, uint64_t *out) {
     struct union_fs *u = ctx;
     int r = u->base->inode_flags(u->base->ctx, fd, st, out);
-    if (fd < 0) return r;
+    if (fd < 0 || !in_upper(u, fd, st)) return r;
     char v[16];
     const ssize_t vl = ovl_get(u, fd, "protattr", v, sizeof v);
-    if (vl <= 0) return r;
+    if (vl < 0) return r;
+    if (vl == 0) refuse(u, "H-U8: an empty protattr%s", "");
     uint64_t f = r == 0 ? *out : 0;
     for (ssize_t i = 0; i < vl; i++) {
         if (v[i] == 'i') f |= PROT_I;
@@ -679,7 +742,8 @@ struct union_fs *union_new(const struct fsops *base, const int *layer_fds, size_
         for (; u->nmounts < nmounts; u->nmounts++)
             if ((u->mounts[u->nmounts] = strdup(mounts[u->nmounts])) == NULL) goto nomem;
     }
-    /* "/": every layer's root, down to the first opaque one */
+    /* "/": every layer's root -- the kernel ignores `opaque` and `redirect`
+     * on a layer's root (the union model's U8, probed: every root merges) */
     struct contrib c[UNION_LAYERS_MAX];
     size_t k = 0;
     for (size_t i = 0; i < n; i++) {
@@ -691,10 +755,7 @@ struct union_fs *union_new(const struct fsops *base, const int *layer_fds, size_
             return NULL;
         }
         check_dir_xattrs(u, c[k].fd, "/");
-        char v[8];
-        const bool opaque = ovl_get(u, c[k].fd, "opaque", v, sizeof v) >= 0;
         k++;
-        if (opaque) break;
     }
     if (reg(u, c, k, "/", true) != 0) {
         belay_err_set(BELAY_ERR_NOMEM, errno, "union");
@@ -751,6 +812,18 @@ int union_open_scope(struct union_fs *u, const char *path, char *canon, size_t c
         comp[l] = '\0';
         p += l;
         if (strcmp(comp, ".") == 0) continue;
+        if (strcmp(comp, "..") != 0) {                /* a name looked up inside a mount: not the layers' (U18) */
+            const char *here = done[0] != '\0' ? done : "/";
+            for (size_t i = 0; i < u->nmounts; i++) {
+                const size_t ml = strlen(u->mounts[i]);
+                if (strncmp(here, u->mounts[i], ml) == 0 && (here[ml] == '\0' || here[ml] == '/')) {
+                    belay_err_set(BELAY_ERR_INVALID, 0, "--scope %s: the scope's path enters another mount, %s "
+                                  "(host-reader H-C3)", path, u->mounts[i]);
+                    close(cur);
+                    return -1;
+                }
+            }
+        }
         if (strcmp(comp, "..") == 0) {                /* back up; at the root, stay */
             char *sl = strrchr(done, '/');
             if (sl != NULL) *sl = '\0';
@@ -773,14 +846,19 @@ int union_open_scope(struct union_fs *u, const char *path, char *canon, size_t c
         }
         struct stat st;
         if (u_fstatat(u, cur, comp, &st, AT_SYMLINK_NOFOLLOW) != 0) {
-            belay_err_set(BELAY_ERR_INVALID, 0, "--scope %s: %s%s/%s does not exist in the container", path,
+            if (u->refused[0] != '\0') {              /* met on the way: said first */
+                belay_err_set(BELAY_ERR_INVALID, 0, "--scope %s: %s", path, u->refused);
+                close(cur);
+                return -1;
+            }
+            belay_err_set(BELAY_ERR_INVALID, 0, "--scope %s: %s%s/%s does not exist in the container (host-reader H-C3)", path,
                           errno == ENOENT ? "" : "(cannot read) ", done, comp);
             close(cur);
             return -1;
         }
         if (S_ISLNK(st.st_mode)) {
             if (++links > LINKS_MAX) {
-                belay_err_set(BELAY_ERR_INVALID, 0, "--scope %s: more than %d symbolic links", path, LINKS_MAX);
+                belay_err_set(BELAY_ERR_INVALID, 0, "--scope %s: more than %d symbolic links (host-reader H-C3)", path, LINKS_MAX);
                 close(cur);
                 return -1;
             }
@@ -801,7 +879,7 @@ int union_open_scope(struct union_fs *u, const char *path, char *canon, size_t c
             continue;
         }
         if (!S_ISDIR(st.st_mode)) {
-            belay_err_set(BELAY_ERR_INVALID, 0, "--scope %s: %s/%s is not a directory", path, done, comp);
+            belay_err_set(BELAY_ERR_INVALID, 0, "--scope %s: %s/%s is not a directory (host-reader H-C3)", path, done, comp);
             close(cur);
             return -1;
         }
@@ -820,8 +898,47 @@ int union_open_scope(struct union_fs *u, const char *path, char *canon, size_t c
         if (strncmp(done, u->mounts[i], ml) == 0 && (done[ml] == '\0' || done[ml] == '/')) {
             belay_err_set(BELAY_ERR_INVALID, 0,
                           "--scope %s: %s is a volume or bind mount (%s), not in the container's layers: "
-                          "capture its host source as a scope of its own, without --docker",
+                          "capture its host source as a scope of its own, without --docker (host-reader H-C3)",
                           path, done, u->mounts[i]);
+            close(cur);
+            return -1;
+        }
+    }
+    /* H-M5: every mount point below the scope is an entry of the union,
+     * reached from the root without a link (the union model's U17) */
+    const size_t dl = strcmp(done, "/") == 0 ? 0 : strlen(done);
+    for (size_t i = 0; i < u->nmounts; i++) {
+        const char *m = u->mounts[i];
+        if (strncmp(m, done, dl) != 0 || m[dl] != '/' || m[dl + 1] == '\0') continue;
+        bool nested = false;                                 /* below another mount: not read (U18) */
+        for (size_t j = 0; j < u->nmounts && !nested; j++) {
+            const size_t ml = strlen(u->mounts[j]);
+            nested = j != i && ml < strlen(m) && strncmp(m, u->mounts[j], ml) == 0 && m[ml] == '/';
+        }
+        if (nested) continue;
+        int at = u_openat(u, u->root, ".", DIR_FLAGS);
+        bool ok = at != -1;
+        char comp[256];
+        for (const char *q = m + 1; ok && *q != '\0';) {
+            const char *e2 = strchr(q, '/');
+            const size_t l2 = e2 != NULL ? (size_t)(e2 - q) : strlen(q);
+            if (l2 == 0 || l2 >= sizeof comp) { ok = false; break; }
+            memcpy(comp, q, l2);
+            comp[l2] = '\0';
+            q += l2 + (e2 != NULL);
+            struct stat ms;
+            if (u_fstatat(u, at, comp, &ms, AT_SYMLINK_NOFOLLOW) != 0) { ok = false; break; }
+            if (*q == '\0') break;                          /* the mount point itself: any type */
+            if (!S_ISDIR(ms.st_mode)) { ok = false; break; }
+            const int nx = u_openat(u, at, comp, DIR_FLAGS);
+            close(at);
+            at = nx;
+            ok = at != -1;
+        }
+        if (at != -1) close(at);
+        if (!ok) {
+            belay_err_set(BELAY_ERR_INVALID, 0, "--scope %s: the mount point %s is not in the container's layers "
+                          "(host-reader H-M5)", path, m);
             close(cur);
             return -1;
         }

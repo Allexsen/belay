@@ -95,8 +95,8 @@ static ino_t ino_of(const char *l, const char *p) {
 }
 
 static int layers(int *fd) {
-    static const char *const L[] = { "up", "mid", "low" };
-    for (int i = 0; i < 3; i++) {
+    static const char *const L[] = { "up", "mid", "low", "base" };
+    for (int i = 0; i < 4; i++) {
         char b[400];
         snprintf(b, sizeof b, "%s/%s", g_root, L[i]);
         if ((fd[i] = open(b, O_RDONLY | O_DIRECTORY | O_CLOEXEC)) == -1) return -1;
@@ -107,9 +107,9 @@ static int layers(int *fd) {
 /* Capture through the union: 0, or the step that failed (> 0). */
 static const struct fsops *base_ops(void);
 static int capture_with(const char *scope, const char *const *mounts, size_t nm, char *refused, size_t rcap) {
-    int fd[3];
+    int fd[4];
     if (layers(fd) != 0) return 20;
-    struct union_fs *u = union_new(base_ops(), fd, 3, "user.overlay.", mounts, nm);
+    struct union_fs *u = union_new(base_ops(), fd, 4, "user.overlay.", mounts, nm);
     if (u == NULL) return 21;
     char canon[4096];
     const int root = union_open_scope(u, scope, canon, sizeof canon);
@@ -137,10 +137,11 @@ static int capture_with(const char *scope, const char *const *mounts, size_t nm,
 
 static const struct fsops *base_ops(void) { return fsops_default(); }
 
-/* The layout of host-reader.md's union rows, three layers deep. */
+/* The layout of host-reader.md's union rows, four layers deep (the bottom
+ * one empty but for what a case adds). */
 static int build(void) {
-    static const char *const L[] = { "up", "mid", "low" };
-    for (int i = 0; i < 3; i++) {
+    static const char *const L[] = { "up", "mid", "low", "base" };
+    for (int i = 0; i < 4; i++) {
         char b[400];
         snprintf(b, sizeof b, "%s/%s", g_root, L[i]);
         if (mkdir(b, 0755) != 0) return -1;
@@ -216,10 +217,16 @@ static int refusal_child(int which) {
     if (build() != 0) return errno == EPERM || errno == ENOTSUP || errno == EOPNOTSUPP ? 77 : 10;
     if (which == 0 && xa("up", "w/op", "user.overlay.opaque", "x") != 0) return 11;
     if (which == 1 && xa("low", "w/keep", "user.overlay.metacopy", "") != 0) return 11;
+    /* H-U5: the absolute redirect's target whited out in the middle layer --
+     * nothing below it merges (found by the union model: a whiteout there was
+     * read as absent and the bottom layer's content used) */
+    if (which == 2 && (md("up", "w/r2") != 0 || xa("up", "w/r2", "user.overlay.redirect", "/tgt") != 0 ||
+                       wo("low", "tgt") != 0 || md("base", "tgt") != 0 || wf("base", "tgt/old", "o\n") != 0))
+        return 11;
     char why[600] = "";
     const int r = capture_with("/w", NULL, 0, why, sizeof why);
     if (r != 0) return 40 + r;
-    return strstr(why, which == 0 ? "H-U3" : "H-U6") != NULL ? 0 : 50;
+    return strstr(why, which == 0 ? "H-U3" : which == 1 ? "H-U6" : "H-U5") != NULL ? 0 : 50;
 }
 
 /* H-C3: a scope that is a mount, below one, or not a directory is refused. */
@@ -260,7 +267,7 @@ TEST(the_union_reads_the_layers_as_the_pin_says) {
 }
 
 TEST(what_the_pin_refuses_is_said) {
-    for (int w = 0; w < 2; w++) {
+    for (int w = 0; w < 3; w++) {
         const int r = run_child(refusal_child, w);
         if (r == 77) SKIP("no user namespace here");
         ASSERT_EQ_INT(0, r);

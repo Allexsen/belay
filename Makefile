@@ -229,6 +229,19 @@ $(REF_DRIVER): scripts/reference/driver.c $(CORE_OBJ)
 reference: $(REF_DRIVER)
 	BUILD=$(BUILD) scripts/reference/run.sh $(REFERENCE_N) $(REFERENCE_SEED)
 
+# The host reader's union against an independent model of overlayfs written from
+# the kernel's documentation and the pin alone (scripts/union-model/, decision 203),
+# on generated layer sets. UNION_N sets from UNION_SEED.
+UNION_DRIVER	= $(BUILD)/union/driver
+UNION_N		?= 300
+UNION_SEED	?= 1
+$(UNION_DRIVER): scripts/union/driver.c $(CORE_OBJ)
+	@mkdir -p $(dir $@)
+	$(CC) $(CFLAGS) $(WARN) -Iinclude -Isrc -o $@ $< $(CORE_OBJ)
+.PHONY: union-model
+union-model: $(UNION_DRIVER)
+	python3 -I -B scripts/union/agree.py $(UNION_DRIVER) $(UNION_N) $(UNION_SEED)
+
 # `baseline export` and `verify` against an independent model of policy.v1 written
 # from the pins alone (scripts/policy-model/, decision 150). Exits 3 while verify is
 # not built. BELAY_BIN overrides the binary; PM_WORKDIR where scenarios are built.
