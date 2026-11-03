@@ -1,0 +1,38 @@
+# A one-off probe (decision 184: an external tool's behaviour is verified
+# before a pin states it). Not for merge: the PR carrying it is closed.
+name: probe-docker
+on:
+  pull_request:
+    paths: ['.github/workflows/probe-docker.yml']
+jobs:
+  probe:
+    runs-on: ubuntu-24.04
+    steps:
+      - name: overlay mounts of containers, both image stores
+        run: |
+          set -u
+          sudo apt-get install -y -qq attr >/dev/null
+          probe() {
+            echo "=== docker $(docker version --format '{{.Server.Version}}'), $(docker info -f 'driver={{.Driver}} status={{json .DriverStatus}}')"
+            C=$(docker run -d --rm alpine:3.20 sleep 300)
+            P=$(docker inspect -f '{{.State.Pid}}' $C)
+            echo "--- GraphDriver: $(docker inspect -f '{{json .GraphDriver}}' $C)"
+            L=$(sudo awk '$5 == "/"' /proc/$P/mountinfo)
+            echo "--- mountinfo of / (lowerdir cut): $(echo "$L" | sed 's/lowerdir=[^,]*/lowerdir=<cut>/')"
+            echo "--- lowerdir entries: $(echo "$L" | grep -o 'lowerdir=[^,]*' | cut -d= -f2 | tr ':' '\n' | wc -l), first: $(echo "$L" | grep -o 'lowerdir=[^,]*' | cut -d= -f2 | cut -d: -f1)"
+            echo "--- overlay options: $(echo "$L" | awk '{print $NF}' | tr ',' '\n' | grep -v 'lowerdir\|upperdir\|workdir' | tr '\n' ' ')"
+            echo "--- /sys/module/overlay/parameters: $(for f in /sys/module/overlay/parameters/*; do printf '%s=%s ' "${f##*/}" "$(cat $f)"; done)"
+            U=$(echo "$L" | grep -o 'upperdir=[^,]*' | cut -d= -f2)
+            docker exec $C sh -c 'echo x > /tmp/new; rm /etc/motd; rm -rf /etc/apk && mkdir /etc/apk && echo y > /etc/apk/fresh; mv /etc/ssl /etc/ssl2; chmod 600 /etc/hostname 2>/dev/null; true'
+            echo "--- the upper layer after: a file added, one deleted, a directory replaced, one renamed"
+            sudo find "$U" -printf '%y %m %s %p\n' | sed "s|$U|U|" | sort | head -40
+            echo "--- xattrs in the upper layer"
+            sudo getfattr -R -d -m - --absolute-names "$U" 2>/dev/null | sed "s|$U|U|" | head -30
+            echo "--- a whiteout's device numbers"
+            sudo stat -c '%F %t:%T %n' "$U/etc/motd" 2>&1 | sed "s|$U|U|"
+            docker stop -t 0 $C >/dev/null
+          }
+          probe
+          echo '{"features":{"containerd-snapshotter":true}}' | sudo tee /etc/docker/daemon.json >/dev/null
+          sudo systemctl restart docker && sleep 3
+          probe
