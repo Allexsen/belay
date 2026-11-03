@@ -26,6 +26,12 @@ hook() {  # hook EVENT [tool_use_id tool summary]
         '{session_id:"s1", tool_use_id:$tid, tool_name:$tool, tool_input:{command:$s}}' | "$HOOK" "$1"
 }
 LOG=$T/state/dogfood/s1.jsonl
+# The session receipt is made detached (decision 143): wait for its mark to go.
+done_receipt() {
+    i=0
+    while [ -e "$T/state/dogfood/$1.receipt-running.session" ] && [ $i -lt 150 ]; do sleep 0.1; i=$((i + 1)); done
+    [ ! -e "$T/state/dogfood/$1.receipt-running.session" ]
+}
 
 mkdir "$S/locked" && chmod 000 "$S/locked"         # unreadable before the session: unknown throughout
 hook start
@@ -165,6 +171,7 @@ grep -A2 '^Bash: after$' "$R6" | grep -q '  A src/h.c' && ! grep -q 'background 
     || fail "a background command whose output cannot be found outlived the stop: $(cat "$R6")"
 
 hook end
+done_receipt s1 || fail "the session receipt did not finish"
 [ -f "$T/state/dogfood/s1.receipt.txt" ] || fail "no session receipt"
 ls "$T/notes"/*-s1.md >/dev/null 2>&1 || fail "a test file changed, but the receipt was not kept"
 grep -q 'Kept because: a test file changed' "$T"/notes/*-s1.md || fail "kept for the wrong reason"
@@ -275,6 +282,41 @@ grep -q '^      echo line 10$' "$R10" && ! grep -q '^      echo line 11$' "$R10"
     || fail "a long command not shown as ten lines and a count: $(cat "$R10")"
 jq -e 'any(.sections[].calls[]; test("echo line 15$"))' "${R10%.txt}.json" >/dev/null || fail "the JSON lost the whole command"
 
+# Lost receipts are loud (decision 143). The session receipt is made
+# detached: the end hook returns at once, however long the receipt takes,
+# and the receipt still arrives. A mark whose maker is gone -- a session's or
+# a turn's receipt killed by a hook's timeout -- is said at the next Stop, by
+# any session's hook, once; a "starting" mark only after a minute.
+mkdir -p "$T/slow" && cp "$HOOK" "$T/slow/"
+printf 'import runpy, sys, time\ntime.sleep(3)\nsys.argv[0] = "%s"\nrunpy.run_path("%s", run_name="__main__")\n' \
+    "$PWD/scripts/dogfood/receipt.py" "$PWD/scripts/dogfood/receipt.py" > "$T/slow/receipt.py"
+slow() { jq -cn --arg t "${2:-}" '{session_id:"s5", tool_use_id:$t, tool_name:"Bash", tool_input:{command:"x"}}' | "$T/slow/belay-dogfood" "$1"; }
+slow start; slow pre t90; printf 's\n' > "$S/slow.txt"; slow post t90
+t0=$(date +%s); slow end; t1=$(date +%s)
+[ $((t1 - t0)) -lt 2 ] || fail "the end hook waited for its receipt ($((t1 - t0)) s)"
+[ -e "$T/state/dogfood/s5.receipt-running.session" ] || fail "no mark while the session receipt is made"
+sleep 1; hook pre t89 Bash "while it is made"; hook post t89 Bash      # its maker alive: not lost
+done_receipt s5 && [ -f "$T/state/dogfood/s5.receipt.txt" ] || fail "the detached session receipt never arrived"
+sh -c 'exit 0' & dead=$!; wait $dead
+printf '%s %s session\n' "$dead" "$(date +%s%N)" > "$T/state/dogfood/ghost.receipt-running.session"
+printf '%s %s turn\n' "$dead" "$(date +%s%N)" > "$T/state/dogfood/ghost2.receipt-running.turn"
+printf 'starting %s session\n' "$(date +%s%N)" > "$T/state/dogfood/young.receipt-running.session"
+printf 'starting %s session\n' "$(( $(date +%s) - 120 ))000000000" > "$T/state/dogfood/old.receipt-running.session"
+hook pre t91 Bash "after"
+out=$(hook stop)
+printf '%s' "$out" | jq -e '.systemMessage | test("^belay: hooks failing: pre: the (session|turn) receipt of session [a-z0-9]+ was lost: begun [0-9:]+ UTC and never finished") and test("and 2 more since the last stop")' >/dev/null \
+    || fail "the lost receipts not said at the Stop: $out"
+for w in "session receipt of session ghost was lost" "turn receipt of session ghost2 was lost" "session receipt of session old was lost"; do
+    grep -qF "$w" "$T/state/dogfood/failures.log" || fail "a lost receipt not kept ($w)"
+done
+! printf '%s' "$out" | grep -q 'young' || fail "a receipt still starting was called lost: $out"
+! grep -q 'session s5 was lost' "$T/state/dogfood/failures.log" || fail "a receipt still being made was called lost"
+[ -e "$T/state/dogfood/young.receipt-running.session" ] || fail "a receipt still starting lost its mark"
+out=$(hook stop)
+! printf '%s' "$out" | grep -q 'was lost' || fail "a lost receipt said twice: $out"
+! ls "$T/state/dogfood"/s1.receipt-running.* >/dev/null 2>&1 || fail "a finished turn receipt left its mark"
+rm -f "$T/state/dogfood/young.receipt-running.session"
+
 # install.sh (decision 115): the settings in a file, one line printed that
 # merges them into settings.json after a backup of its own -- other hooks
 # and keys kept, an earlier belay hook replaced, twice the same as once. A
@@ -330,4 +372,4 @@ grep -A2 '^Bash: before$' "$R9" | grep -q '  A before-gap.txt' && grep -A2 '^Bas
 ! grep -q 'background writers\|^between tool calls' "$R9" || fail "an inactive gap read as background writing: $(cat "$R9")"
 printf '%s' "$out" | jq -e '.systemMessage | test("^belay: hooks failing: [a-z]+: checksum mismatch \\(hooks inactive\\)")' >/dev/null \
     || fail "the first good Stop did not say the hooks had been inactive: $out"
-echo "dogfood selftest: sequential, concurrent, background, cancelled, silent turn, other project, git folded, labels cut, background commands, directories folded, paths counted, failures said, inactive gaps unattributed, summary, touched folded, long commands, git events, compiled Python, install: ok"
+echo "dogfood selftest: sequential, concurrent, background, cancelled, silent turn, other project, git folded, labels cut, background commands, directories folded, paths counted, failures said, inactive gaps unattributed, summary, touched folded, long commands, git events, compiled Python, lost receipts, install: ok"
