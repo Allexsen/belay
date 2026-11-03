@@ -6,7 +6,7 @@ answers: "the manifest's `source` key: a pin PR, as a table"). A v3 manifest is 
 exactly the changes below. Everything not listed here is as v2 says, byte for byte. A new header key
 is a new version, not a v2 addendum row: v2's readers reject an unknown key and v2 has no optional
 key (V2-R2), and v0.1.0-alpha and alpha.2 already wrote v2 manifests that a reader must keep reading.
-Written by hand; *proposed 2026-11-03, awaiting the author's OK*.
+Written by hand; approved by the author 2026-11-03 (decision 198).
 
 **Changing it.** In its own PR, presented as a table, after the author's explicit OK. Rules added
 to v3 later go in `manifest-v3-addendum.md`, append-only, as v1's do.
