@@ -4208,6 +4208,39 @@ def git_events(w, rng):
             'HEAD git reads in a form not its own: switched',
             'a branch moved, no reflog entries', 'HEAD switched to another branch']))
 
+    # Decision 213, E12: "A branch whose loose ref is symbolic (`ref:
+    # refs/heads/<other>`) on a side is an alias of its target there, as git
+    # lists it (`alias -> main`), not a branch of its own: it derives no
+    # event, its path finding stands, and the target's events are the
+    # target's own." main moves on its own (its event); beside it an alias
+    # made, a branch turned into an alias, an alias retargeted (`ref:` and
+    # two spaces) and a dangling alias made -- each its git_ref_* finding,
+    # no event. Their reverses: an alias removed, an alias turned into a
+    # branch, retargeted back, the dangling one removed.
+    def aliases(rng):
+        r, c = repo(rng), [oid() for _ in range(3)]
+        return [(r + b'refs/heads/main', git_loose(c[0]), git_loose(c[1]), O),
+                (r + b'refs/heads/alias', None, b'ref: refs/heads/main\n', O),
+                (r + b'refs/heads/turned', git_loose(c[2]), b'ref: refs/heads/main\n', O),
+                (r + b'refs/heads/retarget', b'ref: refs/heads/main\n',
+                 b'ref:  refs/heads/dev\n', O),
+                (r + b'refs/heads/dangling', None, b'ref: refs/heads/nowhere\n', O)]
+    one('git: aliases made, turned and retargeted beside their target', aliases,
+        ev(['an alias made: no event', 'an alias removed: no event',
+            'a branch turned into an alias: no event', 'an alias turned into a branch: no event',
+            'an alias retargeted: no event', 'a branch moved, no reflog entries']))
+
+    # "An id read in either case is written lowercased, as git prints it"
+    # (decision 213): HEAD detached at an id written in upper case --
+    # git_head_changed and git_head_switched name it lowercased. Its
+    # reverse: attached.
+    def head_upper(rng):
+        r, c1 = repo(rng), oid()
+        return [(r + b'HEAD', git_head('main'), c1.upper().encode() + b'\n', O)]
+    one('git: HEAD detached at an id in upper case', head_upper,
+        ev(['HEAD detached at an id in upper case: written lowercased',
+            'HEAD detached', 'HEAD attached']))
+
     # Values git calls a broken ref (E12, decision 202: "a value git calls a
     # broken ref is one git cannot parse (E10)"): a word glued to the id, a
     # leading space, a short id -- each after only: could_not_interpret, no

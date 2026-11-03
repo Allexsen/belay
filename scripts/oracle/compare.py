@@ -1246,6 +1246,15 @@ GIT_EVENT_ITEMS = collections.OrderedDict([
      'a branch whose loose ref cannot be parsed after: no event'),
     ('git-ev:removed, no value before, no event: its loose ref unparsed',
      'a loose ref removed, not parsed before: no event'),
+    # E12, decision 213: "A branch whose loose ref is symbolic ... on a side
+    # is an alias of its target there ...: it derives no event".
+    ('git-ev:alias, no event: absent before, an alias after', 'an alias made: no event'),
+    ('git-ev:alias, no event: an alias before, absent after', 'an alias removed: no event'),
+    ('git-ev:alias, no event: a branch before, an alias after',
+     'a branch turned into an alias: no event'),
+    ('git-ev:alias, no event: an alias before, a branch after',
+     'an alias turned into a branch: no event'),
+    ('git-ev:alias, no event: an alias before, an alias after', 'an alias retargeted: no event'),
     # (No reflog git cannot parse: decision 202 -- a line git does not read
     # as an entry it skips, counted in git_reflog_lines_ignored.)
     ('git-ev:HEAD not read on a side, no event: unread',
@@ -1323,6 +1332,9 @@ GIT_INPUT_ITEMS = ['an unknown ref read from its copy: provisional',
                    'a loose ref git calls broken: a word glued to its id',
                    'a loose ref git calls broken: a leading space',
                    'a loose ref git calls broken: a short id',
+                   # Decision 213: "An id read in either case is written
+                   # lowercased, as git prints it".
+                   'HEAD detached at an id in upper case: written lowercased',
                    # diff-v1 (88454c8): the order of a reflog record's
                    # findings; an operation of any length read.
                    'a reflog record with moves and lines git skips: the kinds table\'s order',
@@ -1389,6 +1401,9 @@ def git_coverage(records, traces, tags):
                 'git-invalid-finding' in tr and 'invalid_finding' in kinds:
             tags.add('git events: a reflog entry whose operation is over 1,024 bytes: read, '
                      'its move invalid')
+        if 'git-ref-lenient-HEAD' in tr and 'git-ev:HEAD detached' in end and \
+                'git_head_changed' in kinds:
+            tags.add('git events: HEAD detached at an id in upper case: written lowercased')
         if 'git-ref-lenient-HEAD' in tr and 'git-ev:HEAD switched' in end:
             tags.add('git events: HEAD git reads in a form not its own: switched')
         for form, item in (('glued', 'a word glued to its id'), ('leading-space',
