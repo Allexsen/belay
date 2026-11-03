@@ -101,8 +101,10 @@ The corpus has three parts:
     same commits, renamed (with HEAD on them; another branch between the two
     names), commits added (counted, or not with a fast-forward or merge),
     each rewrite and several, reflogs that do not chain or gained none (one
-    a prefix by its bytes ending inside a line), one whose last entry
-    gained has no newline,
+    a prefix by its bytes ending inside a line), one whose last line
+    gained has no newline (no entry), one with a blank line before an entry
+    (skipped), HEAD and a loose ref ending without
+    their newline (read) and packed-refs (not parsed),
     another operation, HEAD switched, detached and attached, a detached
     HEAD moved, four repositories nested and side by side, `unknown` refs
     and packed-refs read from their copies (provisional) or with none,
@@ -4062,24 +4064,89 @@ def git_events(w, rng):
         ev(['a reflog whose before ends inside a line of after: none gained',
             'a branch moved, its reflog gained none']))
 
-    # G15 (decision 160): E12, "a last line without its newline is an entry
-    # like any other, as git reads it"; diff-v1, `git_reflog_appended`
-    # "counts the entries after it (a last line without its newline is an
-    # entry, as git reads it)". Before ends at a line's end; after adds one
-    # or two commits, the last with no newline -- counted in
-    # `git_reflog_appended`, and commits added, counted. Its reverse is not
-    # a prefix: rewritten, the branch moved, its reflog gained none.
+    # G15 (decisions 160, 183): E12, "A reflog's last line without its
+    # newline is no entry: git does not read it as one"; diff-v1,
+    # `git_reflog_appended` "counts the entries after it (a last line without
+    # its newline is none: git does not read it as an entry) -- and says
+    # nothing when it gained none (decision 183) --". Before ends at a line's
+    # end on both branches. main gains a commit and a second entry without
+    # its newline, its ref at the commit: one entry counted, commits added
+    # (one) -- were the last line an entry, two, not leading to the ref:
+    # moved. dev gains only a line without its newline, its ref moved: no
+    # entry, so no finding on its reflog (G20), and the branch moved, its
+    # reflog gained none. Their reverses are not a prefix: rewritten, the
+    # branches moved, their reflogs gained none.
     def reflog_last_unterminated(rng):
-        r, c = repo(rng), [oid() for _ in range(3)]
+        r, c, d = repo(rng), [oid() for _ in range(3)], [oid() for _ in range(2)]
         base = [(Z, c[0], 'commit (initial): root')]
-        new = [(c[0], c[1], 'commit: one'), (c[1], c[2], 'commit: two')][:rng.choice([1, 2])]
-        return [(r + b'refs/heads/main', git_loose(c[0]), git_loose(c[len(new)]), O),
+        dbase = [(Z, d[0], 'branch: Created from HEAD')]
+        return [(r + b'refs/heads/main', git_loose(c[0]), git_loose(c[1]), O),
                 (r + b'logs/refs/heads/main', git_reflog(*base),
-                 git_reflog(*(base + new))[:-1], O)]
-    one('git: commits made, the reflog\'s last entry without its newline',
+                 git_reflog(*(base + [(c[0], c[1], 'commit: one'),
+                                      (c[1], c[2], 'commit: two')]))[:-1], O),
+                (r + b'refs/heads/dev', git_loose(d[0]), git_loose(d[1]), O),
+                (r + b'logs/refs/heads/dev', git_reflog(*dbase),
+                 git_reflog(*(dbase + [(d[0], d[1], 'commit: one')]))[:-1], O)]
+    one('git: commits made, the reflog\'s last line without its newline',
         reflog_last_unterminated,
-        ev(['a reflog whose last entry gained has no newline: an entry',
+        ev(['a reflog whose last line gained has no newline: no entry',
+            'a reflog that gained only a line without its newline: no finding',
             'commits added, counted', 'a branch moved, its reflog gained none']))
+
+    # G21 (decision 183): diff-v1, "nor is a blank line, which git skips".
+    # After gains a blank line, then git's entry: the entry counted, commits
+    # added. Its reverse is not a prefix: rewritten, the branch moved, its
+    # reflog gained none.
+    def reflog_blank_line(rng):
+        r, c0, c1 = repo(rng), oid(), oid()
+        base = git_reflog((Z, c0, 'commit (initial): root'))
+        return [(r + b'refs/heads/main', git_loose(c0), git_loose(c1), O),
+                (r + b'logs/refs/heads/main', base,
+                 base + b'\n' + git_reflog((c0, c1, 'commit: one')), O)]
+    one('git: commits made, a blank reflog line before the entry', reflog_blank_line,
+        ev(['a reflog that gained a blank line, then an entry: the entry counted',
+            'commits added, counted', 'a branch moved, its reflog gained none']))
+
+    # G17 (decision 183): E12, "A loose ref's or `HEAD`'s last line without
+    # its newline is read, as git reads it; a `packed-refs` that ends without
+    # a newline is one git refuses, so a side git cannot parse (E10)";
+    # diff-v1, "`HEAD` and a loose ref are read without their last newline,
+    # as git reads them; a `packed-refs` that ends without one is refused, as
+    # git refuses it: `could_not_interpret` (decision 183)". HEAD and the
+    # loose ref end without their newline on both sides. HEAD: switched to
+    # another branch in one repository, detached in another (their
+    # reverses: switched back, attached).
+    def head_unterminated(rng):
+        ra, rb = rng.sample([b'', b'repo/', b'work/src/proj/'], 2)
+        c1 = oid()
+        return [(ra + b'.git/HEAD', git_head('main')[:-1], git_head('dev')[:-1], O),
+                (rb + b'.git/HEAD', git_head('main')[:-1], git_head(c1)[:-1], O)]
+    one('git: HEAD switched, its files without the final newline', head_unterminated,
+        ev(['HEAD switched, its file without a final newline',
+            'HEAD switched to another branch', 'HEAD detached', 'HEAD attached']))
+
+    # A loose ref moved, no reflog: `git_ref_moved` and the branch moved.
+    def loose_unterminated(rng):
+        r, c0, c1 = repo(rng), oid(), oid()
+        return [(r + b'refs/heads/main', git_loose(c0)[:-1], git_loose(c1)[:-1], O)]
+    one('git: a loose ref moved, its files without the final newline', loose_unterminated,
+        ev(['a loose ref moved, its file without a final newline',
+            'a branch moved, no reflog entries']))
+
+    # packed-refs ending without its newline after, its last line moved
+    # beside one unchanged: not parsed there -- could_not_interpret, and
+    # neither branch derives an event. Its reverse, not parsed before: each
+    # branch now at, with no from.
+    def packed_unterminated(rng):
+        r, c0, c1, c2 = repo(rng), oid(), oid(), oid()
+        return [(r + b'packed-refs',
+                 git_packed((c2, 'refs/heads/dev'), (c0, 'refs/heads/main')),
+                 git_packed((c2, 'refs/heads/dev'), (c1, 'refs/heads/main'))[:-1], O)]
+    one('git: a packed-refs line moved, the file without the final newline',
+        packed_unterminated,
+        ev(['a packed-refs that ends without a newline: not parsed',
+            'a branch whose packed-refs cannot be parsed after: no event',
+            'a branch whose packed-refs cannot be parsed before: now at (no from)']))
 
     # "`HEAD` that cannot be read on a side derives none": not read before,
     # naming another branch after (no git_head_switched); not parsed before,
