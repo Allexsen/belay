@@ -418,20 +418,31 @@ TEST(executables_on_path_and_privilege) {
     NONE("new_executable_on_path", "bin/new");
 }
 
-/* P-F2: a text past 1,024 bytes is cut at a character, with "...". */
+/* P-F2: a text past 1,024 bytes is cut at a character, with "...": six
+ * marker lines of 200 bytes each (a path that long would not fit
+ * macOS's PATH_MAX). */
 TEST(a_long_text_is_cut_at_1024_bytes) {
     fresh(NULL);
-    char deep[1400] = "tests";
-    for (int i = 0; i < 6; i++) strcat(deep, "/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa");
-    sh("mkdir -p '%s' && printf 'x\\n' > '%s/f.txt'", deep, deep);
+    sh("mkdir -p tests && printf 'def test_a():\\n    assert 1\\n' > tests/test_m.py");
     REQUIRE(export_(false) == EXIT_DONE);
-    sh("printf 'y\\n' > '%s/f.txt'", deep);
+    char p[700];
+    snprintf(p, sizeof p, "%s/tests/test_m.py", g_scope);
+    FILE *f = fopen(p, "w");
+    REQUIRE(f != NULL);
+    for (int i = 0; i < 6; i++) {
+        fputs("@pytest.mark.skip(reason=\"", f);
+        for (int k = 0; k < 170; k++) fputc('0' + i, f);
+        fputs("\")\n", f);
+    }
+    fputs("def test_a():\n    assert 1\n", f);
+    fclose(f);
     ASSERT_EQ_INT(EXIT_DONE, verify_(false));
-    const char *t = strstr(g_out, "\"text\":\"tests/aaa");
-    REQUIRE(t != NULL);
-    const char *e = strstr(t + 8, "\"");
-    REQUIRE(e != NULL);
-    ASSERT_EQ_INT(1024, (int)(e - (t + 8)));
+    const char *t = strstr(g_out, "\"text\":\"tests/test_m.py: assertions 1 -> 1");
+    REQUIRE_MSG(t != NULL, "%s", g_out);
+    const char *e = t + 8;
+    size_t n = 0;
+    while (*e && !(*e == '"' && e[-1] != '\\')) e++, n++;      /* the JSON string, its escapes counted as written */
+    ASSERT_TRUE(n >= 1024);
     ASSERT_EQ_INT(0, strncmp(e - 3, "...", 3));
 }
 
