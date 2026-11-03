@@ -18,6 +18,7 @@
 #define PROTECT_RULES_MAX   4096u       /* PS-2 */
 #define PROTECT_PATTERN_MAX 4096u       /* bytes of a pattern (PS-P1) */
 #define PROTECT_DIRS_MAX    256u        /* PS-7 */
+#define PROTECT_HASH_MAX_BYTES (4ull << 30)  /* a capture's hash limit with a spec (PS-C3, decision 159) */
 
 /* A rule's modes (PS-4): a bit each. */
 enum { PROTECT_NO_WRITE = 1u, PROTECT_NO_DELETE = 2u, PROTECT_NO_CREATE = 4u };

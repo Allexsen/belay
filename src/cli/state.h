@@ -33,6 +33,11 @@ struct scope {
     uint64_t dev, ino;
 };
 
+/* The state root to use instead of the environment's, when not NULL:
+ * `belay verify` sets it to a directory it has just created, so no state a
+ * policy prepared is ever read (structure §6, 4). */
+extern const char *state_root_override;
+
 /* Test hook: called between realpath() and the open that checks it, so a
  * test can swap a component in the window. NULL in the binary. */
 extern void (*scope_resolve_hook)(const char *resolved);
@@ -116,6 +121,7 @@ struct capture_req {
     bool prefilter;             /* mark and diff: against the latest checkpoint */
     bool force_full;            /* --full */
     long full_every;            /* a full mark every N marks (Q8); 0: never */
+    uint64_t hash_max_bytes;    /* 0: the default; raised with a protect spec (protect-spec PS-C3) */
 };
 
 /* The state root's path relative to the scope, when its resolved path is
