@@ -177,3 +177,5 @@
 2026-11-03T16:50:52+04:00	spec: a reflog record's findings in the kinds table's order; an operation of any length read (E9 for its move)
 2026-11-03T16:47:52+04:00	oracle: decision 202 -- refs and reflog lines read as git reads them, the lines git skips counted
 2026-11-03T16:55:54+04:00	oracle: a reflog record's findings in the kinds table's order; an operation of any length read (88454c8)
+# Decision 213 (G25, G26): the pin fails make oracle until its author follows (the start-up quote of E12).
+2026-11-03T18:01:45+04:00	pins: E12 -- ids lowercased as git prints them; a symbolic loose branch is an alias (decision 213)
