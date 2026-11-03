@@ -61,6 +61,7 @@ KINDS = [
     # git's hook and index kinds are not modelled; the rest keep the table's
     # order.
     "git_reflog_appended", "git_reflog_move", "git_reflog_rewritten",
+    "git_reflog_lines_ignored",
     "git_head_switched", "git_branch_created", "git_branch_deleted", "git_branch_renamed",
     "git_commits_added", "git_history_rewritten", "git_branch_moved",
 ]
@@ -90,6 +91,7 @@ KIND_ROWS = {
     "git_reflog_appended": (["ref", "entries"], "{ref}: {entries} reflog entries"),
     "git_reflog_move": (["ref", "from", "to", "operation"], "{ref} {from} -> {to} by {operation}"),
     "git_reflog_rewritten": (["ref"], "{ref}: reflog rewritten"),
+    "git_reflog_lines_ignored": (["ref", "lines"], "{ref}: {lines} lines git ignores"),
     "git_head_changed": (["from", "to"], "HEAD {from} -> {to}"),
     "git_ref_created": (["ref", "to"], "created {ref} at {to}"),
     "git_ref_deleted": (["ref", "from"], "deleted {ref} (was {from})"),
@@ -785,30 +787,38 @@ def is_zero(v):
     return v != b"" and v.strip(b"0") == b""
 
 
-def parse_ref_value(data):
-    """("oid", id) or ("sym", name). READING: git's loose-ref format, not
-    spelled out by the spec: one line, an object id (40 lowercase hex
-    digits) or `ref: <name>` (HEAD's symbolic form; the spec: "the symbolic
-    ref's name or the object id"). Anything else cannot be parsed. The
-    corpus writes only those two forms, and content that is plainly neither.
+_WS = b" \t\n\v\f\r"                   # C's isspace
+_REF_ID = re.compile(rb"([0-9a-fA-F]{64}|[0-9a-fA-F]{40})(?:[ \t\n\v\f\r]|\Z)")
 
-    The line's newline (decision 183): E12, "A loose ref's or `HEAD`'s last
-    line without its newline is read, as git reads it"; diff-v1, git,
-    "`HEAD` and a loose ref are read without their last newline, as git
-    reads them". So `<id>` alone is the ref `<id>\\n` is (lines_of: "the
-    bytes up to and including a newline, or the bytes after the last
-    newline"), and a file that only gained or lost that newline keeps its
-    value. Nothing else of git's leniency is read in (no other
-    whitespace)."""
-    lines = lines_of(data)
-    if len(lines) != 1:
-        raise InterpFailure("ref: not one line")
-    v = lines[0]
-    if v.startswith(b"ref: ") and len(v) > 5:
-        return ("sym", v[5:])
-    if is_oid(v):
-        return ("oid", v)
-    raise InterpFailure("ref: neither an id nor `ref: `")
+
+def parse_ref_value(data):
+    """("oid", id) or ("sym", name): a loose ref's or `HEAD`'s value as git
+    reads it (decision 202). E12: "A loose ref's or `HEAD`'s value is read
+    as git reads it: `ref:`, any spaces or tabs, then the name to the line's
+    end, trailing whitespace cut; or an object id of either case at the
+    start, followed by the end or by whitespace, whatever follows ignored --
+    a value git calls a broken ref is one git cannot parse (E10). A last
+    line without its newline is read, as git reads it"; diff-v1, git, "an
+    object id of either case followed by whitespace and anything at all is
+    that id".
+
+    READINGS: an object id is 40 or 64 hex digits (E12's reflog ids; the
+    longer taken when both fit). Its value is the id, in lowercase: diff-v1,
+    "an object id of either case ... is that id" -- git reads the digits
+    into the id, whatever their case, and shows it in lowercase; so a ref
+    rewritten only in case has not moved. Whitespace is C's isspace. "to the line's end" is
+    to the first newline: later lines of a symbolic value are not read. A
+    `ref:` with no name cannot be parsed. Anything else -- a leading space,
+    a word glued to the id, a short id -- cannot be parsed."""
+    if data.startswith(b"ref:"):
+        name = data[4:].lstrip(b" \t").split(b"\n", 1)[0].rstrip(_WS)
+        if name:
+            return ("sym", name)
+        raise InterpFailure("ref: `ref:` with no name")
+    m = _REF_ID.match(data)
+    if m:
+        return ("oid", m.group(1).lower())
+    raise InterpFailure("ref: a broken ref")
 
 
 def parse_packed(data):
@@ -856,27 +866,20 @@ def lines_of(data):
     The lines of `HEAD`, a loose ref and `packed-refs` (decision 183: a
     loose ref's or `HEAD`'s last line without its newline "is read, as git
     reads it"; a `packed-refs` ending without one never gets here --
-    parse_packed refuses it). A reflog's entries are not these: see
-    reflog_entries."""
+    parse_packed refuses it). A reflog's lines are not these: see
+    reflog_lines."""
     out = data.split(b"\n")
     if out[-1] == b"":
         out.pop()
     return out
 
 
-def reflog_entries(data):
-    """A reflog's entries: its lines that end in a newline, blank lines
-    skipped. Its last line without its newline is none (decisions 160,
-    183): E12, "A reflog's last line without its newline is no entry: git
-    does not read it as one"; diff-v1, git, `git_reflog_appended` "counts
-    the entries after it (a last line without its newline is none: git does
-    not read it as an entry; nor is a blank line, which git skips)". Not
-    read, neither is parsed: one not git's fails nothing.
-
-    READING: a blank line is an empty one (its newline alone). A line of
-    spaces or tabs is not blank here: it is an entry, and not git's (the
-    corpus builds none)."""
-    return [x for x in data.split(b"\n")[:-1] if x != b""]
+def reflog_lines(data):
+    """A reflog's complete lines: those ending in a newline. Its last line
+    without its newline is neither an entry nor counted (decisions 160,
+    183, 202): E12, "A reflog's last line without its newline is no entry,
+    and not counted: git does not read it as one"."""
+    return data.split(b"\n")[:-1]
 
 
 def appended(before, after):
@@ -889,37 +892,73 @@ def appended(before, after):
     a line's end, and none otherwise (diff-v1, git: `git_reflog_rewritten`)
     -- never its older entries". before's bytes are compared here, never
     split into entries nor parsed; None (not a prefix, or one ending inside
-    a line of after) is "none otherwise": nothing is parsed. Of the bytes
-    after before's, only the lines ending in a newline are entries
-    (reflog_entries, decision 183). A reflog that gained none says nothing
-    (reflog_findings)."""
+    a line of after) is "none otherwise": nothing is parsed. The complete
+    lines after before's bytes (reflog_lines); split_gained tells git's
+    entries from the lines git skips."""
     bb = before or b""
     if after.startswith(bb) and (bb == b"" or bb.endswith(b"\n") or bb == after):
-        return reflog_entries(after[len(bb):])
+        return reflog_lines(after[len(bb):])
     return None
 
 
-_REFLOG_ENTRY = re.compile(rb"[0-9a-f]{40} [0-9a-f]{40} ")
+_REFLOG_IDS = re.compile(rb"([0-9a-fA-F]{64}|[0-9a-fA-F]{40}) ([0-9a-fA-F]{64}|[0-9a-fA-F]{40}) ")
+_ZONE = re.compile(rb" [+-][0-9]{4}")
 
 
 def reflog_entry_fields(line):
-    """(old, new, message), or InterpFailure for an entry that is not git's.
+    """(old, new, message) when git reads the line as an entry, else None
+    (a line git skips). E12 (decision 202): "A reflog's line is an entry
+    when git reads it as one: `<old> <new> <identity>> <time> <zone>` and
+    the message -- the ids 40 or 64 hex digits of either case, the identity
+    up to the first `>` with a space after it, the time a number other than
+    0 as `strtoumax` reads it, the zone `+` or `-` and four digits, the
+    message after one tab when there is one; every other line, a blank one
+    included, git skips".
 
-    READING: git's reflog format, not spelled out by the spec: an entry is
-    "<old> <new> <ident>", then a tab and its message when it has one; old
-    and new are object ids (40 lowercase hex digits, as parse_ref_value's),
-    each followed by one space. A line not starting so cannot be parsed. The
-    corpus writes only entries git writes, and lines plainly not entries.
+    READINGS: one space after each id and between the time and the zone;
+    strtoumax skips leading whitespace, takes a sign and decimal digits, and
+    is 0 only when it reads no digit or only zeros (a negative number is
+    not 0); "after one tab when there is one" is: the message is what
+    follows the zone, less one tab that starts it. old and new are each 40
+    or 64 digits (the words do not tie their lengths), in lowercase, as
+    parse_ref_value's ids are."""
+    m = _REFLOG_IDS.match(line)
+    if not m:
+        return None
+    rest = line[m.end():]
+    i = rest.find(b">")
+    if i < 0 or rest[i + 1:i + 2] != b" ":
+        return None
+    t = rest[i + 2:]
+    j = len(t) - len(t.lstrip(_WS))
+    if t[j:j + 1] in (b"+", b"-"):
+        j += 1
+    k = j
+    while t[k:k + 1].isdigit():
+        k += 1
+    if k == j or int(t[j:k]) == 0:
+        return None                     # strtoumax read 0
+    if not _ZONE.match(t, k):
+        return None
+    msg = t[k + 6:]
+    if msg.startswith(b"\t"):
+        msg = msg[1:]
+    return m.group(1).lower(), m.group(2).lower(), msg
 
-    Only a gained entry is ever given here (appended(); E12, decision 144:
-    "parsing a reflog is parsing only the entries it gained in this diff
-    ... -- never its older entries"), so an older entry not git's fails
-    nothing, nor does any entry of a reflog whose before is not a prefix of
-    after's ending at a line's end ("and none otherwise")."""
-    if not _REFLOG_ENTRY.match(line):
-        raise InterpFailure("reflog: an entry not git's")
-    _, _, msg = line.partition(b"\t")
-    return line[:40], line[41:81], msg
+
+def split_gained(lines):
+    """([(old, new, message)], the count of lines git skips): E12, "every
+    other line, a blank one included, git skips, and so does belay, counting
+    the lines the reflog gained in this diff that git skips in
+    `git_reflog_lines_ignored` (decision 202)"."""
+    entries, skipped = [], 0
+    for line in lines:
+        f = reflog_entry_fields(line)
+        if f is None:
+            skipped += 1
+        else:
+            entries.append(f)
+    return entries, skipped
 
 
 def operation(msg):
@@ -945,22 +984,31 @@ def reflog_findings(ref, before, after):
     after: bytes, or None when the reflog was removed (no copy needed)."""
     if after is None:
         return [checked("git_reflog_rewritten", {"ref": ref})]
-    new = appended(before, after)
-    if new is None:
+    lines = appended(before, after)
+    if lines is None:
         return [checked("git_reflog_rewritten", {"ref": ref})]
-    if not new:
+    entries, skipped = split_gained(lines)
+    out = []
+    if entries:
         # diff-v1, git: `git_reflog_appended` "counts the entries after it
         # ... -- and says nothing when it gained none (decision 183)"
-        return []
-    out = [checked("git_reflog_appended", {"ref": ref, "entries": len(new)})]
-    for line in new:
-        old, nw, msg = reflog_entry_fields(line)
+        out.append(checked("git_reflog_appended", {"ref": ref, "entries": len(entries)}))
+    for old, nw, msg in entries:
         op = operation(msg)
         if op in (b"commit", b"commit (initial)") or b"Fast-forward" in msg:
             continue
         out.append(checked("git_reflog_move", {"ref": ref, "from": old, "to": nw,
                                                "operation": op}))
-    # READING: appended first, then each move in entry order. The corpus
+    if skipped:
+        # "-- and `git_reflog_lines_ignored` counts the lines after it that
+        # git skips as no entry, blank ones included, and says nothing when
+        # there are none (decision 202)".
+        out.append(checked("git_reflog_lines_ignored", {"ref": ref, "lines": skipped}))
+    # diff-v1, git: "A reflog's record gives `git_reflog_appended`, then its
+    # `git_reflog_move`s in file order, then `git_reflog_lines_ignored`: the
+    # order of the kinds table." An operation of any length is read; a move
+    # whose operation breaks its row is invalid_finding in its place
+    # (checked; E9). The corpus
     # stays under 4,096 findings (and_more is not modelled here).
     assert len(out) <= FINDINGS_MAX
     return out
@@ -1038,16 +1086,11 @@ def git_read(store, g):
     entry not git's fails nothing; a reflog whose before is not such a
     prefix (not one at all, or one ending inside a line of after) gained
     none, so nothing of it is parsed -- its record is git_reflog_rewritten,
-    no E10 event names it, and it is no evidence (gained None). One it
-    gained that is not git's
-    (reflog_entry_fields) is a side git cannot parse -- after, whose bytes
-    hold them -- which "counts as one it cannot read (and is a
-    `could_not_interpret` event, E10)": the reflog is then no evidence ("a
-    reflog it cannot read is no evidence", reflog_unusable), and its record
-    carries `could_not_interpret`. READING: the side is the unit, as for a
-    ref or `packed-refs` -- a reflog that gained one entry not git's gives
-    nothing from the others either (not the old id of its first entry, nor
-    a how, nor a rename)."""
+    no E10 event names it, and it is no evidence (gained None). A line it
+    gained that git does not read as an entry is skipped, as git skips it
+    (decision 202): "every other line, a blank one included, git skips, and
+    so does belay" -- its entries are the evidence, and it is counted in
+    `git_reflog_lines_ignored`. So no reflog's lines fail to parse here."""
     if g.role == "reflog":
         need_b = g.reg["before"] and g.reg["after"]
         need_a = g.reg["after"]
@@ -1081,12 +1124,9 @@ def git_read(store, g):
         # after's ending at a line's end, and none otherwise ... -- never
         # its older entries"; before's bytes are only compared (appended()).
         new = appended(g.contents.get("before"), g.contents["after"])
-        try:
-            g.gained = None if new is None else [reflog_entry_fields(x) for x in new]
-        except InterpFailure:
-            g.gained = None
-            g.cni = True                # E10: the file, once
-            g.unparsed.add("after")     # the side holding the gained entries
+        # E12 (decision 202): the lines git skips are skipped -- the
+        # entries alone are evidence, and no line fails the reflog
+        g.gained = None if new is None else split_gained(new)[0]
 
 
 def gives(g, side):
@@ -1211,10 +1251,9 @@ class Repo:
 
 def reflog_unusable(G):
     """A reflog git cannot read: a side it needs could not be read (a removed
-    one needs none), or the entries it gained could not be parsed. E12: "a
-    reflog it cannot read is no evidence"; "A side git cannot parse counts as
-    one it cannot read ...; parsing a reflog is parsing only the entries it
-    gained in this diff" (decision 144). A reflog whose before is not a
+    one needs none). E12: "a reflog it cannot read is no evidence". Its
+    lines never fail to parse: those git skips are skipped (decision 202).
+    A reflog whose before is not a
     prefix of after's ending at a line's end is usable but gained none ("and
     none otherwise"): G.gained is None, which gives no evidence either."""
     return G is not None and G.reg["after"] and bool(G.unread or G.unparsed)

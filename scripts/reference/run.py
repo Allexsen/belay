@@ -208,6 +208,10 @@ def check_e12(cell, mine):
 
     CNI_REC = [{"kind": "could_not_interpret", "text": "could not interpret"}]
 
+    def rk(path):
+        """A record's findings: (kind, its count -- entries or lines)."""
+        return [(f["kind"], f.get("entries", f.get("lines"))) for f in rec(path) or []]
+
     def cni_named(repo):
         """Does a could_not_interpret event name a path of this repository?"""
         return any(e["event"] == "could_not_interpret"
@@ -443,36 +447,32 @@ def check_e12(cell, mine):
             "git_reflog_rewritten"] and kinds_of(r + "/.git") == [("git_branch_moved", "dated")]
             and moved_no_from(r + "/.git", "dated") and ev(r + "/.git")["to"] == Y
             and ev(r + "/.git")["paths"] == [r + "/.git/refs/heads/dated"] for r in "tu"),
-        # a gained entry not git's: "A side git cannot parse counts as one it
-        # cannot read (and is a `could_not_interpret` event, E10)" -- the
-        # reflog is no evidence (git-e12-unread-reflog's cells, not parsed)
-        "git.e12.unparsed.reflog_gained": lambda: [
-            (e["event"], e["paths"]) for e in E if e["event"] in (
-                "could_not_interpret", "content_unavailable")] == [
-            ("could_not_interpret", ["a/.git/logs/refs/heads/alone"]),
-            ("could_not_interpret", ["b/.git/logs/refs/heads/new"]),
-            ("could_not_interpret", ["c/.git/logs/refs/heads/feat"]),
-            ("could_not_interpret", ["h/.git/logs/HEAD"])]
-        and cni_event("c/.git/logs/refs/heads/feat")
-        and rec("c/.git/logs/refs/heads/feat") == CNI_REC
+        # lines git skips (decision 202): "every other line, a blank one
+        # included, git skips, and so does belay, counting the lines the
+        # reflog gained in this diff that git skips in
+        # `git_reflog_lines_ignored`" -- the entries around them stand
+        "git.e12.reflog_skipped.only_skipped": lambda: not any(
+            e["event"] in ("could_not_interpret", "content_unavailable") for e in E)
         and kinds_of("c/.git") == [("git_branch_moved", "feat")]
-        and moved_from("c/.git", "feat", ["c/.git/refs/heads/feat"]),
-        "git.e12.unparsed.reflog_would_date": lambda: kinds_of("a/.git") == [
-            ("git_branch_moved", "alone")] and moved_no_from("a/.git", "alone")
-        and ev("a/.git")["to"] == Y and ev("a/.git")["paths"] == ["a/.git/refs/heads/alone"]
-        and cni_event("a/.git/logs/refs/heads/alone")
-        and rec("a/.git/logs/refs/heads/alone") == CNI_REC,
-        "git.e12.unparsed.reflog_rename_untold": lambda: kinds_of("b/.git") == [
-            ("git_branch_created", "new"), ("git_branch_deleted", "old")]
-        and created("b/.git", "new", ["b/.git/packed-refs", "b/.git/refs/heads/new"])
-        and ev("b/.git", "git_branch_deleted")["paths"] == [
-            "b/.git/packed-refs", "b/.git/refs/heads/old"]
-        and cni_event("b/.git/logs/refs/heads/new")
-        and rec("b/.git/logs/refs/heads/new") == CNI_REC,
-        "git.e12.unparsed.reflog_head_detached": lambda: kinds_of("h/.git") == [
-            ("git_branch_moved", "HEAD")] and ev("h/.git")["from"] == X
-        and ev("h/.git")["paths"] == ["h/.git/HEAD"]
-        and cni_event("h/.git/logs/HEAD") and rec("h/.git/logs/HEAD") == CNI_REC,
+        and moved_from("c/.git", "feat", ["c/.git/refs/heads/feat"])
+        and rk("c/.git/logs/refs/heads/feat") == [("git_reflog_lines_ignored", 2)],
+        "git.e12.reflog_skipped.dates": lambda: kinds_of("a/.git") == [
+            ("git_commits_added", "alone")] and ev("a/.git")["count"] == 1
+        and ev("a/.git")["paths"] == ["a/.git/logs/refs/heads/alone", "a/.git/refs/heads/alone"]
+        and rk("a/.git/logs/refs/heads/alone") == [
+            ("git_reflog_appended", 1), ("git_reflog_lines_ignored", 1)],
+        "git.e12.reflog_skipped.renames": lambda: kinds_of("b/.git") == [
+            ("git_branch_renamed", "old")] and ev("b/.git")["to"] == "new"
+        and ev("b/.git")["paths"] == ["b/.git/logs/refs/heads/new", "b/.git/packed-refs",
+                                      "b/.git/refs/heads/new", "b/.git/refs/heads/old"]
+        and rk("b/.git/logs/refs/heads/new") == [
+            ("git_reflog_appended", 2), ("git_reflog_move", None), ("git_reflog_move", None),
+            ("git_reflog_lines_ignored", 1)],
+        "git.e12.reflog_skipped.head_detached": lambda: kinds_of("h/.git") == [
+            ("git_history_rewritten", "HEAD")] and ev("h/.git")["how"] == "reset"
+        and ev("h/.git")["paths"] == ["h/.git/HEAD", "h/.git/logs/HEAD"]
+        and rk("h/.git/logs/HEAD") == [("git_reflog_appended", 1), ("git_reflog_move", None),
+                                       ("git_reflog_lines_ignored", 1)],
         # a reflog that gained no entry "says nothing when it gained none"
         # (diff-v1, git; decision 183).
         # decision 183, as git reads them: "A reflog's last line without its
@@ -504,11 +504,10 @@ def check_e12(cell, mine):
         "git.e12.last_line.reflog_blank_line": lambda: not cni_named("b/.git")
         and kinds_of("b/.git") == [("git_commits_added", "feat")] and ev("b/.git")["count"] == 1
         and ev("b/.git")["paths"] == ["b/.git/logs/refs/heads/feat", "b/.git/refs/heads/feat"]
-        and [(f["kind"], f.get("entries")) for f in rec("b/.git/logs/refs/heads/feat")] == [
-            ("git_reflog_appended", 1)],
+        and rk("b/.git/logs/refs/heads/feat") == [
+            ("git_reflog_appended", 1), ("git_reflog_lines_ignored", 1)],
         "git.e12.last_line.reflog_blank_line_alone": lambda: not cni_named("b2/.git")
-        and rec("b2/.git/logs/refs/heads/feat") is None
-        and mine.outcomes.get(b"b2/.git/logs/refs/heads/feat") == "modified"
+        and rk("b2/.git/logs/refs/heads/feat") == [("git_reflog_lines_ignored", 1)]
         and kinds_of("b2/.git") == [("git_branch_moved", "feat")]
         and moved_from("b2/.git", "feat", ["b2/.git/refs/heads/feat"]),
         "git.e12.last_line.head": lambda: not cni_named("h/.git")
@@ -565,6 +564,63 @@ def check_e12(cell, mine):
             (e["event"], e["paths"]) for e in E if e["event"] in (
                 "could_not_interpret", "content_unavailable")] == [
             ("could_not_interpret", [r + "/.git/packed-refs"]) for r in ("p", "p2", "p3", "p4")],
+        # decision 202: refs and reflog lines read as git reads them
+        "git.e12.git_reads.ref_id_then_anything": lambda: not cni_named("k1/.git")
+        and kinds_of("k1/.git") == [("git_commits_added", "feat")] and ev("k1/.git")["count"] == 1
+        and [(f["kind"], f["from"], f["to"]) for f in rec("k1/.git/refs/heads/feat")] == [
+            ("git_ref_moved", X, Y)],
+        "git.e12.git_reads.head_ref_spaces": lambda: not cni_named("k2/.git")
+        and kinds_of("k2/.git") == [("git_head_switched", "main")] and ev("k2/.git")["to"] == "topic"
+        and [(f["kind"], f["from"], f["to"]) for f in rec("k2/.git/HEAD")] == [
+            ("git_head_changed", "refs/heads/main", "refs/heads/topic")],
+        "git.e12.git_reads.head_ref_no_space": lambda: not cni_named("k3/.git")
+        and kinds_of("k3/.git") == [("git_head_switched", "main")] and ev("k3/.git")["to"] == "topic",
+        "git.e12.git_reads.head_detached_id_then_anything": lambda: not cni_named("k4/.git")
+        and kinds_of("k4/.git") == [("git_commits_added", "HEAD")] and ev("k4/.git")["count"] == 1
+        and [(f["kind"], f["from"], f["to"]) for f in rec("k4/.git/HEAD")] == [
+            ("git_head_changed", X, Y)],
+        "git.e12.git_reads.ids_64": lambda: not cni_named("k5/.git")
+        and kinds_of("k5/.git") == [("git_commits_added", "feat")] and ev("k5/.git")["count"] == 1
+        and len(ev("k5/.git")["to"]) == 64
+        and ev("k5/.git")["paths"] == ["k5/.git/logs/refs/heads/feat", "k5/.git/refs/heads/feat"]
+        and [(f["kind"], len(f["from"]), f["to"]) for f in rec("k5/.git/refs/heads/feat")] == [
+            ("git_ref_moved", 64, ev("k5/.git")["to"])],
+        # an id in capitals is that id, shown in lowercase (ref.py's READING)
+        "git.e12.git_reads.id_capitals": lambda: not cni_named("k6/.git")
+        and kinds_of("k6/.git") == [("git_branch_moved", "up")]
+        and (ev("k6/.git")["from"], ev("k6/.git")["to"]) == (X, Y)
+        and [(f["kind"], f["from"], f["to"]) for f in rec("k6/.git/refs/heads/up")] == [
+            ("git_ref_moved", X, Y)],
+        # "a value git calls a broken ref is one git cannot parse (E10)"
+        "git.e12.git_reads.broken_refs": lambda: not repo_events("kb/.git")
+        and [(e["event"], e["paths"]) for e in E if e["event"] in (
+            "could_not_interpret", "content_unavailable")] == [
+            ("could_not_interpret", ["kb/.git/refs/heads/" + n]) for n in ("glued", "leading", "short")]
+        and all(rec("kb/.git/refs/heads/" + n) == CNI_REC for n in ("glued", "leading", "short")),
+        "git.e12.git_reads.reflog_lines_skipped": lambda: not cni_named("r1/.git")
+        and kinds_of("r1/.git") == [("git_commits_added", "feat")] and ev("r1/.git")["count"] == 1
+        and ev("r1/.git")["paths"] == ["r1/.git/logs/refs/heads/feat", "r1/.git/refs/heads/feat"]
+        and rk("r1/.git/logs/refs/heads/feat") == [
+            ("git_reflog_appended", 1), ("git_reflog_lines_ignored", 8)],
+        "git.e12.git_reads.reflog_entry_forms": lambda: not cni_named("r2/.git")
+        and kinds_of("r2/.git") == [("git_commits_added", "feat")] and ev("r2/.git")["count"] == 2
+        and rk("r2/.git/logs/refs/heads/feat") == [("git_reflog_appended", 2)],
+        "git.e12.git_reads.reflog_id_capitals": lambda: not repo_events("r3/.git")
+        and [(f["kind"], f.get("from"), f.get("to"), f.get("operation"))
+             for f in rec("r3/.git/logs/refs/remotes/origin/main")] == [
+            ("git_reflog_appended", None, None, None),
+            ("git_reflog_move", X, Y, "fetch")],
+        # "A reflog's record gives `git_reflog_appended`, then its
+        # `git_reflog_move`s in file order, then `git_reflog_lines_ignored`";
+        # a move whose operation is over 1,024 bytes is invalid_finding (E9)
+        "git.e12.git_reads.reflog_long_operation": lambda: not cni_named("r4/.git")
+        and rk("r4/.git/logs/refs/heads/feat") == [
+            ("git_reflog_appended", 2), ("invalid_finding", None), ("git_reflog_move", None),
+            ("git_reflog_lines_ignored", 1)]
+        and rec("r4/.git/logs/refs/heads/feat")[2]["operation"] == "reset"
+        and kinds_of("r4/.git") == [("git_history_rewritten", "feat")]
+        and ev("r4/.git")["how"] == "reset" and (ev("r4/.git")["from"], ev("r4/.git")["to"]) == (X, Y)
+        and ev("r4/.git")["paths"] == ["r4/.git/logs/refs/heads/feat", "r4/.git/refs/heads/feat"],
         "git.e12.tags_remotes_nothing": lambda: not E and rec(P + "/packed-refs") is not None
         and rec(P + "/refs/tags/v2") is not None,
         # decision 137: what cannot be read reduces the claim, never the fact
