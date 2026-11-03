@@ -866,6 +866,35 @@ TEST(git_a_reflog_is_parsed_by_the_entries_it_gained) {
     r_free(&r);
 }
 
+/* Decision 160 (G15): a reflog's last line without its newline is an entry
+ * like any other, as git reads it -- counted, and telling how. */
+TEST(git_a_last_reflog_line_without_its_newline_is_an_entry) {
+    struct run r;
+    r_begin(&r, BELAY_INTERP_GIT, true);
+    const struct belay_entry a = file(put(OA "\n"), 0), b = file(put(OB "\n"), 0);
+    const struct belay_entry lb = file(put(Z40 " " OA WHO "commit (initial): one\n"), 0);
+    const struct belay_entry la = file(put(Z40 " " OA WHO "commit (initial): one\n" OA " " OB WHO "commit: two"), 0);
+    r_path(&r, "/s/.git/refs/heads/main", &a, &b, "modified");
+    r_path(&r, "/s/.git/logs/refs/heads/main", &lb, &la, "modified");
+    ASSERT_EQ_STR(GEV("git_commits_added", "\"repo\":\".git\",\"branch\":\"main\",\"count\":1,\"to\":\"" OB "\"",
+                      "commits added to main: 1, now at " OB)
+                  ",\"paths\":[\".git/logs/refs/heads/main\",\".git/refs/heads/main\"]}\n", r_end(&r));
+    r_free(&r);
+    /* G16, the oracle's author: a before whose last line has no newline,
+     * after's next byte that newline. A line is the bytes up to and
+     * including a newline (diff-v1), so before does not end at a line's
+     * end: nothing gained, no how (decision 144). */
+    r_begin(&r, BELAY_INTERP_GIT, true);
+    const struct belay_entry ub = file(put(Z40 " " OA WHO "commit (initial): one"), 0);
+    const struct belay_entry ua = file(put(Z40 " " OA WHO "commit (initial): one\n" OA " " OB WHO "commit: two\n"), 0);
+    r_path(&r, "/s/.git/refs/heads/main", &a, &b, "modified");
+    r_path(&r, "/s/.git/logs/refs/heads/main", &ub, &ua, "modified");
+    ASSERT_EQ_STR(GEV("git_branch_moved", "\"repo\":\".git\",\"branch\":\"main\",\"from\":\"" OA "\",\"to\":\"" OB "\"",
+                      "main " OA " -> " OB)
+                  ",\"paths\":[\".git/refs/heads/main\"]}\n", r_end(&r));
+    r_free(&r);
+}
+
 /* E10: a loose ref git cannot parse decides nothing and is said. */
 TEST(git_a_ref_that_cannot_be_parsed_is_one_could_not_interpret_event) {
     struct run r;
@@ -1468,6 +1497,7 @@ int main(void) {
     RUN(git_unparseable_unknown_before_and_unread_head);
     RUN(git_a_reflog_is_parsed_by_the_entries_it_gained);
     RUN(git_a_reflog_not_parsed_tells_no_rename);
+    RUN(git_a_last_reflog_line_without_its_newline_is_an_entry);
     RUN(git_reflog_that_is_not_appended_to_is_rewritten);
     RUN(git_reflog_without_a_copy_is_content_unavailable);
     RUN(git_ref_that_cannot_be_parsed_could_not_be_interpreted);
