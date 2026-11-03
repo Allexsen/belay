@@ -15,7 +15,7 @@ HOOK=$PWD/scripts/dogfood/belay-dogfood
 T=$(mktemp -d "${TMPDIR:-/tmp}/belay-dogfood.XXXXXX")
 trap 'chmod -R u+rwx "${T:?}" 2>/dev/null; rm -rf "${T:?}"' EXIT
 S=$T/repo
-mkdir -p "$S/src" "$S/tests" "$T/state" && chmod 700 "$T/state"
+mkdir -p "$S/src" "$S/tests" "$S/keepdir" "$T/state" && chmod 700 "$T/state"
 printf 'a\n' > "$S/src/a.c"
 printf 'def test_x(): assert 1\n' > "$S/tests/test_x.py"
 export BELAY BELAY_DOGFOOD_SCOPE="$S" BELAY_STATE_DIR="$T/state" CLAUDE_PROJECT_DIR="$S" \
@@ -261,6 +261,8 @@ rm "$S/src/b.c"
 chmod 4755 "$S/src/c.c"
 printf 'o' > "$S/build/out.o"
 touch -m -d '2002-02-02' "$S/src/d.c"
+cp -p "$S/src/e.c" "$S/src/e.tmp" && mv "$S/src/e.tmp" "$S/src/e.c"     # the same bytes, a new inode
+mkdir "$S/keepdir.new" && rmdir "$S/keepdir" && mv "$S/keepdir.new" "$S/keepdir"   # a directory: a new inode only
 printf '%s\n' "$H" > "$S/.git/refs/heads/feature"
 printf 'Name: foo\nVersion: 1.0\n' > "$S/venv/lib/python3.12/site-packages/foo-1.0.dist-info/METADATA"
 printf 'foo-1.0.dist-info/METADATA,,\n' > "$S/venv/lib/python3.12/site-packages/foo-1.0.dist-info/RECORD"
@@ -285,7 +287,13 @@ printf '%s\n' "$sum" | grep -q '^  build      2 changes under build/, bin/; 3 co
 grep -A30 '^Bash: glance$' "$R10" | grep -q '^  compiled Python: 3 changes (__pycache__/, \*\.pyc)$' || fail "compiled Python not folded: $(cat "$R10")"
 printf '%s\n' "$sum" | grep -q '^  unknown    .*locked' || fail "the unknown not summarised: $sum"
 grep -A20 '^Bash: glance$' "$R10" | grep -q '^  ~ 1 file touched, content unchanged   \[t1\]$' || fail "an mtime-only change not folded: $(cat "$R10")"
-grep -A1 '^the files touched, content unchanged$' "$R10" | grep -q '^  \[t1\] src/d\.c$' || fail "the touched file not in the detail"
+# replaced with identical content -- a branch switch's rewrite (decision 177): folded apart, named
+grep -A20 '^Bash: glance$' "$R10" | grep -q '^  ~ 2 entries replaced with identical content   \[t2\]$' \
+    || fail "an identical replacement not folded: $(cat "$R10")"
+! grep -q '^  ~ src/e\.c \|^  ~ keepdir ' "$R10" || fail "an identical replacement listed line by line: $(cat "$R10")"
+grep -A1 '^the paths with content unchanged$' "$R10" | grep -q '^  \[t1\] src/d\.c$' || fail "the touched file not in the detail"
+sed -n '/^  \[t2\] /,$p' "$R10" | grep -q 'keepdir$' && sed -n '/^  \[t2\] /,$p' "$R10" | grep -q 'src/e\.c$' \
+    || fail "the replaced paths not in the detail: $(cat "$R10")"
 grep -q '^  ~ src/c\.c   mode' "$R10" || fail "a mode change was folded with the touched files: $(cat "$R10")"
 grep -q '^      echo line 10$' "$R10" && ! grep -q '^      echo line 11$' "$R10" && grep -q '^      … 5 more lines$' "$R10" \
     || fail "a long command not shown as ten lines and a count: $(cat "$R10")"
@@ -393,4 +401,4 @@ grep -A2 '^Bash: before$' "$R9" | grep -q '  A before-gap.txt' && grep -A2 '^Bas
 ! grep -q 'background writers\|^between tool calls' "$R9" || fail "an inactive gap read as background writing: $(cat "$R9")"
 printf '%s' "$out" | jq -e '.systemMessage | test("^belay: hooks failing: [a-z]+: checksum mismatch \\(hooks inactive\\)")' >/dev/null \
     || fail "the first good Stop did not say the hooks had been inactive: $out"
-echo "dogfood selftest: sequential, concurrent, background, cancelled, quiet turn said, other project, symlinked project, git folded, labels cut, background commands, directories folded, paths counted, failures said, inactive gaps unattributed, summary, touched folded, long commands, git events, compiled Python, lost receipts, install: ok"
+echo "dogfood selftest: sequential, concurrent, background, cancelled, quiet turn said, other project, symlinked project, git folded, labels cut, background commands, directories folded, paths counted, failures said, inactive gaps unattributed, summary, touched folded, identical replacements folded, long commands, git events, compiled Python, lost receipts, install: ok"
