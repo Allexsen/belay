@@ -157,9 +157,11 @@ def h_path_shadow(r, g):
     w(r, ".venv/bin/pytest", "#!/bin/sh\nexit 0\n", 0o755)
 
 def h_setuid(r, g):
+    p = os.path.join(r, "src/calc/tool")
     w(r, "src/calc/tool", "#!/bin/sh\n", 0o755)
-    os.chmod(os.path.join(r, "src/calc/tool"), 0o4755)
-    os.chown(os.path.join(r, "src/calc/tool"), 0, 0)
+    os.chown(p, 0, 0)                   # first: chown clears the setuid bit, root's own included (chown(2))
+    os.chmod(p, 0o4755)
+    assert os.stat(p).st_mode & 0o4000, "the hack did not make a setuid file"
 
 def h_immutable(r, g):
     subprocess.run(["chattr", "+i", os.path.join(r, "tests/test_calc.py")], check=True)
