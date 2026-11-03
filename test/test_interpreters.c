@@ -947,6 +947,24 @@ TEST(git_refs_without_their_last_newline_as_git_reads_them) {
     r_free(&r);
 }
 
+/* Decision 213 (G26): a loose branch that is symbolic is an alias, as git
+ * lists it ("alias -> main"), not a branch of its own: added, turned into an
+ * alias, or removed, it derives no event; its target's move is the target's. */
+TEST(git_a_symbolic_loose_branch_is_an_alias_with_no_event_of_its_own) {
+    struct run r;
+    r_begin(&r, BELAY_INTERP_GIT, true);
+    const struct belay_entry a = file(put(OA "\n"), 0), b = file(put(OB "\n"), 0);
+    const struct belay_entry al = file(put("ref: refs/heads/main\n"), 0);
+    r_path(&r, "/s/.git/refs/heads/main", &a, &b, "modified");
+    r_path(&r, "/s/.git/refs/heads/alias", NULL, &al, "added");       /* an alias made */
+    r_path(&r, "/s/.git/refs/heads/was", &a, &al, "modified");        /* a branch turned into one */
+    r_path(&r, "/s/.git/refs/heads/gone", &al, NULL, "removed");      /* an alias removed */
+    ASSERT_EQ_STR(GEV("git_branch_moved", "\"repo\":\".git\",\"branch\":\"main\",\"from\":\"" OA "\",\"to\":\"" OB "\"",
+                      "main " OA " -> " OB)
+                  ",\"paths\":[\".git/refs/heads/main\"]}\n", r_end(&r));
+    r_free(&r);
+}
+
 /* E10: a loose ref git cannot parse decides nothing and is said. */
 TEST(git_a_ref_that_cannot_be_parsed_is_one_could_not_interpret_event) {
     struct run r;
@@ -1543,6 +1561,7 @@ int main(void) {
     RUN(git_events_say_how_a_branch_moved_only_by_a_reflog_that_agrees);
     RUN(git_events_rename_and_packed_branches);
     RUN(git_events_from_an_unknown_ref_are_provisional);
+    RUN(git_a_symbolic_loose_branch_is_an_alias_with_no_event_of_its_own);
     RUN(git_a_ref_that_cannot_be_parsed_is_one_could_not_interpret_event);
     RUN(git_events_name_only_the_paths_they_came_from);
     RUN(git_what_cannot_be_read_reduces_the_claim_never_the_fact);

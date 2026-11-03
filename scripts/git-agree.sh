@@ -122,4 +122,12 @@ has "$R.diff" '"event":"git_commits_added","interp":"git","repo":".git","branch"
 hasnt "$R.diff" 'could_not_interpret' "lines git skips refused"
 has "$R.diff" '"kind":"git_reflog_lines_ignored","ref":"refs/heads/main","lines":3' "the lines git skips not counted"
 
+# ---- a symbolic loose branch: an alias, no branch of its own (decision 213) ----
+alias_then_commit() { printf 'ref: refs/heads/main\n' > "$R/.git/refs/heads/alias"; G commit -q --allow-empty -m three; }
+run alias alias_then_commit
+G branch --list | grep -qF 'alias -> main' && [ "$(G rev-parse alias)" = "$(G rev-parse main)" ] \
+    || fail "git does not list a symbolic loose branch as an alias of its target: the pin no longer holds"
+hasnt "$R.diff" '"branch":"alias"' "a symbolic loose branch given events of its own"
+has "$R.diff" '"event":"git_commits_added","interp":"git","repo":".git","branch":"main","count":1' "the alias's target lost its own event"
+
 echo "git-agree: belay reads the reflog, packed-refs, loose refs and HEAD as $(git --version | cut -d' ' -f3) does: ok"

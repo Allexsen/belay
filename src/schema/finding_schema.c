@@ -247,8 +247,12 @@ const struct event_rule EVENT_RULES[EVENT_RULE_COUNT] = {
         "read as git reads it: `ref:`, any spaces or tabs, then the name to the line's end, trailing "
         "whitespace cut; or an object id of either case at the start, followed by the end or by "
         "whitespace, whatever follows ignored -- a value git calls a broken ref is one git cannot "
-        "parse (E10). A last line without its newline is read, as git reads it; a `packed-refs` that "
-        "ends without a newline is one git refuses, so a side git cannot parse (E10). A branch "
+        "parse (E10). An id read in either case is written lowercased, as git prints it (decision "
+        "213). A branch whose loose ref is symbolic (`ref: refs/heads/<other>`) on a side is an "
+        "alias of its target there, as git lists it (`alias -> main`), not a branch of its own: it "
+        "derives no event, its path finding stands, and the target's events are the target's own "
+        "(decision 213). A last line without its newline is read, as git reads it; a `packed-refs` "
+        "that ends without a newline is one git refuses, so a side git cannot parse (E10). A branch "
         "removed whose value before cannot be told derives no event (`git_branch_deleted` needs "
         "`was`), and `HEAD` that cannot be read on a side derives none. The record of a path git "
         "cannot read whose outcome is not `unknown` carries `content_unavailable`, and one "
@@ -263,5 +267,5 @@ const struct event_rule EVENT_RULES[EVENT_RULE_COUNT] = {
         "dated, HEAD not read; 144: a reflog parsed by the entries it gained; 160, 183: a reflog's "
         "unterminated last line no entry; 183: a ref's and HEAD's read, an unterminated packed-refs "
         "refused -- as git does; 202: the reflog lines git skips skipped and counted, refs read as "
-        "git reads them.)" },
+        "git reads them; 213: ids lowercased, a symbolic loose branch an alias.)" },
 };
