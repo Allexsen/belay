@@ -8,8 +8,8 @@
 #   start   SessionStart              the session's base checkpoint
 #   pre     PreToolUse   (writing)    a checkpoint before the call
 #   post    PostToolUse(Failure)      a checkpoint after it
-#   stop    Stop                      a checkpoint; the turn's receipt; one line
-#                                     when something changed in the turn
+#   stop    Stop                      a checkpoint; the turn's receipt; its one
+#                                     line, "nothing changed" included
 #   end     SessionEnd                a last checkpoint; the session's receipt,
 #                                     copied to NOTES/dogfood/ when interesting
 #
@@ -41,7 +41,10 @@ STATE=${BELAY_STATE_DIR:-${XDG_STATE_HOME:-$HOME/.local/state}/belay}
 HERE=$(dirname "$0")
 in=$(cat)
 
-[ -n "$SCOPE" ] && [ "${CLAUDE_PROJECT_DIR:-}" = "$SCOPE" ] || exit 0     # this repository only (Q5)
+# This repository only (Q5), by any name: a symlinked path to it is no
+# other project (decision 156: hooks that stopped watching it would be silent).
+[ -n "$SCOPE" ] && [ -n "${CLAUDE_PROJECT_DIR:-}" ] || exit 0
+[ "$CLAUDE_PROJECT_DIR" = "$SCOPE" ] || [ "$(cd "$CLAUDE_PROJECT_DIR" 2>/dev/null && pwd -P)" = "$(cd "$SCOPE" 2>/dev/null && pwd -P)" ] || exit 0
 case $ev in start|pre|post|stop|end) ;; *) exit 0 ;; esac
 
 D=$STATE/dogfood
@@ -72,6 +75,11 @@ say() {
     [ -n "$f" ] && f="belay: hooks failing: $f"
     if [ -n "$f" ] && [ -n "$1" ]; then m="$(js "$f")\n$(js "$1")"; else m=$(js "$f$1"); fi
     [ -z "$m" ] || printf '{"systemMessage":"%s"}\n' "$m"
+    # What each Stop said, kept: a line missing on screen can then be told
+    # from one never made (decision 156).
+    case ${sid:-} in ''|*[!A-Za-z0-9_-]*) ;; *)        # a name, never a path
+        [ -z "$m" ] || printf '%s\t%s\n' "$(date +%s%N)" "$m" >> "$D/$sid.said" 2>/dev/null ;;
+    esac
 }
 quit() { [ "$ev" = stop ] && say ""; exit 0; }
 command -v jq >/dev/null 2>&1 || { fail "jq not found"; quit; }
@@ -169,8 +177,11 @@ case $ev in
 stop)
     M=$D/$sid.receipt-running.turn
     printf '%s %s turn\n' "$$" "$now" > "$M"
-    line=$(python3 -I "$HERE/receipt.py" turn "$LOG" "$BELAY" "$SCOPE" "$D" 2>>"$D/$sid.err") \
-        || fail "the turn's receipt failed (see $D/$sid.err)"
+    if line=$(python3 -I "$HERE/receipt.py" turn "$LOG" "$BELAY" "$SCOPE" "$D" 2>>"$D/$sid.err"); then
+        [ -n "$line" ] || fail "the turn's receipt gave no line (see $D/$sid.err)"
+    else
+        fail "the turn's receipt failed (see $D/$sid.err)"
+    fi
     rm -f "$M"
     say "$line" ;;
 end)

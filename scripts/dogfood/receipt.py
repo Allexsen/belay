@@ -675,6 +675,8 @@ def main():
     sid = os.path.basename(log)[:-len(".jsonl")]
     cps = [e["cp"] for e in events if e.get("cp") is not None]
     if not cps:
+        if mode == "turn":                          # never a Stop without a line (decision 156)
+            print("belay: no checkpoint recorded in this session, so no receipt this turn")
         return
     stops = [e["cp"] for e in events if e.get("event") == "stop" and e.get("cp") is not None]
     starts = [e["cp"] for e in events if e.get("event") == "start" and e.get("cp") is not None]
@@ -689,7 +691,9 @@ def main():
                 msg += " (" + "; ".join(heads) + ")"
             if errors:
                 msg += f"; receipt incomplete ({len(errors)} error{'s' if len(errors) != 1 else ''})"
-            print(msg + f" -- {path}")             # the hook makes the Stop's JSON
+        else:                                       # said too: no line is never a quiet turn (decision 156)
+            msg = "belay: nothing changed this turn"
+        print(msg + f" -- {path}")                 # the hook makes the Stop's JSON
         return
     # The session: what happened after the last stop as a last turn, then
     # every turn's receipt in order -- nothing diffed twice, so SessionEnd
