@@ -248,6 +248,33 @@ def corrupt_bundle(data, how):
     raise ValueError(how)
 
 
+def rewrite_manifest(data, how):
+    """The bundle with its manifest member's header rewritten: "v2" (as an earlier release wrote
+    it, no source) or "container" (a host reader's source). -> (bytes, its manifest's sha256,
+    its source)."""
+    out = []
+    pos = 0
+    msha = source = None
+    while pos < len(data):
+        nl = data.index(b"\n", pos)
+        hdr = json.loads(data[pos:nl])
+        content = data[nl + 1:nl + 1 + hdr["size"]]
+        pos = nl + 1 + hdr["size"]
+        if hdr.get("member") == "manifest":
+            first, rest = content.split(b"\n", 1)
+            mh = json.loads(first)
+            if how == "v2":
+                mh.pop("source")
+                mh["belay_manifest"] = 2
+            else:
+                mh["source"] = source = {"docker": "4f1c" * 16, "image": "sha256:" + "91ef" * 16}
+            content = model.enc(mh).encode() + b"\n" + rest
+            msha = hashlib.sha256(content).hexdigest()
+            hdr = {"member": "manifest", "size": len(content), "sha256": msha}
+        out.append(model.enc(hdr).encode() + b"\n" + content)
+    return b"".join(out), msha, source
+
+
 def spec_bytes(spec):
     if spec is None:
         return None
@@ -369,6 +396,13 @@ def _run(sc, rep, cov, vstate, tmp):
         if not trailer.get("trusted"):
             rep.notes.append("%s: the second mark trusted no file, so its premise does not hold" % sc["name"])
     vbundle, vdigest_true = out, digest
+    before_sha, before_source = exp["manifest_sha256"], None
+    if v.get("manifest"):
+        vbundle = os.path.join(outdir, "rewritten.bundle")
+        cdata, before_sha, before_source = rewrite_manifest(bundle, v["manifest"])
+        with open(vbundle, "wb") as f:
+            f.write(cdata)
+        vdigest_true = hashlib.sha256(cdata).hexdigest()
     if v.get("corrupt"):
         vbundle = os.path.join(outdir, "corrupt.bundle")
         cdata = corrupt_bundle(bundle, v["corrupt"])
@@ -399,7 +433,8 @@ def _run(sc, rep, cov, vstate, tmp):
                             "dev": 0, "ino": 0}]
 
     # the model's expectation, built whether verify exists or not
-    refusal = model.verify_refusal(exp, vspec_raw, vdigest, vdigest_true, excl_a, to == "trusted")
+    refusal = model.verify_refusal(exp, vspec_raw, vdigest, vdigest_true, excl_a, to == "trusted",
+                                   before_source)
     if refusal is None and v.get("corrupt"):
         refusal = 4
     lines = flags = None
@@ -408,7 +443,7 @@ def _run(sc, rep, cov, vstate, tmp):
                "before": model.Side(exp["B"], raw_b[b"."]["dev"], excl_b),
                "after": model.Side(model.view(raw_a, hash_after), raw_a[b"."]["dev"], excl_a),
                "bundle_lines": exp["lines"], "outside_scope": exp["outside"],
-               "before_sha256": exp["manifest_sha256"], "after_sha256": after_sha}
+               "before_sha256": before_sha, "after_sha256": after_sha}
         lines, flags, _recs, _events = model.verify_lines(ctx)
         ecode_v = model.verify_exit(flags, v.get("exit_code", True))
         for f in flags:

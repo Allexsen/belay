@@ -186,6 +186,14 @@ P34 New with decision 175. The test-file rule's "a path none of whose components
     counts any component, the last included, as P12 did. `.build` is the only dot-name among them;
     `*.test.<ext>` and `*.spec.<ext>` take only the six extensions listed.
 
+P39 New with manifest v3 (decision 198). B-4: a bundle's manifest is v3; one "an earlier release
+    wrote holds a v2 one, whose source is `null`" and is read as such. Export writes v3 with
+    `"source": null` (every capture here is in-sandbox). V3-R4: verify refuses (exit 3) a bundle
+    whose manifest's source is not `null`, its own capture being the walker's. Order: after the
+    bundle's digest (B-R2: a bundle whose bytes hash otherwise is never read), with the other
+    refusals of exit 3, so which comes first is not observable. A v2 bundle compares as v3 with
+    a null source (V3-R5: `source` decides nothing else).
+
 P36 New with decision 186. The `.pyc` judged is one "modified or of another type": its outcome
     `modified` (why `other bytes`, or `cannot be verified` when unverified after, as P9) or
     `type_changed` (why `type changed`). One whose outcome is `unknown`, `metadata_only`,
@@ -1191,8 +1199,10 @@ def git_hook_findings(recs, B, A):
 
 
 def reflog_entries(data):
+    """A reflog's entries: its terminated lines only (E12, decision 183: "A reflog's
+    unterminated last line is no entry: git does not read it as one")."""
     out = []
-    for line in data.split(b"\n"):
+    for line in data.split(b"\n")[:-1]:
         if not line:
             continue
         head, _, msg = line.partition(b"\t")
@@ -1999,7 +2009,8 @@ def export_expect(scope, out_real, spec_raw, excluded, B_raw):
                "integrity": integrity}
 
 
-def verify_refusal(exported, spec_raw, digest_given, digest_true, excluded_after, to_trusted):
+def verify_refusal(exported, spec_raw, digest_given, digest_true, excluded_after, to_trusted,
+                   before_source=None):
     """The refusal verify must give before judging, or None (policy-v1's exit codes)."""
     spec = None
     if spec_raw is not None:
@@ -2011,6 +2022,8 @@ def verify_refusal(exported, spec_raw, digest_given, digest_true, excluded_after
         return 3                                                                      # P23
     if digest_given != digest_true:
         return 3
+    if before_source is not None:          # V3-R4: verify's own capture is the walker's, null
+        return 3                                                                      # P39
     if (spec.digest if spec else None) != exported["protect_sha256"]:
         return 3                                                                      # P30
     if spec is not None:
@@ -2118,8 +2131,9 @@ def check_bundle(data, exp, scope):
         except ValueError:
             problems.append("B-4: the manifest is not NDJSON")
             mh, mt = {}, {}
-        if mh.get("belay_manifest") != 2:
-            problems.append("B-4: not manifest v2")
+        if mh.get("belay_manifest") != 3 or list(mh)[-1:] != ["source"] or mh.get("source") is not None:
+            problems.append("B-4/V3-1,V3-2: not manifest v3 with a null source (header ends %r)"
+                            % (list(mh.items())[-2:],))
         if mh.get("hash_max_bytes") != exp["hash_max"]:
             problems.append("B-4/PS-C3: the manifest's hash_max_bytes %r, not %r" % (mh.get("hash_max_bytes"), exp["hash_max"]))
         if mt.get("trusted") != 0 or mt.get("read_all") != "check":
