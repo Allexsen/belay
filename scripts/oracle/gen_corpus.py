@@ -4151,6 +4151,41 @@ def git_events(w, rng):
         ev(['a reflog that gained lines git skips: counted beside its entries',
             'commits added, counted', 'a branch moved, its reflog gained none']))
 
+    # "A reflog's record gives `git_reflog_appended`, then its
+    # `git_reflog_move`s in file order, then `git_reflog_lines_ignored`: the
+    # order of the kinds table" (diff-v1, 88454c8). Two entries, each a move
+    # (a reset, a rebase), a line git skips before each and a blank one after:
+    # appended 2, the two moves, then 3 lines ignored; history rewritten.
+    # Its reverse: not a prefix.
+    def reflog_moves_and_skipped(rng):
+        r, c = repo(rng), [oid() for _ in range(3)]
+        base = git_reflog((Z, c[0], 'commit (initial): root'))
+        new = (b'not a reflog line\n' + raw_line(c[0], c[1], tail='\treset: moving to HEAD~1')
+               + raw_line(c[1], c[2], time='0') + raw_line(c[1], c[2],
+                                                          tail='\trebase (finish): onto x')
+               + b'\n')
+        return [(r + b'refs/heads/main', git_loose(c[0]), git_loose(c[2]), O),
+                (r + b'logs/refs/heads/main', base, base + new, O)]
+    one('git: reflog moves and lines git skips, in the kinds table\'s order',
+        reflog_moves_and_skipped,
+        ev(['a reflog record with moves and lines git skips: the kinds table\'s order',
+            'history rewritten by several operations', 'a branch moved, its reflog gained none']))
+
+    # An operation over 1,024 bytes is read (88454c8): the entry counted, its
+    # git_reflog_move an invalid_finding (the prose's 1,024-byte string
+    # bound), the branch moved by another operation. Its reverse: not a
+    # prefix.
+    def reflog_long_operation(rng):
+        r, c = repo(rng), [oid() for _ in range(3)]
+        base = git_reflog((Z, c[0], 'commit (initial): root'))
+        new = (raw_line(c[0], c[1], tail='\tcommit: one')
+               + raw_line(c[1], c[2], tail='\t' + 'o' * 1100 + ': a long operation'))
+        return [(r + b'refs/heads/main', git_loose(c[0]), git_loose(c[2]), O),
+                (r + b'logs/refs/heads/main', base, base + new, O)]
+    one('git: a reflog entry whose operation is over 1,024 bytes', reflog_long_operation,
+        ev(['a reflog entry whose operation is over 1,024 bytes: read, its move invalid',
+            'a branch moved by another operation', 'a branch moved, its reflog gained none']))
+
     # A loose ref and HEAD as git reads them (E12, decision 202): "an object
     # id of either case at the start, followed by the end or by whitespace,
     # whatever follows ignored"; "`ref:`, any spaces or tabs, then the name
