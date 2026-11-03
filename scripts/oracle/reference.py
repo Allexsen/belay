@@ -137,12 +137,13 @@ copy"):
      without its newline (`git reflog show`, `git rev-parse main@{0}`),
      stops on packed-refs ending without one ("fatal: unterminated line
      in .git/packed-refs") and reads a loose ref and HEAD without theirs;
-  G19 nothing else git accepts in a loose ref or HEAD is read: the words
-     speak of the last newline only ("A loose ref's or `HEAD`'s last line
-     without its newline is read, as git reads it"). git 2.43.0 also reads
-     spaces, a carriage return, a second newline or a word after a loose
-     ref's object id, and spaces in HEAD's `ref:` line; here each cannot
-     be parsed (the corpus writes none of them);
+  G19 is settled by E12 and diff-v1 (decision 202): "A loose ref's or
+     `HEAD`'s value is read as git reads it: `ref:`, any spaces or tabs,
+     then the name to the line's end, trailing whitespace cut; or an object
+     id of either case at the start, followed by the end or by whitespace,
+     whatever follows ignored -- a value git calls a broken ref is one git
+     cannot parse (E10)" (parse_ref_value()); each form the corpus writes
+     was checked against git 2.43.0 first;
   G20 is settled by diff-v1 (decision 183), where this file had read it
      the other way (`git_reflog_appended` with 0 entries): a reflog whose
      before is a prefix of after's ending at a line's end and which gained
@@ -155,11 +156,38 @@ copy"):
      git skips" -- an empty line in what a reflog gained is skipped, no
      entry and not a line that cannot be parsed (parse_git()); a reflog
      that gained only blank lines gained none (G20);
-  G22 a blank line is an empty one, its newline alone: a line of spaces or
-     tabs is a line git cannot parse (E12). git 2.43.0 skips such a line
-     too -- as it skips any reflog line it cannot parse (`git reflog
-     show`: 2 of 2 entries with a line `not a reflog line` between them),
-     which E12 still makes a side git cannot parse, `could_not_interpret`.
+  G22 is settled by E12 (decision 202), and with it any reflog line git
+     cannot read: "A reflog's line is an entry when git reads it as one:
+     `<old> <new> <identity>> <time> <zone>` and the message -- ...; every
+     other line, a blank one included, git skips, and so does belay,
+     counting the lines the reflog gained in this diff that git skips in
+     `git_reflog_lines_ignored` (decision 202)" (reflog_lines()). A reflog
+     is never a side git cannot parse; each form the corpus writes was
+     checked against git 2.43.0 (`git reflog show`) first;
+  G23 a reflog's findings come `git_reflog_appended`, then
+     `git_reflog_lines_ignored`, then each `git_reflog_move` -- the order
+     diff-v1's sentence names them in ("`git_reflog_appended` counts ...
+     -- and `git_reflog_lines_ignored` counts ..., and each of those ...
+     is a `git_reflog_move`"); the Kinds table lists it after
+     `git_reflog_rewritten`, and no rule orders a record's findings;
+  G24 `git_reflog_lines_ignored` is given only when the reflog gained a
+     line git skips: diff-v1 says "says nothing when it gained none" of
+     `git_reflog_appended` alone, but finding-kinds.md's row is "Lines the
+     reflog gained in this diff that git does not read as entries";
+  G25 an object id of either case is its lower-case spelling, in every
+     value it gives (a ref's, HEAD's, a reflog entry's): "read as git
+     reads it", and git reads it as the object it names, which git
+     2.43.0 prints in lower case; so two spellings of one id are one value;
+  G26 a loose ref's `ref:` value is its name, as HEAD's, and is that
+     ref's value wherever a value is used -- E12 reads "A loose ref's or
+     `HEAD`'s value" alike but says nothing of what a symbolic branch's
+     value means for its events; `ref:` with no name is a broken ref. The
+     corpus writes neither;
+  G27 a reflog entry with no tab after its zone has as its message what
+     follows the zone ("the message after one tab when there is one"):
+     git 2.43.0 does so (`git log -g --format=%gs`: `+0000xyz: q` gives
+     `xyz: q`); the corpus writes only such an entry with nothing after
+     its zone, an empty message, which both readings give.
 
 Deliberately naive: both manifests in memory as dictionaries, the union of
 their paths sorted, ancestors found by walking a path's prefixes.
@@ -1280,11 +1308,24 @@ def load_event_rules():
                 '`could_not_interpret` event, E10); parsing a reflog is parsing only the '
                 'entries it gained in this diff -- those after before\'s bytes when they are a '
                 'prefix of after\'s ending at a line\'s end, and none otherwise (diff-v1, git: '
-                '`git_reflog_rewritten`) -- never its older entries. A reflog\'s last line without '
-                'its newline is no entry: git does not read it as one. A loose ref\'s or '
-                '`HEAD`\'s last line without its newline is read, as git reads it; a '
-                '`packed-refs` that ends without a newline is one git refuses, so a side git '
-                'cannot parse (E10).',
+                '`git_reflog_rewritten`) -- never its older entries.',
+                # Decision 202 (reflog_lines(), parse_ref_value()).
+                'A reflog\'s line is an entry when git reads it as one: `<old> <new> '
+                '<identity>> <time> <zone>` and the message -- the ids 40 or 64 hex digits of '
+                'either case, the identity up to the first `>` with a space after it, the time a '
+                'number other than 0 as `strtoumax` reads it, the zone `+` or `-` and four '
+                'digits, the message after one tab when there is one; every other line, a blank '
+                'one included, git skips, and so does belay, counting the lines the reflog '
+                'gained in this diff that git skips in `git_reflog_lines_ignored` (decision '
+                '202).',
+                'A reflog\'s last line without its newline is no entry, and not counted: git '
+                'does not read it as one.',
+                'A loose ref\'s or `HEAD`\'s value is read as git reads it: `ref:`, any spaces '
+                'or tabs, then the name to the line\'s end, trailing whitespace cut; or an object '
+                'id of either case at the start, followed by the end or by whitespace, whatever '
+                'follows ignored -- a value git calls a broken ref is one git cannot parse (E10).',
+                'A last line without its newline is read, as git reads it; a `packed-refs` that '
+                'ends without a newline is one git refuses, so a side git cannot parse (E10).',
                 'A branch removed whose value before cannot be told derives no event '
                 '(`git_branch_deleted` needs `was`), and `HEAD` that cannot be read on a side '
                 'derives none.',
@@ -1465,15 +1506,18 @@ def _check_claims():
               '`git_ref_moved` (only when the value differs), the ref being its full name '
               '(`refs/heads/main`).',
               # G17, decision 183 (parse_git()).
-              '`HEAD` and a loose ref are read without their last newline, as git reads them; '
-              'a `packed-refs` that ends without one is refused, as git refuses it: '
-              '`could_not_interpret` (decision 183).',
+              '`HEAD` and a loose ref are read as git reads them: without their last newline, '
+              'and an object id of either case followed by whitespace and anything at all is '
+              'that id (decision 202); a `packed-refs` that ends without a newline is refused, '
+              'as git refuses it: `could_not_interpret` (decision 183).',
               "A reflog (`logs/HEAD` is ref `HEAD`, `logs/refs/...` is `refs/...`): when "
               "before's bytes are a prefix of after's ending at a line's end (an absent before "
               'is empty), `git_reflog_appended` counts the entries after it (a last line '
               'without its newline is none: git does not read it as an entry; nor is a blank '
               'line, which git skips) -- and says nothing when it gained none (decision 183) '
-              '-- and each of those '
+              '-- and `git_reflog_lines_ignored` counts the lines after it that git skips as no '
+              'entry, blank ones included (decision 202: git skips them silently, and they are '
+              'evidence worth showing), and each of those '
               'that is not a plain commit (operation `commit` or `commit (initial)`) or a '
               'fast-forward (its message contains `Fast-forward`) is a `git_reflog_move`, its '
               'operation being the message before its first `:`; otherwise, or when the reflog '
@@ -2035,11 +2079,13 @@ def pip_end(state, trace):
 # cannot be told derives no event (`git_branch_deleted` needs `was`), and
 # `HEAD` that cannot be read on a side derives none").
 #
-# The formats are git's own, which the prose does not restate: a loose ref is
-# an object id and a newline; HEAD is that or `ref: <name>` and a newline;
+# The formats are git's own, as git writes them: a loose ref is an object id
+# and a newline; HEAD is that or `ref: <name>` and a newline (read as git
+# reads them, decision 202: parse_ref_value(), G19);
 # packed-refs is lines `<id> <name>`, its `#` header and `^<id>` peeled lines
 # naming no ref; a reflog entry is `<old> <new> <identity>\t<message>` and a
-# newline. A last line without its newline is read as git reads it
+# newline (any line read as git reads it, the rest skipped, decision 202:
+# reflog_lines(), G22). A last line without its newline is read as git reads it
 # (decision 183): a reflog's is no entry (G15: "A reflog's last line without
 # its newline is no entry: git does not read it as one"); a loose ref's or
 # HEAD's is read, and packed-refs ending without one cannot be parsed (G17:
@@ -2091,66 +2137,121 @@ def git_repo(p):
     return p[:len(p) - len(place) - 1], place
 
 
+# Decision 202: refs and reflogs read as git reads them (E12). A reflog line
+# is an entry when "`<old> <new> <identity>> <time> <zone>` and the message
+# -- the ids 40 or 64 hex digits of either case, the identity up to the
+# first `>` with a space after it, the time a number other than 0 as
+# `strtoumax` reads it, the zone `+` or `-` and four digits, the message
+# after one tab when there is one": strtoumax skips leading whitespace and
+# takes a sign, then the digits; exactly one space must follow them. What
+# follows the zone is the message, its tab dropped when there is one (G27).
+_HEX_ID = rb'(?:[0-9a-fA-F]{40}|[0-9a-fA-F]{64})'
+_REFLOG_ENTRY = re.compile(rb'(' + _HEX_ID + rb') (' + _HEX_ID + rb') [^>]*> '
+                           rb'[ \t\v\f\r]*[+-]?([0-9]+) [+-][0-9]{4}(.*)', re.S)
+# git's own writing, as the model read a line before decision 202: lowercase
+# ids, an identity with no tab, a tab before the message (the coverage gate's
+# alone: which entries are read only by git's leniency).
+_REFLOG_WRITTEN = re.compile(b'(' + _OID + b') (' + _OID + rb') [^\t\n]*> [0-9]+ [+-][0-9]{4}\t'
+                             rb'[^\n]*')
+_SPACE = b' \t\n\v\f\r'
+
+
+def reflog_lines(data):
+    """(entries, lines skipped): a reflog read up to its last newline -- "A
+    reflog's last line without its newline is no entry, and not counted"
+    (G15) -- each complete line an entry when git reads it as one, "every
+    other line, a blank one included, git skips, and so does belay,
+    counting the lines ... that git skips" (G21, decision 202). An entry is
+    (old, new, message, operation), the ids lowercased as git reads them."""
+    data = data[:data.rfind(b'\n') + 1]
+    entries, skipped = [], 0
+    for line in data.split(b'\n')[:-1]:
+        m = _REFLOG_ENTRY.fullmatch(line)
+        if not m or int(m.group(3)) == 0:
+            skipped += 1
+            continue
+        msg = m.group(4)[1:] if m.group(4).startswith(b'\t') else m.group(4)
+        # "its operation being the message before its first `:`"
+        entries.append((m.group(1).decode('ascii').lower(), m.group(2).decode('ascii').lower(),
+                        msg, msg.split(b':', 1)[0]))
+    return entries, skipped
+
+
+def parse_ref_value(what, data):
+    """A loose ref's or HEAD's value, or None for "a value git calls a broken
+    ref" (E12, decision 202): "`ref:`, any spaces or tabs, then the name to
+    the line's end, trailing whitespace cut; or an object id of either case
+    at the start, followed by the end or by whitespace, whatever follows
+    ignored". The id is lowercased, as git reads it (G25). A loose ref's
+    `ref:` value is its name, as HEAD's (ambiguity G26)."""
+    if data.startswith(b'ref:'):
+        name = data[4:].lstrip(b' \t').split(b'\n', 1)[0].rstrip(_SPACE)
+        if not name:
+            return None                         # no name: a broken ref (G26)
+        return ('sym', name) if what == 'HEAD' else name
+    m = re.match(b'(' + _HEX_ID + b')(?:$|[ \t\n\v\f\r])', data)
+    if not m:
+        return None
+    oid = m.group(1).decode('ascii').lower()
+    return ('oid', oid) if what == 'HEAD' else oid
+
+
+def ref_written_by_git(what, data):
+    """Whether a loose ref's or HEAD's bytes are as git writes them (with or
+    without the last newline) -- the coverage gate's alone."""
+    return bool(re.fullmatch(b'(' + _OID + b')\n?', data) or
+                (what == 'HEAD' and re.fullmatch(rb'ref: ([^\n]+)\n?', data)))
+
+
+def broken_ref(data):
+    """Which broken ref a value is, for the coverage gate: a leading space, a
+    short id, or a word glued to the id (E12's examples, decision 202)."""
+    if data[:1] and data[:1] in _SPACE:
+        return 'leading-space'
+    run = len(re.match(b'[0-9a-fA-F]*', data).group(0))
+    return 'short' if run < 40 else 'glued' if run in (40, 64) or run > 40 else 'other'
+
+
 def parse_git(what, data):
     """The parsed copy, or None when it cannot be parsed."""
     # A last line without its newline, as git reads it (decision 183): a
     # loose ref's or HEAD's is read, packed-refs ending without one cannot be
-    # parsed (G17), and a reflog's is no entry (G15) -- a reflog is read up to
-    # its last newline, what follows it ignored, never a line not parsed.
+    # parsed (G17), and a reflog's is no entry (G15). Decision 202: a loose
+    # ref and HEAD read as git reads them; a reflog's lines that git skips
+    # skipped (reflog_lines()) -- a reflog is never one git cannot parse.
     if what in ('HEAD', 'ref'):
-        m = re.fullmatch(b'(' + _OID + b')\n?', data)
-        if m:
-            return ('oid', m.group(1).decode('ascii')) if what == 'HEAD' \
-                else m.group(1).decode('ascii')
-        m = re.fullmatch(rb'ref: ([^\n]+)\n?', data) if what == 'HEAD' else None
-        return ('sym', m.group(1)) if m else None
-    if what == 'packed-refs' and data and not data.endswith(b'\n'):
-        return None
+        return parse_ref_value(what, data)
     if what == 'reflog':
-        data = data[:data.rfind(b'\n') + 1]
-    lines = data.split(b'\n')[:-1]
-    if what == 'packed-refs':
-        refs = collections.OrderedDict()
-        for line in lines:
-            if line.startswith(b'#') or re.fullmatch(b'\\^' + _OID, line):
-                continue
-            m = re.fullmatch(b'(' + _OID + rb') ([^\n]+)', line)
-            if not m:
-                return None
-            # "Where an interpreter keeps the first of two equal keys (..., a
-            # packed ref), "first" is in file order."
-            refs.setdefault(m.group(2), m.group(1).decode('ascii'))
-        return refs
-    entries = []                                # a reflog
-    for line in lines:
-        if line == b'':                         # G21: a blank line, no entry
+        return reflog_lines(data)[0]
+    if data and not data.endswith(b'\n'):
+        return None
+    refs = collections.OrderedDict()
+    for line in data.split(b'\n')[:-1]:
+        if line.startswith(b'#') or re.fullmatch(b'\\^' + _OID, line):
             continue
-        m = re.fullmatch(b'(' + _OID + b') (' + _OID + rb') [^\t\n]*\t([^\n]*)', line)
+        m = re.fullmatch(b'(' + _OID + rb') ([^\n]+)', line)
         if not m:
             return None
-        msg = m.group(3)
-        # "its operation being the message before its first `:`"
-        entries.append((m.group(1).decode('ascii'), m.group(2).decode('ascii'), msg,
-                        msg.split(b':', 1)[0]))
-    return entries
+        # "Where an interpreter keeps the first of two equal keys (..., a
+        # packed ref), "first" is in file order."
+        refs.setdefault(m.group(2), m.group(1).decode('ascii'))
+    return refs
 
 
 def gained(before, after):
-    """The entries a reflog gained: "when before's bytes are a prefix of
-    after's ending at a line's end (an absent before is empty), ... the
-    entries after it"; else False (git_reflog_rewritten). Only those
-    entries are parsed -- None when they cannot be: E12 (decision 144; G3,
-    G13 and G14), "parsing a reflog is parsing only the entries it gained
-    in this diff -- those after before's bytes when they are a prefix of
-    after's ending at a line's end, and none otherwise (diff-v1, git:
-    `git_reflog_rewritten`) -- never its older entries", so a reflog side
-    git cannot parse is only ever an after whose new entries are not git's,
-    and a prefix ending inside a line gained none. After's last line without
-    its newline is no entry (G15, parse_git()); before's may lack its
-    newline too, but then before does not end with one and gained none
-    (ambiguity G16)."""
+    """The entries a reflog gained and the lines it gained that git skips:
+    "when before's bytes are a prefix of after's ending at a line's end (an
+    absent before is empty), ... the entries after it"; else False
+    (git_reflog_rewritten). Only those lines are read: E12 (decision 144;
+    G3, G13 and G14), "parsing a reflog is parsing only the entries it
+    gained in this diff -- those after before's bytes when they are a prefix
+    of after's ending at a line's end, and none otherwise (diff-v1, git:
+    `git_reflog_rewritten`) -- never its older entries", and a prefix ending
+    inside a line gained none. After's last line without its newline is no
+    entry and not counted (G15); before's may lack its newline too, but
+    then before does not end with one and gained none (ambiguity G16)."""
     if after.startswith(before) and (before == b'' or before.endswith(b'\n')):
-        return parse_git('reflog', after[len(before):])
+        return reflog_lines(after[len(before):])
     return False
 
 
@@ -2273,11 +2374,19 @@ def git_explain(what, p, b, a, outcome, state, trace):
         return out
     trace.append('git-read' + ('-unknown' if unknown else ''))
     if what == 'reflog':
-        # A reflog is read by its bytes first: only the entries after
-        # before's are parsed (gained()), so only its after can fail (E12,
-        # decision 144: "never its older entries"). Before's are
-        # parsed below for the coverage gate's trace alone.
-        g = gained(raw.get('before', b''), raw['after'])
+        # A reflog is read by its bytes first: only the lines after before's
+        # are read (gained()), and none fails -- what git does not read as an
+        # entry it skips (decision 202). Before's are read below for the
+        # coverage gate's traces alone.
+        g, skipped = gained(raw.get('before', b''), raw['after']) or (False, 0)
+        if isinstance(g, list):
+            gb = raw['after'][len(raw.get('before', b'')):]
+            gb = gb[:gb.rfind(b'\n') + 1]
+            if any(_REFLOG_ENTRY.fullmatch(x) and not _REFLOG_WRITTEN.fullmatch(x)
+                   for x in gb.split(b'\n')[:-1]):
+                trace.append('git-reflog-entry-lenient')    # read only as git reads
+            if skipped:
+                trace.append('git-reflog-lines-ignored')
         if g is False and raw['after'].startswith(raw.get('before', b'')):
             trace.append('git-reflog-prefix-mid-line')  # G14: none gained, none parsed
         if isinstance(g, list) and raw['after'] and not raw['after'].endswith(b'\n'):
@@ -2287,15 +2396,19 @@ def git_explain(what, p, b, a, outcome, state, trace):
                 b'\n\n' in b'\n' + raw['after'][len(raw.get('before', b'')):]:
             trace.append('git-reflog-blank-line')       # G21: skipped, no entry
         parsed = {s: raw[s] for s in regs}
-        if g is None:
-            parsed['after'] = None
-        elif g and 'before' in raw and parse_git('reflog', raw['before']) is None:
+        if g and 'before' in raw and reflog_lines(raw['before'])[1]:
             trace.append('git-reflog-old-unparsed')     # the coverage gate's alone
     else:
         g = None
         parsed = {s: parse_git(what, raw[s]) for s in regs}
         if any(raw[s] and not raw[s].endswith(b'\n') for s in regs):
             trace.append('git-unterminated-' + what)    # G17: read, or packed-refs not
+        if what in ('HEAD', 'ref'):                     # the coverage gate's alone
+            for x in regs:
+                if parsed[x] is None:
+                    trace.append('git-ref-broken:' + broken_ref(raw[x]))
+                elif not ref_written_by_git(what, raw[x]):
+                    trace.append('git-ref-lenient-' + what)
     if any(v is None for v in parsed.values()):
         # E12 (decision 141): "A side git cannot parse counts as one it
         # cannot read (and is a `could_not_interpret` event, E10)" -- no
@@ -2336,14 +2449,23 @@ def git_explain(what, p, b, a, outcome, state, trace):
         if g is False:
             trace.append('git-reflog-rewritten')
             return [render('git_reflog_rewritten', {'ref': ref})]
+        fs = []
         if not g:
             # G20, decision 183: "-- and says nothing when it gained none" --
-            # all it gained a last line without its newline (G15).
+            # all it gained a last line without its newline (G15), or lines
+            # git skips (decision 202).
             trace.append('git-reflog-appended-none')
-            return []
-        trace.append('git-reflog-appended')
-        fs = [git_finding('git_reflog_appended', collections.OrderedDict(
-            [('ref', ref), ('entries', len(g))]), trace)]
+        else:
+            trace.append('git-reflog-appended')
+            fs.append(git_finding('git_reflog_appended', collections.OrderedDict(
+                [('ref', ref), ('entries', len(g))]), trace))
+        # "-- and `git_reflog_lines_ignored` counts the lines after it that
+        # git skips as no entry, blank ones included (decision 202 ...), and
+        # each of those ... is a `git_reflog_move`": in that order, and only
+        # when it skipped any (ambiguities G23, G24).
+        if skipped:
+            fs.append(git_finding('git_reflog_lines_ignored', collections.OrderedDict(
+                [('ref', ref), ('lines', skipped)]), trace))
         for e in g:
             if not plain_or_fast_forward(e):
                 trace.append('git-reflog-move')
