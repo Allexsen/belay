@@ -14,6 +14,10 @@
  *  The pins are read at run time from test/expect/ relative to the working
  *  directory (make runs the tests from the repository root).
  */
+#define _GNU_SOURCE   /* mkstemp, fdopen */
+#include <stdlib.h>
+#include <unistd.h>
+
 #include "belay_test.h"
 #include "belay/hash.h"
 #include "schema/entry.h"
@@ -35,7 +39,8 @@
 
 #define MAX_ROWS 96
 #define MAX_COLS 8
-struct table { int n; char cell[MAX_ROWS][MAX_COLS][4096]; int cols[MAX_ROWS]; };   /* a cell: E12 is 2,763 bytes */
+#define CELL_MAX 8192
+struct table { int n; char cell[MAX_ROWS][MAX_COLS][CELL_MAX]; int cols[MAX_ROWS]; };   /* a cell: E12 is 4,190 bytes */
 
 static void trim(char *s) {
     char *p = s;
@@ -49,7 +54,7 @@ static void trim(char *s) {
 static int read_table(const char *path, const char *first, struct table *t) {
     FILE *f = fopen(path, "r");
     if (f == NULL) return -1;
-    char line[8192], head[64];
+    char line[4 * CELL_MAX], head[64];
     snprintf(head, sizeof head, "| %s |", first);
     int in = 0;
     t->n = 0;
@@ -60,6 +65,10 @@ static int read_table(const char *path, const char *first, struct table *t) {
         }
         if (in == 1) { in = 2; continue; }                          /* |---| row */
         if (line[0] != '|') break;
+        if (strchr(line, '\n') == NULL && !feof(f)) {     /* a row longer than the buffer: never cut */
+            fclose(f);
+            return -2;
+        }
         if (t->n == MAX_ROWS) break;
         /* split on '|' not preceded by '\' */
         int c = 0;
@@ -67,7 +76,11 @@ static int read_table(const char *path, const char *first, struct table *t) {
         for (; *p && c < MAX_COLS; p++) {
             if (*p == '|' && p[-1] != '\\') {
                 *p = '\0';
-                snprintf(t->cell[t->n][c], sizeof t->cell[t->n][c], "%.4095s", start);
+                if (strlen(start) >= sizeof t->cell[t->n][c]) {   /* a cell longer than the buffer: never cut */
+                    fclose(f);
+                    return -2;
+                }
+                snprintf(t->cell[t->n][c], sizeof t->cell[t->n][c], "%s", start);
                 trim(t->cell[t->n][c]);
                 c++;
                 start = p + 1;
@@ -527,6 +540,34 @@ TEST(event_rules_pin_and_schema_agree_both_ways) {
     }
 }
 
+/* A pin's cell or row longer than the reader holds is refused, never cut:
+ * E12 outgrew a 4,096-byte cell (G15) and a cut statement only read as
+ * "differs" (decision 156's class: a check that cannot see says so). */
+TEST(a_pin_cell_too_long_is_refused_never_cut) {
+    static struct table t;
+    char path[] = "/tmp/belay-pin-XXXXXX";
+    const int fd = mkstemp(path);
+    REQUIRE(fd >= 0);
+    FILE *f = fdopen(fd, "w");
+    REQUIRE(f != NULL);
+    fprintf(f, "| rule | statement |\n|---|---|\n| fits | short |\n");
+    fclose(f);
+    ASSERT_EQ_INT(1, read_table(path, "rule", &t));
+    f = fopen(path, "a");
+    REQUIRE(f != NULL);
+    fputs("| long | ", f);
+    for (int i = 0; i < CELL_MAX; i++) fputc('x', f);
+    fputs(" |\n", f);
+    fclose(f);
+    ASSERT_EQ_INT(-2, read_table(path, "rule", &t));
+    f = fopen(path, "a");
+    REQUIRE(f != NULL);
+    for (int i = 0; i < 4 * CELL_MAX; i++) fputc('|', f);
+    fclose(f);
+    ASSERT_EQ_INT(-2, read_table(path, "rule", &t));
+    unlink(path);
+}
+
 int main(void) {
     RUN(diff_fields_pin_and_table_agree_both_ways);
     RUN(finding_kinds_pin_and_schema_agree_both_ways);
@@ -536,5 +577,6 @@ int main(void) {
     RUN(one_sided_fields_follow_the_pin);
     RUN(the_frozen_format_file_never_changes);
     RUN(frozen_format_keys_types_and_rules_match_the_schema);
+    RUN(a_pin_cell_too_long_is_refused_never_cut);
     return belay_test_report();
 }
