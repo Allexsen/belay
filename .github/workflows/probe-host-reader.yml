@@ -1,0 +1,41 @@
+# A one-off probe (decision 184: an external tool's behaviour is verified
+# before a pin states it). Not for merge: the PR carrying it is closed.
+name: probe-host-reader
+on:
+  pull_request:
+    paths: ['.github/workflows/probe-host-reader.yml']
+jobs:
+  probe:
+    runs-on: ubuntu-24.04
+    steps:
+      - name: paused and stopped containers, overlay xattrs, immutable flags
+        run: |
+          set -u
+          sudo apt-get install -y -qq attr e2fsprogs >/dev/null
+          echo "=== kernel $(uname -r), docker $(docker version --format '{{.Server.Version}}')"
+          C=$(docker run -d --cap-add LINUX_IMMUTABLE alpine:3.20 sleep 300)
+          echo "--- inspect Id / Image: $(docker inspect -f '{{.Id}} {{.Image}}' $C)"
+          P=$(docker inspect -f '{{.State.Pid}}' $C)
+          U=$(sudo awk '$5 == "/"' /proc/$P/mountinfo | grep -o 'upperdir=[^,]*' | cut -d= -f2)
+          docker exec $C sh -c 'echo a > /etc/imm; chattr +i /etc/imm; echo b > /etc/app; chattr +a /etc/app; lsattr /etc/imm /etc/app; chattr +i /etc/hostname 2>&1; chattr +i /etc/os-release; lsattr /etc/os-release' 2>&1
+          echo "--- in the upper layer: flags and xattrs of the files made immutable / append-only inside"
+          for f in etc/imm etc/app etc/os-release; do sudo lsattr -d "$U/$f" 2>&1 | sed "s|$U/||"; sudo getfattr -d -m - --absolute-names "$U/$f" 2>&1 | sed "s|$U/||"; done
+          docker pause $C
+          echo "--- paused: State $(docker inspect -f 'Status={{.State.Status}} Paused={{.State.Paused}} Running={{.State.Running}} Pid={{.State.Pid}}' $C)"
+          P2=$(docker inspect -f '{{.State.Pid}}' $C)
+          echo "--- paused: mountinfo of / readable: $(sudo awk '$5 == "/"' /proc/$P2/mountinfo | awk '{print $9}') same pid: $([ $P = $P2 ] && echo yes || echo no)"
+          echo "--- paused: upper layer listable: $(sudo ls $U/etc | tr '\n' ' ')"
+          docker unpause $C
+          docker exec $C sh -c 'chattr -i /etc/imm /etc/os-release; chattr -a /etc/app' 2>&1
+          docker stop -t 0 $C >/dev/null
+          echo "--- stopped: State $(docker inspect -f 'Status={{.State.Status}} Paused={{.State.Paused}} Running={{.State.Running}} Pid={{.State.Pid}}' $C)"
+          echo "--- stopped: GraphDriver $(docker inspect -f '{{json .GraphDriver}}' $C | cut -c1-200)"
+          docker rm $C >/dev/null
+          echo "=== trusted.overlay.* through a merged view (a mount made by root, like Docker's)"
+          D=$(mktemp -d) && cd $D && mkdir l u w m && mkdir l/d && echo x > l/d/f && echo y > l/g
+          sudo mount -t overlay overlay -o lowerdir=l,upperdir=u,workdir=w m
+          sudo mv m/d m/d2; sudo chmod 600 m/g
+          echo "--- upper:"; sudo getfattr -R -d -m - --absolute-names u | sed "s|$D/||"
+          echo "--- merged view:"; sudo getfattr -d -m - --absolute-names m/d2 m/g 2>&1 | sed "s|$D/||"; echo "(end)"
+          echo "--- st_ino of g: merged $(stat -c %i m/g), lower $(stat -c %i l/g), upper $(sudo stat -c %i u/g)"
+          sudo umount m
