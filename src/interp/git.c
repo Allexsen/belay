@@ -525,21 +525,30 @@ static int collect(struct git *g, const struct belay_interp_input *in, enum git_
         rc = unav(g, w, (enum side)k, in, prov);
     }
     struct pk_ctx pc[2] = { { g, &x->pk[0], &x->npk[0], 0, 0 }, { g, &x->pk[1], &x->npk[1], 0, 0 } };
+    /* A side that cannot be parsed counts as one that cannot be read
+     * (decision 141): no value there; the other side still gives one. */
     bool parsed = true;
     for (int k = SIDE_BEFORE; k <= SIDE_AFTER && rc == 0; k++) {
         if (buf[k] == NULL) continue;
+        bool side_ok = true;
         if (kind == GK_HEAD || kind == GK_LOOSE) {
             const char *v;
             size_t vl;
-            if (git_ref_value((const char *)buf[k], len[k], &x->sym[k], &v, &vl) == -1) parsed = false;
+            if (git_ref_value((const char *)buf[k], len[k], &x->sym[k], &v, &vl) == -1) side_ok = false;
             else rc = keep(g, &x->val[k], v, vl);
         } else if (kind == GK_PACKED) {
             const int r = git_packed_each((const char *)buf[k], len[k], pk_add, &pc[k]);
             if (r > 0) rc = -1;                 /* state over its bound, or memory */
-            else if (r != 0) parsed = false;
+            else if (r != 0) side_ok = false;
+        }
+        if (!side_ok) {
+            parsed = false;
+            x->known[k] = false;
+            for (size_t m = 0; m < x->npk[k]; m++) free((char *)x->pk[k][m].s);
+            x->npk[k] = 0;                      /* nothing of what was parsed before the fault */
         }
     }
-    if (rc == 0 && kind == GK_LOG && readable && x->present[SIDE_AFTER]) {
+    if (rc == 0 && kind == GK_LOG && readable && parsed && x->present[SIDE_AFTER]) {
         const char *a = (const char *)buf[SIDE_AFTER];
         const size_t bl = buf[SIDE_BEFORE] ? len[SIDE_BEFORE] : 0;
         x->log_ok = !(bl > len[SIDE_AFTER] || (bl && memcmp(buf[SIDE_BEFORE], a, bl) != 0) || (bl && a[bl - 1] != '\n'));
@@ -547,12 +556,14 @@ static int collect(struct git *g, const struct belay_interp_input *in, enum git_
         if (x->log_ok) {
             const int r = git_reflog_each(a + bl, len[SIDE_AFTER] - bl, log_add, &lc);
             if (r > 0) rc = -1;                 /* state over its bound, or memory */
-            else if (r != 0) parsed = false;
+            else if (r != 0) {
+                parsed = false;
+                x->known[0] = x->known[1] = false;  /* a reflog not parsed is no evidence */
+            }
         }
     }
-    if (!parsed) {
+    if (!parsed) {                              /* said once for the path (E10) */
         belay_err_clear();
-        x->known[0] = x->known[1] = false;      /* decides nothing */
         if (rc == 0) rc = unav(g, SW_ERROR, SIDE_AFTER, in, prov);
     }
     free(buf[0]);

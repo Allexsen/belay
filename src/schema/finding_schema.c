@@ -230,7 +230,10 @@ const struct event_rule EVENT_RULES[EVENT_RULE_COUNT] = {
         "comes from the refs, as `git_branch_moved`, without a how; a ref or `packed-refs` that "
         "cannot be read on a side gives no value there -- before, the reflog's evidence may still "
         "give one, and without one the event is `git_branch_moved` with no `from` (a branch only "
-        "in `packed-refs` too); after, the branch derives no event. The record of a path git "
+        "in `packed-refs` too); after, the branch derives no event. A side git cannot parse "
+        "counts as one it cannot read (and is a `could_not_interpret` event, E10). A branch "
+        "removed whose value before cannot be told derives no event (`git_branch_deleted` needs "
+        "`was`), and `HEAD` that cannot be read on a side derives none. The record of a path git "
         "cannot read whose outcome is not `unknown` carries `content_unavailable`, and one "
         "`content_unavailable` event per reason names those paths (provisional when one of them "
         "is `unknown`). `paths`: every ref, `packed-refs` and `HEAD` path whose value the event "
@@ -239,5 +242,6 @@ const struct event_rule EVENT_RULES[EVENT_RULE_COUNT] = {
         "before to after but say not how are not used). The reflog is written by the watched "
         "process (diff-v1, git): the kinds that rest on it say so. (Decisions 126, 132: approved "
         "2026-11-02, events from an `unknown` path provisional rather than dropped; 137: what "
-        "cannot be read, and `paths`, worded -- refs are proof, the reflog is evidence.)" },
+        "cannot be read, and `paths`, worded -- refs are proof, the reflog is evidence; 141: a "
+        "side not parsed, a removal not dated, HEAD not read.)" },
 };

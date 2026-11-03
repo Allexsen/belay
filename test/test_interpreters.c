@@ -771,6 +771,31 @@ TEST(git_what_cannot_be_read_reduces_the_claim_never_the_fact) {
     r_free(&r);
 }
 
+/* Decision 141: three readings E12 now states. A ref git cannot parse on a
+ * side counts as one it cannot read there -- before: "now at"; after: no
+ * event -- and is said (E10). A branch removed whose value before cannot be
+ * told derives no event (git_branch_deleted needs was). HEAD that cannot be
+ * read on a side derives no event. */
+TEST(git_unparseable_unknown_before_and_unread_head) {
+    struct run r;
+    r_begin(&r, BELAY_INTERP_GIT, true);
+    const struct belay_entry a = file(put(OA "\n"), 0), junk = file(put("not a ref\n"), 0), none = file(NULL, 0);
+    const struct belay_entry hd = file(put("ref: refs/heads/main\n"), 0);
+    r_path(&r, "/s/.git/refs/heads/p", &junk, &a, "modified");
+    r_path(&r, "/s/.git/refs/heads/q", &a, &junk, "modified");
+    r_path(&r, "/s/.git/refs/heads/gone", &none, NULL, "removed");
+    r_path(&r, "/s/.git/HEAD", &none, &hd, "modified");
+    ASSERT_EQ_STR(
+        "{\"event\":\"could_not_interpret\",\"interp\":\"git\",\"text\":\"could not interpret\",\"paths\":[\".git/refs/heads/p\"]}\n"
+        "{\"event\":\"could_not_interpret\",\"interp\":\"git\",\"text\":\"could not interpret\",\"paths\":[\".git/refs/heads/q\"]}\n"
+        GEV("content_unavailable", "\"reason\":\"missing\",\"side\":\"before\"", "content unavailable (before): missing")
+            ",\"paths\":[\".git/HEAD\",\".git/refs/heads/gone\"]}\n"
+        GEV("git_branch_moved", "\"repo\":\".git\",\"branch\":\"p\",\"to\":\"" OA "\"", "p now at " OA)
+            ",\"paths\":[\".git/refs/heads/p\"]}\n",
+        r_end(&r));
+    r_free(&r);
+}
+
 /* E10: a loose ref git cannot parse decides nothing and is said. */
 TEST(git_a_ref_that_cannot_be_parsed_is_one_could_not_interpret_event) {
     struct run r;
@@ -1370,6 +1395,7 @@ int main(void) {
     RUN(git_a_ref_that_cannot_be_parsed_is_one_could_not_interpret_event);
     RUN(git_events_name_only_the_paths_they_came_from);
     RUN(git_what_cannot_be_read_reduces_the_claim_never_the_fact);
+    RUN(git_unparseable_unknown_before_and_unread_head);
     RUN(git_reflog_that_is_not_appended_to_is_rewritten);
     RUN(git_reflog_without_a_copy_is_content_unavailable);
     RUN(git_ref_that_cannot_be_parsed_could_not_be_interpreted);
