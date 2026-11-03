@@ -78,8 +78,13 @@ static void fixture(void) {
        "m=$(python3 -c \"import hashlib;print(hashlib.md5(open('usr/bin/hello','rb').read()).hexdigest())\") && "
        "c=$(python3 -c \"import hashlib;print(hashlib.md5(open('etc/hello.conf','rb').read()).hexdigest())\") && "
        "printf 'Package: hello\\nStatus: install ok installed\\nArchitecture: amd64\\nVersion: 2.10-3\\n"
-       "Conffiles:\\n /etc/hello.conf %%s\\n /etc/gone.conf newconffile\\nDescription: x\\n more\\n\\n' $c > var/lib/dpkg/status && "
-       "printf '%%s  usr/bin/hello\\n%%s  usr/bin/gone\\n%%s  ../../outside\\n%%s  zzz/last\\n' $m $m $m $m > var/lib/dpkg/info/hello.md5sums && "
+       "Conffiles:\\n /etc/hello.conf %%s\\n /etc/gone.conf newconffile\\nDescription: x\\n more\\n\\n"
+       "Package: libc6\\nStatus: install ok installed\\nArchitecture: amd64\\nVersion: 2.36\\n\\n"
+       "Package: libc6\\nStatus: install ok installed\\nArchitecture: i386\\nVersion: 2.36-i\\n\\n' $c > var/lib/dpkg/status && "
+       "mkdir -p lib/i386 usr/share && printf 'libc\\n' > lib/i386/libc.so && "
+       "l=$(python3 -c \"import hashlib;print(hashlib.md5(b'libc\\\\n').hexdigest())\") && "
+       "printf '%%s  lib/i386/libc.so\\n' $l > 'var/lib/dpkg/info/libc6:i386.md5sums' && "
+       "printf '%%s  usr/bin/hello\\n%%s  usr/bin/gone\\n%%s  ../../outside\\n%%s  zzz/last\\n%%s  usr/share\\n' $m $m $m $m $m > var/lib/dpkg/info/hello.md5sums && "
        "printf 'x = 1\\n' > lib/site-packages/foo/__init__.py && cp lib/site-packages/foo/__init__.py bin/foo && "
        "h=$(python3 -c \"import hashlib,base64;print(base64.urlsafe_b64encode(hashlib.sha256(b'x = 1\\\\n').digest()).rstrip(b'=').decode())\") && "
        "printf 'foo/__init__.py,sha256=%%s,6\\nfoo-1.0.dist-info/RECORD,,\\n../../bin/foo,sha256=%%s,6\\n../../../../escape,,\\n' $h $h "
@@ -125,8 +130,8 @@ static int read_back(const char *path, const char *want, struct bundle *b) {
 TEST(export_lists_every_database_row_with_what_it_said_at_reset) {
     fixture();
     REQUIRE_MSG(export_(NULL) == EXIT_DONE, "%s", g_err);
-    ASSERT_TRUE(strstr(g_out, "packages: 8 files listed by their databases, 2 outside the scope (never checked)") != NULL);
-    ASSERT_TRUE(strstr(g_out, "baseline integrity: 5 files not as their database says") != NULL);
+    ASSERT_TRUE(strstr(g_out, "packages: 10 files listed by their databases, 2 outside the scope (never checked)") != NULL);
+    ASSERT_TRUE(strstr(g_out, "baseline integrity: 6 files not as their database says") != NULL);
     /* the sha256 printed is the file's, as sha256sum says (B-R1) */
     size_t n;
     char *b = slurp(g_out_path, &n), hex[65], want[80];
@@ -137,17 +142,19 @@ TEST(export_lists_every_database_row_with_what_it_said_at_reset) {
     free(b);
     struct bundle bd;
     REQUIRE_MSG(read_back(g_out_path, hex, &bd) == 0, "%s", belay_err_msg());
-    ASSERT_EQ_INT(8, (int)bd.packages.n);
+    ASSERT_EQ_INT(10, (int)bd.packages.n);
     ASSERT_EQ_INT(2, (int)bd.packages.outside_scope);
     /* sorted by db, package, path (B-6); each at_reset (B-P6) */
     ASSERT_EQ_STR("dpkg hello:amd64 2.10-3 etc/gone.conf (conffile) missing", line_of(&bd.packages.v[0]));
     ASSERT_EQ_STR("dpkg hello:amd64 2.10-3 etc/hello.conf (conffile) match", line_of(&bd.packages.v[1]));
     ASSERT_EQ_STR("dpkg hello:amd64 2.10-3 usr/bin/gone missing", line_of(&bd.packages.v[2]));
     ASSERT_EQ_STR("dpkg hello:amd64 2.10-3 usr/bin/hello mismatch", line_of(&bd.packages.v[3]));
-    ASSERT_EQ_STR("dpkg hello:amd64 2.10-3 zzz/last missing", line_of(&bd.packages.v[4]));   /* past every entry */
-    ASSERT_EQ_STR("pip foo 1.0 bin/foo match", line_of(&bd.packages.v[5]));
-    ASSERT_EQ_STR("pip foo 1.0 lib/site-packages/foo-1.0.dist-info/RECORD no_hash", line_of(&bd.packages.v[6]));
-    ASSERT_EQ_STR("pip foo 1.0 lib/site-packages/foo/__init__.py match", line_of(&bd.packages.v[7]));
+    ASSERT_EQ_STR("dpkg hello:amd64 2.10-3 usr/share not_a_file", line_of(&bd.packages.v[4]));
+    ASSERT_EQ_STR("dpkg hello:amd64 2.10-3 zzz/last missing", line_of(&bd.packages.v[5]));   /* past every entry */
+    ASSERT_EQ_STR("dpkg libc6:i386 2.36-i lib/i386/libc.so match", line_of(&bd.packages.v[6]));   /* its arch's stanza */
+    ASSERT_EQ_STR("pip foo 1.0 bin/foo match", line_of(&bd.packages.v[7]));
+    ASSERT_EQ_STR("pip foo 1.0 lib/site-packages/foo-1.0.dist-info/RECORD no_hash", line_of(&bd.packages.v[8]));
+    ASSERT_EQ_STR("pip foo 1.0 lib/site-packages/foo/__init__.py match", line_of(&bd.packages.v[9]));
     bundle_free(&bd);
     /* --json: one line, the findings in the packages member's order */
     sh("rm -f '%s'", g_out_path);
@@ -455,6 +462,19 @@ TEST(every_row_refuses_what_it_does_not_allow) {
         t[P].body = body;
         t[P].bl = bl;
         CORRUPT_(cases[c].what, t, k, false);
+    }
+
+    /* B-6: a count that is not a non-negative integer */
+    memcpy(t, m, k * sizeof *t);
+    {
+        static char ph[70000];
+        snprintf(ph, sizeof ph, "%.*s", (int)m[P].hl, m[P].hdr);
+        char *os = strstr(ph, "\"outside_scope\":");
+        REQUIRE(os != NULL);
+        snprintf(os, sizeof ph - (size_t)(os - ph), "\"outside_scope\":-1}");
+        t[P].hdr = ph;
+        t[P].hl = strlen(ph);
+        CORRUPT_("outside_scope -1", t, k, false);
     }
 
     /* B-7: members miscounted; bytes after the end; the end missing */

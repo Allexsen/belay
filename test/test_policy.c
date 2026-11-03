@@ -9,6 +9,10 @@
 #define _GNU_SOURCE
 #include "belay_test.h"
 #include "cli/cli.h"
+#include "belay/diff.h"
+#include "belay/manifest.h"
+#include "belay/error.h"
+#include "policy/policy.h"
 
 #include <dirent.h>
 #include <stdbool.h>
@@ -414,6 +418,157 @@ TEST(executables_on_path_and_privilege) {
     NONE("new_executable_on_path", "bin/new");
 }
 
+/* P-F2: a text past 1,024 bytes is cut at a character, with "...". */
+TEST(a_long_text_is_cut_at_1024_bytes) {
+    fresh(NULL);
+    char deep[1400] = "tests";
+    for (int i = 0; i < 6; i++) strcat(deep, "/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa");
+    sh("mkdir -p '%s' && printf 'x\\n' > '%s/f.txt'", deep, deep);
+    REQUIRE(export_(false) == EXIT_DONE);
+    sh("printf 'y\\n' > '%s/f.txt'", deep);
+    ASSERT_EQ_INT(EXIT_DONE, verify_(false));
+    const char *t = strstr(g_out, "\"text\":\"tests/aaa");
+    REQUIRE(t != NULL);
+    const char *e = strstr(t + 8, "\"");
+    REQUIRE(e != NULL);
+    ASSERT_EQ_INT(1024, (int)(e - (t + 8)));
+    ASSERT_EQ_INT(0, strncmp(e - 3, "...", 3));
+}
+
+/* tests_weakened counts only where both sides' copies are held: a test
+ * file too large to be kept before is never counted against nothing. */
+TEST(a_test_file_without_a_copy_is_not_counted) {
+    fresh(NULL);
+    sh("mkdir -p tests && python3 -c \"open('tests/test_big.py','w').write('def test_a():\\\\n' + '    assert 1\\\\n' * 9000)\"");
+    REQUIRE(export_(false) == EXIT_DONE);
+    sh("printf 'import pytest\\n@pytest.mark.skip\\ndef test_a():\\n    assert 1\\n' > tests/test_big.py");
+    ASSERT_EQ_INT(EXIT_DONE, verify_(false));
+    HAS("touches_tests", "tests/test_big.py", NULL);
+    NONE("tests_weakened", "tests/test_big.py");
+}
+
+/* P-T5, P-T6: what the databases list and belay never checked, counted. */
+TEST(the_trailer_counts_what_was_never_checked) {
+    fresh(NULL);
+    sh("mkdir -p lib/site-packages/p-1.0.dist-info lib/site-packages/p && printf 'x\\n' > lib/site-packages/p/x.py && "
+       "printf 'p/x.py,,\\n../../../../out,,\\n' > lib/site-packages/p-1.0.dist-info/RECORD");
+    REQUIRE(export_(false) == EXIT_DONE);
+    ASSERT_EQ_INT(EXIT_DONE, verify_(false));
+    ASSERT_TRUE(strstr(g_out, ",\"packages_outside_scope\":1,\"packages_no_hash\":1,") != NULL);
+}
+
+/* The scope root is a file like any other for privilege_changed. */
+TEST(the_scope_root_is_judged_too) {
+    fresh(NULL);
+    REQUIRE(export_(false) == EXIT_DONE);
+    sh("chmod +t .");
+    ASSERT_EQ_INT(EXIT_DONE, verify_(false));
+    HAS("privilege_changed", ".", ",\"what\":\"sticky\",\"before\":\"off\",\"after\":\"on\",");
+}
+
+/* --to: the checkpoint's own copies come with it -- a test weakened
+ * before that checkpoint is counted from them. */
+TEST(verify_to_a_checkpoint_brings_its_copies) {
+    fresh(NULL);
+    sh("mkdir -p tests && printf 'def test_a():\\n    assert 1\\n' > tests/test_a.py");
+    REQUIRE(export_(false) == EXIT_DONE);
+    sh("printf 'def test_a():\\n    pass\\n' > tests/test_a.py");
+    ASSERT_EQ_INT(EXIT_DONE, belay("check", "--scope", g_scope, NULL));
+    sh("printf 'def test_a():\\n    assert 1\\n' > tests/test_a.py");       /* put back after the checkpoint */
+    ASSERT_EQ_INT(EXIT_DONE, belay("verify", "--scope", g_scope, "--baseline", g_bundle, "--baseline-sha256", g_sha, "--to", "2", NULL));
+    HAS("tests_weakened", "tests/test_a.py", ",\"assertions_before\":1,\"assertions_after\":0,");
+}
+
+/* An event's provisional, git's `how`, and P-F4's sorted paths, on a diff
+ * made by hand: no scope makes an event provisional on demand. */
+TEST(events_carry_their_provisional_how_and_sorted_paths) {
+    fresh(NULL);
+    char empty[600], m1[600], m2[600], d[600], st[600], dd[600];
+    snprintf(empty, sizeof empty, "%s/e", g_dir);
+    snprintf(m1, sizeof m1, "%s/m1", g_dir);
+    snprintf(m2, sizeof m2, "%s/m2", g_dir);
+    snprintf(d, sizeof d, "%s/d", g_dir);
+    snprintf(dd, sizeof dd, "%s/dd", g_dir);
+    snprintf(st, sizeof st, "%s/st", g_dir);
+    char cmd[8192];
+    snprintf(cmd, sizeof cmd, "mkdir -p '%s' '%s'", empty, st);
+    REQUIRE(system(cmd) == 0);
+    struct belay_manifest_opts o = { .hash_max_bytes = BELAY_HASH_MAX_BYTES_DEFAULT, .store_max_bytes = BELAY_STORE_MAX_BYTES_DEFAULT };
+    REQUIRE(belay_manifest_write(m1, empty, &o, NULL) == 0 && belay_manifest_write(m2, empty, &o, NULL) == 0);
+    REQUIRE(belay_diff(m1, m2, d, NULL, NULL) == 0);
+    /* the event, before the trailer */
+    snprintf(cmd, sizeof cmd, "head -n 1 '%s' > '%s' && printf '%%s\\n' '{\"event\":\"git_history_rewritten\",\"interp\":\"git\","
+             "\"repo\":\".git\",\"branch\":\"main\",\"how\":\"reset\",\"from\":\"1\",\"to\":\"2\",\"text\":\"x\","
+             "\"provisional\":true,\"paths\":[\".git/refs/heads/main\",\".git/logs/refs/heads/main\"]}' >> '%s' && "
+             "tail -n 1 '%s' >> '%s'", d, dd, dd, d, dd);
+    REQUIRE(system(cmd) == 0);
+    struct bundle b = { 0 };
+    const struct policy_in in = { m1, m2, dd, st, empty, true, &b,
+                                  "0000000000000000000000000000000000000000000000000000000000000000", NULL };
+    free(g_out);
+    size_t on;
+    FILE *out = open_memstream(&g_out, &on);
+    REQUIRE_MSG(policy_run(&in, out, NULL) == 0, "%s", belay_err_msg());
+    fclose(out);
+    HAS("git_history_rewritten", NULL, ",\"repo\":\".git\",\"branch\":\"main\",\"how\":\"reset\","
+        "\"text\":\"main in .git: history rewritten by reset\",\"provisional\":true,"
+        "\"paths\":[\".git/logs/refs/heads/main\",\".git/refs/heads/main\"]}");
+}
+
+/* Found by policy.v1's separate author: a checkpoint's own exclusions
+ * cover a protected pattern too (PS-C2: "a manifest header's excluded,
+ * any reason") -- verify --to refuses it. */
+TEST(verify_to_a_checkpoint_that_left_a_protected_path_out_is_refused) {
+    fresh("{\"belay_protect\":1,\"protect\":[{\"path\":\"tests/**\",\"mode\":[\"no_write\"]}]}");
+    sh("mkdir -p tests && printf 't\\n' > tests/t.py");
+    REQUIRE_MSG(export_(true) == EXIT_DONE, "%s", g_err);
+    ASSERT_EQ_INT(EXIT_DONE, belay("exclude", "--scope", g_scope, "--add", "tests", NULL));
+    ASSERT_EQ_INT(EXIT_DONE, belay("check", "--scope", g_scope, NULL));
+    ASSERT_EQ_INT(EXIT_REFUSED, belay("verify", "--scope", g_scope, "--baseline", g_bundle, "--baseline-sha256", g_sha,
+                                      "--protect", g_spec, "--to", "2", NULL));
+    ASSERT_TRUE(strstr(g_err, "a capture did not walk tests") != NULL);
+    ASSERT_EQ_INT(0, (int)strlen(g_out));
+}
+
+/* Found by policy.v1's separate author: an entry's reasons are every flag
+ * it carries (an unreadable file is unverified too, manifest-v1 rule 6). */
+TEST(an_unverifiable_entry_names_every_flag_it_carries) {
+    if (geteuid() == 0) SKIP("root reads anything");
+    fresh("{\"belay_protect\":1,\"protect\":[{\"path\":\"tests/**\",\"mode\":[\"no_create\"]}]}");
+    sh("mkdir -p tests");
+    REQUIRE_MSG(export_(true) == EXIT_DONE, "%s", g_err);
+    sh("printf 'n\\n' > tests/new.py && chmod 000 tests/new.py");
+    ASSERT_EQ_INT(EXIT_CHANGES, verify_(true));
+    sh("chmod 644 tests/new.py");
+    HAS("protected_path_unverifiable", "tests/new.py", ",\"reasons\":[\"unverified\",\"unreadable\"],");
+}
+
+/* Found by policy.v1's separate author: a side never looked at (E11,
+ * not_captured) is neither held nor absent -- nothing is counted. */
+TEST(a_side_never_looked_at_is_not_counted) {
+    fresh(NULL);
+    sh("mkdir -p tests && printf 'def test_a():\\n    assert 1\\n' > tests/test_a.py");
+    REQUIRE(export_(false) == EXIT_DONE);
+    ASSERT_EQ_INT(EXIT_DONE, belay("exclude", "--scope", g_scope, "--add", "tests", NULL));
+    ASSERT_EQ_INT(EXIT_DONE, belay("check", "--scope", g_scope, NULL));
+    ASSERT_EQ_INT(EXIT_DONE, belay("verify", "--scope", g_scope, "--baseline", g_bundle, "--baseline-sha256", g_sha,
+                                   "--to", "2", NULL));
+    ASSERT_EQ_INT(0, count("tests_weakened"));
+}
+
+/* P-F2's text: bytes that are not UTF-8 as the receipt writes them,
+ * \xNN, so two paths never read the same (the author's ambiguity P19). */
+TEST(a_path_not_utf8_reads_as_the_receipt_writes_it) {
+    fresh(NULL);
+    REQUIRE(export_(false) == EXIT_DONE);
+    sh("mkdir -p tests && printf 'x\\n' > \"$(printf 'tests/test_\\377.py')\" || true");
+    char p[600];
+    snprintf(p, sizeof p, "%s/tests/test_\377.py", g_scope);
+    if (access(p, F_OK) != 0) SKIP("this filesystem refuses a name that is not UTF-8");
+    ASSERT_EQ_INT(EXIT_DONE, verify_(false));
+    ASSERT_TRUE(strstr(g_out, "\"text\":\"tests/test_\\\\xff.py: test file added\"") != NULL);
+}
+
 /* ---- refusals ---- */
 
 TEST(verify_refuses_what_it_must_never_judge) {
@@ -429,6 +584,7 @@ TEST(verify_refuses_what_it_must_never_judge) {
     ASSERT_EQ_INT(0, (int)strlen(g_out));
     /* the spec: none, another (PS-R3); refused (PS-R2, exit 2) */
     ASSERT_EQ_INT(EXIT_REFUSED, verify_(false));
+    ASSERT_TRUE(strstr(g_err, "verify takes that spec, and only it") != NULL);
     char other[600];
     snprintf(other, sizeof other, "%s/other.json", g_dir);
     FILE *f = fopen(other, "w");
@@ -459,6 +615,15 @@ TEST(verify_refuses_what_it_must_never_judge) {
     /* usage */
     ASSERT_EQ_INT(EXIT_USAGE, belay("verify", "--scope", g_scope, NULL));
     ASSERT_EQ_INT(EXIT_USAGE, belay("verify", "--scope", g_scope, "--baseline", g_bundle, "--to", "x", NULL));
+    /* a spec given to a bundle exported without one (PS-R3) */
+    char plain[600];
+    snprintf(plain, sizeof plain, "%s/plain.bundle", g_dir);
+    ASSERT_EQ_INT(EXIT_DONE, belay("baseline", "export", "--scope", g_scope, "--out", plain, "--json", NULL));
+    char psha[65];
+    snprintf(psha, sizeof psha, "%.64s", strstr(g_out, "\"sha256\":\"") + 10);
+    ASSERT_EQ_INT(EXIT_REFUSED, belay("verify", "--scope", g_scope, "--baseline", plain, "--baseline-sha256", psha,
+                                      "--protect", g_spec, NULL));
+    ASSERT_TRUE(strstr(g_err, "exported without a protect spec") != NULL);
     /* the work directory is gone, whatever happened */
     DIR *d = opendir(g_tmp);
     REQUIRE(d != NULL);
@@ -486,6 +651,16 @@ int main(void) {
     RUN(ci_pytest_config_and_conftest);
     RUN(startup_hooks_git_hooks_and_history);
     RUN(executables_on_path_and_privilege);
+    RUN(a_long_text_is_cut_at_1024_bytes);
+    RUN(a_test_file_without_a_copy_is_not_counted);
+    RUN(the_trailer_counts_what_was_never_checked);
+    RUN(the_scope_root_is_judged_too);
+    RUN(verify_to_a_checkpoint_brings_its_copies);
+    RUN(events_carry_their_provisional_how_and_sorted_paths);
+    RUN(verify_to_a_checkpoint_that_left_a_protected_path_out_is_refused);
+    RUN(an_unverifiable_entry_names_every_flag_it_carries);
+    RUN(a_side_never_looked_at_is_not_counted);
+    RUN(a_path_not_utf8_reads_as_the_receipt_writes_it);
     RUN(verify_refuses_what_it_must_never_judge);
     char cmd[600];
     snprintf(cmd, sizeof cmd, "chmod -R u+rwx '%s' 2>/dev/null; rm -rf '%s'", g_dir, g_dir);

@@ -81,6 +81,7 @@ TEST(a_spec_is_refused_for_anything_its_rows_do_not_allow) {
     REFUSED("{\"belay_protect\":1,\"protect\":[{\"path\":\"a\"}]}");              /* neither mode nor sha */
     REFUSED("{\"belay_protect\":1,\"protect\":[{\"path\":\"a\",\"mode\":[]}]}");
     REFUSED("{\"belay_protect\":1,\"protect\":[{\"path\":\"a\",\"mode\":[\"no_read\"]}]}");
+    REFUSED("{\"belay_protect\":1,\"protect\":[{\"path\":\"a\",\"mode\":[\"no_writes\"]}]}");
     REFUSED("{\"belay_protect\":1,\"protect\":[{\"path\":\"a\",\"mode\":[\"no_write\",\"no_write\"]}]}");
     REFUSED("{\"belay_protect\":1,\"protect\":[{\"path\":\"a\",\"mode\":\"no_write\"}]}");
     REFUSED("{\"belay_protect\":1,\"protect\":[{\"path\":\"a\",\"mode\":[\"no_write\"],\"why\":\"x\"}]}");
@@ -118,11 +119,21 @@ TEST(a_spec_is_bounded_by_its_rows) {
         ASSERT_EQ_INT(extra ? -1 : 0, rc);
         if (rc == 0) protect_free(&s);
     }
+    /* 256 path_dirs read, 257 refused (PS-7) */
+    for (int extra = 0; extra < 2; extra++) {
+        size_t n = (size_t)sprintf(j, "{\"belay_protect\":1,\"protect\":[],\"path_dirs\":[");
+        for (size_t i = 0; i < PROTECT_DIRS_MAX + (size_t)extra; i++) n += (size_t)sprintf(j + n, "\"bin\",");
+        sprintf(j + n - 1, "]}");
+        struct protect_spec s;
+        const int rc = protect_parse(j, strlen(j), &s);
+        ASSERT_EQ_INT(extra ? -1 : 0, rc);
+        if (rc == 0) protect_free(&s);
+    }
     free(j);
     /* a pattern of 4,096 bytes read, 4,097 refused (PS-P1) */
     char p[PROTECT_PATTERN_MAX + 2];
     memset(p, 'a', sizeof p - 1);
-    p[PROTECT_PATTERN_MAX] = '\0';
+    p[PROTECT_PATTERN_MAX + 1] = '\0';                  /* 4,097 bytes, no NUL among them */
     ASSERT_TRUE(protect_pattern_valid(p, PROTECT_PATTERN_MAX));
     ASSERT_FALSE(protect_pattern_valid(p, PROTECT_PATTERN_MAX + 1));
     /* larger than 1 MiB: refused before it is parsed (PS-R1) */
@@ -164,6 +175,8 @@ TEST(patterns_match_as_ps_p2_to_p4) {
     MATCHES("**", "a/b/c");
     MATCHES("test_*.py", "test_api.py");                /* PS-P3 */
     MATCHES("test_*.py", "test_.py");
+    MATCHES("test*", "test");                           /* a trailing '*' takes none */
+    MATCHES("a**b", "ab");                              /* `**` inside a component: two stars */
     NO("test_*.py", "test_api.pyc");
     NO("test_*.py", "sub/test_api.py");
     MATCHES("a/*/c", "a/b/c");
