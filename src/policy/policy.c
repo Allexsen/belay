@@ -392,6 +392,13 @@ struct state {
     char **venv;
     size_t nvenv;
     bool *sha_seen;
+    /* decision 186: the .py paths with a record, and the .pyc files listed
+     * without a hash that changed -- judged once the merge is done (a
+     * source can sort after its __pycache__) */
+    char **chg_py;
+    size_t nchg_py, capchg_py;
+    struct pyc { const struct pkg_line *x; char *path; size_t n; const char *why; } *pyc;
+    size_t npyc, cappyc;
 };
 
 static const struct pkg_list *g_pl;
@@ -577,6 +584,34 @@ static void protected(struct state *s, const char *p, size_t n, const struct bel
 }
 
 /* Installed packages (B-6 lines at this path). */
+static bool p_n_ends(const char *p, size_t n, const char *suf) {
+    const size_t l = strlen(suf);
+    return n >= l && memcmp(p + n - l, suf, l) == 0;
+}
+
+/* A .pyc's source (decision 186): <dir>/__pycache__/<name>.<tag>[.opt-<n>].pyc
+ * and <dir>/<name>.pyc are both <dir>/<name>.py. */
+static size_t pyc_source(const char *p, size_t n, char *out, size_t cap) {
+    size_t bl;
+    const char *bn = base_name(p, n, &bl);
+    const size_t dl = n - bl;                       /* the directory, '/' kept */
+    static const char PC[] = "__pycache__/";
+    if (dl >= sizeof PC - 1 && memcmp(p + dl - (sizeof PC - 1), PC, sizeof PC - 1) == 0 &&
+        (dl == sizeof PC - 1 || p[dl - sizeof PC] == '/')) {
+        const char *dot = memchr(bn, '.', bl);
+        const size_t nl = dot != NULL ? (size_t)(dot - bn) : bl;
+        const size_t pre = dl - (sizeof PC - 1);
+        if (pre + nl + 3 >= cap) return 0;
+        memcpy(out, p, pre);
+        memcpy(out + pre, bn, nl);
+        memcpy(out + pre + nl, ".py", 3);
+        return pre + nl + 3;
+    }
+    if (n < 1 || n >= cap) return 0;
+    memcpy(out, p, n - 1);                          /* <name>.pyc -> <name>.py */
+    return n - 1;
+}
+
 static void packages(struct state *s, const char *p, size_t n, const struct belay_entry *a, const struct rec *d) {
     const struct pkg_list *l = &s->in->bundle->packages;
     struct ctx *c = s->c;
@@ -599,8 +634,30 @@ static void packages(struct state *s, const char *p, size_t n, const struct bela
         }
         /* listed without a hash: never checked (P-T6) -- a RECORD lists
          * itself so, and every reinstall rewrites it */
-        if (tamp || x->at_reset == AT_MISSING || x->at_reset == AT_NO_HASH || pkg_has_event(s, x->db, x->package))
+        if (tamp || x->at_reset == AT_MISSING || pkg_has_event(s, x->db, x->package))
             continue;
+        if (x->at_reset == AT_NO_HASH) {
+            /* a .pyc listed without a hash: judged by its source (decision
+             * 186); modified or of another type, never removed */
+            const char *pw = strcmp(outcome, "modified") == 0 ? "other bytes"
+                           : strcmp(outcome, "type_changed") == 0 ? "type changed" : NULL;
+            if (pw == NULL || p_n_ends(p, n, ".pyc") == false) continue;
+            if (s->npyc == s->cappyc) {
+                const size_t cap = s->cappyc ? 2 * s->cappyc : 16;
+                struct pyc *v = realloc(s->pyc, cap * sizeof *v);
+                if (v == NULL) { c->oom = true; return; }
+                s->pyc = v;
+                s->cappyc = cap;
+            }
+            struct pyc *y = &s->pyc[s->npyc];
+            if ((y->path = dupn(p, n)) == NULL) { c->oom = true; return; }
+            y->x = x;
+            y->n = n;
+            y->why = pw;
+            s->npyc++;
+            tamp = true;
+            continue;
+        }
         const char *why = NULL;
         if (strcmp(outcome, "removed") == 0) why = "removed";
         else if (strcmp(outcome, "type_changed") == 0) why = "type changed";
@@ -1001,7 +1058,7 @@ static int corrupt(const char *what) {
 
 int policy_run(const struct policy_in *in, FILE *out, struct policy_stats *st) {
     struct ctx c = { in, NULL, 0, 0, false };
-    struct state s = { &c, in, NULL, NULL, NULL, 0, { 0 }, NULL, 0, NULL, 0, NULL };
+    struct state s = { .c = &c, .in = in };
     FILE *df = NULL;
     char *line = NULL;
     size_t cap = 0, ln;
@@ -1114,9 +1171,37 @@ int policy_run(const struct policy_in *in, FILE *out, struct policy_stats *st) {
         packages(&s, key, kl, a, dr);
         if (signals(&s, key, kl, b, a, dr) == -1) goto out;
         if (c.oom) { nomem(); goto out; }
+        if (dr != NULL && p_n_ends(key, kl, ".py")) {
+            if (s.nchg_py == s.capchg_py) {
+                const size_t cap = s.capchg_py ? 2 * s.capchg_py : 64;
+                char **v = realloc(s.chg_py, cap * sizeof *v);
+                if (v == NULL) { nomem(); goto out; }
+                s.chg_py = v;
+                s.capchg_py = cap;
+            }
+            if ((s.chg_py[s.nchg_py] = dupn(key, kl)) == NULL) { nomem(); goto out; }
+            s.nchg_py++;
+        }
         if (dr != NULL) have_d = false;
         if (b != NULL) hb = belay_manifest_next(rb, &eb);
         if (a != NULL) ha = belay_manifest_next(ra, &ea);
+    }
+    /* a .pyc changed under a source that did not (decision 186) */
+    for (size_t i = 0; i < s.npyc; i++) {
+        char src[4096 + 8];
+        const size_t sl = pyc_source(s.pyc[i].path, s.pyc[i].n, src, sizeof src);
+        bool changed = sl == 0;
+        for (size_t k = 0; k < s.nchg_py && !changed; k++)
+            changed = strlen(s.chg_py[k]) == sl && memcmp(s.chg_py[k], src, sl) == 0;
+        if (changed) continue;
+        const struct pkg_line *x = s.pyc[i].x;
+        struct flag *f = add(&c, PK_TAMPERED_INSTALLED_PACKAGE, false);
+        fstr(&c, f, "db", pkg_db_name(x->db));
+        fstr(&c, f, "package", x->package);
+        fs(&c, f, "path", s.pyc[i].path, s.pyc[i].n);
+        fstr(&c, f, "why", s.pyc[i].why);
+        fstr(&c, f, "at_reset", pkg_at_reset_name(x->at_reset));
+        fpath(&c, f, s.pyc[i].path, s.pyc[i].n);
     }
     /* expected_sha256 of a path no after entry has, and no before entry either */
     for (size_t i = 0; in->spec != NULL && i < in->spec->n_rules; i++) {
@@ -1195,6 +1280,10 @@ out:
     free(s.pk_ix);
     free(s.rec_ix);
     free(s.sha_seen);
+    for (size_t i = 0; i < s.nchg_py; i++) free(s.chg_py[i]);
+    free(s.chg_py);
+    for (size_t i = 0; i < s.npyc; i++) free(s.pyc[i].path);
+    free(s.pyc);
     pkgdb_free(&s.after_pk);
     belay_content_close(s.cs);
     return rc;

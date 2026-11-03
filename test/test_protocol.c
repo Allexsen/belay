@@ -157,6 +157,34 @@ TEST(a_forged_record_is_named_as_tampering_unfrozen) {
     ASSERT_EQ_INT(1, (int)(strstr(g_out, ",\"tampered_installed_package\":1,") != NULL));
 }
 
+/* Decision 186: a .pyc its RECORD lists without a hash is judged -- Python
+ * imports bytecode that looks current instead of its source. Changed while
+ * its source did not: tampering (frozen, a violation). Recompiled beside a
+ * changed source, or removed: not flagged. */
+TEST(a_pyc_patched_under_an_unchanged_source_is_tampering) {
+    for (int frozen = 0; frozen < 2; frozen++) {
+        fresh(frozen ? FROZEN : "{\"belay_protect\":1,\"protect\":[]}");
+        packages();
+        sh("mkdir -p lib/site-packages/pkg/__pycache__ && printf 'bytecode\\n' > lib/site-packages/pkg/__pycache__/core.cpython-312.pyc && "
+           "printf 'two\\n' > lib/site-packages/pkg/two.py && printf 'bc2\\n' > lib/site-packages/pkg/__pycache__/two.cpython-312.pyc && "
+           "printf 'gone\\n' > lib/site-packages/pkg/__pycache__/gone.cpython-312.pyc && printf 'g\\n' > lib/site-packages/pkg/gone.py && "
+           "printf 'pkg/__pycache__/core.cpython-312.pyc,,\\npkg/__pycache__/two.cpython-312.pyc,,\\npkg/__pycache__/gone.cpython-312.pyc,,\\n' "
+           ">> lib/site-packages/pkg-1.0.dist-info/RECORD");
+        REQUIRE_MSG(export_() == EXIT_DONE, "%s", g_err);
+        sh("printf 'patched\\n' > lib/site-packages/pkg/__pycache__/core.cpython-312.pyc && "     /* core.py untouched */
+           "printf 'two!\\n' > lib/site-packages/pkg/two.py && printf 'bc2!\\n' > lib/site-packages/pkg/__pycache__/two.cpython-312.pyc && "
+           "rm lib/site-packages/pkg/__pycache__/gone.cpython-312.pyc");
+        ASSERT_EQ_INT(frozen ? EXIT_CHANGES : EXIT_DONE, verify_());
+        char want[512];
+        snprintf(want, sizeof want, "{\"flag\":\"tampered_installed_package\",\"level\":\"%s\",\"db\":\"pip\",\"package\":\"pkg\","
+                 "\"path\":\"lib/site-packages/pkg/__pycache__/core.cpython-312.pyc\",\"why\":\"other bytes\",\"at_reset\":\"no_hash\"",
+                 frozen ? "violation" : "signal");
+        ASSERT_TRUE(strstr(g_out, want) != NULL);
+        ASSERT_TRUE(strstr(g_out, "\"path\":\"lib/site-packages/pkg/__pycache__/two.cpython-312.pyc\",\"why\"") == NULL);   /* recompiled */
+        ASSERT_TRUE(strstr(g_out, "\"path\":\"lib/site-packages/pkg/__pycache__/gone.cpython-312.pyc\",\"why\"") == NULL);  /* removed */
+    }
+}
+
 /* Step 4: verify reads every file -- an edit with its size and mtime put
  * back is still other bytes. */
 TEST(an_edit_with_size_and_mtime_put_back_is_still_seen) {
@@ -252,6 +280,7 @@ int main(void) {
     snprintf(g_spec, sizeof g_spec, "%s/spec.json", g_dir);
     RUN(databases_rewritten_to_match_a_tampered_file_still_tampered);
     RUN(a_forged_record_is_named_as_tampering_unfrozen);
+    RUN(a_pyc_patched_under_an_unchanged_source_is_tampering);
     RUN(an_edit_with_size_and_mtime_put_back_is_still_seen);
     RUN(a_state_directory_prepared_by_the_policy_is_never_read);
     RUN(a_symlink_swapped_in_a_rename_over_and_a_hard_link_write_are_writes);
