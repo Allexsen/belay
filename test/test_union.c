@@ -21,13 +21,13 @@
 #include <stdlib.h>
 #include <string.h>
 #include <sys/stat.h>
-#include <sys/sysmacros.h>
 #include <sys/wait.h>
-#include <sys/xattr.h>
 #include <unistd.h>
 
 #ifdef __linux__
 #include <linux/fs.h>
+#include <sys/sysmacros.h>
+#include <sys/xattr.h>
 
 static char g_root[256], g_m[300];
 static struct belay_entry g_e[64];
