@@ -23,11 +23,13 @@ jobs:
             echo "--- overlay options: $(echo "$L" | awk '{print $NF}' | tr ',' '\n' | grep -v 'lowerdir\|upperdir\|workdir' | tr '\n' ' ')"
             echo "--- /sys/module/overlay/parameters: $(for f in /sys/module/overlay/parameters/*; do printf '%s=%s ' "${f##*/}" "$(cat $f)"; done)"
             U=$(echo "$L" | grep -o 'upperdir=[^,]*' | cut -d= -f2)
-            docker exec $C sh -c 'echo x > /tmp/new; rm /etc/motd; rm -rf /etc/apk && mkdir /etc/apk && echo y > /etc/apk/fresh; mv /etc/ssl /etc/ssl2; chmod 600 /etc/hostname 2>/dev/null; true'
+            docker exec $C sh -c 'echo x > /tmp/new; rm /etc/motd; rm -rf /etc/apk && mkdir /etc/apk && echo y > /etc/apk/fresh; mv /etc/ssl /etc/ssl2; mkdir -p /srv; mv /etc/terminfo /srv/ti; chmod 600 /etc/os-release; mv /etc/issue /etc/issue2; true'
             echo "--- the upper layer after: a file added, one deleted, a directory replaced, one renamed"
             sudo find "$U" -printf '%y %m %s %p\n' | sed "s|$U|U|" | sort | head -40
             echo "--- xattrs in the upper layer"
             sudo getfattr -R -d -m - --absolute-names "$U" 2>/dev/null | sed "s|$U|U|" | head -30
+            echo "--- a copied-up file (mode only changed): its size in the upper layer, and the lower's"
+            sudo stat -c '%s %a %n' "$U/etc/os-release" 2>&1 | sed "s|$U|U|"
             echo "--- a whiteout's device numbers"
             sudo stat -c '%F %t:%T %n' "$U/etc/motd" 2>&1 | sed "s|$U|U|"
             docker stop -t 0 $C >/dev/null
