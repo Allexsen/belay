@@ -144,13 +144,17 @@ TEST(databases_rewritten_to_match_a_tampered_file_still_tampered) {
 TEST(a_forged_record_is_named_as_tampering_unfrozen) {
     fresh("{\"belay_protect\":1,\"protect\":[]}");
     packages();
+    sh("printf 'pkg-1.0.dist-info/RECORD,,\\n' >> lib/site-packages/pkg-1.0.dist-info/RECORD");   /* as pip writes it: the RECORD lists itself, no hash */
     REQUIRE_MSG(export_() == EXIT_DONE, "%s", g_err);
     sh("printf 'evil\\n' > lib/site-packages/pkg/core.py && "
        "h=$(python3 -c \"import hashlib,base64;print(base64.urlsafe_b64encode(hashlib.sha256(b'evil\\\\n').digest()).rstrip(b'=').decode())\") && "
-       "printf 'pkg/core.py,sha256=%%s,5\\n' $h > lib/site-packages/pkg-1.0.dist-info/RECORD");
+       "printf 'pkg/core.py,sha256=%%s,5\\npkg-1.0.dist-info/RECORD,,\\n' $h > lib/site-packages/pkg-1.0.dist-info/RECORD");
     ASSERT_EQ_INT(EXIT_DONE, verify_());            /* signals only: not frozen */
     ASSERT_TRUE(strstr(g_out, "{\"flag\":\"tampered_installed_package\",\"level\":\"signal\",\"db\":\"pip\",\"package\":\"pkg\","
-                              "\"path\":\"lib/site-packages/pkg/core.py\",\"why\":\"other bytes\",\"at_reset\":\"match\"") != NULL);
+                              "\"path\":\"lib/site-packages/pkg/core.py\",\"why\":\"other bytes\",\"at_reset\":\"match\"") != NULL);    /* the RECORD itself is listed without a hash: never checked (P-T6),
+     * so a reinstall never flags its own database */
+    ASSERT_TRUE(strstr(g_out, "dist-info/RECORD\",\"why\"") == NULL);
+    ASSERT_EQ_INT(1, (int)(strstr(g_out, ",\"tampered_installed_package\":1,") != NULL));
 }
 
 /* Step 4: verify reads every file -- an edit with its size and mtime put

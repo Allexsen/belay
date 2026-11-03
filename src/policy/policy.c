@@ -597,7 +597,10 @@ static void packages(struct state *s, const char *p, size_t n, const struct bela
             }
             continue;
         }
-        if (tamp || x->at_reset == AT_MISSING || pkg_has_event(s, x->db, x->package)) continue;
+        /* listed without a hash: never checked (P-T6) -- a RECORD lists
+         * itself so, and every reinstall rewrites it */
+        if (tamp || x->at_reset == AT_MISSING || x->at_reset == AT_NO_HASH || pkg_has_event(s, x->db, x->package))
+            continue;
         const char *why = NULL;
         if (strcmp(outcome, "removed") == 0) why = "removed";
         else if (strcmp(outcome, "type_changed") == 0) why = "type changed";
