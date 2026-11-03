@@ -3,8 +3,8 @@
 **What this is.** The public behaviour of `pybelay` (decision 187: "PyPI name: pybelay"): how it is
 distributed, the functions it offers, what they return and raise. It is a thin layer over the CLI:
 every function runs the release's binary once and parses its JSON by the pinned formats, which stay
-the interface (BELAY_DESIGN §5); nothing here adds a format. Written by hand; *proposed 2026-11-03,
-awaiting the author's OK*.
+the interface (BELAY_DESIGN §5); nothing here adds a format. Written by hand; approved by the author
+2026-11-03 (decision 200), with checkpoint.v1 pinned in its own PR before pybelay ships.
 
 **Changing it.** In its own PR, presented as a table, after the author's explicit OK.
 
