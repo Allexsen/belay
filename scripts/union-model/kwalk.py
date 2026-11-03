@@ -128,11 +128,15 @@ def record(rel, path, st, is_mount):
         r["size"] = st.st_size
     if kind == "lnk":
         put_bytes(r, "target", os.readlink(path))
-    names = os.listxattr(path, follow_symlinks=False)
-    r["xattrs"] = {k: os.getxattr(path, k, follow_symlinks=False).hex() for k in sorted(names)}
+    if is_mount:
+        r["xattrs"] = {}        # a mount root: its stat fields only, as the walker's (H-M5)
+    else:
+        names = os.listxattr(path, follow_symlinks=False)
+        r["xattrs"] = {k: os.getxattr(path, k, follow_symlinks=False).hex()
+                       for k in sorted(names)}
     r["mount"] = is_mount
     r["nlink"] = st.st_nlink
-    f = iflags(path, kind)
+    f = None if is_mount else iflags(path, kind)
     if f is not None:
         r["iflags"] = f
     if kind == "reg" and not is_mount:

@@ -3,7 +3,7 @@
 The union-resolver model (`model.py`) is written from two sources only: Linux's
 `Documentation/filesystems/overlayfs.rst` (fetched 2026-11-03 from torvalds/linux master) and
 the pin `test/expect/host-reader.md` (rows H-U1..H-U10, H-C3 and H-M5). It never reads belay's
-code. Below are its readings, U1..U24: each says what the pin and the documentation say, what
+code. Below are its readings, U1..U25: each says what the pin and the documentation say, what
 the model does, and how that was established: **kernel** (`run.sh` compares it with a real
 overlay), **probe** (tried by hand on Linux 6.18.33.2-microsoft-standard-WSL2, in `unshare -rm`),
 **hand** (a case in `hand.py` with the outcome written down in advance), or **reading** (the
@@ -21,21 +21,21 @@ model to expect; and what `run.sh` cannot check, with the reason.
 | `gen.py` | random layer sets, seeded (`--seed N --out DIR`), run in `unshare -r` (whiteouts) |
 | `kwalk.py` | mounts a set as a real overlay (`userxattr`), chroots into it, walks the scope |
 | `compare.py` | `compare_outputs()`: **the hook** for belay's driver (its output in the model's format against the model's); `kernel_diffs()`: the model against `kwalk.py` |
-| `hand.py` | 18 hand cases: the redirects the kernel cannot be asked here (U19), and the readings below |
+| `hand.py` | 19 hand cases: the redirects the kernel cannot be asked here (U19), and the readings below |
 | `check.py` | the loop: gen, model, kwalk, compare, for COUNT seeds |
 | `run.sh` | `run.sh [COUNT [SEED]]`: the hand cases, then COUNT generated sets (default 300) |
 
 ## The runs
 
-`run.sh 300 1` (2026-11-03, Linux 6.18.33.2-microsoft-standard-WSL2): the 18 hand cases pass,
-15 of them also agreeing with the kernel (8 in full, 7 around their redirects; the other 3 are
-refusals the kernel does not make); of the 300 generated
-sets, none disagrees. 177 were listed: 3663 entries compared field by field with the kernel's
+`run.sh 300 1` (2026-11-03, Linux 6.18.33.2-microsoft-standard-WSL2, after decision 212): the
+19 hand cases pass, 16 of them also agreeing with the kernel (9 in full, 7 around their
+redirects; the other 3 are refusals the kernel does not make); of the 300 generated sets, none
+disagrees. 177 were listed: 3663 entries compared field by field with the kernel's
 view, 381 entries behind a followed redirect not compared (33 sets). 123 were refused: 60 with
 the kernel agreeing (H-C3 37: ELOOP 11, ENOENT 15, ENOTDIR 4, a mount 7; H-M5 23), 40 planted
 refusals of the right row (H-U3 11, H-U5 15, H-U6 8, H-U8 6), and 23 random redirects whose
 target did not survive (H-U5, not judged). The same check over 3000 further sets (seeds
-10000-12999): 37246 entries compared, 1087 sets refused, no disagreement -- after one fix to
+10000-12999, before decision 212, which changed only a mount point's entry, U25): 37246 entries compared, 1087 sets refused, no disagreement -- after one fix to
 the *comparison*: in 4 sets the scope's path met a mount point and then also failed in the
 kernel's own resolution (ELOOP or ENOENT further on); the model refuses at the mount point first
 (U18), which the walker confirms, and the comparison had asked for the kernel's later errno.
@@ -195,20 +195,18 @@ rule; likewise `layer_path_b64`, `target_b64`); lines sorted by the raw bytes of
 layer (`/` for its root); `xattrs` an object of name to lowercase hex value, the overlay's own
 removed (only those under the given prefix: with `trusted.overlay.`, a `user.overlay.*` xattr is
 the file's own); `size` on `reg` only; `target` on `lnk` only; `protattr` always, `""` when none;
-`mount` always, `true` or `false`; a refusal is a single line `{"refused", "why"}` and exit 1.
+`mount` always, `true` or `false` (a mount point's entry: U25); a refusal is a single line `{"refused", "why"}` and exit 1.
 `--content` adds `sha256` (reg), `--explain` adds `tainted`, `members` and, on `.`, `scope` and
 `scope_tainted`; neither belongs to the format, and `compare_outputs()` ignores them.
 
 ## Where the pin is open on the stat fields
 
-**U23. `nlink` of a merged directory.** The pin (H-U7): every stat field is the layer file's,
-read on the host -- so a merged directory has its topmost member's `nlink`. Inside the
-container the kernel reports `1` for every merged directory, and the real count for one that
-is not merged (K4). The model does not output `nlink`; the reading is that belay records the
-layer file's, as H-U7 says. But the pin's preface promises "the same entries the walker writes
-for the same tree": for `nlink` of merged directories (as for `dev` and `ino`, which H-U7
-already names) they differ. **kernel** (the 300-set run: 918 merged directories, every one
-`nlink` 1; 1416 unmerged, 2 to 7). **OPEN**.
+**U23. `nlink` of a merged directory. SETTLED (decision 212, H-U7).** A merged directory's
+`nlink` is its topmost layer directory's, read on the host. Inside the container the kernel
+reports `1` for every merged directory, and the real count for one that is not merged (K4); the
+pin now says so, and its preface counts a merged directory's `nlink` with `dev` and `ino` as the
+identity a host read differs in. The model does not output `nlink`, so nothing in it changes.
+**kernel** (the 300-set run: 918 merged directories, every one `nlink` 1; 1416 unmerged, 2 to 7).
 
 **U24. How far "its own metadata is the topmost one's" (H-U4) reaches.** All of it: mode,
 owner, xattrs, the inode flags (with the upper file's `protattr`, U15), times, size -- every
@@ -217,6 +215,17 @@ of names from directories are merged. Other content such as metadata and extende
 are reported for the upper directory only." The exceptions are the kernel's own, not the
 layers': `nlink` (U23), `dev` and `ino` (H-U7). **kernel** for mode, uid, gid, xattrs and the
 `i`/`a` flags (times and directory sizes are not compared).
+
+## A mount point's entry
+
+**U25. A mount point's entry carries its stat fields only. SETTLED (decision 212, H-M5).** As
+the walker records a mount root: type, mode, owner, size, and a symbolic link's target -- no
+xattrs (`{}`), no protattr (`""`), no `sha256`. Before decision 212 the model gave a mount point
+its layer file's xattrs and upper protattr; the comparison adapter for belay's driver had to
+normalise that. The mount point's layer file is still read by the lookup, so the refusals of
+U10-U15 still apply to it (U14): a malformed overlay xattr there is refused. `kwalk.py` records a
+mount point the same way (no xattrs, no flags read). **kernel** (the random sets with mount
+points), **hand** (a directory, a file and a link mounted, each with an xattr and a protattr).
 
 ## What the kernel did that I did not expect
 
@@ -235,7 +244,10 @@ names up (seen on the root, which K8 marks `impure`). Not every such parent fail
 generated set (seed 1083: `readdir` of the scope root EPERM; its child `cR` redirected);
 `compare.py` accepts this EPERM only where a child of that directory is tainted (U20).
 
-**K3. Whiteouts are listed in a directory that is not merged.** In a directory only one layer
+**K3. Whiteouts are listed in a directory that is not merged. SETTLED (decision 212, H-U2):** a
+whiteout is no entry in any directory, merged or not, which is what the model does: its lookup
+drops a whiteout wherever it is found, so it never lists one, and `compare.py` fails a set whose
+model lists a name the kernel's `lstat` cannot find. In a directory only one layer
 holds (a new upper directory, or one only a lower layer has), a whiteout comes back from
 `readdir` -- `ls` shows `c?????????` -- but `lstat` of the name fails with ENOENT. The
 documentation does say "Readdir on directories that are not merged is simply handled by the
