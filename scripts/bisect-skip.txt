@@ -164,3 +164,5 @@
 # Decision 144 (G13): the pin fails make oracle until its author follows (the start-up quote of E12), and so does the git fix after it.
 2026-11-03T11:34:14+04:00	pins: E12 states G13 -- a reflog is parsed by the entries it gained
 2026-11-03T11:49:02+04:00	git: a reflog it cannot parse tells no rename
+# Decision 160 (G15): the pin fails make oracle until its author follows (the start-up quote of E12).
+2026-11-03T12:13:45+04:00	pins: E12 states G15 -- a last reflog line without its newline is an entry
