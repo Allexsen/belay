@@ -357,7 +357,7 @@ struct gfact {
     struct gs repo, name, path;     /* name: the branch, or "HEAD" (HEAD, logs/HEAD) */
     bool prov;                      /* the path's outcome is unknown (E2) */
     bool present[2], known[2];      /* a file on that side; its content read */
-    bool sym[2];                    /* HEAD: a symbolic ref */
+    bool sym[2];                    /* HEAD or a loose ref: symbolic */
     struct gs val[2];               /* HEAD, a loose ref: the ref's name or the object id */
     struct gs *pk[2];               /* packed-refs: branch, id, branch, id, ... */
     size_t npk[2];
@@ -797,6 +797,14 @@ static int repo_events(struct git *g, const struct grepo *r, struct gev **v, siz
             bool done = false;
             for (size_t j = first; j < *n && !done; j++) done = gs_eq((*v)[j].branch, b);
             if (done) continue;
+            /* A loose branch that is symbolic on a side is an alias of its
+             * target there, not a branch of its own (git lists it "alias ->
+             * main"; decision 213): it derives no event, its path finding
+             * stands, and the target's own events are the target's. */
+            const struct gfact *lo = find(g, r, GK_LOOSE, b);
+            if (lo != NULL && ((lo->present[0] && lo->known[0] && lo->sym[0]) ||
+                               (lo->present[1] && lo->known[1] && lo->sym[1])))
+                continue;
             const struct gfact *bs, *as;
             const struct val bv = value(g, r, b, SIDE_BEFORE, &bs), av = value(g, r, b, SIDE_AFTER, &as);
             if (bv.st == V_UNKNOWN || av.st == V_UNKNOWN) continue;     /* decides nothing */
