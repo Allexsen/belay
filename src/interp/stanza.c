@@ -37,6 +37,7 @@ int stanza_each(const char *buf, size_t len, stanza_fn fn, void *ctx) {
     memset(&p, 0, sizeof p);
     size_t count = 0, lineno = 0, i = 0;
     bool simple = false;            /* the last field line was one of the four read */
+    bool conf = false;              /* it was Conffiles: its continuations are kept */
     while (i < len) {
         const char *nl = memchr(buf + i, '\n', len - i);
         const size_t end = nl != NULL ? (size_t)(nl - buf) : len;
@@ -60,6 +61,10 @@ int stanza_each(const char *buf, size_t len, stanza_fn fn, void *ctx) {
                 belay_err_set(BELAY_ERR_CORRUPT, 0, "dpkg status: line %zu folds a simple field", lineno);
                 return -1;
             }
+            if (conf) {
+                if (p.conffiles == NULL) p.conffiles = l;
+                p.conffiles_len = (size_t)(l + ll - p.conffiles);
+            }
             continue;
         }
         const char *colon = memchr(l, ':', ll);
@@ -71,6 +76,7 @@ int stanza_each(const char *buf, size_t len, stanza_fn fn, void *ctx) {
         const size_t nlen = (size_t)(colon - l);
         simple = name_is(l, nlen, "package") || name_is(l, nlen, "architecture") ||
                  name_is(l, nlen, "version") || name_is(l, nlen, "status");
+        conf = name_is(l, nlen, "conffiles") && p.conffiles == NULL;   /* the first kept */
         size_t vs = nlen + 1, ve = ll;
         while (vs < ve && blank(l[vs])) vs++;
         while (ve > vs && blank(l[ve - 1])) ve--;
