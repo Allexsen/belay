@@ -4,7 +4,7 @@
 # 9): sequential calls, two concurrent ones, a background write between
 # calls, a cancelled call, another project ignored. Checks where each change
 # lands in the receipt, that concurrent hooks lose no log line, and that the
-# turn line is said only when something changed. Needs jq and python3.
+# turn line is said at every Stop. Needs jq and python3.
 #
 #   scripts/dogfood/selftest.sh [path/to/belay]
 
@@ -64,13 +64,21 @@ R2=$(ls -t "$T/state/dogfood"/s1.turn-*.txt | head -1)
 [ "$(grep -c '^  ? locked' "$R2")" = 1 ] || fail "the unreadable directory not said once: $(cat "$R2")"
 grep -q '^unknown throughout the session' "$R2" || fail "no 'unknown throughout' section: $(cat "$R2")"
 printf '%s' "$out" | jq -e '.systemMessage | test("^belay: 2 paths changed")' >/dev/null || fail "counted the unreadable directory: $out"
-# a turn that changes nothing says nothing
+# a turn that changes nothing says so: a Stop always says its line, or why
+# it could not (decision 156) -- no line is never a quiet turn
 out=$(hook stop)
-[ -z "$out" ] || fail "a turn without changes said: $out"
+printf '%s' "$out" | jq -e '.systemMessage | test("^belay: nothing changed this turn -- .*/s1[.]turn-[0-9]+[.]txt$")' \
+    >/dev/null || fail "a turn without changes said nothing, or not that: $out"
+# what each Stop said is kept, so a missing line can be told from one never made
+tail -1 "$T/state/dogfood/s1.said" | grep -q 'nothing changed this turn' || fail "the Stop's line was not kept"
 # another project: ignored, nothing logged
 n=$(wc -l < "$LOG")
 CLAUDE_PROJECT_DIR=$T/elsewhere hook pre t9 Bash x
 [ "$(wc -l < "$LOG")" = "$n" ] || fail "another project's hook was logged"
+# this project by another name (a symlink): the same project, logged
+ln -s "$S" "$T/link"
+CLAUDE_PROJECT_DIR=$T/link hook pre t9b Bash x; CLAUDE_PROJECT_DIR=$T/link hook post t9b Bash
+[ "$(wc -l < "$LOG")" = "$((n + 2))" ] || fail "the project through a symlink was ignored"
 
 # git's bookkeeping folds; what git reports stays (decision 105): a ref
 # moved, HEAD, a hook added, the index's content -- and a real edit beside
@@ -207,7 +215,8 @@ out=$(hook stop)
 printf '%s' "$out" | jq -e '.systemMessage | test("^belay: hooks failing: pre: belay mark failed")' >/dev/null \
     || fail "a failed mark was not said at the Stop: $out"
 out=$(hook stop)
-[ -z "$out" ] || fail "a failure said again after it stopped: $out"
+printf '%s' "$out" | jq -e '.systemMessage | test("hooks failing") | not' >/dev/null \
+    || fail "a failure said again after it stopped: $out"
 for k in 1 2; do
     out=$(BELAY=/nonexistent/belay hook stop)
     printf '%s' "$out" | jq -e '.systemMessage | test("^belay: hooks failing: stop: belay mark failed")' >/dev/null \
@@ -317,6 +326,18 @@ out=$(hook stop)
 ! ls "$T/state/dogfood"/s1.receipt-running.* >/dev/null 2>&1 || fail "a finished turn receipt left its mark"
 rm -f "$T/state/dogfood/young.receipt-running.session"
 
+# A receipt that succeeds and says nothing is a failure said at this Stop,
+# never a Stop without a line (decision 156).
+mkdir -p "$T/mute" && cp "$HOOK" "$T/mute/" && printf 'pass\n' > "$T/mute/receipt.py"
+out=$(jq -cn '{session_id:"s6"}' | "$T/mute/belay-dogfood" stop)
+printf '%s' "$out" | jq -e '.systemMessage | test("^belay: hooks failing: stop: the turn.s receipt gave no line")' >/dev/null \
+    || fail "a receipt with no line made a silent Stop: $out"
+# a log with no checkpoint at all (every mark failed) still gives a line
+printf '{"event":"error","during":"stop","message":"x"}\n' > "$T/nocp.jsonl"
+out=$(python3 -I scripts/dogfood/receipt.py turn "$T/nocp.jsonl" "$BELAY" "$S" "$T/state/dogfood")
+[ "$out" = "belay: no checkpoint recorded in this session, so no receipt this turn" ] \
+    || fail "a turn with no checkpoint said: $out"
+
 # install.sh (decision 115): the settings in a file, one line printed that
 # merges them into settings.json after a backup of its own -- other hooks
 # and keys kept, an earlier belay hook replaced, twice the same as once. A
@@ -372,4 +393,4 @@ grep -A2 '^Bash: before$' "$R9" | grep -q '  A before-gap.txt' && grep -A2 '^Bas
 ! grep -q 'background writers\|^between tool calls' "$R9" || fail "an inactive gap read as background writing: $(cat "$R9")"
 printf '%s' "$out" | jq -e '.systemMessage | test("^belay: hooks failing: [a-z]+: checksum mismatch \\(hooks inactive\\)")' >/dev/null \
     || fail "the first good Stop did not say the hooks had been inactive: $out"
-echo "dogfood selftest: sequential, concurrent, background, cancelled, silent turn, other project, git folded, labels cut, background commands, directories folded, paths counted, failures said, inactive gaps unattributed, summary, touched folded, long commands, git events, compiled Python, lost receipts, install: ok"
+echo "dogfood selftest: sequential, concurrent, background, cancelled, quiet turn said, other project, symlinked project, git folded, labels cut, background commands, directories folded, paths counted, failures said, inactive gaps unattributed, summary, touched folded, long commands, git events, compiled Python, lost receipts, install: ok"
