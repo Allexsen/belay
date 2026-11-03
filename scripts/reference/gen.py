@@ -1696,7 +1696,9 @@ def cell_git_reflog_gained():
     git's: the events come from the gained ones alone. A reflog not a
     prefix, after's entries not git's, or a before ending inside a line of
     after: it gained none, so nothing is parsed -- `git_reflog_rewritten`,
-    no E10 event, no evidence. A gained entry not git's: "A side git cannot parse
+    no E10 event, no evidence. A gained line git skips (decision 202): skipped
+    and counted, the entries around it the evidence -- before decision 202,
+    "A side git cannot parse
     counts as one it cannot read (and is a `could_not_interpret` event,
     E10)" -- the reflog is no evidence, the cells of git-e12-unread-reflog
     with a reflog not parsed in place of one not read."""
@@ -1763,15 +1765,17 @@ def cell_git_reflog_gained():
     c.tag("git.e12.reflog_gained.inside_a_line")
     out.append(c)
 
-    # ---- gained entries not git's: no evidence, and its E10 event
-    c = Case("git-e12-unparsed-reflog")
-    g = GitRepo(c, b"a")            # its first gained entry would date the branch
+    # ---- gained lines git skips: skipped and counted (decision 202), the
+    # entries around them the evidence -- these were G13's reflogs that git
+    # could not parse; git reads them
+    c = Case("git-e12-reflog-skipped-lines")
+    g = GitRepo(c, b"a")            # its first gained entry dates the branch
     g.unchanged()
     g.ref("after", b"alone", Y)
     g.log("before", b"alone", [born])
     g.put("after", b"logs/refs/heads/alone",
           glog([born, (X, Y, b"commit: y")]) + NOT_AN_ENTRY)
-    g = GitRepo(c, b"b")            # it would say a rename: created and deleted stand
+    g = GitRepo(c, b"b")            # its entries say a rename: renamed
     g.unchanged()
     g.packed("before", [(b"refs/tags/v1", X)])
     g.packed("after", [(b"refs/tags/v1", X), (b"refs/tags/v2", Y)])
@@ -1781,22 +1785,22 @@ def cell_git_reflog_gained():
     g.put("after", b"logs/refs/heads/new",
           glog([born, (X, X, b"Branch: renamed refs/heads/old to refs/heads/new")])
           + NOT_AN_ENTRY)
-    g = GitRepo(c, b"c")            # every gained entry not git's: moved, no how
+    g = GitRepo(c, b"c")            # only lines git skips: moved, no how
     g.unchanged()
     g.ref("before", b"feat", X)
     g.ref("after", b"feat", Y)
     g.log("before", b"feat", [born])
     g.put("after", b"logs/refs/heads/feat", glog([born]) + NOT_AN_ENTRY + NOT_AN_ENTRY)
-    g = GitRepo(c, b"h")            # HEAD detached: the branch `HEAD`, without a how
+    g = GitRepo(c, b"h")            # HEAD detached: the branch `HEAD`, reset
     g.head("before", oid=X)
     g.head("after", oid=Y)
     g.log("before", b"HEAD", [(ZERO, X, b"commit (initial): x")])
     g.put("after", b"logs/HEAD",
           glog([(ZERO, X, b"commit (initial): x"), (X, Y, b"reset: moving to y")]) + NOT_AN_ENTRY)
-    c.tag("git.e12.unparsed.reflog_gained")
-    c.tag("git.e12.unparsed.reflog_would_date")
-    c.tag("git.e12.unparsed.reflog_rename_untold")
-    c.tag("git.e12.unparsed.reflog_head_detached")
+    c.tag("git.e12.reflog_skipped.only_skipped")
+    c.tag("git.e12.reflog_skipped.dates")
+    c.tag("git.e12.reflog_skipped.renames")
+    c.tag("git.e12.reflog_skipped.head_detached")
     out.append(c)
     return out
 
@@ -1848,15 +1852,16 @@ def cell_git_last_line():
           glog([born, (X, Y, b"commit: y")]) + NOT_AN_ENTRY[:-1])
 
     # ---- a blank line gained, then git's entry: the blank line is none
-    # ("nor is a blank line, which git skips") -- commits added, no E10
+    # ("nor is a blank line, which git skips") -- commits added, no E10, the
+    # blank line counted (decision 202)
     g = GitRepo(c, b"b")
     g.unchanged()
     g.ref("before", b"feat", X)
     g.ref("after", b"feat", Y)
     g.log("before", b"feat", [born])
     g.put("after", b"logs/refs/heads/feat", glog([born]) + b"\n" + glog([(X, Y, b"commit: y")], 5))
-    # ... a blank line alone gained: no entry -- the record says nothing,
-    # and the branch moved, no how
+    # ... a blank line alone gained: no entry -- the record counts it in
+    # git_reflog_lines_ignored (decision 202), and the branch moved, no how
     g = GitRepo(c, b"b2")
     g.unchanged()
     g.ref("before", b"feat", X)
@@ -1936,6 +1941,124 @@ def cell_git_last_line():
     return out
 
 
+def raw_entry(old, new, tail):
+    """A reflog line: the ids, a space each, then `tail` as given."""
+    return old + b" " + new + b" " + tail + b"\n"
+
+
+def cell_git_reads():
+    """Required cells for refs and reflog lines read as git reads them (E12,
+    decision 202). Refs: "`ref:`, any spaces or tabs, then the name to the
+    line's end, trailing whitespace cut; or an object id of either case at
+    the start, followed by the end or by whitespace, whatever follows
+    ignored -- a value git calls a broken ref is one git cannot parse
+    (E10)". Reflog lines: "A reflog's line is an entry when git reads it as
+    one: `<old> <new> <identity>> <time> <zone>` and the message ...; every
+    other line, a blank one included, git skips, and so does belay,
+    counting the lines the reflog gained in this diff that git skips in
+    `git_reflog_lines_ignored`"."""
+    out = []
+    X, Y, W = goid("X"), goid("Y"), goid("W")
+    Z1, Z2 = (hashlib.sha256(b"belay-ref 64 " + c).hexdigest().encode() for c in (b"1", b"2"))
+    born = (ZERO, X, b"branch: Created from HEAD")
+    c = Case("git-e12-git-reads")
+
+    # ---- loose refs and HEAD
+    g = GitRepo(c, b"k1")           # an id, then whitespace and anything: that id
+    g.unchanged()
+    g.ref("before", b"feat", X)
+    g.put("after", b"refs/heads/feat", Y + b" and words git ignores\nand a line\n")
+    g.log("before", b"feat", [born])
+    g.log("after", b"feat", [born, (X, Y, b"commit: y")])
+    g = GitRepo(c, b"k2")           # `ref:`, spaces and tabs, trailing whitespace cut
+    g.unchanged(head=False)
+    g.both(b"refs/heads/topic", Y + b"\n")
+    g.head("before", b"main")
+    g.put("after", b"HEAD", b"ref:\t  refs/heads/topic \t\n")
+    g = GitRepo(c, b"k3")           # `ref:` and no space, no newline
+    g.unchanged(head=False)
+    g.both(b"refs/heads/topic", Y + b"\n")
+    g.put("before", b"HEAD", b"ref:refs/heads/main")
+    g.head("after", b"topic")
+    g = GitRepo(c, b"k4")           # HEAD detached, an id then a tab or a line
+    g.put("before", b"HEAD", X + b"\nsecond line\n")
+    g.put("after", b"HEAD", Y + b"\t# a note\n")
+    g.log("before", b"HEAD", [(ZERO, X, b"commit (initial): x")])
+    g.log("after", b"HEAD", [(ZERO, X, b"commit (initial): x"), (X, Y, b"commit: y")])
+    g = GitRepo(c, b"k5")           # 64-digit ids, in the ref and in its reflog
+    g.unchanged()
+    g.ref("before", b"feat", Z1)
+    g.ref("after", b"feat", Z2)
+    g.log("before", b"feat", [(b"0" * 64, Z1, b"branch: Created from HEAD")])
+    g.log("after", b"feat", [(b"0" * 64, Z1, b"branch: Created from HEAD"),
+                             (Z1, Z2, b"commit: z")])
+    g = GitRepo(c, b"k6")           # an id in capitals: read, as written
+    g.unchanged()
+    g.ref("before", b"up", X)
+    g.ref("after", b"up", Y.upper())
+    g = GitRepo(c, b"kb")           # still broken refs: E10, no value after
+    g.unchanged()
+    for name, data in ((b"glued", Y + b"junk\n"), (b"leading", b" " + Y + b"\n"),
+                       (b"short", Y[:39] + b"\n")):
+        g.ref("before", name, X)
+        g.put("after", b"refs/heads/" + name, data)
+
+    # ---- reflog lines git skips, counted: the entry among them stands
+    skipped = [
+        b"\n",                                                       # blank
+        b"  \t \n",                                                  # whitespace only
+        NOT_AN_ENTRY,                                                # no form at all
+        raw_entry(X, X, b"Ref Erence <ref@example.org> 0 +0000\tcommit: zero time"),
+        raw_entry(X, X, b"Ref Erence <ref@example.org>1761000000 +0000\tcommit: no space"),
+        raw_entry(X, X, b"Ref Erence <ref@example.org> 1761000000 +000\tcommit: short zone"),
+        raw_entry(X[:39], X, b"Ref Erence <ref@example.org> 1761000000 +0000\tcommit: short"),
+        raw_entry(X, X, b"Ref Erence ref@example.org 1761000000 +0000\tcommit: no >"),
+    ]
+    g = GitRepo(c, b"r1")
+    g.unchanged()
+    g.ref("before", b"feat", X)
+    g.ref("after", b"feat", Y)
+    g.log("before", b"feat", [born])
+    g.put("after", b"logs/refs/heads/feat",
+          glog([born]) + b"".join(skipped) + glog([(X, Y, b"commit: y")], 5))
+    # ---- entries in the forms git reads: no tab, a time with spaces and a
+    # sign, ids of either case (in a remote-tracking reflog: the record only)
+    g = GitRepo(c, b"r2")
+    g.unchanged()
+    g.ref("before", b"feat", X)
+    g.ref("after", b"feat", Y)
+    g.log("before", b"feat", [born])
+    g.put("after", b"logs/refs/heads/feat", glog([born])
+          + raw_entry(X, W, b"Ref Erence <ref@example.org> 1761000005 +0000commit: no tab")
+          + raw_entry(W, Y, b"Ref Erence <ref@example.org>   -17 -0130\tcommit: odd time"))
+    g = GitRepo(c, b"r3")
+    g.unchanged()
+    g.log("before", b"refs/remotes/origin/main", [(ZERO, X, b"fetch: storing head")])
+    g.put("after", b"logs/refs/remotes/origin/main",
+          glog([(ZERO, X, b"fetch: storing head")])
+          + raw_entry(X.upper(), Y.upper(), b"Ref Erence <ref@example.org> 1761000009 +0000\t"
+                      b"fetch: forced-update"))
+
+    # ---- a move whose operation is over 1,024 bytes, beside a move and a
+    # line git skips: read, the move invalid_finding in its place (E9); the
+    # branch rewritten by the reset
+    g = GitRepo(c, b"r4")
+    g.unchanged()
+    g.ref("before", b"feat", X)
+    g.ref("after", b"feat", Y)
+    g.log("before", b"feat", [born])
+    g.put("after", b"logs/refs/heads/feat", glog([born])
+          + glog([(X, W, b"o" * 1100 + b": a long operation")], 5) + NOT_AN_ENTRY
+          + glog([(W, Y, b"reset: moving to y")], 7))
+    for cell in ("ref_id_then_anything", "head_ref_spaces", "head_ref_no_space",
+                 "head_detached_id_then_anything", "ids_64", "id_capitals", "broken_refs",
+                 "reflog_lines_skipped", "reflog_entry_forms", "reflog_id_capitals",
+                 "reflog_long_operation"):
+        c.tag("git.e12.git_reads." + cell)
+    out.append(c)
+    return out
+
+
 def random_git(rng, c):
     """A repository's history, simulated: a few operations before, more
     after, each written as git writes it (loose refs, packed-refs, HEAD,
@@ -1943,7 +2066,8 @@ def random_git(rng, c):
     packed-refs garbled on a side, a reflog entry dropped, a reflog line
     not git's -- among its older entries, or gained -- or a file's last line
     without its newline (decision 183: a reflog's no entry, `HEAD`'s and a
-    loose ref's read, a `packed-refs` so ending refused)."""
+    loose ref's read, a `packed-refs` so ending refused), or an id in a ref
+    or `HEAD` in capitals with words after it (decision 202: that id)."""
     root = rng.choice([b"", b"proj", b"proj/vendor/lib", b"w"])
     repo = join(root, b".git")
     st = {"loose": {}, "packed": {}, "logs": {}, "head": ("sym", b"main"), "t": 0}
@@ -2111,13 +2235,16 @@ def random_git(rng, c):
                     del lines[-2]
                     data = b"\n".join(lines) + b"\n"
             elif not same and rest.startswith(b"logs/") and side == "after" and r < 0.08:
-                data += NOT_AN_ENTRY            # an entry gained, not git's
+                data += NOT_AN_ENTRY            # a line gained that git skips
             elif not same and rest.startswith(b"refs/") and r < 0.02:
                 data = b"garbled\n"
             elif not same and rest == b"HEAD" and r < 0.03:
                 data = b"garbled HEAD\n"
             elif not same and rest == b"packed-refs" and r < 0.06:
                 data += b"garbled, no ref line\n"
+            elif (not same and 0.86 < r <= 0.92 and (rest.startswith(b"refs/") or rest == b"HEAD")
+                  and not data.startswith(b"ref:") and data.endswith(b"\n")):
+                data = data[:-1].upper() + b"\twords git ignores\n"     # read as git reads it
             elif not same and r > 0.92 and data.endswith(b"\n"):
                 data = data[:-1]                # its last line without its newline
             c.put(side, repo + b"/" + rest,
@@ -3231,7 +3358,8 @@ def required_cases():
     return (cell_dpkg_simple() + cell_pip_simple() + cell_pip_e10() + cell_dpkg_e9_e10()
             + cell_p7() + cell_e11() + cell_order() + cell_content_unavailable() + cell_paths_b64()
             + cell_git_reflog() + cell_git_events() + cell_git_unread() + cell_git_unparsed()
-            + cell_git_reflog_gained() + cell_git_last_line() + cell_probes())
+            + cell_git_reflog_gained() + cell_git_last_line() + cell_git_reads()
+            + cell_probes())
 
 
 def all_cases(n, seed):
