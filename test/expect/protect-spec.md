@@ -4,8 +4,9 @@
 export`: which paths must stay as they were, which file must hold which bytes, whether installed
 packages are frozen, where its executables live. Read from the task package, never from the
 environment being judged (BELAY_DESIGN §6, 4). Written by hand from the M2 structure the author
-approved on 2026-11-03 (decisions 145-150), for the author's OK before any code (decision 151). A
-row marked *Q10* waits for the author's answer to that question.
+approved on 2026-11-03 (decisions 145-150), before any code (decision 151); approved by the author
+2026-11-03 with the dot-segment rule added to PS-P4 (decision 157) and the hashing bound (Q10,
+decision 159).
 
 **Changing it.** In its own PR, presented as a table, after the author's explicit OK. A key added
 later is one every earlier reader refuses (PS-R2), so a spec is never half-understood; changing a
@@ -38,7 +39,7 @@ key's meaning is `belay_protect` 2.
 | PS-P1 | Relative to the scope, components separated by `/`; no leading or trailing `/`, no empty component, no `.` or `..` component; at most 4,096 bytes. Matched against a path's bytes, case-sensitively. |
 | PS-P2 | A component `**` matches any number of whole components, none included: `tests/**` matches `tests` and every path below it. |
 | PS-P3 | In any other component, `*` matches any run of bytes within that component, none included (`test_*.py`). No other character is special: `?`, `[` and `\` match themselves. |
-| PS-P4 | A wildcard never matches a component starting with `.`: `tests/**` does not match `tests/.cache/x`; `tests/.cache/**` and `.*` do. |
+| PS-P4 | A wildcard never matches a component starting with `.`: `tests/**` does not match `tests/.cache/x`. A component that itself starts with `.` matches one: `.github/workflows/**` matches `.github/workflows/ci.yml`, `tests/.cache/**` matches `tests/.cache/x`, and `.*` matches `.env`. Only `*` and `**` skip dot-names (decision 157; a test proves it). |
 | PS-P5 | Matched against the paths of both manifests: the bundle's (before) and `verify`'s capture (after). Each mode says which side it reads. |
 
 ## Modes
@@ -57,7 +58,7 @@ key's meaning is `belay_protect` 2.
 |---|---|
 | PS-C1 | **Never trusted by mark's shortcut** (decision 147). Both captures `verify` judges read every file: the bundle's manifest is a full `check` (baseline-bundle.md, B-4), and so is `verify`'s own capture. Given `--to ID` and a spec, `verify` takes only a checkpoint that trusted nothing (its trailer's `trusted` is 0, manifest-v2 V2-4) and refuses any other (exit 3). The manifest does not say which files were trusted, and it stays as it is, so a checkpoint that trusted any file is not used. |
 | PS-C2 | **Never excludable** (decision 147). An excluded path (a manifest header's `excluded`, any reason: an exclude, belay's state directory) covers a pattern when some path at or below it could match: its components, in order, matched by a leading part of the pattern (`**` taking any number). `baseline export` and `verify`, given a spec, refuse an exclusion that covers one of its patterns (exit 3), naming both. |
-| PS-C3 | **Always hashed** (decision 147). *Q10: the bound waits for the author.* A manifest holds a `sha256` only within its `hash_max_bytes` (manifest-v1, header rule 1), and the manifest stays as it is, so both captures made with a spec raise `hash_max_bytes` for the whole capture to the bound: every file within it is hashed, protected or not. A protected regular file larger than the bound is `unverified`, so `protected_path_unverifiable` (PS-M5); the capture is otherwise complete. Recommended bound: 4 GiB (4,294,967,296 bytes). |
+| PS-C3 | **Always hashed** (decision 147), up to 4 GiB (decision 159). A manifest holds a `sha256` only within its `hash_max_bytes` (manifest-v1, header rule 1), and the manifest stays as it is, so both captures made with a spec raise `hash_max_bytes` for the whole capture to the bound: every file within it is hashed, protected or not. A protected regular file larger than the bound is `unverified`, so `protected_path_unverifiable` (PS-M5); the capture is otherwise complete. The bound is 4 GiB (4,294,967,296 bytes). |
 
 ## Example
 
