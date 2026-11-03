@@ -164,9 +164,10 @@ raw pre "{$tocall}"; raw post "{$tocall,\"tool_response\":{\"backgroundTaskId\":
 printf 'g\n' > "$S/late.txt"
 out=$(hook stop)
 R5=$(ls -t "$T/state/dogfood"/s1.turn-*.txt | head -1)
-grep -A2 '^a background command may have written these: Bash: make watch   (open at the time: Bash: cat README)$' "$R5" \
-    | grep -q '  A watch.out' || fail "the open call was blamed for the background command's time: $(cat "$R5")"
-! grep -q '^Bash: cat README' "$R5" || fail "a read-only call got changes while a background command ran: $(cat "$R5")"
+# decision 185: a foreground call open heads its interval, the background
+# command beside it a note (decision 111 gave the head to the background)
+grep -A2 '^Bash: cat README   (a background command was also running: Bash: make watch)$' "$R5" \
+    | grep -q '  A watch.out' || fail "the open call not heading its interval, the background noted: $(cat "$R5")"
 grep -A2 '^a background command may have written these: Bash: make watch$' "$R5" | grep -q '  M watch.out' \
     || fail "a write between calls while it ran is not said to be maybe its"
 grep -A2 '^Bash: edit f$' "$R5" | grep -q '  A src/f.c' || fail "after its end, a call is not credited: $(cat "$R5")"
@@ -177,6 +178,26 @@ out=$(hook stop)
 R6=$(ls -t "$T/state/dogfood"/s1.turn-*.txt | head -1)
 grep -A2 '^Bash: after$' "$R6" | grep -q '  A src/h.c' && ! grep -q 'background command' "$R6" \
     || fail "a background command whose output cannot be found outlived the stop: $(cat "$R6")"
+# A long-running watcher that writes nothing (gh pr checks --watch), and the
+# turn's real edits made while it runs (turn-3803, decision 185): each edit
+# under its own call, the watcher a note; the Stop line names each call once.
+wcall='"session_id":"s1","tool_use_id":"t25","tool_name":"Bash","tool_input":{"command":"watch ci","run_in_background":true}'
+raw pre "{$wcall}"
+sleep 60 > "$T/tasks/bgt25.output" & held=$!
+raw post "{$wcall,\"tool_response\":{\"backgroundTaskId\":\"bgt25\"}}"
+hook pre t26 Bash "edit k"; printf 'k\n' > "$S/src/k.c"; hook post t26 Bash
+hook pre t27 Bash "edit l"; printf 'l\n' > "$S/src/l.c"; hook post t27 Bash
+hook pre t28 Bash "edit k"; printf 'k2\n' >> "$S/src/k.c"; hook post t28 Bash   # the same label again
+out=$(hook stop)
+kill $held; wait $held 2>/dev/null || :
+R11=$(ls -t "$T/state/dogfood"/s1.turn-*.txt | head -1)
+grep -A1 '^Bash: edit k   (a background command was also running: Bash: watch ci)$' "$R11" | grep -q '  A src/k.c' \
+    || fail "an edit made while a watcher ran not under its call: $(cat "$R11")"
+grep -A1 '^Bash: edit l   (a background command was also running: Bash: watch ci)$' "$R11" | grep -q '  A src/l.c' \
+    || fail "the second edit not under its call: $(cat "$R11")"
+! grep -q '^a background command may have written these' "$R11" || fail "the watcher credited with the edits: $(cat "$R11")"
+printf '%s' "$out" | jq -e '.systemMessage | test("[(]Bash: edit k; Bash: edit l[)]")' >/dev/null \
+    || fail "the Stop line does not name each call once: $out"
 
 hook end
 done_receipt s1 || fail "the session receipt did not finish"
@@ -401,4 +422,4 @@ grep -A2 '^Bash: before$' "$R9" | grep -q '  A before-gap.txt' && grep -A2 '^Bas
 ! grep -q 'background writers\|^between tool calls' "$R9" || fail "an inactive gap read as background writing: $(cat "$R9")"
 printf '%s' "$out" | jq -e '.systemMessage | test("^belay: hooks failing: [a-z]+: checksum mismatch \\(hooks inactive\\)")' >/dev/null \
     || fail "the first good Stop did not say the hooks had been inactive: $out"
-echo "dogfood selftest: sequential, concurrent, background, cancelled, quiet turn said, other project, symlinked project, git folded, labels cut, background commands, directories folded, paths counted, failures said, inactive gaps unattributed, summary, touched folded, identical replacements folded, long commands, git events, compiled Python, lost receipts, install: ok"
+echo "dogfood selftest: sequential, concurrent, background, cancelled, quiet turn said, other project, symlinked project, git folded, labels cut, background commands, directories folded, paths counted, failures said, inactive gaps unattributed, summary, touched folded, identical replacements folded, a watcher noted, long commands, git events, compiled Python, lost receipts, install: ok"

@@ -272,12 +272,14 @@ def sections(events, belay, scope, lo, hi, persistent=None, d=None, sid=None):
         for r in recs:
             last[("e", len(last)) if "event" in r else path_of(r)] = r
         recs = list(last.values())
+        # Decision 185: a foreground call open heads its interval -- a
+        # background command beside it is a note; only an interval with no
+        # call open is the background command's (turn-3803: a CI watcher
+        # that wrote nothing headed every real edit of the turn).
         if key == ("inactive",):
             head = INACTIVE
-        elif running:
+        elif not key and running:
             head = "a background command may have written these: " + "; ".join(label(calls[t]) for t in running)
-            if key:
-                head += "   (open at the time: " + "; ".join(label(calls[t]) for t in key) + ")"
         elif not key:
             head = "between tool calls"
         elif len(key) == 1:
@@ -285,9 +287,14 @@ def sections(events, belay, scope, lo, hi, persistent=None, d=None, sid=None):
             head = label(c) + ("   (cancelled)" if c["cancelled"] else "")
         else:
             head = "during these concurrent calls: " + "; ".join(label(calls[t]) for t in key)
-        named = [] if key == ("inactive",) else [calls[t] for t in running + key]
+        if key and key != ("inactive",) and running:
+            head += BG_NOTE + "; ".join(label(calls[t]) for t in running) + ")"
+        named = [] if key == ("inactive",) else [calls[t] for t in key + running]
         out.append((head, recs, outside if named else set(), named))
     return out, errors, calls, throughout
+
+
+BG_NOTE = "   (a background command was also running: "
 
 
 def compiled(p):
@@ -679,7 +686,14 @@ def turn(events, belay, scope, d, sid, lo, hi):
         json.dump({"lo": lo, "hi": hi, "changes": n, "paths": paths, "interesting": interesting(secs),
                    "sections": [{"section": h, "calls": [full_label(c) for c in cs], "records": r}
                                 for h, r, _, cs in secs]}, f)
-    heads = [h for h, _, _, _ in secs if not h.startswith("unknown throughout")][:3]
+    # Each call once (decision 185): the background note is the section's,
+    # not the Stop line's.
+    heads = []
+    for h, _, _, _ in secs:
+        h = h.split(BG_NOTE)[0]
+        if not h.startswith("unknown throughout") and h not in heads:
+            heads.append(h)
+    heads = heads[:3]
     return text, n, paths, path, errors, heads
 
 
