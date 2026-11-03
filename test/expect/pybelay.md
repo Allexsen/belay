@@ -1,0 +1,64 @@
+# Pin: pybelay, the Python package
+
+**What this is.** The public behaviour of `pybelay` (decision 187: "PyPI name: pybelay"): how it is
+distributed, the functions it offers, what they return and raise. It is a thin layer over the CLI:
+every function runs the release's binary once and parses its JSON by the pinned formats, which stay
+the interface (BELAY_DESIGN §5); nothing here adds a format. Written by hand; *proposed 2026-11-03,
+awaiting the author's OK*.
+
+**Changing it.** In its own PR, presented as a table, after the author's explicit OK.
+
+## Distribution
+
+| id | rule |
+|---|---|
+| PY-D1 | The distribution is `pybelay` on PyPI, and the import name is `pybelay` too. `belay` on PyPI is another project (BrianPugh/belay, a MicroPython library, 0.30.1 on 2026-11-03), which imports as `belay`. |
+| PY-D2 | Its version is the belay release's, in PEP 440 (`v0.1.0-alpha.3` is `0.1.0a3`). One release, one binary, one wheel set. |
+| PY-D3 | Wheels only, one per release target, each tagged `py3-none-<platform>` (no extension: any Python 3.9 or later): Linux x86_64 and aarch64, tagged for both manylinux and musllinux since the binary is static; macOS arm64. No sdist: one could not carry a checked binary. |
+| PY-D4 | Each wheel vendors its target's binary from the same release, taken from the release's assets after their `SHA256SUMS` and provenance attestation are checked, and records its sha256 in the package. |
+| PY-D5 | Before its first call in a process, the package hashes the vendored binary and compares it with the recorded digest: on a mismatch it raises `BinaryMismatch` and runs nothing. No environment variable or argument selects another binary. `pybelay.binary_path()` returns the vendored binary's path (for an orchestrator to copy into a sandbox: in-sandbox mode). |
+
+## Calls
+
+Each function runs the binary once, with an argument list (never a shell) and `--json` where the
+command takes it, never `--exit-code`, and parses its standard output strictly: each line by its
+pinned format, an unknown key or a missing one is a `FormatError`. Paths are given as `str` or
+`os.PathLike` and returned as `str`, decoded as `os.fsdecode` does (a name that is not UTF-8 keeps
+its bytes as surrogate escapes and round-trips to the file system); a `*_b64` key is decoded into
+its plain counterpart, so a result never has both.
+
+| id | function | runs | returns |
+|---|---|---|---|
+| PY-F1 | `check(scope, *, docker=None)` | `belay check --scope S [--docker C] --json` | `Checkpoint` |
+| PY-F2 | `mark(scope, *, docker=None, full=False, full_every=None)` | `belay mark ...` | `Checkpoint` |
+| PY-F3 | `log(scope, *, docker=None)` | `belay log ...` | `list[Checkpoint]`, oldest first, as the CLI prints them |
+| PY-F4 | `diff(scope, since, to=None, *, docker=None, all=False, full_every=None)` | `belay diff ...` | `Diff` |
+| PY-F5 | `baseline_export(scope, out, *, protect=None, docker=None)` | `belay baseline export ...` | `Baseline` |
+| PY-F6 | `verify(scope, baseline, sha256, *, protect=None, to=None, docker=None)` | `belay verify ...` | `Policy` |
+
+`docker=` is the container's name or id (host-reader.md). `exclude` has no function: it changes
+the scope's configuration and prints nothing to parse; the CLI does it.
+
+## Results
+
+All are frozen dataclasses: equal when their contents are, safe to keep and share.
+
+| id | type | fields |
+|---|---|---|
+| PY-R1 | `Checkpoint` | One attribute per key of checkpoint.v1 (`schema/checkpoint.v1.json`), named as the key; `prefilter` a frozen dataclass of its keys. |
+| PY-R2 | `Diff` | `header` and `trailer`: one attribute per key of diff.v1's header and trailer; `records`: a tuple of `DiffRecord`, each with diff.v1's record keys as attributes and `findings` a tuple of dicts, each finding's JSON object as diff.v1 writes it (paths decoded as above). Event records likewise, as `DiffEvent`. |
+| PY-R3 | `Baseline` | `bundle` (str), `sha256` (str), `baseline_integrity`: a tuple of dicts, as baseline-bundle B-R4 gives them. |
+| PY-R4 | `Policy` | `header` and `trailer` (policy.v1's keys as attributes), `flags`: a tuple of `Flag`, each with `flag`, `level`, `text`, `provisional` (bool, `False` when absent), `paths` (tuple of str) and `fields` (a dict of the kind's own fields, policy-v1 P-F1). `violations` and `signals`: the trailer's counts. |
+
+## Errors
+
+Every error is a `pybelay.BelayError` (an `Exception`), with `exit_code` (int or `None`) and
+`stderr` (the binary's, as text). A violation is never an error: it is in the result.
+
+| id | when | raises |
+|---|---|---|
+| PY-E1 | exit 2 (usage) | `UsageError` |
+| PY-E2 | exit 3 (refused: a digest that does not match, a source that differs, an unsupported container, ...) | `Refused` |
+| PY-E3 | exit 4 (failed) | `Failed` |
+| PY-E4 | output a strict parse rejects, or an exit code the CLI does not document | `FormatError` |
+| PY-E5 | the vendored binary does not hash to its recorded digest (PY-D5) | `BinaryMismatch` |
