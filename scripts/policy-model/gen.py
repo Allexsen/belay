@@ -15,6 +15,8 @@ A scenario is a dict:
              corrupt (None, "trailing", "unknown-key", "short"), tmpdir ("inside": verify's
              $TMPDIR, where it makes its own state directory, is the scope's `tmp`)
   refusal    the refusal label it exercises (coverage), if any
+  workdir    "disk": built on the disk's temporary directory (ext4 here) rather than PM_WORKDIR,
+             for a filesystem that sets its own inode flags on every new file
 
 Ops are tuples; `apply` performs them. Paths are str, or bytes when not UTF-8.
 """
@@ -357,7 +359,8 @@ def git_ops(repo=".git"):
 def S(name, tree, episode=(), spec=None, tags=(), **kw):
     d = {"name": name, "tree": list(tree), "episode": list(episode), "spec": spec,
          "tags": list(tags), "excludes": kw.pop("excludes", []), "out": kw.pop("out", "outside"),
-         "verify": kw.pop("verify", {}), "refusal": kw.pop("refusal", None)}
+         "verify": kw.pop("verify", {}), "refusal": kw.pop("refusal", None),
+         "workdir": kw.pop("workdir", None)}
     assert not kw, kw
     return d
 
@@ -418,11 +421,11 @@ def scenarios():
           spec_of(rule("grader/**", "no_write"))))
     add(S("unverif-unreadable-at-reset", BASE + [("file", "grader/secret.txt", b"s3cret\n"),
                                                 ("chmod", "grader/secret.txt", 0o000)], [],
-          GW, tags=["P2", "P25"]))
+          GW, tags=["P25"]))
     add(S("unverif-unreadable-episode", BASE + [("file", "grader/secret.txt", b"s3cret\n")],
-          [("chmod", "grader/secret.txt", 0o000)], GW, tags=["P2", "P25", "P29", "P3"]))
+          [("chmod", "grader/secret.txt", 0o000)], GW, tags=["P25", "P29"]))
     add(S("unverif-added-unreadable", BASE, [("file", "grader/new.txt", b"n\n"), ("chmod", "grader/new.txt", 0o000)],
-          spec_of(rule("grader/**", "no_create")), tags=["P6", "P25", "P3"]))
+          spec_of(rule("grader/**", "no_create")), tags=["P6", "P25"]))
     add(S("unverif-no-create-reads-after", BASE + [("sparse", "grader/blob.bin", 4294967296 + 1)], [],
           spec_of(rule("grader/**", "no_create")), tags=["P6"]))
 
@@ -453,17 +456,17 @@ def scenarios():
         add(S("dpkg-conffile" + f, BASE + D, [("write", "etc/tool.conf", b"verbose = true\n")], PS))
         tool2 = dict(TOOL, version="1.1-1", files=dict(TOOL["files"], **{"usr/bin/tool": (TOOL_V2, 0o755)}))
         add(S("dpkg-upgrade" + f, BASE + D,
-              [op for op in dpkg_ops([tool2, LIBX]) if op[1] != "etc/tool.conf"], PS, tags=["P10", "P11"]))
+              [op for op in dpkg_ops([tool2, LIBX]) if op[1] != "etc/tool.conf"], PS, tags=["P10"]))
         newt = {"pkg": "newtool", "version": "2.0-1", "files": {"usr/bin/newtool": (b"#!/bin/sh\n", 0o755)}}
         add(S("dpkg-install" + f, BASE + D,
               [op for op in dpkg_ops([TOOL, LIBX, newt]) if op[1] not in ("usr/bin/tool", "usr/share/doc/tool/README",
                                                                        "etc/tool.conf", "usr/lib/libx.so.2")],
-              PS, tags=["P10", "P11"]))
+              PS, tags=["P10"]))
     newt_bad = {"pkg": "newtool", "version": "2.0-1", "files": {"usr/bin/newtool": (b"#!/bin/sh\n", 0o755)},
                 "md5_override": {"usr/bin/newtool": "0" * 32}}
     add(S("dpkg-install-inconsistent", BASE + dpkg_ops([TOOL]),
           [op for op in dpkg_ops([TOOL, newt_bad]) if not op[1].startswith(("usr/bin/tool", "usr/share", "etc/"))],
-          spec_of(), tags=["P10", "P11"]))
+          spec_of(), tags=["P10"]))
     bad_tool = dict(TOOL, md5_override={"usr/share/doc/tool/README": "f" * 32}, absent=("usr/bin/tool",))
     add(S("dpkg-baseline-integrity", BASE + dpkg_ops([bad_tool, LIBX]), [], spec_of(), tags=["P22"]))
     add(S("dpkg-sysroot", dpkg_ops([TOOL], root="sysroot/"),
@@ -482,22 +485,22 @@ def scenarios():
         add(S("pip-remove-file" + f, BASE + FOO, [("rm", SITE + "/foo/__init__.py")], PS))
         newer = pip_ops("bar", "2.0", {"bar/__init__.py": (b"X = 1\n", 0o644),
                                        "../../../bin/bar": (b"#!/usr/bin/env python3\n", 0o755)})
-        add(S("pip-install" + f, BASE + FOO, newer, PS, tags=["P10", "P11"]))
+        add(S("pip-install" + f, BASE + FOO, newer, PS, tags=["P10"]))
         up = ([("rmtree", SITE + "/foo-1.0.dist-info")] +
               pip_ops("foo", "2.0", dict(FOO_FILES, **{"foo/__init__.py": (b"VERSION = '2.0'\n", 0o644),
                                                        "../../../bin/foo": (b"#!/usr/bin/env python3\n", 0o755)}))
               + [("write", SITE + "/foo/__init__.py", b"VERSION = '2.0'\n")])
         add(S("pip-upgrade" + f, BASE + FOO, [op for op in up if op[1] not in (SITE + "/foo/core.py", "bin/foo")],
-              PS, tags=["P10", "P11"]))
+              PS, tags=["P10"]))
     add(S("pip-install-inconsistent", BASE + FOO,
           pip_ops("bar", "2.0", {"bar/__init__.py": (b"X = 1\n", 0o644)}, bad={"bar/__init__.py"}),
-          spec_of(), tags=["P11"]))
+          spec_of()))
     add(S("pip-reinstall", BASE + FOO,
           [op for op in pip_ops("foo", "1.0", dict(FOO_FILES, **{"foo/core.py": (b"def run():\n    return 3\n", 0o644),
                                                                  "foo/extra.py": (b"E = 1\n", 0o644),
                                                                  "../../../bin/foo": (b"#!/usr/bin/env python3\n", 0o755)}),
                                 extra_rows=[escape])
-           if op[1] not in (SITE + "/foo/__init__.py", "bin/foo")], spec_of(), tags=["P10", "P11"]))
+           if op[1] not in (SITE + "/foo/__init__.py", "bin/foo")], spec_of(), tags=["P8", "P10"]))
     add(S("pip-baseline-integrity", BASE + pip_ops("baz", "0.1", {"baz.py": (b"B = 1\n", 0o644),
                                                                    "baz_gone.py": (b"G\n", 0o644)},
                                                    bad={"baz.py"}) + [("rm", SITE + "/baz_gone.py")],
@@ -534,10 +537,9 @@ def scenarios():
            ("write", "spec/helper.rb", b"y\n"), ("write", "web/app.spec.js", b"y\n"), ("write", "src/__tests__/a.js", b"y\n"),
            ("rm", "test/test.js")], tags=["P12", "P13"]))
     add(S("tw-new-test-dir", BASE, [("file", "tests/integration/test_i.py", b"def test_i():\n    assert 1\n")], tags=["P12"]))
-    add(S("tw-not-utf8", BASE, [("file", b"tests/test_\xff.py", b"def test_x():\n    assert 1\n")], tags=["P19"]))
+    add(S("tw-not-utf8", BASE, [("file", b"tests/test_\xff.py", b"def test_x():\n    assert 1\n")]))
     add(S("tw-not-utf8-backslash", BASE, [("file", b"tests/a\\b/test_\xfe\\.py", b"def test_x():\n    assert 1\n"),
-                                           ("file", "tests/c\\d/test_ok.py", b"def test_y():\n    assert 1\n")],
-          tags=["P19"]))
+                                           ("file", "tests/c\\d/test_ok.py", b"def test_y():\n    assert 1\n")]))
 
     # -- pytest configuration, conftest, CI
     add(S("cfg-pyproject", BASE, [("write", "pyproject.toml", PYPROJECT.replace(b'addopts = "-q"', b'addopts = "-q -p no:randomly"'))], tags=["P15"]))
@@ -569,7 +571,7 @@ def scenarios():
            ("file", SP + "/sub/nested.pth", b"x\n"), ("rm", SP + "/foo/core.py")]))
     add(S("hook-pth-in-record", BASE + FOO,
           pip_ops("pthpkg", "1.0", {"pthpkg.pth": (b"import pthpkg\n", 0o644), "pthpkg/__init__.py": (b"\n", 0o644)}),
-          spec_of(), tags=["P11"]))
+          spec_of()))
     add(S("hook-pth-in-record-tampered", BASE + pip_ops("pthpkg", "1.0", {"pthpkg.pth": (b"import pthpkg\n", 0o644)}),
           [("write", SP + "/pthpkg.pth", b"import os; os.system('true')\n")], spec_of()))
 
@@ -617,11 +619,11 @@ def scenarios():
     add(S("priv-bits", BASE + [("file", "tools/run", b"#!/bin/sh\n", 0o755), ("dir", "shared"),
                                ("file", "tools/old-suid", b"#!/bin/sh\n", 0o4755)],
           [("chmod", "tools/run", 0o6755), ("chmod", "shared", 0o1777), ("rm", "tools/old-suid"),
-           ("file", "tools/new-sgid", b"#!/bin/sh\n", 0o2755)], tags=["P3", "P4"]))
+           ("file", "tools/new-sgid", b"#!/bin/sh\n", 0o2755)], tags=["P4"]))
     add(S("priv-scope-root", BASE, [("chmod", ".", 0o1755)], tags=["P4"]))
-    add(S("priv-iflags", BASE, [("chattr", "src/app.py", FS_NODUMP_FL)], tags=["P3"]))
+    add(S("priv-iflags", BASE, [("chattr", "src/app.py", FS_NODUMP_FL)]))
     add(S("priv-sticky-file-in-bin", BASE + [("dir", "bin")], [("file", "bin/s", b"#!/bin/sh\n", 0o1755)],
-          tags=["P3", "P18"]))
+          tags=["P18"]))
 
     # -- more shapes of change
     add(S("pw-symlink-retarget", BASE + [("symlink", "tests/data-link", "a")],
@@ -639,14 +641,14 @@ def scenarios():
               [("rm", "usr/lib/libx.so.2"), ("rm", "var/lib/dpkg/info/libx.md5sums"), ("rm", "var/lib/dpkg/info/libx.list"),
                ("write", "var/lib/dpkg/status", dpkg_stanza("tool", "1.0-1",
                                                             [("etc/tool.conf", hashlib.md5(b"verbose = false\n").hexdigest())]).encode())],
-              PS, tags=["P10", "P11"]))
+              PS, tags=["P10"]))
         add(S("pip-remove-package" + f, BASE + FOO,
-              [("rmtree", SITE + "/foo-1.0.dist-info"), ("rmtree", SITE + "/foo"), ("rm", "bin/foo")], PS, tags=["P10", "P11"]))
+              [("rmtree", SITE + "/foo-1.0.dist-info"), ("rmtree", SITE + "/foo"), ("rm", "bin/foo")], PS, tags=["P10"]))
     add(S("pip-downgrade", BASE + FOO,
-          [("rmtree", SITE + "/foo-1.0.dist-info")] + pip_ops("foo", "0.9", FOO_FILES, write=False), spec_of(), tags=["P10", "P11"]))
+          [("rmtree", SITE + "/foo-1.0.dist-info")] + pip_ops("foo", "0.9", FOO_FILES, write=False), spec_of(), tags=["P10"]))
     add(S("pip-version-changed", BASE + FOO,
           [("rmtree", SITE + "/foo-1.0.dist-info")] + pip_ops("foo", "1.0.0", FOO_FILES, write=False), spec_of(),
-          tags=["P10", "P11"]))
+          tags=["P10"]))
     add(S("git-history-branch-reset-forced", BASE + git_ops(),
           [("write", ".git/refs/heads/main", (C[0] + "\n").encode()),
            ("append", ".git/logs/refs/heads/main",
@@ -668,7 +670,67 @@ def scenarios():
         add(S("mix-all" + f, mix_tree, mix_ep,
               spec_of(rule("tests/**", "no_write", "no_delete", "no_create"),
                       rule("grader/check.py", "no_write", expected=sha(GRADER)), frozen=frozen),
-              tags=["P3", "P10", "P11", "P13", "P15", "P17"]))
+              tags=["P10", "P13", "P15", "P17"]))
+
+    # -- decision 163: iflags of a file added or removed only when they lock it
+    add(S("priv-added-nodump", BASE + [("file", "src/old.py", b"o\n"), ("chattr", "src/old.py", FS_NODUMP_FL)],
+          [("file", "src/new.py", b"n\n"), ("chattr", "src/new.py", FS_NODUMP_FL), ("rm", "src/old.py")]))
+    add(S("priv-disk-extents", BASE + [("file", "src/kept.py", b"k\n")],
+          [("file", "src/added.py", b"a\n"), ("dir", "src/newdir"), ("chattr", "src/kept.py", FS_NODUMP_FL),
+           ("rm", "README.md")], workdir="disk"))
+
+    # -- decision 173: a reinstall at the same version has its files judged
+    for frozen in (False, True):
+        f = "-frozen" if frozen else "-free"
+        forged = pip_ops("foo", "1.0", dict(FOO_FILES, **{"foo/core.py": (b"def run():\n    return 'patched'\n", 0o644),
+                                                          "../../../bin/foo": (b"#!/usr/bin/env python3\n", 0o755)}),
+                         extra_rows=[escape])
+        add(S("pip-forged-record" + f, BASE + FOO,
+              [op for op in forged if op[1] in (SITE + "/foo/core.py", SITE + "/foo-1.0.dist-info/RECORD")],
+              spec_of(frozen=frozen), tags=["P8"]))
+
+    add(S("pip-no-hash-file-modified", BASE + pip_ops("pyc", "1.0", {"pyc/__init__.py": (b"P = 1\n", 0o644)},
+                                                      extra_rows=["pyc/__pycache__/__init__.cpython-312.pyc,,"])
+          + [("file", SITE + "/pyc/__pycache__/__init__.cpython-312.pyc", b"\x00compiled 1")],
+          [("write", SITE + "/pyc/__pycache__/__init__.cpython-312.pyc", b"\x00compiled 2, patched")],
+          spec_of(), tags=["P8"]))
+
+    # -- decision 175: the test-file rule, narrowed
+    T175 = [("build/test/test_gen.py", b"def test_g():\n    assert 1\n"), ("build/san/test/x.c", b"int x;\n"),
+            ("docs/spec/policy.md", b"# spec\n"), ("doc/tests/a.txt", b"a\n"), ("out/tests/r.txt", b"r\n"),
+            ("target/debug/foo_test.go", b"package x\n"), ("node_modules/m/test/i.js", b"x\n"),
+            ("src/__pycache__/test_a.cpython-312.pyc", b"\0pyc"), ("dist/test_b.py", b"x\n"),
+            (".build/tests/t.swift", b"x\n"), ("obj/test_o.c", b"x\n"), ("_build/tests/x", b"x\n"),
+            ("src/foo_test.go", b"package foo\n"), ("src/FooTest.java", b"class FooTest {}\n"),
+            ("src/BarTests.kt", b"class BarTests\n"), ("src/QuxTest.kt", b"class QuxTest\n"),
+            ("src/BazTests.java", b"class BazTests {}\n"), ("lib/x_spec.rb", b"x\n"), ("lib/y_test.rb", b"y\n"),
+            ("src/test_a.c", b"x\n"), ("src/b_test.cc", b"x\n"), ("src/test_c.cpp", b"x\n"), ("src/d_test.c", b"x\n"),
+            ("src/test_e.cc", b"x\n"), ("src/f_test.cpp", b"x\n"),
+            ("web/a.test.tsx", b"x\n"), ("web/b.spec.mjs", b"x\n"), ("web/c.test.cjs", b"x\n"), ("web/d.spec.jsx", b"x\n"),
+            ("web/e.test.ts", b"x\n"), ("web/f.spec.js", b"x\n"),
+            ("src/g_test.py", b"def test_g():\n    assert 1\n"), ("src/test_h.py", b"def test_h():\n    assert 1\n"),
+            ("src/web.test.py", b"x\n"), ("src/Foo.test.java", b"x\n"), ("src/footest.go", b"x\n"),
+            ("src/x.spec.rb", b"x\n"), ("src/test_x.h", b"x\n"), ("web/a.test.vue", b"x\n"), ("src/testing.py", b"x\n"),
+            ("crates/x/tests/it.rs", b"x\n"), ("app/spec/models/user_spec.rb", b"x\n"), ("src/__tests__/a.vue", b"x\n")]
+    add(S("tw-paths-decision-175", BASE + [("file", "build/test/old_test.go", b"package x\n"),
+                                           ("file", "docs/spec/old.md", b"# old\n"), ("file", "src/old_test.go", b"package y\n")],
+          [("file", p, d) for p, d in T175] + [("rm", "build/test/old_test.go"), ("write", "docs/spec/old.md", b"# new\n"),
+                                               ("write", "src/old_test.go", b"package z\n")], tags=["P12", "P34"]))
+    add(S("tw-weakened-below-build", BASE + [("file", "build/tests/test_b.py", TEST_API), ("file", "src/c_test.py", TEST_API)],
+          [("write", "build/tests/test_b.py", b""), ("write", "src/c_test.py", b"")], tags=["P13", "P34"]))
+
+    # -- decision 174: a text over 1,024 bytes is cut at a character
+    many = b"".join(b'@pytest.mark.skip(reason="flaky on the CI runner, number %02d of many")\n' % i for i in range(25))
+    add(S("text-cut-markers", BASE, [("write", "tests/test_api.py", TEST_API.replace(b"def test_two", many + b"def test_two"))],
+          tags=["P13", "P33"]))
+    deep = "/".join(["\u00e9" * 120] * 4)
+    add(S("text-cut-long-path", BASE, [("file", "tests/%s/a\u00e9/test_\u00e9.py" % deep, b"def test_x():\n    assert 1\n")],
+          spec_of(rule("tests/**", "no_create")), tags=["P33"]))
+    add(S("text-cut-not-utf8", BASE, [("file", b"tests/" + b"\xff" * 250 + b"/" + b"\\" * 30 + b"/t.py", b"x\n")],
+          tags=["P33"]))
+    add(S("text-cut-mid-escape", BASE,
+          [("file", b"tests/" + b"/".join([b"a" * 250, b"b" * 250, b"c" * 250, b"d" * 250]) + b"/" + b"\xff" * 10, b"x\n")],
+          tags=["P33", "P35"]))
 
     # -- headers: no spec, empty spec, an exclude that covers nothing protected
     add(S("nospec-mixed", BASE + git_ops(), [("write", "tests/test_api.py", b""), ("file", ".git/hooks/pre-commit", b"#!/bin/sh\n", 0o755)],
@@ -708,11 +770,11 @@ def scenarios():
     add(S("verify-to-trusted", BASE, [("write", "README.md", b"# app 2\n")], TW, verify={"to": "trusted"},
           refusal="verify:to-trusted"))
     add(S("verify-configured-exclude-not-applied", BASE, [("write", "tests/test_api.py", TEST_API + b"#\n")], TW,
-          verify={"excludes_add": ["tests"]}, tags=["P31"]))
+          verify={"excludes_add": ["tests"]}))
     add(S("verify-to-excluded-checkpoint", BASE, [], TW, verify={"excludes_add": ["tests"], "to": "check"},
           refusal="verify:exclude-covers-to"))
     add(S("nospec-to-excluded-checkpoint", BASE, [], None, verify={"excludes_add": ["tests"], "to": "check"},
-          tags=["P13", "P3"]))
+          tags=["P13", "P32"]))
     add(S("verify-own-state-dir-covered", BASE + [("dir", "tmp")], [], spec_of(rule("tmp/**", "no_write")),
           verify={"tmpdir": "inside"}, refusal="verify:state-dir-covers"))
     for c in ("trailing", "unknown-key", "short"):
