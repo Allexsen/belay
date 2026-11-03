@@ -559,6 +559,11 @@ static int collect(struct git *g, const struct belay_interp_input *in, enum git_
             else if (r != 0) {
                 parsed = false;
                 x->known[0] = x->known[1] = false;  /* a reflog not parsed is no evidence */
+                for (size_t m = 0; m < x->ne; m++) {
+                    free((char *)x->e[m].old.s); free((char *)x->e[m].nw.s);
+                    free((char *)x->e[m].op.s); free((char *)x->e[m].msg.s);
+                }
+                x->ne = 0;                      /* nothing of what was parsed before the fault: no rename */
             }
         }
     }

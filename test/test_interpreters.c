@@ -796,6 +796,51 @@ TEST(git_unparseable_unknown_before_and_unread_head) {
     r_free(&r);
 }
 
+/* A reflog whose gained entries git cannot parse is no evidence, a rename
+ * included: what was parsed before the fault is not used (the reference's
+ * author, following G13). packed-refs dates the new branch's absence before:
+ * it was created, and the old one deleted -- no rename. Without packed-refs
+ * nothing dates that absence: it moved, with no from. */
+TEST(git_a_reflog_not_parsed_tells_no_rename) {
+    struct run r;
+    r_begin(&r, BELAY_INTERP_GIT, true);
+    const struct belay_entry a = file(put(OA "\n"), 0);
+    char nl[1024];
+    snprintf(nl, sizeof nl, Z40 " " OA WHO "branch: Created from main\n" OA " " OA WHO
+             "Branch: renamed refs/heads/feat to refs/heads/done\nnot a reflog line at all\n");
+    const struct belay_entry nlog = file(put(nl), 0), ol = file(put(Z40 " " OA WHO "branch: Created from main\n"), 0);
+    r_path(&r, "/s/.git/refs/heads/feat", &a, NULL, "removed");
+    r_path(&r, "/s/.git/logs/refs/heads/feat", &ol, NULL, "removed");
+    r_path(&r, "/s/.git/refs/heads/done", NULL, &a, "added");
+    r_path(&r, "/s/.git/logs/refs/heads/done", NULL, &nlog, "added");
+    const struct belay_entry pb = file(put("# pack-refs with: peeled fully-peeled sorted\n" OA " refs/heads/main\n"), 0);
+    const struct belay_entry pa = file(put("# pack-refs with: peeled fully-peeled sorted\n" OA " refs/heads/main\n"
+                                           OA " refs/tags/v1\n"), 0);
+    r_path(&r, "/s/.git/packed-refs", &pb, &pa, "modified");
+    ASSERT_EQ_STR(
+        "{\"event\":\"could_not_interpret\",\"interp\":\"git\",\"text\":\"could not interpret\",\"paths\":[\".git/logs/refs/heads/done\"]}\n"
+        GEV("git_branch_created", "\"repo\":\".git\",\"branch\":\"done\",\"at\":\"" OA "\"", "branch done created at " OA)
+            ",\"paths\":[\".git/packed-refs\",\".git/refs/heads/done\"]}\n"
+        GEV("git_branch_deleted", "\"repo\":\".git\",\"branch\":\"feat\",\"was\":\"" OA "\"", "branch feat deleted (was " OA ")")
+            ",\"paths\":[\".git/packed-refs\",\".git/refs/heads/feat\"]}\n",
+        r_end(&r));
+    r_free(&r);
+    /* without packed-refs: done moved, with no from */
+    r_begin(&r, BELAY_INTERP_GIT, true);
+    r_path(&r, "/s/.git/refs/heads/feat", &a, NULL, "removed");
+    r_path(&r, "/s/.git/logs/refs/heads/feat", &ol, NULL, "removed");
+    r_path(&r, "/s/.git/refs/heads/done", NULL, &a, "added");
+    r_path(&r, "/s/.git/logs/refs/heads/done", NULL, &nlog, "added");
+    ASSERT_EQ_STR(
+        "{\"event\":\"could_not_interpret\",\"interp\":\"git\",\"text\":\"could not interpret\",\"paths\":[\".git/logs/refs/heads/done\"]}\n"
+        GEV("git_branch_moved", "\"repo\":\".git\",\"branch\":\"done\",\"to\":\"" OA "\"", "done now at " OA)
+            ",\"paths\":[\".git/refs/heads/done\"]}\n"
+        GEV("git_branch_deleted", "\"repo\":\".git\",\"branch\":\"feat\",\"was\":\"" OA "\"", "branch feat deleted (was " OA ")")
+            ",\"paths\":[\".git/refs/heads/feat\"]}\n",
+        r_end(&r));
+    r_free(&r);
+}
+
 /* Decision 144 (G13): a reflog is parsed by the entries it gained in this
  * diff; its older entries are never read, git's or not. A before that ends
  * inside a line is no prefix: nothing gained, nothing parsed, so no how
@@ -1422,6 +1467,7 @@ int main(void) {
     RUN(git_what_cannot_be_read_reduces_the_claim_never_the_fact);
     RUN(git_unparseable_unknown_before_and_unread_head);
     RUN(git_a_reflog_is_parsed_by_the_entries_it_gained);
+    RUN(git_a_reflog_not_parsed_tells_no_rename);
     RUN(git_reflog_that_is_not_appended_to_is_rewritten);
     RUN(git_reflog_without_a_copy_is_content_unavailable);
     RUN(git_ref_that_cannot_be_parsed_could_not_be_interpreted);
