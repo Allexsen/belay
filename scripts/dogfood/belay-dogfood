@@ -8,8 +8,10 @@
 #   start   SessionStart              the session's base checkpoint
 #   pre     PreToolUse   (writing)    a checkpoint before the call
 #   post    PostToolUse(Failure)      a checkpoint after it
-#   stop    Stop                      a checkpoint; the turn's receipt; its one
-#                                     line, "nothing changed" included
+#   stop    Stop                      a checkpoint; the turn's receipt; one
+#                                     line for every turn since the user's
+#                                     message (decision 197), "nothing
+#                                     changed" included
 #   end     SessionEnd                a last checkpoint; the session's receipt,
 #                                     copied to NOTES/dogfood/ when interesting
 #
@@ -89,7 +91,7 @@ command -v jq >/dev/null 2>&1 || { fail "jq not found"; quit; }
 # command's first line, a file, a tool's name -- already JSON-encoded; and
 # the whole command, for the receipt's detail (turn-267: a label cut at 200
 # characters hid the `git fetch` that wrote what it was blamed for).
-eval "$(printf '%s' "$in" | jq -r '((.tool_input.command // .tool_input.file_path // .tool_input.notebook_path // .tool_input.description // "") | tostring) as $c | @sh "sid=\(.session_id // "") tid=\(.tool_use_id // "") tool=\(.tool_name // "") agent=\(.agent_type // "") bgtask=\(.tool_response.backgroundTaskId // (if .tool_input.run_in_background == true then "?" else "" end)) summary=\($c | split("\n")[0] | .[0:200] | @json) full=\($c | .[0:65536])"' 2>/dev/null)" || { fail "the hook's input could not be read"; quit; }
+eval "$(printf '%s' "$in" | jq -r '((.tool_input.command // .tool_input.file_path // .tool_input.notebook_path // .tool_input.description // "") | tostring) as $c | @sh "sid=\(.session_id // "") tid=\(.tool_use_id // "") tool=\(.tool_name // "") agent=\(.agent_type // "") bgtask=\(.tool_response.backgroundTaskId // (if .tool_input.run_in_background == true then "?" else "" end)) summary=\($c | split("\n")[0] | .[0:200] | @json) full=\($c | .[0:65536]) transcript=\(.transcript_path // "")"' 2>/dev/null)" || { fail "the hook's input could not be read"; quit; }
 case ${sid:-} in ''|*[!A-Za-z0-9_-]*) fail "the hook's input names no session"; quit ;; esac   # a name, never a path
 
 mkdir -p "$D" 2>/dev/null && chmod 700 "$D" 2>/dev/null || { fail "cannot create $D"; quit; }
@@ -177,7 +179,7 @@ case $ev in
 stop)
     M=$D/$sid.receipt-running.turn
     printf '%s %s turn\n' "$$" "$now" > "$M"
-    if line=$(python3 -I "$HERE/receipt.py" turn "$LOG" "$BELAY" "$SCOPE" "$D" 2>>"$D/$sid.err"); then
+    if line=$(python3 -I "$HERE/receipt.py" turn "$LOG" "$BELAY" "$SCOPE" "$D" "$transcript" 2>>"$D/$sid.err"); then
         [ -n "$line" ] || fail "the turn's receipt gave no line (see $D/$sid.err)"
     else
         fail "the turn's receipt failed (see $D/$sid.err)"
