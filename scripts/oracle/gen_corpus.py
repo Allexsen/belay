@@ -107,10 +107,14 @@ The corpus has three parts:
     a reflog that cannot be read (no evidence of before, or of how), a
     loose ref or packed-refs that cannot be read on one side (before: the
     reflog's evidence -- an old id, zeros -- or no from; a loose ref there
-    unread, its reflog from zeros; after: no event), a packed-refs that
-    cannot be parsed, a packed-refs touched but unchanged, a ref that
-    cannot be parsed, tags and remote-tracking refs, and copies missing,
-    corrupt (other bytes, a symlink) and over a loose ref's bound;
+    unread, its reflog from zeros; after: no event), a side that cannot be
+    parsed, as one that cannot be read (decision 141: a loose ref, before
+    -- no from, its reflog's old id, its reflog from zeros -- and after;
+    packed-refs on one side, a loose ref beside it; a reflog; HEAD), a
+    branch removed whose value before cannot be told, HEAD that cannot be
+    read on a side, a packed-refs touched but unchanged, a ref that cannot
+    be parsed, tags and remote-tracking refs, and copies missing, corrupt
+    (other bytes, a symlink) and over a loose ref's bound;
     and the values a record carries (values(), diff-values.md): link
     targets not UTF-8 on both sides, a type change whose symlink's target
     is not UTF-8, unknown or written on an unreadable link, or whose
@@ -3951,22 +3955,110 @@ def git_events(w, rng):
             'a branch whose packed-refs cannot be read after: no event',
             'history rewritten by reset', 'a branch moved by another operation']))
 
-    # packed-refs that cannot be parsed ("nothing more is read from it"):
-    # as one that cannot be read, no value on either side (ambiguity G5 of
-    # reference.py) -- a loose ref added beside it has no from.
+    # E12 (decision 141): "A side git cannot parse counts as one it cannot
+    # read (and is a `could_not_interpret` event, E10)" -- on that side only.
+    # packed-refs that cannot be parsed before, parsed after: a branch only
+    # in it after is "now at" (main), a loose ref added beside it has no from
+    # (topic), and a loose ref there on both sides is its value on both,
+    # packed-refs not standing in for it (dev). Its reverse: packed-refs
+    # unparsed after -- main and topic (removed) derive no event; dev still
+    # moves.
     def packed_unparsed(rng):
-        r = repo(rng)
+        r, c = repo(rng), [oid() for _ in range(4)]
         return [(r + b'packed-refs', b'not a packed-refs line\n',
-                 git_packed((oid(), 'refs/heads/main')), O),
-                (r + b'refs/heads/topic', None, git_loose(oid()), O)]
+                 git_packed((c[0], 'refs/heads/main')), O),
+                (r + b'refs/heads/topic', None, git_loose(c[1]), O),
+                (r + b'refs/heads/dev', git_loose(c[2]), git_loose(c[3]), O)]
     one('git: packed-refs that cannot be parsed, a loose ref added', packed_unparsed,
         ev(['a branch whose packed-refs cannot be parsed before: now at (no from)',
+            'a branch whose packed-refs cannot be parsed after: no event',
+            'a loose ref there beside packed-refs not parsed: its value',
             'a ref that cannot be parsed']))
 
-    # A ref that is no ref: could_not_interpret, its record and one event.
+    # A loose ref that cannot be parsed before, parsed after: no value before
+    # -- "now at" (a); its reflog's old id gives one (b, then how); its
+    # reflog from zeros does not make it absent (c; ambiguity G10 of
+    # reference.py). Each is a could_not_interpret event. Its reverse: the
+    # three parsed before, unparsed after -- no event.
+    def loose_unparsed_before(rng):
+        r, c = repo(rng), [oid() for _ in range(5)]
+        base = [(Z, c[0], 'commit (initial): root')]
+        # (No symbolic ref: git writes those, and the documents do not say
+        # how one is read.)
+        return [(r + b'refs/heads/a', b'not an object id\n', git_loose(c[1]), O),
+                (r + b'refs/heads/b', b'not a ref\n', git_loose(c[3]), O),
+                (r + b'logs/refs/heads/b', git_reflog(*base),
+                 git_reflog(*(base + [(c[0], c[2], 'commit: one'),
+                                      (c[2], c[3], 'commit: two')])), O),
+                (r + b'refs/heads/c', b'neither\n', git_loose(c[4]), O),
+                (r + b'logs/refs/heads/c', None,
+                 git_reflog((Z, c[4], 'branch: Created from HEAD')), O)]
+    one('git: a loose ref that cannot be parsed before, parsed after', loose_unparsed_before,
+        ev(['a branch whose loose ref cannot be parsed before: now at (no from)',
+            'a loose ref unparsed before, its value before by its reflog',
+            'a loose ref unparsed before whose reflog starts from zeros: now at, not created',
+            'a branch whose loose ref cannot be parsed after: no event',
+            'commits added, counted', 'a ref that cannot be parsed']))
+
+    # A ref that is no ref: could_not_interpret, its record and one event;
+    # after, no event. Its reverse, a branch removed whose value before
+    # cannot be told: "derives no event (`git_branch_deleted` needs `was`)".
     one('git: a ref that cannot be parsed',
         lambda rng: [(repo(rng) + b'refs/heads/bad', None, b'not an object id\n', O)],
-        ev(['a ref that cannot be parsed']))
+        ev(['a ref that cannot be parsed',
+            'a loose ref removed, not parsed before: no event']))
+
+    # A reflog that cannot be parsed counts as one that cannot be read: no
+    # evidence of before (no from), nor of how (moved, from the refs). A
+    # reflog is read by its bytes: "when before's bytes are a prefix of
+    # after's ... counts the entries after it ...; otherwise ...
+    # `git_reflog_rewritten`" -- what cannot be parsed is the entries it
+    # gained (each reverse: not a prefix, rewritten, nothing parsed).
+    one('git: a branch created, its reflog not parsed',
+        lambda rng: [(f[0], f[1], b'not a reflog line\n' if b'logs/' in f[0] else f[2], f[3])
+                     for f in created_by_reflog(rng)],
+        ev(['a branch whose reflog cannot be parsed: no evidence of before']))
+    one('git: commits made, the reflog\'s new entry not parsed',
+        lambda rng: [(f[0], f[1], f[1] + b'not a reflog line\n' if b'/logs/' in b'/' + f[0]
+                      else f[2], f[3])
+                     for f in moved(rng, lambda c: ([(c[0], c[1], 'commit: one')], 1))],
+        ev(['a branch moved, its reflog not parsed: from the refs, without a how']))
+    # ... and old entries that are not git's, before one it gained: no rule
+    # reads them, so the entry gained is evidence like any other.
+    def reflog_old_unparsed(rng):
+        r, c0, c1 = repo(rng), oid(), oid()
+        junk = b'not a reflog line\n'
+        return [(r + b'refs/heads/main', git_loose(c0), git_loose(c1), O),
+                (r + b'logs/refs/heads/main', junk,
+                 junk + git_reflog((c0, c1, 'commit: one')), O)]
+    one('git: commits made, the reflog\'s old entries not git\'s', reflog_old_unparsed,
+        ev(['commits added, counted', 'a reflog whose old entries are not read']))
+
+    # "`HEAD` that cannot be read on a side derives none": not read before,
+    # naming another branch after (no git_head_switched); not parsed before,
+    # detached after with logs/HEAD's entry (nor the branch `HEAD`). Their
+    # reverses: after.
+    def head_unread(rng):
+        r, c0, c1 = repo(rng), oid(), oid()
+        return [(r + b'HEAD', git_head('main'), git_head('dev'), S(lacking='before')),
+                (r + b'refs/heads/dev', None, git_loose(c1), O),
+                (r + b'logs/refs/heads/dev', None,
+                 git_reflog((Z, c1, 'branch: Created from main')), O),
+                (r + b'logs/HEAD', git_reflog((Z, c0, 'commit (initial): root')),
+                 git_reflog((Z, c0, 'commit (initial): root'),
+                            (c0, c1, 'checkout: moving from main to dev')), O)]
+    one('git: HEAD unreadable before, naming another branch after', head_unread,
+        ev(['HEAD that cannot be read on a side: no event',
+            'a branch created, absent before by its reflog (zeros)']))
+
+    def head_unparsed(rng):
+        r, c0, c1 = repo(rng), oid(), oid()
+        hl = [(Z, c0, 'commit (initial): root')]
+        return [(r + b'HEAD', b'not a HEAD\n', git_head(c1), O),
+                (r + b'logs/HEAD', git_reflog(*hl),
+                 git_reflog(*(hl + [(c0, c1, 'checkout: moving from main to %s' % c1)])), O)]
+    one('git: HEAD that cannot be parsed before, detached after', head_unparsed,
+        ev(['HEAD that cannot be parsed on a side: no event', 'a ref that cannot be parsed']))
 
     # Tags and remote-tracking refs: their path findings, no event.
     def tags(rng):

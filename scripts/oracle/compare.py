@@ -91,7 +91,8 @@ the generator's labels (coverage(), required(), gate()):
     kind and each way to it, the reflog's evidence chaining or not, HEAD,
     repositories nested and their order, `unknown` refs read or not, refs
     that cannot be parsed, tags and remote-tracking refs, each reason a copy
-    cannot be read (GIT_EVENT_ITEMS, GIT_INPUT_ITEMS); a
+    cannot be read, and a side that cannot be read or parsed -- a ref,
+    packed-refs, a reflog, HEAD (GIT_EVENT_ITEMS, GIT_INPUT_ITEMS); a
     RECORD and a dpkg status not captured (excluded, below an unreadable
     directory, below a mount), alone and beside ones read, which derive no
     event (E11), and ones unknown on one side for another reason
@@ -1225,8 +1226,34 @@ GIT_EVENT_ITEMS = collections.OrderedDict([
      "a branch created by its reflog's zeros, packed-refs unread before"),
     ('git-ev:no value after, no event: packed-refs unread',
      'a branch whose packed-refs cannot be read after: no event'),
+    # E12, decision 141: "A side git cannot parse counts as one it cannot
+    # read (and is a `could_not_interpret` event, E10). A branch removed
+    # whose value before cannot be told derives no event (`git_branch_deleted`
+    # needs `was`), and `HEAD` that cannot be read on a side derives none."
     ('git-ev:moved, no value before: packed-refs unparsed',
      'a branch whose packed-refs cannot be parsed before: now at (no from)'),
+    ('git-ev:no value after, no event: packed-refs unparsed',
+     'a branch whose packed-refs cannot be parsed after: no event'),
+    ('git-ev:a loose ref beside packed-refs unparsed',
+     'a loose ref there beside packed-refs not parsed: its value'),
+    ('git-ev:moved, no value before: its loose ref unparsed',
+     'a branch whose loose ref cannot be parsed before: now at (no from)'),
+    ('git-ev:value before by its reflog, its loose ref unparsed',
+     'a loose ref unparsed before, its value before by its reflog'),
+    ('git-ev:moved, no value before: its loose ref unparsed, its reflog from zeros',
+     'a loose ref unparsed before whose reflog starts from zeros: now at, not created'),
+    ('git-ev:no value after, no event: its loose ref unparsed',
+     'a branch whose loose ref cannot be parsed after: no event'),
+    ('git-ev:removed, no value before, no event: its loose ref unparsed',
+     'a loose ref removed, not parsed before: no event'),
+    ('git-ev:moved, its reflog unparsed',
+     'a branch whose reflog cannot be parsed: no evidence of before'),
+    ('git-ev:moved:its reflog unparsed',
+     'a branch moved, its reflog not parsed: from the refs, without a how'),
+    ('git-ev:HEAD not read on a side, no event: unread',
+     'HEAD that cannot be read on a side: no event'),
+    ('git-ev:HEAD not read on a side, no event: unparsed',
+     'HEAD that cannot be parsed on a side: no event'),
     ('git-ev:deleted, packed-refs not a path of this diff',
      'a branch deleted, packed-refs not a path of this diff'),
     ('git-ev:deleted, packed-refs a path of this diff without it',
@@ -1270,7 +1297,10 @@ GIT_INPUT_ITEMS = ['an unknown ref read from its copy: provisional',
                    'an unknown packed-refs read from its copy: provisional',
                    'packed-refs metadata_only, not read: no evidence of before',
                    'an unknown ref with no copy: a provisional content_unavailable event',
-                   'tags and remote-tracking refs read: no event']
+                   'tags and remote-tracking refs read: no event',
+                   # A reflog is read by its bytes: entries before those it
+                   # gained, not git's, are not parsed.
+                   'a reflog whose old entries are not read']
 
 
 def git_coverage(records, traces, tags):
@@ -1287,6 +1317,8 @@ def git_coverage(records, traces, tags):
                 'git-read-unknown' in tr and any(t.startswith('git-ev:provisional:')
                                                  for t in end):
             tags.add('git events: an unknown packed-refs read from its copy: provisional')
+        if 'git-reflog-old-unparsed' in tr and 'git-reflog-appended' in tr:
+            tags.add('git events: a reflog whose old entries are not read')
         if 'interp:git:ref' not in tr and 'interp:git:reflog' not in tr:
             continue
         place = ref.git_place(p)
