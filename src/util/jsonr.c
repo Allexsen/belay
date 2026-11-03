@@ -111,7 +111,11 @@ static int val(struct cur *c, struct jval *v) {
                 if (c->p >= c->e || *c->p != ':') { free(v->keys[v->n]); return -1; }
                 c->p++;
             }
-            if (val(c, &v->kids[v->n]) == -1) { if (obj) free(v->keys[v->n]); return -1; }
+            if (val(c, &v->kids[v->n]) == -1) {     /* the child as far as it got: not yet counted */
+                jsonr_free(&v->kids[v->n]);
+                if (obj) free(v->keys[v->n]);
+                return -1;
+            }
             v->n++;
             ws(c);
             if (c->p < c->e && *c->p == ',') { c->p++; continue; }
