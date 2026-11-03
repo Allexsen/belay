@@ -825,6 +825,24 @@ def scenarios():
           refusal="verify:source-differs"))
     add(S("verify-container-source-nospec", BASE, [("write", "README.md", b"x\n")], None, verify={"manifest": "container"},
           tags=["P39"], refusal="verify:source-differs-nospec"))
+    # -- decision 214, B-R6: the first refusal is the one said
+    add(S("verify-other-scope", BASE, [], TW, verify={"manifest": "other-scope"}, refusal="verify:other-scope"))
+    add(S("verify-order-digest-before-source", BASE, [], TW, verify={"manifest": "container", "digest": "wrong"},
+          refusal="verify:order-digest-before-source"))
+    add(S("verify-order-missing-before-corrupt", BASE, [], TW, verify={"corrupt": "trailing", "digest": "missing"},
+          refusal="verify:order-missing-before-corrupt"))
+    add(S("verify-order-digest-before-corrupt", BASE, [], TW, verify={"corrupt": "short", "digest": "wrong"},
+          refusal="verify:order-digest-before-corrupt"))
+    add(S("verify-order-corrupt-before-source", BASE, [], TW, verify={"manifest": "container", "corrupt": "trailing"},
+          refusal="verify:order-corrupt-before-source"))
+    add(S("verify-order-corrupt-before-scope", BASE, [], TW, verify={"manifest": "other-scope", "corrupt": "unknown-key"},
+          refusal="verify:order-corrupt-before-scope"))
+    add(S("verify-order-corrupt-before-spec-digest", BASE, [], TW,
+          verify={"corrupt": "trailing", "spec": spec_of(rule("tests/**", "no_delete"))},
+          tags=["P40"], refusal="verify:order-corrupt-before-spec-digest"))
+    add(S("verify-order-spec-refused-before-corrupt", BASE, [], TW,
+          verify={"corrupt": "trailing", "spec": b'{"belay_protect":1,"protect":[],"x":1}'},
+          tags=["P40"], refusal="verify:order-spec-refused-before-corrupt"))
     for c in ("trailing", "unknown-key", "short"):
         add(S("verify-corrupt-" + c, BASE, [], TW, verify={"corrupt": c}, refusal="verify:corrupt-" + c))
     names = [s["name"] for s in out]
