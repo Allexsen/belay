@@ -43,12 +43,13 @@ jobs:
         run: |
           set -u
           echo "--- docker info DockerRootDir: $(docker info -f '{{.DockerRootDir}}')"
-          for a in "" "--privileged" "--cap-add SYS_ADMIN" "--cap-add ALL"; do
+          for a in "" "--privileged" "--cap-add SYS_ADMIN" "--cap-add ALL" "--user 1000 --cap-add SYS_ADMIN" "--read-only"; do
             C=$(docker run -d $a alpine:3.20 sleep 60)
-            echo "--- run [$a]: HostConfig.Privileged=$(docker inspect -f '{{.HostConfig.Privileged}}' $C) CapAdd=$(docker inspect -f '{{json .HostConfig.CapAdd}}' $C) CapEff=$(docker exec $C grep CapEff /proc/1/status | cut -f2)"
+            echo "--- run [$a]: HostConfig.Privileged=$(docker inspect -f '{{.HostConfig.Privileged}}' $C) CapAdd=$(docker inspect -f '{{json .HostConfig.CapAdd}}' $C) CapEff=$(docker exec $C grep CapEff /proc/1/status | cut -f2) CapBnd(host view of the first process)=$(sudo grep CapBnd /proc/$(docker inspect -f {{.State.Pid}} $C)/status | cut -f2)"
             docker rm -f $C >/dev/null
           done
           mkdir -p "/tmp/v d"
+          C=$(docker run -d --read-only alpine:3.20 sleep 60); P=$(docker inspect -f "{{.State.Pid}}" $C); echo "--- read-only container, mount of /: $(sudo awk "\$5 == \"/\"" /proc/$P/mountinfo | sed "s/lowerdir=[^,]*/lowerdir=<cut>/; s/upperdir=[^,]*/upperdir=<cut>/; s/workdir=[^,]*/workdir=<cut>/")"; docker rm -f $C >/dev/null
           C=$(docker run -d -v "/tmp/v d:/work dir" -v vol1:/data alpine:3.20 sleep 60)
           P=$(docker inspect -f '{{.State.Pid}}' $C)
           echo "--- mountinfo mount points (field 5), all:"; sudo awk '{print $5, $9}' /proc/$P/mountinfo
