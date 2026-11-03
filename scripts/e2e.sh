@@ -95,4 +95,7 @@ else
     echo "e2e: this filesystem refuses names that are not UTF-8; that case not run"
 fi
 
+# ---- git's files read as git reads them (decision 183) ----
+sh "$(dirname "$0")/git-agree.sh" "$BELAY"
+
 echo "e2e: check, mark, diff and log, unprivileged in a plain directory: ok"
