@@ -814,11 +814,12 @@ TEST(an_exclude_list_whose_header_could_not_fit_is_refused) {
     /* The bound is the widest line those names can make: every number at
      * its widest, the state directory counted where it is. */
     static const char *const one[] = { "a" };
-    const char *widest = "{\"belay_manifest\":2,\"created_ns\":-9223372036854775808,\"scopes\":[\"/s\"],"
+    const char *widest = "{\"belay_manifest\":3,\"created_ns\":-9223372036854775808,\"scopes\":[\"/s\"],"
         "\"hash\":\"sha256\",\"hash_max_bytes\":18446744073709551615,\"store_max_bytes\":18446744073709551615,"
         "\"excluded\":[{\"path\":\".st\",\"reason\":\"state_dir\",\"dev\":18446744073709551615,"
         "\"ino\":18446744073709551615},{\"path\":\"a\",\"reason\":\"user\",\"dev\":18446744073709551615,"
-        "\"ino\":18446744073709551615}],\"walk_start_ns\":-9223372036854775808}";
+        "\"ino\":18446744073709551615}],\"walk_start_ns\":-9223372036854775808,"
+        "\"source\":{\"docker\":\"0000000000000000000000000000000000000000000000000000000000000000\",\"image\":\"sha256:0000000000000000000000000000000000000000000000000000000000000000\"}}";
     ASSERT_EQ_INT((int)strlen(widest), (int)belay_manifest_header_bound("/s", one, 1, ".st"));
     /* By hand, all twenty: the capture fails and says why. */
     sh("cd '%s' && find d* -mindepth 15 -maxdepth 15 -type d > '%s/excludes'", g_scope, d);

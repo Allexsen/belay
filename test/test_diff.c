@@ -586,6 +586,43 @@ TEST(different_scopes_are_refused_before_any_entry_is_read) {
     belay_err_clear();
 }
 
+/* Manifest v3 (V3-R4, decision 198): manifests of different sources are
+ * refused as different scopes are -- a container against a walk, or one
+ * container against another, of the same image or not. */
+TEST(different_sources_are_refused_as_different_scopes_are) {
+    static const char *const src[] = {
+        "null",
+        "{\"docker\":\"4f1c0e8a9b7d6c5e4f3a2b1c0d9e8f7a6b5c4d3e2f1a0b9c8d7e6f5a4b3c2d1e\",\"image\":\"sha256:91ef0af61f39ece4d6710e465df5ed6ca12112358344fd51ae6a3b886634148b\"}",
+        "{\"docker\":\"5f1c0e8a9b7d6c5e4f3a2b1c0d9e8f7a6b5c4d3e2f1a0b9c8d7e6f5a4b3c2d1e\",\"image\":\"sha256:91ef0af61f39ece4d6710e465df5ed6ca12112358344fd51ae6a3b886634148b\"}",
+    };
+    char p[2][400];
+    for (int x = 0; x < 3; x++)
+        for (int y = 0; y < 3; y++) {
+            for (int k = 0; k < 2; k++) {
+                snprintf(p[k], sizeof p[k], "%s/src%d", g_dir, k);
+                FILE *f = fopen(p[k], "wb");
+                REQUIRE(f != NULL);
+                fprintf(f, "{\"belay_manifest\":3,\"created_ns\":1,\"scopes\":[\"/w\"],\"hash\":\"sha256\","
+                           "\"hash_max_bytes\":1000,\"store_max_bytes\":0,\"excluded\":[],\"walk_start_ns\":0,"
+                           "\"source\":%s}\n"
+                           "{\"path\":\".\",\"type\":\"dir\",\"mode\":16877,\"uid\":1,\"gid\":1,\"size\":1,"
+                           "\"mtime_ns\":1,\"ctime_ns\":1,\"ino\":1,\"dev\":1,\"nlink\":2}\n"
+                           "{\"belay_manifest_end\":1,\"vanished\":0,\"unreadable\":0,\"unstable\":0,\"mounts\":0,"
+                           "\"raced\":0,\"trusted\":0,\"reference\":\"none\",\"read_all\":\"check\"}\n",
+                        src[k == 0 ? x : y]);
+                fclose(f);
+            }
+            unlink(g_out);
+            const int r = belay_diff(p[0], p[1], g_out, NULL, NULL);
+            if (x == y) {
+                if (r != 0) BELAY_FAIL("sources %d and %d are equal, yet refused: %s", x, y, belay_err_msg());
+            } else if (r != -1 || belay_err_code() != BELAY_ERR_INVALID || strstr(belay_err_msg(), "different sources") == NULL) {
+                BELAY_FAIL("sources %d and %d differ, yet compared", x, y);
+            }
+            belay_err_clear();
+        }
+}
+
 /* Review F3: once the output is in place, the diff has succeeded. A directory
  * that cannot be opened to sync it (write and search only) does not turn a
  * complete output into a reported failure. */
@@ -1440,6 +1477,7 @@ int main(void) {
     RUN(a_changed_dpkg_status_without_a_store_is_never_no_change);
     RUN(the_store_reaches_an_interpreter_through_the_options);
     RUN(different_scopes_are_refused_before_any_entry_is_read);
+    RUN(different_sources_are_refused_as_different_scopes_are);
     RUN(a_published_output_is_success_even_where_its_directory_cannot_be_synced);
     RUN(names_sorting_before_the_root_see_its_flags);
     RUN(manifests_of_different_scopes_are_refused_with_no_output);

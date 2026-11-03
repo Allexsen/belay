@@ -539,8 +539,11 @@ TEST(header_records_version_and_scope) {
     fx_write("h", "x", 1);
     size_t n = 0;
     ASSERT_EQ_INT(0, run_check(NULL, &n));
-    ASSERT_TRUE(strstr(g_header, "\"belay_manifest\":2,") != NULL);       /* v2 since 2026-11-01 */
+    ASSERT_TRUE(strstr(g_header, "\"belay_manifest\":3,") != NULL);       /* v3 since decision 198 */
     ASSERT_TRUE(strstr(g_header, ",\"excluded\":[],\"walk_start_ns\":") != NULL);
+    /* walked where belay ran: source null, last (manifest-v3 V3-2) */
+    const size_t hl = strlen(g_header);
+    ASSERT_TRUE(hl > 16 && strcmp(g_header + hl - 16, ",\"source\":null}\n") == 0);
     ASSERT_TRUE(strstr(g_header, "\"hash\":\"sha256\"") != NULL);
     ASSERT_TRUE(strstr(g_header, "\"scopes\"") != NULL);
     fx_rm("h");

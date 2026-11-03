@@ -20,7 +20,7 @@
 
 /* The version belay writes; its reader reads 1 and 2, each by its own key
  * set (test/expect/manifest-v2.md, V2-R1..R3). */
-#define BELAY_MANIFEST_VERSION 2
+#define BELAY_MANIFEST_VERSION 3
 #define BELAY_MANIFEST_VERSION_MIN 1
 
 /* What a capture did not walk (v2's `excluded`). */
@@ -232,6 +232,10 @@ struct belay_manifest_opts {
      */
     bool     expect_root;
     uint64_t root_dev, root_ino;
+
+    /* Version 3's `source` (manifest-v3 V3-2): both NULL for `null`, both
+     * set for a container capture -- its id and its image's id. */
+    const char *source_docker, *source_image;
 };
 
 /* What one write observed. Also recorded in the manifest's trailer line. */
@@ -318,7 +322,7 @@ struct belay_manifest_reader;
 
 /* The manifest's header line. Available as soon as open succeeds. */
 struct belay_manifest_header {
-    uint64_t version;           /* 1 or 2 */
+    uint64_t version;           /* 1, 2 or 3 */
     int64_t  created_ns;
     char     scope[4096];       /* the resolved scope root, NUL-terminated */
     uint64_t hash_max_bytes;
@@ -327,7 +331,15 @@ struct belay_manifest_header {
     int64_t  walk_start_ns;
     const struct belay_excluded *excluded;   /* the reader's; n_excluded of them */
     size_t   n_excluded;
+    /* Version 3's `source` (both empty for null, and for v1 and v2: the
+     * walker was all they had -- manifest-v3 V3-R3): */
+    char     source_docker[65];  /* the container's id */
+    char     source_image[72];   /* "sha256:" and its image's id */
 };
+
+/* Whether two manifests' sources are equal (manifest-v3 V3-R4): only then
+ * do they compare. */
+bool belay_manifest_same_source(const struct belay_manifest_header *a, const struct belay_manifest_header *b);
 
 /*
  *  A comparator MUST check that two manifests describe the same scope before
