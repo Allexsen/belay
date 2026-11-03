@@ -156,3 +156,8 @@
 2026-11-03T00:07:17+04:00	pins: E12 -- a branch only in packed-refs gets "now at" too; a reflog that says not how is not used
 2026-11-03T00:07:17+04:00	git: an event's paths each once, with room for a rename's; a reflog listed only when it says how
 2026-11-03T00:00:39+04:00	oracle: what git cannot read reduces the claim, never the fact (E12, decision 137)
+# Decision 141 (E12's three readings): the pin fails test_pins until the schema follows; the code and the prose fail make oracle and make reference until their authors follow, the oracle's commit make reference.
+2026-11-03T10:41:56+04:00	pins: E12 states three readings -- a side not parsed is unread; a removal not dated, HEAD not read: no event
+2026-11-03T10:41:56+04:00	git: a side it cannot parse counts as one it cannot read
+2026-11-03T10:59:01+04:00	spec: for git, nothing more is read from the side that failed to parse
+2026-11-03T11:05:01+04:00	oracle: a side git cannot parse counts as one it cannot read (E12, decision 141)
