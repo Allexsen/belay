@@ -56,6 +56,12 @@ int git_ref_value(const char *buf, size_t len, bool *sym, const char **val, size
 int git_packed_each(const char *buf, size_t len, git_packed_fn fn, void *ctx) {
     size_t i = 0, ll, line = 0;
     const char *l;
+    /* git refuses a packed-refs whose last line has no newline ("unterminated
+     * line", git 2.43.0): a side git cannot parse (decision 183, E10). */
+    if (len > 0 && buf[len - 1] != '\n') {
+        belay_err_set(BELAY_ERR_CORRUPT, 0, "git: packed-refs ends without a newline (git refuses it)");
+        return -1;
+    }
     while (next_line(buf, len, &i, &l, &ll)) {
         line++;
         if (ll == 0 || l[0] == '#') continue;
@@ -80,6 +86,9 @@ int git_packed_each(const char *buf, size_t len, git_packed_fn fn, void *ctx) {
 int git_reflog_each(const char *buf, size_t len, git_reflog_fn fn, void *ctx) {
     size_t i = 0, ll, line = 0;
     const char *l;
+    /* A last line without its newline is no entry: git does not read it
+     * (git 2.43.0 shows a reflog so cut without that line; decision 183). */
+    while (len > 0 && buf[len - 1] != '\n') len--;
     while (next_line(buf, len, &i, &l, &ll)) {
         line++;
         if (ll == 0) continue;

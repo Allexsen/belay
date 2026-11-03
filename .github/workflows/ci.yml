@@ -141,7 +141,7 @@ jobs:
         run: |
           docker run --rm -v "$PWD:/src:ro" ubuntu:24.04 bash -euo pipefail -c '
             apt-get update -qq
-            apt-get install -y -qq --no-install-recommends build-essential python3 >/dev/null
+            apt-get install -y -qq --no-install-recommends build-essential python3 git >/dev/null
             useradd -m tester
             cp -r /src /home/tester/w && chown -R tester /home/tester/w
             su tester -c "cd /home/tester/w && BELAY_SKIP_PROFILE=docker make check && make bench"
