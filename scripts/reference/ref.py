@@ -915,6 +915,7 @@ class GitPath:
         self.parsed = {}        # side -> parsed value (HEAD, ref, packed)
         self.cni = False        # could not be interpreted: E10, the file as a whole
         self.unread = set()     # sides it needs whose copy could not be read
+        self.unparsed = set()   # sides read that could not be parsed (decision 141)
         self.record_unav = []   # the unavailable sides its record names
         self.gained = None      # reflog: [(old, new, msg)] when appended, else None
 
@@ -942,12 +943,28 @@ def git_read(store, g):
     `unknown` path" -- none from this one). As an unknown RECORD on both
     sides is not read (pip).
 
-    READING: a file one side of which cannot be parsed is not interpreted
-    at all, on either side -- diff-v1, "Where an interpreter fails on a path
-    (a file it claims cannot be parsed ...), ... nothing more is read from
-    it, and pip, dpkg and git emit one `could_not_interpret` event naming it
-    (E10)". It gives no value on either side, with what E12 says follows
-    from no value there (see branch_value)."""
+    A side that cannot be parsed: E12 (decision 141), "A side git cannot
+    parse counts as one it cannot read (and is a `could_not_interpret`
+    event, E10)". So each side read is parsed alone, and one that cannot be
+    parsed gives no value there only, as a side not read gives none (E12,
+    "a ref or `packed-refs` that cannot be read on a side gives no value
+    there -- before, the reflog's evidence may still give one, and without
+    one the event is `git_branch_moved` with no `from` ...; after, the
+    branch derives no event"): the other side's value stands. The file is
+    still one git failed on: diff-v1, "that path's record carries
+    `could_not_interpret` (R11) unless its outcome is `unknown`, ... and
+    pip, dpkg and git emit one `could_not_interpret` event naming it (E10)"
+    -- one event per file, whichever sides failed. READING: it counts as not
+    read for its value only, not for "The record of a path git cannot read
+    ... carries `content_unavailable`": the parenthesis says what it is
+    instead ("and is a `could_not_interpret` event"), and no reason of
+    `content_unavailable`'s (`no_store`, `missing`, `too_large`, `corrupt`)
+    names a copy that was read. READING: diff-v1's "nothing more is read
+    from it" is taken as nothing more read from the side that failed -- E12,
+    the later and narrower rule, uses the other side's value. A reflog is
+    never unparseable here (reflog_entry_fields; the corpus writes only such
+    entries), so "a reflog it cannot read is no evidence" is reached only by
+    a copy not read."""
     if g.role == "reflog":
         need_b = g.reg["before"] and g.reg["after"]
         need_a = g.reg["after"]
@@ -973,9 +990,8 @@ def git_read(store, g):
             elif g.role == "packed":
                 g.parsed[side] = parse_packed(data)
         except InterpFailure:
-            g.cni = True
-            g.parsed = {}
-            break
+            g.cni = True                # E10: the file, once
+            g.unparsed.add(side)        # "counts as one it cannot read": that side
     if g.role == "reflog" and not g.unread:
         new = appended(g.contents.get("before"), g.contents["after"])
         g.gained = None if new is None else [reflog_entry_fields(x) for x in new]
@@ -983,8 +999,9 @@ def git_read(store, g):
 
 def gives(g, side):
     """Does this ref, packed-refs or HEAD give a value on `side`? It is a
-    file there, its copy there was read, and the file was interpreted."""
-    return g.reg[side] and side not in g.unread and not g.cni
+    file there, its copy there was read, and parsed: E12, "A side git cannot
+    parse counts as one it cannot read"."""
+    return g.reg[side] and side not in g.unread and side not in g.unparsed
 
 
 def git_path_findings(g):
@@ -1114,7 +1131,8 @@ def reflog_before(G, loose_there):
     not they then lead to the value after.
 
     READING (the text leaves it open): a loose ref that was a file before
-    and could not be read is never absent by its reflog. Its existence there
+    and could not be read -- or parsed, which "counts as one it cannot
+    read" (decision 141) -- is never absent by its reflog. Its existence there
     is a fact the refs give (the manifest records the file), and "What git
     cannot read reduces what is claimed, never the fact the refs give":
     zeros, there, are evidence against a fact, so they give no value, and
@@ -1143,7 +1161,8 @@ def branch_value(side, ref, L, P, G):
     may still give one, and without one the event is `git_branch_moved`
     with no `from` (a branch only in `packed-refs` too); after, the branch
     derives no event". Before, that is UNKNOWN ("no evidence of before");
-    after, UNKNOWN too, which derives nothing.
+    after, UNKNOWN too, which derives nothing. And (decision 141) "A side
+    git cannot parse counts as one it cannot read": gives() is false on it.
 
     READING: "its loose ref there" is the loose ref as git sees it -- a path
     of this diff ("git sees only the paths that changed"). A loose ref that
@@ -1174,12 +1193,13 @@ def is_id(v):
 
 
 def packed_names(P):
-    """The branches packed-refs names, on every side it was read: read on one
-    side only, the side read is used -- E12, "without one the event is
-    `git_branch_moved` with no `from` (a branch only in `packed-refs` too)".
-    A packed-refs not interpreted (E10) names none: nothing is read from it."""
+    """The branches packed-refs names, on every side it gives a value: read
+    and parsed on one side only, that side is used -- E12, "without one the
+    event is `git_branch_moved` with no `from` (a branch only in
+    `packed-refs` too)"; "A side git cannot parse counts as one it cannot
+    read". A side not read or not parsed names none."""
     out = set()
-    if P is None or P.cni:
+    if P is None:
         return out
     for side, refs in P.parsed.items():
         for ref in refs:
@@ -1232,15 +1252,15 @@ def git_events(gpaths):
         # ---- HEAD
         H = r.head
         if H is not None and gives(H, "before") and gives(H, "after"):
+            # E12 (decision 141): "`HEAD` that cannot be read on a side
+            # derives none" -- nor one that cannot be parsed there ("A side
+            # git cannot parse counts as one it cannot read"): neither
+            # git_head_switched nor the branch `HEAD`.
             # READING: git_head_switched needs HEAD on both sides: its from and
             # to are "the branch (`main`) or, detached, the commit", with no
             # empty value (git_head_changed's "empty on a side where it is
             # absent" is not repeated for it), so a HEAD added or removed
-            # (a repository made or deleted) switches nothing. So too a HEAD
-            # that gives no value on a side (its copy there cannot be read,
-            # or it cannot be interpreted): whether it was attached or
-            # detached there is not known, so neither a switch nor the
-            # branch `HEAD` ("detached on both sides") can be told.
+            # (a repository made or deleted) switches nothing.
             hb, ha = H.parsed["before"], H.parsed["after"]
 
             def shown(v):
@@ -1271,13 +1291,13 @@ def git_events(gpaths):
             B, pb = branch_value("before", ref, L, P, G)
             A, pa = branch_value("after", ref, L, P, G)
             paths = pb | pa
-            # READING (the text leaves it open): no value before and removed
-            # after -- a loose ref there that cannot be read, gone after, its
-            # reflog no evidence -- derives no event. git_branch_deleted's
-            # `was` is required, and E12's "without one the event is
-            # `git_branch_moved` with no `from`" names a branch present after;
-            # the record's and the event's content_unavailable say what could
-            # not be read.
+            # E12 (decision 141): "A branch removed whose value before cannot
+            # be told derives no event (`git_branch_deleted` needs `was`)" --
+            # a loose ref there not read or not parsed, gone after, its reflog
+            # no evidence; or a branch only in a packed-refs not read or not
+            # parsed before, its reflog removed. What could not be read or
+            # parsed is said by the record and by the content_unavailable or
+            # could_not_interpret event.
             if B == ABSENT and is_id(A):
                 created[br] = (A, paths)
             elif B == UNKNOWN and is_id(A):
