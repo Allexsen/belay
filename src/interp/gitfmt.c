@@ -78,11 +78,11 @@ int git_packed_each(char *buf, size_t len, git_packed_fn fn, void *ctx) {
         if (ll == 0 || l[0] == '#') continue;
         char *w = buf + (l - buf);
         if (l[0] == '^') {
-            if (oid_at(w + 1, ll - 1) != ll - 1) goto bad;
+            if (ll < 2 || oid_at(w + 1, ll - 1) != ll - 1) goto bad;      /* an id, not none */
             continue;
         }
         const char *sp = memchr(l, ' ', ll);
-        if (sp == NULL || oid_at(w, (size_t)(sp - l)) != (size_t)(sp - l)) goto bad;
+        if (sp == NULL || sp == l || oid_at(w, (size_t)(sp - l)) != (size_t)(sp - l)) goto bad;
         const size_t rl = ll - (size_t)(sp - l) - 1;
         if (rl == 0 || rl > GIT_NAME_MAX || memchr(sp + 1, ' ', rl) != NULL) goto bad;
         const int r = fn(sp + 1, rl, l, (size_t)(sp - l), ctx);
