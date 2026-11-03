@@ -1305,7 +1305,11 @@ GIT_INPUT_ITEMS = ['an unknown ref read from its copy: provisional',
                    # ... "those after before's bytes when they are a prefix
                    # of after's ending at a line's end, and none otherwise":
                    # a prefix by its bytes ending inside a line gained none.
-                   'a reflog whose before ends inside a line of after: none gained']
+                   'a reflog whose before ends inside a line of after: none gained',
+                   # ... "a last line without its newline is an entry like
+                   # any other, as git reads it" (decision 160): counted and
+                   # used for events.
+                   'a reflog whose last entry gained has no newline: an entry']
 
 
 def git_coverage(records, traces, tags):
@@ -1328,6 +1332,9 @@ def git_coverage(records, traces, tags):
                 'git-ev:moved:a reflog that gained none' in end:
             tags.add('git events: a reflog whose before ends inside a line of after: '
                      'none gained')
+        if 'git-reflog-last-unterminated' in tr and 'git-reflog-appended' in tr and \
+                'git-ev:commits added:counted' in end:
+            tags.add('git events: a reflog whose last entry gained has no newline: an entry')
         if 'interp:git:ref' not in tr and 'interp:git:reflog' not in tr:
             continue
         place = ref.git_place(p)

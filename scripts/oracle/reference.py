@@ -108,7 +108,21 @@ copy"):
   G10 a loose ref there before and not read (or not parsed: decision 141)
      is not absent by its reflog's zeros: that it was there is "the fact
      the refs give" -- no value before, so `git_branch_moved` with no
-     `from`.
+     `from`;
+  G15 is settled by E12 and diff-v1 (decision 160), where this file had
+     read it the other way (an unterminated last line not git's): E12, "a
+     last line without its newline is an entry like any other, as git
+     reads it"; diff-v1, `git_reflog_appended` "counts the entries after
+     it (a last line without its newline is an entry, as git reads it)".
+     A reflog's last line is parsed as an entry whether or not a newline
+     ends it (parse_git()): counted, used for events, and not git's only
+     as any other line is not. packed-refs, a loose ref and HEAD keep
+     their newline (git's formats, no pin says otherwise);
+  G16 a before whose last line has no newline does not end "at a line's
+     end", even where after's next byte is that line's newline: a line's
+     end is its newline, so a prefix must end with one (or be empty) --
+     it gained none and nothing of it is parsed (gained()). Its last line
+     is an entry (G15), but before's entries are never read (G13).
 
 Deliberately naive: both manifests in memory as dictionaries, the union of
 their paths sorted, ancestors found by walking a path's prefixes.
@@ -1221,12 +1235,14 @@ def load_event_rules():
                 # Decision 141: G5 (per side, read anew), G11 and G12 stated;
                 # decision 144: G3, G13 and G14 stated -- a reflog parsed by
                 # the entries it gained, none when not a prefix ending at a
-                # line's end (gained()).
+                # line's end (gained()); decision 160: G15 stated -- a last
+                # line without its newline an entry (parse_git()).
                 'A side git cannot parse counts as one it cannot read (and is a '
                 '`could_not_interpret` event, E10); parsing a reflog is parsing only the '
                 'entries it gained in this diff -- those after before\'s bytes when they are a '
                 'prefix of after\'s ending at a line\'s end, and none otherwise (diff-v1, git: '
-                '`git_reflog_rewritten`) -- never its older entries.',
+                '`git_reflog_rewritten`) -- never its older entries; a last line without its '
+                'newline is an entry like any other, as git reads it.',
                 'A branch removed whose value before cannot be told derives no event '
                 '(`git_branch_deleted` needs `was`), and `HEAD` that cannot be read on a side '
                 'derives none.',
@@ -1408,7 +1424,8 @@ def _check_claims():
               '(`refs/heads/main`).',
               "A reflog (`logs/HEAD` is ref `HEAD`, `logs/refs/...` is `refs/...`): when "
               "before's bytes are a prefix of after's ending at a line's end (an absent before "
-              'is empty), `git_reflog_appended` counts the entries after it, and each of those '
+              'is empty), `git_reflog_appended` counts the entries after it (a last line '
+              'without its newline is an entry, as git reads it), and each of those '
               'that is not a plain commit (operation `commit` or `commit (initial)`) or a '
               'fast-forward (its message contains `Fast-forward`) is a `git_reflog_move`, its '
               'operation being the message before its first `:`; otherwise, or when the reflog '
@@ -1974,7 +1991,9 @@ def pip_end(state, trace):
 # an object id and a newline; HEAD is that or `ref: <name>` and a newline;
 # packed-refs is lines `<id> <name>`, its `#` header and `^<id>` peeled lines
 # naming no ref; a reflog entry is `<old> <new> <identity>\t<message>` and a
-# newline. An object id is 40 or 64 lowercase hex digits. Anything else
+# newline, which its last line may lack (G15, decision 160: "a last line
+# without its newline is an entry like any other, as git reads it"). An
+# object id is 40 or 64 lowercase hex digits. Anything else
 # cannot be parsed: "Where an interpreter fails on a path (a file it claims
 # cannot be parsed, ...), that path's record carries `could_not_interpret`
 # (R11) unless its outcome is `unknown`, nothing more is read from it (git:
@@ -1985,9 +2004,11 @@ def pip_end(state, trace):
 # (git_explain()) -- for a reflog (decision 144), "parsing a reflog is
 # parsing only the entries it gained in this diff -- ... -- never its older
 # entries" (gained()). The
-# corpus writes only content git writes, and refs that are no ref at all
-# (git's own parser may accept more: the documents do not define the
-# formats, so the corpus stays within what git writes).
+# corpus writes only content git writes -- or a reflog whose write was cut
+# short, its last line without its newline (G14, G15) -- and
+# refs that are no ref at all (git's own parser may accept more: the
+# documents do not define the formats, so the corpus stays within what git
+# writes).
 
 GIT_CONTENT = ('HEAD', 'ref', 'packed-refs', 'reflog')
 
@@ -2026,9 +2047,14 @@ def parse_git(what, data):
                 else m.group(1).decode('ascii')
         m = re.fullmatch(rb'ref: ([^\n]+)\n', data) if what == 'HEAD' else None
         return ('sym', m.group(1)) if m else None
-    if data and not data.endswith(b'\n'):
+    if what == 'packed-refs' and data and not data.endswith(b'\n'):
         return None
-    lines = data.split(b'\n')[:-1]
+    # A reflog's last line may lack its newline: G15, decision 160 -- E12, "a
+    # last line without its newline is an entry like any other, as git reads
+    # it".
+    lines = data.split(b'\n')
+    if lines[-1] == b'':
+        lines.pop()
     if what == 'packed-refs':
         refs = collections.OrderedDict()
         for line in lines:
@@ -2063,7 +2089,9 @@ def gained(before, after):
     after's ending at a line's end, and none otherwise (diff-v1, git:
     `git_reflog_rewritten`) -- never its older entries", so a reflog side
     git cannot parse is only ever an after whose new entries are not git's,
-    and a prefix ending inside a line gained none."""
+    and a prefix ending inside a line gained none. After's last entry may
+    lack its newline (G15, parse_git()); before's may too, but then before
+    does not end with a newline and gained none (ambiguity G16)."""
     if after.startswith(before) and (before == b'' or before.endswith(b'\n')):
         return parse_git('reflog', after[len(before):])
     return False
@@ -2195,6 +2223,8 @@ def git_explain(what, p, b, a, outcome, state, trace):
         g = gained(raw.get('before', b''), raw['after'])
         if g is False and raw['after'].startswith(raw.get('before', b'')):
             trace.append('git-reflog-prefix-mid-line')  # G14: none gained, none parsed
+        if g and not raw['after'].endswith(b'\n'):
+            trace.append('git-reflog-last-unterminated')  # G15: an entry, gained
         parsed = {s: raw[s] for s in regs}
         if g is None:
             parsed['after'] = None
