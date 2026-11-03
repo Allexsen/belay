@@ -5,8 +5,8 @@ SPEC] [--to ID] [--exit-code]` writes: what the changes since the baseline mean 
 expectations. Judgement kept apart from description (decision 145): verify computes the diff
 diff.v1 describes, with the same core, and writes this beside it, never inside it. diff.v1 and the
 manifest are unchanged. Written by hand from the M2 structure the author approved on 2026-11-03
-(decisions 145-150), for the author's OK before any code (decision 151). A separate author models
-it from this pin (decision 150, Q9).
+(decisions 145-150), before any code (decision 151); approved by the author 2026-11-03 (decision
+157). A separate author models it from this pin (decision 150, Q9).
 
 **Changing it.** In its own PR, presented as a table, after the author's explicit OK. A consumer
 ignores a flag kind, and a field, it does not know; removing a kind or changing a field's meaning
