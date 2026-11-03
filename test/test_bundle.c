@@ -19,6 +19,7 @@
 
 #include <errno.h>
 #include <fcntl.h>
+#include <limits.h>
 #include <stdarg.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -196,7 +197,9 @@ TEST(a_bundle_reads_back_what_was_written) {
     sha_of(m, n, mh);
     free(m);
     ASSERT_EQ_STR(bd.manifest_sha256, mh);                       /* B-4 */
-    ASSERT_EQ_STR(g_scope, bd.meta.scope);
+    char real[PATH_MAX];
+    REQUIRE(realpath(g_scope, real) != NULL);              /* macOS: /tmp is /private/tmp */
+    ASSERT_EQ_STR(real, bd.meta.scope);
     ASSERT_EQ_INT(BELAY_HASH_MAX_BYTES_DEFAULT, (int)bd.meta.hash_max_bytes);
     ASSERT_FALSE(bd.meta.has_protect);
     /* every copy the manifest names is in the store, and verifies (B-5) */
