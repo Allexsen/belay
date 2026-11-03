@@ -604,7 +604,7 @@ TEST(the_v2_trailer_says_how_the_walk_read) {
     struct belay_manifest_stats st;
     REQUIRE(capture(prev, NULL, &st) == 0);
     ends(prev, h, sizeof h, t, sizeof t);
-    ASSERT_TRUE(strstr(h, "{\"belay_manifest\":2,") == h);
+    ASSERT_TRUE(strstr(h, "{\"belay_manifest\":3,") == h);
     ASSERT_TRUE(strstr(h, ",\"excluded\":[],\"walk_start_ns\":") != NULL && strstr(h, "\"walk_start_ns\":0}") == NULL);
     ASSERT_TRUE(strstr(t, ",\"trusted\":0,\"reference\":\"none\",\"read_all\":\"check\"}") != NULL);
     REQUIRE(capture(next, prev, &st) == 0);

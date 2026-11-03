@@ -29,7 +29,8 @@ static int by_path(const void *a, const void *b) {
  * belay_err. */
 static int format_header(FILE *f, long long created, const char *scope_real,
                          const struct belay_excluded *xs, size_t nx, long long walk_start_ns,
-                         unsigned long long hash_max, unsigned long long store_max, char *buf) {
+                         unsigned long long hash_max, unsigned long long store_max,
+                         const char *src_docker, const char *src_image, char *buf) {
     /* Same rule as entry paths: JSON for valid UTF-8, base64 otherwise.
      * Before, a non-UTF-8 scope was written raw and the line was not JSON. */
     const size_t sl = strlen(scope_real);
@@ -62,7 +63,16 @@ static int format_header(FILE *f, long long created, const char *scope_real,
                     x->reason == BELAY_EXCLUDE_STATE_DIR ? "state_dir" : "user", X[EX_DEV].name,
                     (unsigned long long)x->dev, X[EX_INO].name, (unsigned long long)x->ino);
     }
-    if (w < 0 || fprintf(f, "],\"%s\":%lld}", HEADER2_FIELDS[H2_WALK_START].name, walk_start_ns) < 0) {
+    if (w < 0 || fprintf(f, "],\"%s\":%lld", HEADER2_FIELDS[H2_WALK_START].name, walk_start_ns) < 0) {
+        belay_err_set(BELAY_ERR_IO, errno, "manifest: header write failed");
+        return -1;
+    }
+    /* Version 3 (test/expect/manifest-v3.md): where the capture came from.
+     * The ids are checked where they are taken (docker.c): hex and "sha256:". */
+    if ((src_docker == NULL
+             ? fprintf(f, ",\"%s\":null}", HEADER3_FIELDS[H3_SOURCE].name)
+             : fprintf(f, ",\"%s\":{\"%s\":\"%s\",\"%s\":\"%s\"}}", HEADER3_FIELDS[H3_SOURCE].name,
+                       SOURCE_FIELDS[SRC_DOCKER].name, src_docker, SOURCE_FIELDS[SRC_IMAGE].name, src_image)) < 0) {
         belay_err_set(BELAY_ERR_IO, errno, "manifest: header write failed");
         return -1;
     }
@@ -87,7 +97,8 @@ int cap_write_header(const struct fsops *ops, FILE *f, const char *scope_real,
     }
     const int r = format_header(m, created, scope_real, xs, nx, walk_start_ns > 0 ? walk_start_ns : 0,
                                 (unsigned long long)opts->hash_max_bytes,
-                                (unsigned long long)opts->store_max_bytes, buf);
+                                (unsigned long long)opts->store_max_bytes, opts->source_docker,
+                                opts->source_docker != NULL ? opts->source_image : NULL, buf);
     if (fclose(m) != 0 && r == 0) {
         free(line);
         belay_err_set(BELAY_ERR_NOMEM, errno, "manifest: header");
@@ -142,8 +153,10 @@ long belay_manifest_header_bound(const char *scope_real, const char *const *path
         belay_err_set(BELAY_ERR_NOMEM, errno, "manifest: header");
         return -1;
     }
+    /* the widest source: a container's */
+    static const char D[] = "0000000000000000000000000000000000000000000000000000000000000000";
     const int r = format_header(m, (long long)INT64_MIN, scope_real, xs, nx, (long long)INT64_MIN,
-                                UINT64_MAX, UINT64_MAX, buf);
+                                UINT64_MAX, UINT64_MAX, D, "sha256:" "0000000000000000000000000000000000000000000000000000000000000000", buf);
     const int c = fclose(m);
     free(buf);
     free(line);

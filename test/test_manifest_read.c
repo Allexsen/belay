@@ -906,7 +906,7 @@ TEST(review_d8_reader_rejects_what_the_writer_never_emits) {
         { "flag false",                     HDR ROOT_E DIR_E("d", ",\"unreadable\":false") TRL(2, 0),
           "malformed value" },
         { "flag null",                      HDR ROOT_E DIR_E("d", ",\"mount\":null") TRL(2, 0),
-          "malformed value" },
+          "\"mount\" must be exactly true" },
         { "path as base64 although it is valid UTF-8",
           HDR ROOT_E "{\"path_b64\":\"YQ==\",\"type\":\"reg\",\"mode\":33188,\"uid\":1,\"gid\":1,"
           "\"size\":1,\"mtime_ns\":1,\"ctime_ns\":1,\"ino\":2,\"dev\":1,\"nlink\":1" SHA_F "}\n" TRL(2, 0),
@@ -1396,7 +1396,7 @@ TEST(v2_header_and_trailer_are_read_and_exposed) {
  * present; the v2 values well formed and agreeing with each other. */
 TEST(v2_is_read_strictly) {
     static const struct { const char *name, *m, *reason; } cases[] = {
-        { "version 3", "{\"belay_manifest\":3,\"created_ns\":0}\n" ROOT_E T2, "format version 3" },
+        { "version 4", "{\"belay_manifest\":4,\"created_ns\":0}\n" ROOT_E T2, "format version 4" },
         { "a v1 header with a v2 key", "{\"belay_manifest\":1,\"created_ns\":0,\"scopes\":[\"/s\"],\"hash\":\"sha256\","
           "\"hash_max_bytes\":67108864,\"store_max_bytes\":65536,\"excluded\":[]}\n" ROOT_E T1 "}\n",
           "unknown key \"excluded\"" },
@@ -1450,6 +1450,41 @@ TEST(v2_is_read_strictly) {
         belay_err_clear();
     }
     ASSERT_EQ_INT(0, read_raw(H2 ROOT_E T2));                            /* the well-formed one */
+}
+
+/* Manifest v3 (test/expect/manifest-v3.md, decision 198): `source` last,
+ * always present, `null` or exactly {docker, image}; v1 and v2 read as
+ * before, their source empty (V3-R3). */
+#define H3_PRE "{\"belay_manifest\":3,\"created_ns\":0,\"scopes\":[\"/s\"],\"hash\":\"sha256\"," \
+               "\"hash_max_bytes\":67108864,\"store_max_bytes\":65536,\"excluded\":[],\"walk_start_ns\":5"
+#define D64 "4f1c0e8a9b7d6c5e4f3a2b1c0d9e8f7a6b5c4d3e2f1a0b9c8d7e6f5a4b3c2d1e"
+#define IMG "sha256:91ef0af61f39ece4d6710e465df5ed6ca12112358344fd51ae6a3b886634148b"
+TEST(v3_is_read_strictly) {
+    static const struct { const char *name, *m, *reason; } cases[] = {
+        { "no source", H3_PRE "}\n" ROOT_E T2, "missing source" },
+        { "a v2 header with source", H2_PRE ",\"excluded\":[],\"walk_start_ns\":5,\"source\":null}\n" ROOT_E T2,
+          "unknown key \"source\"" },
+        { "source a string", H3_PRE ",\"source\":\"docker\"}\n" ROOT_E T2, "null or an object" },
+        { "source true", H3_PRE ",\"source\":true}\n" ROOT_E T2, "null or an object" },
+        { "an unknown key in source", H3_PRE ",\"source\":{\"docker\":\"" D64 "\",\"image\":\"" IMG "\",\"x\":1}}\n" ROOT_E T2,
+          "unknown key \"x\"" },
+        { "source keys out of order", H3_PRE ",\"source\":{\"image\":\"" IMG "\",\"docker\":\"" D64 "\"}}\n" ROOT_E T2,
+          "out of canonical order" },
+        { "source without image", H3_PRE ",\"source\":{\"docker\":\"" D64 "\"}}\n" ROOT_E T2, "needs docker and image" },
+        { "an uppercase container id", H3_PRE ",\"source\":{\"docker\":\"4F1C0E8A9B7D6C5E4F3A2B1C0D9E8F7A6B5C4D3E2F1A0B9C8D7E6F5A4B3C2D1E\",\"image\":\"" IMG "\"}}\n" ROOT_E T2,
+          "64 lowercase hex" },
+        { "a short container id", H3_PRE ",\"source\":{\"docker\":\"4f1c0e8a9b7d\",\"image\":\"" IMG "\"}}\n" ROOT_E T2,
+          "64 lowercase hex" },
+        { "an image without sha256:", H3_PRE ",\"source\":{\"docker\":\"" D64 "\",\"image\":\"" D64 "\"}}\n" ROOT_E T2,
+          "sha256: and 64" },
+        { "a source after its place", H3_PRE ",\"source\":null,\"walk_start_ns\":5}\n" ROOT_E T2, "duplicate key" },
+    };
+    for (size_t i = 0; i < sizeof cases / sizeof cases[0]; i++) {
+        EXPECT_REJECT(cases[i].name, read_raw(cases[i].m), cases[i].reason);
+        belay_err_clear();
+    }
+    ASSERT_EQ_INT(0, read_raw(H3_PRE ",\"source\":null}\n" ROOT_E T2));
+    ASSERT_EQ_INT(0, read_raw(H3_PRE ",\"source\":{\"docker\":\"" D64 "\",\"image\":\"" IMG "\"}}\n" ROOT_E T2));
 }
 
 int main(void) {
@@ -1517,6 +1552,7 @@ int main(void) {
     RUN(decoder_reads_every_schema_field_once);
     RUN(v2_header_and_trailer_are_read_and_exposed);
     RUN(v2_is_read_strictly);
+    RUN(v3_is_read_strictly);
 
     unlink(g_path);
     return belay_test_report();

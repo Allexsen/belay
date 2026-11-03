@@ -161,11 +161,22 @@ static int end_all(struct run *x) {
 static int same_scope(struct run *x) {
     const struct belay_manifest_header *hb = belay_manifest_header(x->rb);
     const struct belay_manifest_header *ha = belay_manifest_header(x->ra);
-    if (strcmp(hb->scope, ha->scope) == 0) return 0;
-    belay_err_set(BELAY_ERR_INVALID, 0,
-                  "diff: the manifests record different scopes (%s, %s); refusing", hb->scope,
-                  ha->scope);
-    return -1;
+    if (strcmp(hb->scope, ha->scope) != 0) {
+        belay_err_set(BELAY_ERR_INVALID, 0,
+                      "diff: the manifests record different scopes (%s, %s); refusing", hb->scope,
+                      ha->scope);
+        return -1;
+    }
+    /* Nor of different sources (manifest-v3 V3-R4): a container's layer
+     * files are not what a walk inside it sees, and another container is
+     * another tree, whatever its image. */
+    if (!belay_manifest_same_source(hb, ha)) {
+        belay_err_set(BELAY_ERR_INVALID, 0, "diff: the manifests come from different sources (%s, %s); refusing",
+                      hb->source_docker[0] ? hb->source_docker : "walked where belay ran",
+                      ha->source_docker[0] ? ha->source_docker : "walked where belay ran");
+        return -1;
+    }
+    return 0;
 }
 
 /* Whether `path` is at or below a path the manifest `h` excluded (v2): that

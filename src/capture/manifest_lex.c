@@ -159,6 +159,18 @@ int lex_object(const char *s, size_t len, struct obj *o) {
             pr->val = p;
             pr->vlen = 4;
             p += 4;
+        } else if (lim - p >= 4 && memcmp(p, "null", 4) == 0) {
+            pr->kind = V_NULL;                  /* version 3: `source` */
+            pr->val = p;
+            pr->vlen = 4;
+            p += 4;
+        } else if (p < lim && *p == '{') {
+            const char *e;                      /* version 3: `source`, one flat object */
+            if (scan_flat(p, lim, &e) == -1) return -1;
+            pr->kind = V_OBJ;
+            pr->val = p;
+            pr->vlen = (size_t)(e - p);
+            p = e;
         } else if (p < lim && *p == '[' && p + 1 < lim && (p[1] == ']' || p[1] == '{')) {
             /* Version 2: `[]`, or flat objects. Field decoders that want
              * strings refuse both by kind or count. */
@@ -240,6 +252,11 @@ int lex_order(const struct obj *o, const char *const *order, size_t n) {
         next = k + 1;
     }
     return 0;
+}
+
+int lex_sub(const struct pair *p, struct obj *out) {
+    if (p->kind != V_OBJ) return lex_corrupt("not an object");
+    return lex_object(p->val, p->vlen, out);
 }
 
 int lex_elem(const struct pair *arr, size_t i, struct obj *out) {

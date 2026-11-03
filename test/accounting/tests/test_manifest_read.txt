@@ -62,3 +62,4 @@ an_orphan_is_rejected
 the_digest_is_of_the_bytes_read_and_a_rewind_rereads_them
 v2_header_and_trailer_are_read_and_exposed
 v2_is_read_strictly
+v3_is_read_strictly

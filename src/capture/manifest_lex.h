@@ -44,7 +44,9 @@
 #define LINE_MAX_BYTES ((unsigned)BELAY_MANIFEST_LINE_MAX)   /* include/belay/manifest.h */
 #define MAX_PAIRS      32
 
-enum vkind { V_STR, V_INT, V_TRUE, V_ARR, V_OBJS };   /* V_ARR: strings (or none); V_OBJS: flat objects */
+enum vkind { V_STR, V_INT, V_TRUE, V_ARR, V_OBJS, V_NULL, V_OBJ };
+/* V_ARR: strings (or none); V_OBJS: flat objects; V_NULL: `null`; V_OBJ: one flat
+ * object (version 3: the header's `source`). */
 
 struct pair {
     const char *key;  size_t klen;
@@ -74,6 +76,9 @@ int lex_order(const struct obj *o, const char *const *order, size_t n);
 /* The `i`th element of a V_OBJS value as an object (by lex_object's
  * grammar, flat: string and integer values only). 0, or -1. */
 int lex_elem(const struct pair *arr, size_t i, struct obj *out);
+
+/* A V_OBJ value as an object (lex_object's grammar, flat). 0, or -1. */
+int lex_sub(const struct pair *p, struct obj *out);
 
 /* The pair with this key, or NULL. */
 const struct pair *lex_get(const struct obj *o, const char *key);

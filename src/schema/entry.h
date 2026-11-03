@@ -98,6 +98,12 @@ extern const struct line_field_def TRAILER_FIELDS[TR_COUNT];
 enum header2_field { H2_EXCLUDED, H2_WALK_START, H2_COUNT };
 enum trailer2_field { TR2_TRUSTED, TR2_REFERENCE, TR2_READ_ALL, TR2_COUNT };
 extern const struct line_field_def HEADER2_FIELDS[H2_COUNT];
+/* Version 3's addition (test/expect/manifest-v3.md), after v2's keys. */
+enum header3_field { H3_SOURCE, H3_COUNT };
+extern const struct line_field_def HEADER3_FIELDS[H3_COUNT];
+/* The keys of `source`, in order. */
+enum source_field { SRC_DOCKER, SRC_IMAGE, SRC_COUNT };
+extern const struct line_field_def SOURCE_FIELDS[SRC_COUNT];
 extern const struct line_field_def TRAILER2_FIELDS[TR2_COUNT];
 /* The keys of one `excluded` element, in order. */
 enum excluded_field { EX_PATH, EX_REASON, EX_DEV, EX_INO, EX_COUNT };

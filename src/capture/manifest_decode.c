@@ -471,6 +471,41 @@ static int decode_excluded(const struct obj *o, struct belay_excluded *x) {
                ? -1 : 0;
 }
 
+/* `n` lowercase hex digits exactly. */
+static bool lhex(const char *s, size_t len, size_t n) {
+    if (len != n) return false;
+    for (size_t i = 0; i < n; i++)
+        if (!lex_is_lhex(s[i])) return false;
+    return true;
+}
+
+/* Version 3's `source` (manifest-v3 V3-2, V3-R2): `null`, or exactly
+ * {"docker": 64 hex, "image": "sha256:" 64 hex}, in that order. */
+static int decode_source(const struct obj *o, struct belay_manifest_header *h) {
+    const struct pair *sp = lex_get(o, HEADER3_FIELDS[H3_SOURCE].name);
+    if (sp == NULL) return lex_corrupt("missing source");
+    if (sp->kind == V_NULL) return 0;
+    if (sp->kind != V_OBJ) return bad_kind(HEADER3_FIELDS[H3_SOURCE].name, "null or an object");
+    struct obj so;
+    const char *keys[SRC_COUNT] = { SOURCE_FIELDS[SRC_DOCKER].name, SOURCE_FIELDS[SRC_IMAGE].name };
+    if (lex_sub(sp, &so) == -1 || lex_order(&so, keys, SRC_COUNT) == -1) return -1;
+    const struct pair *d = lex_get(&so, keys[SRC_DOCKER]), *im = lex_get(&so, keys[SRC_IMAGE]);
+    if (d == NULL || im == NULL) return lex_corrupt("source needs docker and image");
+    if (d->kind != V_STR || !lhex(d->val, d->vlen, 64))
+        return lex_corrupt("source's docker is not 64 lowercase hex digits");
+    if (im->kind != V_STR || im->vlen != 71 || memcmp(im->val, "sha256:", 7) != 0 || !lhex(im->val + 7, 64, 64))
+        return lex_corrupt("source's image is not sha256: and 64 lowercase hex digits");
+    memcpy(h->source_docker, d->val, 64);
+    h->source_docker[64] = '\0';
+    memcpy(h->source_image, im->val, 71);
+    h->source_image[71] = '\0';
+    return 0;
+}
+
+bool belay_manifest_same_source(const struct belay_manifest_header *a, const struct belay_manifest_header *b) {
+    return strcmp(a->source_docker, b->source_docker) == 0 && strcmp(a->source_image, b->source_image) == 0;
+}
+
 int decode_header(const struct obj *o, struct belay_manifest_header *h, struct belay_excluded *excluded) {
     memset(h, 0, sizeof *h);
     uint64_t ver;
@@ -487,11 +522,14 @@ int decode_header(const struct obj *o, struct belay_manifest_header *h, struct b
     h->version = ver;
     /* Each version by its own key set: a v1 header carrying a v2 key is
      * refused as an unknown key, a v2 header missing one below. */
-    const char *keys[2 * H_COUNT + H2_COUNT];
+    const char *keys[2 * H_COUNT + H2_COUNT + H3_COUNT];
     size_t nk = header_keys(keys);
     if (ver >= 2)
         for (size_t i = 0; i < H2_COUNT; i++) keys[nk++] = HEADER2_FIELDS[i].name;
+    if (ver >= 3)
+        for (size_t i = 0; i < H3_COUNT; i++) keys[nk++] = HEADER3_FIELDS[i].name;
     if (lex_order(o, keys, nk) == -1) return -1;
+    if (ver >= 3 && decode_source(o, h) == -1) return -1;
     if (ver >= 2) {
         if (get_i64(o, HEADER2_FIELDS[H2_WALK_START].name, &h->walk_start_ns) == -1) return -1;
         if (h->walk_start_ns < 0) return lex_corrupt("walk_start_ns is negative");

@@ -169,6 +169,20 @@ const struct line_field_def HEADER2_FIELDS[H2_COUNT] = {
         "A later capture's prefilter compares with it." },
 };
 
+const struct line_field_def HEADER3_FIELDS[H3_COUNT] = {
+    [H3_SOURCE] = { "source", NULL, "object",
+        "Where the capture came from: `null` when the scope was walked where belay ran (the walker; "
+        "in-sandbox mode included), or, for a container read by the host reader, the object below. "
+        "Two manifests compare only when their sources are equal." },
+};
+
+const struct line_field_def SOURCE_FIELDS[SRC_COUNT] = {
+    [SRC_DOCKER] = { "docker", NULL, "string",
+        "The container's full id, as `docker inspect` gives it: 64 lowercase hex digits." },
+    [SRC_IMAGE] = { "image", NULL, "string",
+        "Its image's id, as `docker inspect` gives it: `sha256:` and 64 lowercase hex digits." },
+};
+
 const struct line_field_def TRAILER2_FIELDS[TR2_COUNT] = {
     [TR2_TRUSTED] = { "trusted", NULL, "int",
         "Regular files whose hash and copy decision came from a previous manifest instead of a "
