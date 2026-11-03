@@ -23,6 +23,7 @@
 #include "schema/entry.h"
 #include "schema/diff_schema.h"
 #include "schema/finding_schema.h"
+#include "schema/policy_schema.h"
 #include "belay/interp.h"
 #include "diff/classify.h"
 
@@ -30,6 +31,7 @@
 #define FORMAT_PIN "test/expect/manifest-v1.md"
 #define KINDS_PIN  "test/expect/finding-kinds.md"
 #define EVENTS_PIN "test/expect/diff-events.md"
+#define POLICY_PIN "test/expect/policy-v1.md"
 
 /* sha256 of test/expect/manifest-v1.md as approved (PR #10, 2026-10-30). The
  * file is immutable: a new format version gets a new file. */
@@ -568,6 +570,51 @@ TEST(a_pin_cell_too_long_is_refused_never_cut) {
     unlink(path);
 }
 
+/* Decision 157: policy.v1's flags are the pin's -- each kind once, in its
+ * order, its level, its fields and their types, its templates -- and no
+ * more. */
+TEST(policy_flags_pin_and_schema_agree_both_ways) {
+    static struct table t;
+    REQUIRE(read_table(POLICY_PIN, "flag", &t) > 0);
+    static const char *const TYPE[] = { "int", "string", "bool", "bytes", "strings" };
+    static const char *const LEVEL[] = { "violation", "signal", "violation when `frozen_packages`, else signal" };
+    int seen[PK_COUNT] = { 0 };
+    for (int i = 0; i < t.n; i++) {
+        if (t.cols[i] < 5) { BELAY_FAIL("row %d: %d cells", i, t.cols[i]); continue; }
+        char *name = t.cell[i][0];
+        unquote(name);
+        int k = 0;
+        while (k < PK_COUNT && strcmp(POLICY_KINDS[k].name, name) != 0) k++;
+        if (k == PK_COUNT) { BELAY_FAIL("the pin lists %s; the schema has no such kind", name); continue; }
+        if (k != i) BELAY_FAIL("%s: row %d of the pin, %d of the schema (P-F5's order)", name, i, k);
+        seen[k]++;
+        const struct policy_kind_def *d = &POLICY_KINDS[k];
+        if (strcmp(LEVEL[d->level], t.cell[i][1]) != 0)
+            BELAY_FAIL("%s: level \"%s\", schema \"%s\"", name, t.cell[i][1], LEVEL[d->level]);
+        char f[512];
+        size_t w = 0;
+        f[0] = '\0';
+        for (int j = 0; j < POLICY_FIELDS_MAX && d->field[j].name != NULL; j++)
+            w += (size_t)snprintf(f + w, sizeof f - w, "%s%s: %s%s", j ? ", " : "", d->field[j].name,
+                                  TYPE[d->field[j].type], d->field[j].optional ? "?" : "");
+        if (strcmp(f, t.cell[i][2]) != 0) BELAY_FAIL("%s: fields \"%s\", schema \"%s\"", name, t.cell[i][2], f);
+        char *c = t.cell[i][3], *second = NULL;
+        char *semi = strstr(c, "`; ");
+        if (semi != NULL) {
+            semi[1] = '\0';
+            second = strchr(semi + 2, '`');
+        }
+        unquote(c);
+        if (second != NULL) unquote(second);
+        if (strcmp(d->text, c) != 0) BELAY_FAIL("%s: text \"%s\", schema \"%s\"", name, c, d->text);
+        if ((second == NULL) != (d->text_partial == NULL) || (second != NULL && strcmp(second, d->text_partial) != 0))
+            BELAY_FAIL("%s: second template \"%s\", schema \"%s\"", name, second ? second : "(none)",
+                       d->text_partial ? d->text_partial : "(none)");
+    }
+    for (int k = 0; k < PK_COUNT; k++)
+        if (seen[k] != 1) BELAY_FAIL("%s: listed %d times by the pin", POLICY_KINDS[k].name, seen[k]);
+}
+
 int main(void) {
     RUN(diff_fields_pin_and_table_agree_both_ways);
     RUN(finding_kinds_pin_and_schema_agree_both_ways);
@@ -578,5 +625,6 @@ int main(void) {
     RUN(the_frozen_format_file_never_changes);
     RUN(frozen_format_keys_types_and_rules_match_the_schema);
     RUN(a_pin_cell_too_long_is_refused_never_cut);
+    RUN(policy_flags_pin_and_schema_agree_both_ways);
     return belay_test_report();
 }
