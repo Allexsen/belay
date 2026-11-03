@@ -101,7 +101,8 @@ The corpus has three parts:
     same commits, renamed (with HEAD on them; another branch between the two
     names), commits added (counted, or not with a fast-forward or merge),
     each rewrite and several, reflogs that do not chain or gained none (one
-    a prefix by its bytes ending inside a line),
+    a prefix by its bytes ending inside a line), one whose last entry
+    gained has no newline,
     another operation, HEAD switched, detached and attached, a detached
     HEAD moved, four repositories nested and side by side, `unknown` refs
     and packed-refs read from their copies (provisional) or with none,
@@ -4050,13 +4051,35 @@ def git_events(w, rng):
         base = [(Z, c0, 'commit (initial): root')]
         full = git_reflog(*(base + [(c0, c1, 'commit: one'), (c1, c2, 'commit: two')]))
         start = len(git_reflog(*base))
-        end = full.index(b'\n', start)          # the line's own end, excluded
-        cut = rng.randrange(start + 1, end + 1)
+        end = full.index(b'\n', start)          # the line's newline
+        # Before stops short of the line's last byte too, so after's next
+        # byte is never that newline: that case is ambiguity G16 of
+        # reference.py (before's last line then a whole entry, G15).
+        cut = rng.randrange(start + 1, end)
         return [(r + b'refs/heads/main', git_loose(c0), git_loose(c2), O),
                 (r + b'logs/refs/heads/main', full[:cut], full, O)]
     one('git: a reflog whose before ends inside a line of after', reflog_prefix_mid_line,
         ev(['a reflog whose before ends inside a line of after: none gained',
             'a branch moved, its reflog gained none']))
+
+    # G15 (decision 160): E12, "a last line without its newline is an entry
+    # like any other, as git reads it"; diff-v1, `git_reflog_appended`
+    # "counts the entries after it (a last line without its newline is an
+    # entry, as git reads it)". Before ends at a line's end; after adds one
+    # or two commits, the last with no newline -- counted in
+    # `git_reflog_appended`, and commits added, counted. Its reverse is not
+    # a prefix: rewritten, the branch moved, its reflog gained none.
+    def reflog_last_unterminated(rng):
+        r, c = repo(rng), [oid() for _ in range(3)]
+        base = [(Z, c[0], 'commit (initial): root')]
+        new = [(c[0], c[1], 'commit: one'), (c[1], c[2], 'commit: two')][:rng.choice([1, 2])]
+        return [(r + b'refs/heads/main', git_loose(c[0]), git_loose(c[len(new)]), O),
+                (r + b'logs/refs/heads/main', git_reflog(*base),
+                 git_reflog(*(base + new))[:-1], O)]
+    one('git: commits made, the reflog\'s last entry without its newline',
+        reflog_last_unterminated,
+        ev(['a reflog whose last entry gained has no newline: an entry',
+            'commits added, counted', 'a branch moved, its reflog gained none']))
 
     # "`HEAD` that cannot be read on a side derives none": not read before,
     # naming another branch after (no git_head_switched); not parsed before,
