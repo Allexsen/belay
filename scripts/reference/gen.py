@@ -1684,11 +1684,129 @@ def cell_git_unparsed():
     return out
 
 
+NOT_AN_ENTRY = b"this line is not a reflog entry\n"
+
+
+def cell_git_reflog_gained():
+    """Required cells for which entries of a reflog git parses (E12, decision
+    144): "parsing a reflog is parsing only the entries it gained in this
+    diff -- those after before's bytes when they are a prefix of after's
+    ending at a line's end, and none otherwise (diff-v1, git:
+    `git_reflog_rewritten`) -- never its older entries". Older entries not
+    git's: the events come from the gained ones alone. A reflog not a
+    prefix, after's entries not git's, or a before ending inside a line of
+    after: it gained none, so nothing is parsed -- `git_reflog_rewritten`,
+    no E10 event, no evidence. A gained entry not git's: "A side git cannot parse
+    counts as one it cannot read (and is a `could_not_interpret` event,
+    E10)" -- the reflog is no evidence, the cells of git-e12-unread-reflog
+    with a reflog not parsed in place of one not read."""
+    out = []
+    X, Y = goid("X"), goid("Y")
+    born = (ZERO, X, b"branch: Created from HEAD")
+
+    # ---- older entries not git's, gained ones git's
+    c = Case("git-e12-reflog-old-not-gits")
+    g = GitRepo(c, b"a")            # how it moved: from the gained entry
+    g.unchanged()
+    g.ref("before", b"feat", X)
+    g.ref("after", b"feat", Y)
+    old = NOT_AN_ENTRY + glog([born])
+    g.put("before", b"logs/refs/heads/feat", old)
+    g.put("after", b"logs/refs/heads/feat", old + glog([(X, Y, b"commit: y")], 5))
+    g = GitRepo(c, b"b")            # its value before: the first gained entry's old id
+    g.unchanged()
+    g.ref("after", b"dated", Y)
+    old = glog([born]) + NOT_AN_ENTRY
+    g.put("before", b"logs/refs/heads/dated", old)
+    g.put("after", b"logs/refs/heads/dated", old + glog([(X, Y, b"commit: y")], 5))
+    g = GitRepo(c, b"h")            # HEAD detached: the branch `HEAD`, rewritten
+    g.head("before", oid=X)
+    g.head("after", oid=Y)
+    g.put("before", b"logs/HEAD", NOT_AN_ENTRY)
+    g.put("after", b"logs/HEAD", NOT_AN_ENTRY + glog([(X, Y, b"reset: moving to y")], 5))
+    c.tag("git.e12.reflog_gained.old_not_gits")
+    c.tag("git.e12.reflog_gained.old_not_gits_dates")
+    c.tag("git.e12.reflog_gained.old_not_gits_head")
+    out.append(c)
+
+    # ---- not a prefix ending at a line's end, after's entries not git's:
+    # it gained none, so none is parsed -- rewritten, no E10 event, and no
+    # evidence
+    c = Case("git-e12-reflog-not-prefix-not-gits")
+    g = GitRepo(c, b"r")            # no entry of after git's: moved, no how
+    g.unchanged()
+    g.ref("before", b"feat", X)
+    g.ref("after", b"feat", Y)
+    g.log("before", b"feat", [born])
+    g.put("after", b"logs/refs/heads/feat", NOT_AN_ENTRY + NOT_AN_ENTRY)
+    g = GitRepo(c, b"s")            # after's first line not git's, its next one
+    g.unchanged()                   # would date the branch: no value before
+    g.ref("after", b"dated", Y)
+    g.log("before", b"dated", [born])
+    g.put("after", b"logs/refs/heads/dated", NOT_AN_ENTRY + glog([(X, Y, b"commit: y")], 5))
+    # ... and before a prefix of after's ending inside a line of it ("ending
+    # at a line's end, and none otherwise"; diff-v1: "A line is the bytes up
+    # to and including a newline"): it gained none either
+    full = glog([born, (X, Y, b"commit: y")])
+    g = GitRepo(c, b"t")            # before ends mid-entry: after's rest is no entry
+    g.unchanged()
+    g.ref("after", b"dated", Y)
+    g.put("before", b"logs/refs/heads/dated", full[:len(glog([born])) + 50])
+    g.put("after", b"logs/refs/heads/dated", full)
+    g = GitRepo(c, b"u")            # before ends just short of a newline: after's
+    g.unchanged()                   # next entry would date the branch
+    g.ref("after", b"dated", Y)
+    g.put("before", b"logs/refs/heads/dated", glog([born])[:-1])
+    g.put("after", b"logs/refs/heads/dated", full)
+    c.tag("git.e12.reflog_gained.not_prefix_not_gits")
+    c.tag("git.e12.reflog_gained.not_prefix_no_evidence")
+    c.tag("git.e12.reflog_gained.inside_a_line")
+    out.append(c)
+
+    # ---- gained entries not git's: no evidence, and its E10 event
+    c = Case("git-e12-unparsed-reflog")
+    g = GitRepo(c, b"a")            # its first gained entry would date the branch
+    g.unchanged()
+    g.ref("after", b"alone", Y)
+    g.log("before", b"alone", [born])
+    g.put("after", b"logs/refs/heads/alone",
+          glog([born, (X, Y, b"commit: y")]) + NOT_AN_ENTRY)
+    g = GitRepo(c, b"b")            # it would say a rename: created and deleted stand
+    g.unchanged()
+    g.packed("before", [(b"refs/tags/v1", X)])
+    g.packed("after", [(b"refs/tags/v1", X), (b"refs/tags/v2", Y)])
+    g.ref("before", b"old", X)
+    g.ref("after", b"new", X)
+    g.log("before", b"old", [born])
+    g.put("after", b"logs/refs/heads/new",
+          glog([born, (X, X, b"Branch: renamed refs/heads/old to refs/heads/new")])
+          + NOT_AN_ENTRY)
+    g = GitRepo(c, b"c")            # every gained entry not git's: moved, no how
+    g.unchanged()
+    g.ref("before", b"feat", X)
+    g.ref("after", b"feat", Y)
+    g.log("before", b"feat", [born])
+    g.put("after", b"logs/refs/heads/feat", glog([born]) + NOT_AN_ENTRY + NOT_AN_ENTRY)
+    g = GitRepo(c, b"h")            # HEAD detached: the branch `HEAD`, without a how
+    g.head("before", oid=X)
+    g.head("after", oid=Y)
+    g.log("before", b"HEAD", [(ZERO, X, b"commit (initial): x")])
+    g.put("after", b"logs/HEAD",
+          glog([(ZERO, X, b"commit (initial): x"), (X, Y, b"reset: moving to y")]) + NOT_AN_ENTRY)
+    c.tag("git.e12.unparsed.reflog_gained")
+    c.tag("git.e12.unparsed.reflog_would_date")
+    c.tag("git.e12.unparsed.reflog_rename_untold")
+    c.tag("git.e12.unparsed.reflog_head_detached")
+    out.append(c)
+    return out
+
+
 def random_git(rng, c):
     """A repository's history, simulated: a few operations before, more
     after, each written as git writes it (loose refs, packed-refs, HEAD,
     reflogs); now and then a copy lost, a file raced, a ref, HEAD or
-    packed-refs garbled on a side or a reflog entry dropped."""
+    packed-refs garbled on a side, a reflog entry dropped, or a reflog line
+    not git's -- among its older entries, or gained."""
     root = rng.choice([b"", b"proj", b"proj/vendor/lib", b"w"])
     repo = join(root, b".git")
     st = {"loose": {}, "packed": {}, "logs": {}, "head": ("sym", b"main"), "t": 0}
@@ -1838,6 +1956,12 @@ def random_git(rng, c):
     for _ in range(rng.randrange(1, 7)):
         step()
     af = files()
+    # older entries not git's, on both sides: never parsed (E12, decision 144)
+    for rest in sorted(set(bf) & set(af)):
+        if (rest.startswith(b"logs/") and bf[rest] != af[rest]
+                and af[rest].startswith(bf[rest]) and rng.random() < 0.08):
+            bf[rest] = NOT_AN_ENTRY + bf[rest]
+            af[rest] = NOT_AN_ENTRY + af[rest]
     store_choices = ["ok"] * 14 + ["none", "absent", "corrupt"]
     for side, fs in (("before", bf), ("after", af)):
         for rest, data in fs.items():
@@ -1849,6 +1973,8 @@ def random_git(rng, c):
                 if len(lines) > 2:
                     del lines[-2]
                     data = b"\n".join(lines) + b"\n"
+            elif not same and rest.startswith(b"logs/") and side == "after" and r < 0.08:
+                data += NOT_AN_ENTRY            # an entry gained, not git's
             elif not same and rest.startswith(b"refs/") and r < 0.02:
                 data = b"garbled\n"
             elif not same and rest == b"HEAD" and r < 0.03:
@@ -2966,7 +3092,7 @@ def required_cases():
     return (cell_dpkg_simple() + cell_pip_simple() + cell_pip_e10() + cell_dpkg_e9_e10()
             + cell_p7() + cell_e11() + cell_order() + cell_content_unavailable() + cell_paths_b64()
             + cell_git_reflog() + cell_git_events() + cell_git_unread() + cell_git_unparsed()
-            + cell_probes())
+            + cell_git_reflog_gained() + cell_probes())
 
 
 def all_cases(n, seed):

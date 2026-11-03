@@ -843,20 +843,42 @@ def lines_of(data):
 
 def appended(before, after):
     """The entries after before's bytes when they are "a prefix of after's
-    ending at a line's end (an absent before is empty)"; None otherwise."""
+    ending at a line's end (an absent before is empty)"; None otherwise.
+
+    These are the only entries of a reflog git parses: E12 (decision 144),
+    "parsing a reflog is parsing only the entries it gained in this diff --
+    those after before's bytes when they are a prefix of after's ending at
+    a line's end, and none otherwise (diff-v1, git: `git_reflog_rewritten`)
+    -- never its older entries". before's bytes are compared here, never
+    split into entries nor parsed; None (not a prefix, or one ending inside
+    a line of after) is "none otherwise": nothing is parsed."""
     bb = before or b""
     if after.startswith(bb) and (bb == b"" or bb.endswith(b"\n") or bb == after):
         return lines_of(after[len(bb):])
     return None
 
 
+_REFLOG_ENTRY = re.compile(rb"[0-9a-f]{40} [0-9a-f]{40} ")
+
+
 def reflog_entry_fields(line):
-    """(old, new, message). READING: an entry is "<old> <new> <ident>\t<message>";
-    old and new are its first two space-separated words. The corpus writes
-    only such entries."""
-    head, _, msg = line.partition(b"\t")
-    words = head.split(b" ")
-    return words[0], (words[1] if len(words) > 1 else b""), msg
+    """(old, new, message), or InterpFailure for an entry that is not git's.
+
+    READING: git's reflog format, not spelled out by the spec: an entry is
+    "<old> <new> <ident>", then a tab and its message when it has one; old
+    and new are object ids (40 lowercase hex digits, as parse_ref_value's),
+    each followed by one space. A line not starting so cannot be parsed. The
+    corpus writes only entries git writes, and lines plainly not entries.
+
+    Only a gained entry is ever given here (appended(); E12, decision 144:
+    "parsing a reflog is parsing only the entries it gained in this diff
+    ... -- never its older entries"), so an older entry not git's fails
+    nothing, nor does any entry of a reflog whose before is not a prefix of
+    after's ending at a line's end ("and none otherwise")."""
+    if not _REFLOG_ENTRY.match(line):
+        raise InterpFailure("reflog: an entry not git's")
+    _, _, msg = line.partition(b"\t")
+    return line[:40], line[41:81], msg
 
 
 def operation(msg):
@@ -917,7 +939,7 @@ class GitPath:
         self.unread = set()     # sides it needs whose copy could not be read
         self.unparsed = set()   # sides read that could not be parsed (decision 141)
         self.record_unav = []   # the unavailable sides its record names
-        self.gained = None      # reflog: [(old, new, msg)] when appended, else None
+        self.gained = None      # reflog: [(old, new, msg)] when appended and parsed, else None
 
 
 def git_read(store, g):
@@ -961,10 +983,26 @@ def git_read(store, g):
     `content_unavailable`'s (`no_store`, `missing`, `too_large`, `corrupt`)
     names a copy that was read. READING: diff-v1's "nothing more is read
     from it" is taken as nothing more read from the side that failed -- E12,
-    the later and narrower rule, uses the other side's value. A reflog is
-    never unparseable here (reflog_entry_fields; the corpus writes only such
-    entries), so "a reflog it cannot read is no evidence" is reached only by
-    a copy not read."""
+    the later and narrower rule, uses the other side's value.
+
+    A reflog: E12 (decision 144), "parsing a reflog is parsing only the
+    entries it gained in this diff -- those after before's bytes when they
+    are a prefix of after's ending at a line's end, and none otherwise
+    (diff-v1, git: `git_reflog_rewritten`) -- never its older entries". So
+    only the entries after before's bytes are parsed (appended()); an older
+    entry not git's fails nothing; a reflog whose before is not such a
+    prefix (not one at all, or one ending inside a line of after) gained
+    none, so nothing of it is parsed -- its record is git_reflog_rewritten,
+    no E10 event names it, and it is no evidence (gained None). One it
+    gained that is not git's
+    (reflog_entry_fields) is a side git cannot parse -- after, whose bytes
+    hold them -- which "counts as one it cannot read (and is a
+    `could_not_interpret` event, E10)": the reflog is then no evidence ("a
+    reflog it cannot read is no evidence", reflog_unusable), and its record
+    carries `could_not_interpret`. READING: the side is the unit, as for a
+    ref or `packed-refs` -- a reflog that gained one entry not git's gives
+    nothing from the others either (not the old id of its first entry, nor
+    a how, nor a rename)."""
     if g.role == "reflog":
         need_b = g.reg["before"] and g.reg["after"]
         need_a = g.reg["after"]
@@ -993,8 +1031,17 @@ def git_read(store, g):
             g.cni = True                # E10: the file, once
             g.unparsed.add(side)        # "counts as one it cannot read": that side
     if g.role == "reflog" and not g.unread:
+        # E12 (decision 144): "parsing only the entries it gained in this
+        # diff -- those after before's bytes when they are a prefix of
+        # after's ending at a line's end, and none otherwise ... -- never
+        # its older entries"; before's bytes are only compared (appended()).
         new = appended(g.contents.get("before"), g.contents["after"])
-        g.gained = None if new is None else [reflog_entry_fields(x) for x in new]
+        try:
+            g.gained = None if new is None else [reflog_entry_fields(x) for x in new]
+        except InterpFailure:
+            g.gained = None
+            g.cni = True                # E10: the file, once
+            g.unparsed.add("after")     # the side holding the gained entries
 
 
 def gives(g, side):
@@ -1119,8 +1166,13 @@ class Repo:
 
 def reflog_unusable(G):
     """A reflog git cannot read: a side it needs could not be read (a removed
-    one needs none). E12: "a reflog it cannot read is no evidence"."""
-    return G is not None and G.reg["after"] and bool(G.unread)
+    one needs none), or the entries it gained could not be parsed. E12: "a
+    reflog it cannot read is no evidence"; "A side git cannot parse counts as
+    one it cannot read ...; parsing a reflog is parsing only the entries it
+    gained in this diff" (decision 144). A reflog whose before is not a
+    prefix of after's ending at a line's end is usable but gained none ("and
+    none otherwise"): G.gained is None, which gives no evidence either."""
+    return G is not None and G.reg["after"] and bool(G.unread or G.unparsed)
 
 
 def reflog_before(G, loose_there):
