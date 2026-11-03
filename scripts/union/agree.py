@@ -25,10 +25,9 @@ import compare  # noqa: E402  (the model author's hook)
 def norm(lines, model):
     """The two spellings of one meaning made one: the model's xattr values
     hashed (a manifest keeps a digest); protattr as the set of its letters
-    (belay derives them from iflags, the model echoes the xattr); and a mount
-    point's own xattrs, protattr and content left out on both sides -- capture
-    never reads them on a mount root, the model reads the layer file's (a
-    reading put to the author)."""
+    (belay derives them from iflags, the model echoes the xattr). A mount
+    point's entry carries no xattrs, protattr or content on either side
+    (host-reader H-M5, decision 212): compared as it is."""
     out = []
     for l in lines:
         if not l.strip():
@@ -38,10 +37,6 @@ def norm(lines, model):
             e["xattrs"] = {k: hashlib.sha256(bytes.fromhex(v)).hexdigest() for k, v in e["xattrs"].items()}
         if "protattr" in e:
             e["protattr"] = "".join(sorted(set(e["protattr"])))
-        if e.get("mount"):
-            e["xattrs"] = {}
-            e["protattr"] = ""
-            e.pop("sha256", None)
         out.append(json.dumps(e))
     return out
 
