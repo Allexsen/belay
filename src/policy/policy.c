@@ -10,6 +10,7 @@
 #include "belay/interp.h"
 #include "belay/json.h"
 #include "belay/manifest.h"
+#include "capture/fsops.h"
 #include "policy/jw.h"
 #include "policy/pkgdb.h"
 #include "policy/pytests.h"
@@ -422,6 +423,9 @@ static size_t lower(const struct pkg_list *l, const size_t *ix, size_t n, const 
     return lo;
 }
 
+/* Whether an event names the package, a reinstall at the same version
+ * aside: its files are judged against the bundle all the same (decision
+ * 173: a RECORD rewritten to match a tampered file is no installer's). */
 static bool pkg_has_event(const struct state *s, enum pkg_db db, const char *pkg) {
     char key[2048];
     snprintf(key, sizeof key, "%s %s", pkg_db_name(db), pkg);
@@ -529,6 +533,21 @@ static void protected(struct state *s, const char *p, size_t n, const struct bel
             }
         }
     }
+    /* in decision 176's order (the model author's P2); a name it does not
+     * list after them, as it came */
+    static const char *const ORDER[] = { "unverified", "unstable", "unreadable", "raced", "mount",
+                                         "xattrs_unknown", "iflags_unknown", "not_captured", "listing_incomplete" };
+    const char *sorted[16];
+    size_t ns = 0;
+    for (size_t o = 0; o < sizeof ORDER / sizeof ORDER[0]; o++)
+        for (size_t j = 0; j < nr; j++)
+            if (strcmp(reasons[j], ORDER[o]) == 0) sorted[ns++] = reasons[j];
+    for (size_t j = 0; j < nr; j++) {
+        bool known = false;
+        for (size_t o = 0; o < sizeof ORDER / sizeof ORDER[0]; o++) known = known || strcmp(reasons[j], ORDER[o]) == 0;
+        if (!known) sorted[ns++] = reasons[j];
+    }
+    memcpy(reasons, sorted, ns * sizeof *reasons);
     if (nr > 0) {
         struct flag *f = add(c, PK_PROTECTED_PATH_UNVERIFIABLE, false);
         fs(c, f, "path", p, n);
@@ -675,7 +694,12 @@ static void privilege(struct state *s, const char *p, size_t n, const struct bel
     char ib[32] = "none", ia[32] = "none";
     if (b != NULL && b->has_iflags) snprintf(ib, sizeof ib, "%llu", (unsigned long long)b->iflags);
     if (a != NULL && a->has_iflags) snprintf(ia, sizeof ia, "%llu", (unsigned long long)a->iflags);
-    if (strcmp(ib, ia) != 0) {
+    /* a file added or removed: its iflags only when they lock it -- a
+     * filesystem's own on every new file (ext4's extents) are no privilege
+     * (decision 171) */
+    const struct belay_entry *one = b == NULL ? a : a == NULL ? b : NULL;
+    const bool locking = one == NULL || (one->has_iflags && (one->iflags & belay_iflags_locking) != 0);
+    if (locking && strcmp(ib, ia) != 0) {
         struct flag *f = add(c, PK_PRIVILEGE_CHANGED, prov);
         fs(c, f, "path", p, n);
         fstr(c, f, "what", "iflags");
@@ -1034,7 +1058,7 @@ int policy_run(const struct policy_in *in, FILE *out, struct policy_stats *st) {
     if (trl.t != J_OBJ) { corrupt("the diff has no trailer"); goto out; }
     for (size_t i = 0; i < nev; i++) {          /* packages with an event: their files are the installer's */
         const char *k = jstr(&ev[i], "event");
-        if (strncmp(k, "pip_", 4) && strncmp(k, "dpkg_", 5)) continue;
+        if ((strncmp(k, "pip_", 4) && strncmp(k, "dpkg_", 5)) || !strcmp(k, "pip_reinstalled")) continue;
         char key[2048];
         if (k[0] == 'p') snprintf(key, sizeof key, "pip %s", jstr(&ev[i], "name"));
         else snprintf(key, sizeof key, "dpkg %s:%s", jstr(&ev[i], "package"), jstr(&ev[i], "arch"));

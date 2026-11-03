@@ -64,6 +64,8 @@ static ssize_t macos_xattr_get(void *ctx, const struct xsrc *x, const char *name
     return fgetxattr(x->fd, name, buf, n, 0, 0);
 }
 
+const uint64_t belay_iflags_locking = UF_IMMUTABLE | SF_IMMUTABLE | UF_APPEND | SF_APPEND;
+
 static int macos_inode_flags(void *ctx, int fd, const struct stat *st, uint64_t *out) {
     (void)ctx; (void)fd;
     *out = (uint64_t)st->st_flags;      /* uchg, schg, hidden... */
