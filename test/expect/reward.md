@@ -5,7 +5,7 @@ rollout's record (decision 187: "any violation zeroes the reward; signals go int
 metadata, never into the reward by default"). It is framework-neutral: the verifiers and OpenEnv
 adapters are thin wrappers over it, each pinned with its framework's version once that framework's
 hooks have been checked against the framework itself (decision 184), and none of them changes a row
-below. Written by hand; *proposed 2026-11-03, awaiting the author's OK*.
+below. Written by hand; approved by the author 2026-11-03 (decision 201).
 
 **Changing it.** In its own PR, presented as a table, after the author's explicit OK.
 
