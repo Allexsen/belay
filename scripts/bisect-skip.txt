@@ -166,3 +166,7 @@
 2026-11-03T11:49:02+04:00	git: a reflog it cannot parse tells no rename
 # Decision 160 (G15): the pin fails make oracle until its author follows (the start-up quote of E12).
 2026-11-03T12:13:45+04:00	pins: E12 states G15 -- a last reflog line without its newline is an entry
+# Decision 183 (G15 corrected, G17): the pin and the two spec sentences fail make oracle until its author follows (the start-up quote of E12 and of the spec's reflog sentence).
+2026-11-03T15:15:00+04:00	pins: E12 follows git on unterminated lines -- G15 corrected, G17
+2026-11-03T15:21:19+04:00	spec: a reflog that gained no entry says nothing
+2026-11-03T15:23:25+04:00	spec: a blank reflog line is no entry, as git skips it
