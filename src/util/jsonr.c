@@ -1,4 +1,4 @@
-#include "jsonr.h"
+#include "util/jsonr.h"
 
 #include <stdlib.h>
 #include <string.h>
@@ -106,6 +106,7 @@ static int val(struct cur *c, struct jval *v) {
                 ws(c);
                 size_t kl;
                 if (str(c, &v->keys[v->n], &kl) == -1) return -1;
+                if (strlen(v->keys[v->n]) != kl) { free(v->keys[v->n]); return -1; }   /* a NUL: no key */
                 ws(c);
                 if (c->p >= c->e || *c->p != ':') { free(v->keys[v->n]); return -1; }
                 c->p++;
@@ -135,6 +136,7 @@ static int val(struct cur *c, struct jval *v) {
         v->t = J_NUM;
         v->num = strtod(buf, NULL);
         v->i = integer ? strtoll(buf, NULL, 10) : (int64_t)v->num;
+        v->integer = integer;
         return 0;
     }
     return -1;
