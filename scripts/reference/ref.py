@@ -803,10 +803,10 @@ def parse_ref_value(data):
     that id".
 
     READINGS: an object id is 40 or 64 hex digits (E12's reflog ids; the
-    longer taken when both fit). Its value is the id, in lowercase: diff-v1,
-    "an object id of either case ... is that id" -- git reads the digits
-    into the id, whatever their case, and shows it in lowercase; so a ref
-    rewritten only in case has not moved. Whitespace is C's isspace. "to the line's end" is
+    longer taken when both fit). Its value is the id in lowercase: E12
+    (decision 213), "An id read in either case is written lowercased, as git
+    prints it"; diff-v1, "that id, written lowercased". So a ref rewritten
+    only in case has not moved. Whitespace is C's isspace. "to the line's end" is
     to the first newline: later lines of a symbolic value are not read. A
     `ref:` with no name cannot be parsed. Anything else -- a leading space,
     a word glued to the id, a short id -- cannot be parsed."""
@@ -920,8 +920,9 @@ def reflog_entry_fields(line):
     is 0 only when it reads no digit or only zeros (a negative number is
     not 0); "after one tab when there is one" is: the message is what
     follows the zone, less one tab that starts it. old and new are each 40
-    or 64 digits (the words do not tie their lengths), in lowercase, as
-    parse_ref_value's ids are."""
+    or 64 digits (the words do not tie their lengths), lowercased: E12
+    (decision 213), "An id read in either case is written lowercased, as
+    git prints it"."""
     m = _REFLOG_IDS.match(line)
     if not m:
         return None
@@ -1304,8 +1305,10 @@ def branch_value(side, ref, L, P, G):
     of this diff ("git sees only the paths that changed"). A loose ref that
     is a file on a side and gives no value there is still the branch's ref
     there: before, the reflog may date it, never packed-refs (whose line it
-    hides); after, nothing. A symbolic loose branch ref names no commit and
-    gives no value (the corpus never builds one)."""
+    hides); after, nothing. A loose branch symbolic to `refs/heads/...` on
+    a side is an alias and derives no event (alias_on_a_side, git_events);
+    one symbolic to anything else names no commit and gives no value (the
+    corpus never builds one)."""
     if L is not None and L.reg[side]:
         if gives(L, side) and L.parsed[side][0] == "oid":
             return L.parsed[side][1], {L.path}
@@ -1322,6 +1325,20 @@ def branch_value(side, ref, L, P, G):
             return ABSENT, {L.path}     # removed, packed-refs not a path
         return UNKNOWN, set()
     return reflog_before(G, False)
+
+
+def alias_on_a_side(L):
+    """E12 (decision 213): "A branch whose loose ref is symbolic (`ref:
+    refs/heads/<other>`) on a side is an alias of its target there, as git
+    lists it (`alias -> main`), not a branch of its own: it derives no
+    event, its path finding stands, and the target's events are the
+    target's own". On a side: before, after or both. READING: a side not
+    read or not parsed tells nothing, so only a side read as symbolic
+    counts; a loose branch symbolic to a ref outside `refs/heads/` is not
+    one the words name (never built)."""
+    return L is not None and any(
+        gives(L, side) and L.parsed[side][0] == "sym"
+        and L.parsed[side][1].startswith(b"refs/heads/") for side in ("before", "after"))
 
 
 def is_id(v):
@@ -1424,6 +1441,8 @@ def git_events(gpaths):
         for br in sorted(names):
             ref = b"refs/heads/" + br
             L, G = r.loose.get(br), r.rlog.get(br)
+            if alias_on_a_side(L):
+                continue                # an alias: no event of its own (decision 213)
             B, pb = branch_value("before", ref, L, P, G)
             A, pa = branch_value("after", ref, L, P, G)
             paths = pb | pa

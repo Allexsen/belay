@@ -585,7 +585,8 @@ def check_e12(cell, mine):
         and ev("k5/.git")["paths"] == ["k5/.git/logs/refs/heads/feat", "k5/.git/refs/heads/feat"]
         and [(f["kind"], len(f["from"]), f["to"]) for f in rec("k5/.git/refs/heads/feat")] == [
             ("git_ref_moved", 64, ev("k5/.git")["to"])],
-        # an id in capitals is that id, shown in lowercase (ref.py's READING)
+        # "An id read in either case is written lowercased, as git prints
+        # it" (decision 213)
         "git.e12.git_reads.id_capitals": lambda: not cni_named("k6/.git")
         and kinds_of("k6/.git") == [("git_branch_moved", "up")]
         and (ev("k6/.git")["from"], ev("k6/.git")["to"]) == (X, Y)
@@ -621,6 +622,26 @@ def check_e12(cell, mine):
         and kinds_of("r4/.git") == [("git_history_rewritten", "feat")]
         and ev("r4/.git")["how"] == "reset" and (ev("r4/.git")["from"], ev("r4/.git")["to"]) == (X, Y)
         and ev("r4/.git")["paths"] == ["r4/.git/logs/refs/heads/feat", "r4/.git/refs/heads/feat"],
+        # decision 213: a symbolic loose branch is an alias -- "it derives
+        # no event, its path finding stands, and the target's events are
+        # the target's own"
+        "git.e12.alias.made": lambda: kinds_of("a1/.git") == [("git_commits_added", "main")]
+        and ev("a1/.git")["paths"] == ["a1/.git/logs/refs/heads/main", "a1/.git/refs/heads/main"]
+        and [(f["kind"], f["to"]) for f in rec("a1/.git/refs/heads/alias")] == [
+            ("git_ref_created", "refs/heads/main")]
+        and rk("a1/.git/logs/refs/heads/alias")[0] == ("git_reflog_appended", 1),
+        "git.e12.alias.removed": lambda: not repo_events("a2/.git")
+        and [(f["kind"], f["from"]) for f in rec("a2/.git/refs/heads/alias")] == [
+            ("git_ref_deleted", "refs/heads/main")],
+        "git.e12.alias.branch_to_alias": lambda: not repo_events("a3/.git")
+        and [(f["kind"], f["from"], f["to"]) for f in rec("a3/.git/refs/heads/feat")] == [
+            ("git_ref_moved", X, "refs/heads/main")],
+        "git.e12.alias.alias_to_branch": lambda: not repo_events("a4/.git")
+        and [(f["kind"], f["from"], f["to"]) for f in rec("a4/.git/refs/heads/feat")] == [
+            ("git_ref_moved", "refs/heads/main", Y)],
+        "git.e12.alias.both_sides": lambda: kinds_of("a5/.git") == [("git_branch_moved", "main")]
+        and moved_from("a5/.git", "main", ["a5/.git/refs/heads/main"])
+        and not any(e["event"] in ("could_not_interpret", "content_unavailable") for e in E),
         "git.e12.tags_remotes_nothing": lambda: not E and rec(P + "/packed-refs") is not None
         and rec(P + "/refs/tags/v2") is not None,
         # decision 137: what cannot be read reduces the claim, never the fact

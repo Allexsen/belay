@@ -2059,6 +2059,49 @@ def cell_git_reads():
     return out
 
 
+def cell_git_alias():
+    """Required cells for a symbolic loose branch (E12, decision 213): "A
+    branch whose loose ref is symbolic (`ref: refs/heads/<other>`) on a side
+    is an alias of its target there, as git lists it (`alias -> main`), not
+    a branch of its own: it derives no event, its path finding stands, and
+    the target's events are the target's own". Symbolic before, after or
+    both: no event."""
+    out = []
+    X, Y = goid("X"), goid("Y")
+    to_main = b"ref: refs/heads/main\n"
+    c = Case("git-e12-alias")
+
+    g = GitRepo(c, b"a1")           # an alias made, with a reflog; its target moves
+    g.both(b"HEAD", b"ref: refs/heads/main\n")
+    g.ref("before", b"main", X)
+    g.ref("after", b"main", Y)
+    g.log("before", b"main", [(ZERO, X, b"commit (initial): x")])
+    g.log("after", b"main", [(ZERO, X, b"commit (initial): x"), (X, Y, b"commit: y")])
+    g.put("after", b"refs/heads/alias", to_main)
+    g.log("after", b"alias", [(ZERO, Y, b"symbolic-ref: alias to main")])
+    g = GitRepo(c, b"a2")           # an alias removed
+    g.unchanged()
+    g.put("before", b"refs/heads/alias", to_main)
+    g = GitRepo(c, b"a3")           # a branch turned into an alias
+    g.unchanged()
+    g.ref("before", b"feat", X)
+    g.put("after", b"refs/heads/feat", to_main)
+    g = GitRepo(c, b"a4")           # an alias turned into a branch
+    g.unchanged()
+    g.put("before", b"refs/heads/feat", to_main)
+    g.ref("after", b"feat", Y)
+    g = GitRepo(c, b"a5")           # an alias on both sides, its target moved
+    g.both(b"HEAD", b"ref: refs/heads/main\n")
+    g.both(b"refs/heads/alias", to_main)
+    g.ref("before", b"main", X)
+    g.ref("after", b"main", Y)
+
+    for cell in ("made", "removed", "branch_to_alias", "alias_to_branch", "both_sides"):
+        c.tag("git.e12.alias." + cell)
+    out.append(c)
+    return out
+
+
 def random_git(rng, c):
     """A repository's history, simulated: a few operations before, more
     after, each written as git writes it (loose refs, packed-refs, HEAD,
@@ -3358,7 +3401,7 @@ def required_cases():
     return (cell_dpkg_simple() + cell_pip_simple() + cell_pip_e10() + cell_dpkg_e9_e10()
             + cell_p7() + cell_e11() + cell_order() + cell_content_unavailable() + cell_paths_b64()
             + cell_git_reflog() + cell_git_events() + cell_git_unread() + cell_git_unparsed()
-            + cell_git_reflog_gained() + cell_git_last_line() + cell_git_reads()
+            + cell_git_reflog_gained() + cell_git_last_line() + cell_git_reads() + cell_git_alias()
             + cell_probes())
 
 
