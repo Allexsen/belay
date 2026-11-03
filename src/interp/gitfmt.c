@@ -142,10 +142,6 @@ int git_reflog_each(char *buf, size_t len, git_reflog_fn fn, void *ctx, size_t *
         size_t os = 0;
         while (os < opl && e.message[os] == ' ') os++;
         while (opl > os && e.message[opl - 1] == ' ') opl--;
-        if (opl - os > GIT_NAME_MAX) {
-            belay_err_set(BELAY_ERR_CORRUPT, 0, "git: reflog line %zu: an operation over %u bytes", line, GIT_NAME_MAX);
-            return -1;
-        }
         e.operation = e.message + os;
         e.operation_len = opl - os;
         e.line = line;

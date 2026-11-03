@@ -46,8 +46,8 @@ typedef int (*git_reflog_fn)(const struct git_reflog_entry *e, void *ctx);
  * this: counted in *ignored, when not NULL. A last line without its newline
  * is no line yet: neither an entry nor counted (decision 183). The
  * operation is the message up to its first ':' (all of it when there is
- * none), trimmed. 0, -1 (CORRUPT: an operation over GIT_NAME_MAX), or fn's
- * non-zero. */
+ * none), trimmed, of any length (a finding with a string over its bound is
+ * invalid_finding, E9). 0, or fn's non-zero. */
 int git_reflog_each(char *buf, size_t len, git_reflog_fn fn, void *ctx, size_t *ignored);
 
 #endif

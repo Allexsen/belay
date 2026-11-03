@@ -518,12 +518,14 @@ index: `git_index_changed` when it is added, removed or its content changed (has
 A reflog (`logs/HEAD` is ref `HEAD`, `logs/refs/...` is `refs/...`): when before's bytes are a
 prefix of after's ending at a line's end (an absent before is empty), `git_reflog_appended` counts
 the entries after it (a last line without its newline is none: git does not read it as an entry; nor is a blank line, which git skips) -- and says nothing when it gained none (decision 183) -- and
-`git_reflog_lines_ignored` counts the lines after it that git skips as no entry, blank ones included
-(decision 202: git skips them silently, and they are evidence worth showing), and each of those that is not a plain commit (operation `commit` or `commit
+`git_reflog_lines_ignored` counts the lines after it that git skips as no entry, blank ones included,
+and says nothing when there are none (decision 202: git skips them silently, and they are evidence
+worth showing) -- and each of those that is not a plain commit (operation `commit` or `commit
 (initial)`) or a fast-forward (its message contains `Fast-forward`) is a `git_reflog_move`, its
 operation being the message before its first `:`; otherwise, or when the reflog was removed (no copy
 needed), `git_reflog_rewritten`. **The reflog is written by the process being watched: it is
-evidence, not proof.** A process can write any reflog it likes; a capture taken from outside the
+evidence, not proof.** A reflog's record gives `git_reflog_appended`, then its `git_reflog_move`s in
+file order, then `git_reflog_lines_ignored`: the order of the kinds table. A process can write any reflog it likes; a capture taken from outside the
 process (a host-reader mode, not built yet) would be the answer when that matters.
 
 From its end hook git also derives repository-level events (diff-events E12), so that a reader
