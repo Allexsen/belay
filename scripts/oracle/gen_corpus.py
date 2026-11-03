@@ -100,7 +100,8 @@ The corpus has three parts:
     of this diff, or one without them; only in packed-refs), packed at the
     same commits, renamed (with HEAD on them; another branch between the two
     names), commits added (counted, or not with a fast-forward or merge),
-    each rewrite and several, reflogs that do not chain or gained none,
+    each rewrite and several, reflogs that do not chain or gained none (one
+    a prefix by its bytes ending inside a line),
     another operation, HEAD switched, detached and attached, a detached
     HEAD moved, four repositories nested and side by side, `unknown` refs
     and packed-refs read from their copies (provisional) or with none,
@@ -4009,11 +4010,13 @@ def git_events(w, rng):
             'a loose ref removed, not parsed before: no event']))
 
     # A reflog that cannot be parsed counts as one that cannot be read: no
-    # evidence of before (no from), nor of how (moved, from the refs). A
-    # reflog is read by its bytes: "when before's bytes are a prefix of
-    # after's ... counts the entries after it ...; otherwise ...
-    # `git_reflog_rewritten`" -- what cannot be parsed is the entries it
-    # gained (each reverse: not a prefix, rewritten, nothing parsed).
+    # evidence of before (no from), nor of how (moved, from the refs). E12
+    # (decision 144): "parsing a reflog is parsing only the entries it gained
+    # in this diff -- those after before's bytes when they are a prefix of
+    # after's ending at a line's end, and none otherwise (diff-v1, git:
+    # `git_reflog_rewritten`) -- never its older entries" -- what cannot be
+    # parsed is the entries it gained (each reverse: not a prefix,
+    # rewritten, nothing parsed).
     one('git: a branch created, its reflog not parsed',
         lambda rng: [(f[0], f[1], b'not a reflog line\n' if b'logs/' in f[0] else f[2], f[3])
                      for f in created_by_reflog(rng)],
@@ -4023,8 +4026,9 @@ def git_events(w, rng):
                       else f[2], f[3])
                      for f in moved(rng, lambda c: ([(c[0], c[1], 'commit: one')], 1))],
         ev(['a branch moved, its reflog not parsed: from the refs, without a how']))
-    # ... and old entries that are not git's, before one it gained: no rule
-    # reads them, so the entry gained is evidence like any other.
+    # ... and old entries that are not git's, before one it gained: "never
+    # its older entries", so the entry gained is evidence like any other --
+    # git_commits_added.
     def reflog_old_unparsed(rng):
         r, c0, c1 = repo(rng), oid(), oid()
         junk = b'not a reflog line\n'
@@ -4033,6 +4037,26 @@ def git_events(w, rng):
                  junk + git_reflog((c0, c1, 'commit: one')), O)]
     one('git: commits made, the reflog\'s old entries not git\'s', reflog_old_unparsed,
         ev(['commits added, counted', 'a reflog whose old entries are not read']))
+    # ... and a before that is a prefix of after's by its bytes but ends
+    # inside a line, the one after completes (G14): "those after before's
+    # bytes when they are a prefix of after's ending at a line's end, and
+    # none otherwise" -- it gained none and nothing of it is parsed, so
+    # `git_reflog_rewritten` and the branch moved from the refs, with no
+    # how; never `could_not_interpret` for the rest of the line. The cut is
+    # strictly inside that line, so what follows it is never an entry. Its
+    # reverse: not a prefix, the same.
+    def reflog_prefix_mid_line(rng):
+        r, c0, c1, c2 = repo(rng), oid(), oid(), oid()
+        base = [(Z, c0, 'commit (initial): root')]
+        full = git_reflog(*(base + [(c0, c1, 'commit: one'), (c1, c2, 'commit: two')]))
+        start = len(git_reflog(*base))
+        end = full.index(b'\n', start)          # the line's own end, excluded
+        cut = rng.randrange(start + 1, end + 1)
+        return [(r + b'refs/heads/main', git_loose(c0), git_loose(c2), O),
+                (r + b'logs/refs/heads/main', full[:cut], full, O)]
+    one('git: a reflog whose before ends inside a line of after', reflog_prefix_mid_line,
+        ev(['a reflog whose before ends inside a line of after: none gained',
+            'a branch moved, its reflog gained none']))
 
     # "`HEAD` that cannot be read on a side derives none": not read before,
     # naming another branch after (no git_head_switched); not parsed before,
