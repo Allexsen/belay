@@ -151,6 +151,18 @@ jobs:
             for run in first warm warm; do
               su tester -c "./build/bench/bench_check /usr usr-in-docker-$run" | tail -1
             done'
+      # The host reader (host-reader.md) against real containers, on the host this
+      # job runs on: a static belay, as released, also walked from inside one.
+      - name: host reader, static build
+        run: make CFLAGS='-O2 -static' all
+      - name: host reader against real containers (overlay2 store)
+        run: sudo scripts/host-reader-e2e.sh bin/belay
+      - name: switch Docker to the containerd image store
+        run: |
+          echo '{"features":{"containerd-snapshotter":true}}' | sudo tee /etc/docker/daemon.json
+          sudo systemctl restart docker
+      - name: host reader against real containers (containerd store)
+        run: sudo scripts/host-reader-e2e.sh bin/belay
 
   filesystems:
     name: filesystems
