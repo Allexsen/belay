@@ -229,6 +229,13 @@ $(REF_DRIVER): scripts/reference/driver.c $(CORE_OBJ)
 reference: $(REF_DRIVER)
 	BUILD=$(BUILD) scripts/reference/run.sh $(REFERENCE_N) $(REFERENCE_SEED)
 
+# `baseline export` and `verify` against an independent model of policy.v1 written
+# from the pins alone (scripts/policy-model/, decision 150). Exits 3 while verify is
+# not built. BELAY_BIN overrides the binary; PM_WORKDIR where scenarios are built.
+.PHONY: policy-model
+policy-model: $(BIN)
+	python3 -I -B scripts/policy-model/run.py
+
 bench: $(BENCH_BIN)
 	@echo "built: $(BENCH_BIN)"
 
