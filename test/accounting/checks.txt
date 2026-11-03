@@ -31,6 +31,10 @@ dco | check Signed-off-by on new commits | check
 dco | the manifest addendum is append-only | check
 docker | actions/checkout@v5 | setup
 docker | build + test + /usr timing inside ubuntu:24.04 | check
+docker | host reader, static build | setup
+docker | host reader against real containers (overlay2 store) | check
+docker | switch Docker to the containerd image store | setup
+docker | host reader against real containers (containerd store) | check
 filesystems | actions/checkout@v5 | setup
 filesystems | install filesystem tools | setup
 filesystems | build | check
