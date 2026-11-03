@@ -1,7 +1,7 @@
 #define _GNU_SOURCE
 #include "receipt.h"
 
-#include "jsonr.h"
+#include "util/jsonr.h"
 
 #include "belay/error.h"
 #include "belay/json.h"

@@ -1,10 +1,13 @@
 /*
- *  A small JSON reader for the CLI: one line of diff.v1, one checkpoint's
- *  meta.json. Bounded (depth, size), no recursion past JSONR_DEPTH; values
- *  point into a copy the caller frees with jsonr_free.
+ *  A small JSON reader: one line of diff.v1, one checkpoint's meta.json, a
+ *  protect spec. Bounded (depth, size), no recursion past JSONR_DEPTH;
+ *  values point into a copy the caller frees with jsonr_free. Lenient
+ *  where its callers check for themselves: a string's UTF-8, a key given
+ *  twice, a number's exact form (`integer` says whether it had none of
+ *  `.`, `e`, `E`).
  */
-#ifndef BELAY_CLI_JSONR_H
-#define BELAY_CLI_JSONR_H
+#ifndef BELAY_UTIL_JSONR_H
+#define BELAY_UTIL_JSONR_H
 
 #include <stdbool.h>
 #include <stddef.h>
@@ -19,6 +22,7 @@ struct jval {
     bool b;
     double num;
     int64_t i;              /* J_NUM written as an integer */
+    bool integer;           /* J_NUM: written without '.', 'e' or 'E' */
     char *s;                /* J_STR: decoded, NUL-terminated; s_len bytes */
     size_t s_len;
     struct jval *kids;      /* J_ARR, J_OBJ: n of them */
