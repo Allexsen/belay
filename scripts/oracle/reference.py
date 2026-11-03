@@ -164,16 +164,13 @@ copy"):
      `git_reflog_lines_ignored` (decision 202)" (reflog_lines()). A reflog
      is never a side git cannot parse; each form the corpus writes was
      checked against git 2.43.0 (`git reflog show`) first;
-  G23 a reflog's findings come `git_reflog_appended`, then
-     `git_reflog_lines_ignored`, then each `git_reflog_move` -- the order
-     diff-v1's sentence names them in ("`git_reflog_appended` counts ...
-     -- and `git_reflog_lines_ignored` counts ..., and each of those ...
-     is a `git_reflog_move`"); the Kinds table lists it after
-     `git_reflog_rewritten`, and no rule orders a record's findings;
-  G24 `git_reflog_lines_ignored` is given only when the reflog gained a
-     line git skips: diff-v1 says "says nothing when it gained none" of
-     `git_reflog_appended` alone, but finding-kinds.md's row is "Lines the
-     reflog gained in this diff that git does not read as entries";
+  G23 and G24 are settled by diff-v1 (88454c8): "A reflog's record gives
+     `git_reflog_appended`, then its `git_reflog_move`s in file order, then
+     `git_reflog_lines_ignored`: the order of the kinds table" -- where
+     this file had put it before the moves -- and `git_reflog_lines_ignored`
+     "says nothing when there are none". And an operation over 1,024 bytes
+     is read: its `git_reflog_move` is `invalid_finding` (E9's class, the
+     prose's string bound);
   G25 an object id of either case is its lower-case spelling, in every
      value it gives (a ref's, HEAD's, a reflog entry's): "read as git
      reads it", and git reads it as the object it names, which git
@@ -1516,12 +1513,16 @@ def _check_claims():
               'without its newline is none: git does not read it as an entry; nor is a blank '
               'line, which git skips) -- and says nothing when it gained none (decision 183) '
               '-- and `git_reflog_lines_ignored` counts the lines after it that git skips as no '
-              'entry, blank ones included (decision 202: git skips them silently, and they are '
-              'evidence worth showing), and each of those '
+              'entry, blank ones included, and says nothing when there are none (decision 202: '
+              'git skips them silently, and they are evidence worth showing) -- and each of '
+              'those '
               'that is not a plain commit (operation `commit` or `commit (initial)`) or a '
               'fast-forward (its message contains `Fast-forward`) is a `git_reflog_move`, its '
               'operation being the message before its first `:`; otherwise, or when the reflog '
               'was removed (no copy needed), `git_reflog_rewritten`.',
+              # G23 (git_explain()).
+              "A reflog's record gives `git_reflog_appended`, then its `git_reflog_move`s in "
+              'file order, then `git_reflog_lines_ignored`: the order of the kinds table.',
               'git sees only the paths that changed, so an unchanged `packed-refs` is never '
               'read: a branch is created only by evidence that it was absent before, and a ref '
               'that appeared without that evidence is moved, with no `from`.',
@@ -2459,18 +2460,19 @@ def git_explain(what, p, b, a, outcome, state, trace):
             trace.append('git-reflog-appended')
             fs.append(git_finding('git_reflog_appended', collections.OrderedDict(
                 [('ref', ref), ('entries', len(g))]), trace))
-        # "-- and `git_reflog_lines_ignored` counts the lines after it that
-        # git skips as no entry, blank ones included (decision 202 ...), and
-        # each of those ... is a `git_reflog_move`": in that order, and only
-        # when it skipped any (ambiguities G23, G24).
-        if skipped:
-            fs.append(git_finding('git_reflog_lines_ignored', collections.OrderedDict(
-                [('ref', ref), ('lines', skipped)]), trace))
+        # "A reflog's record gives `git_reflog_appended`, then its
+        # `git_reflog_move`s in file order, then `git_reflog_lines_ignored`"
+        # (G23), the last only when it skipped any: "and says nothing when
+        # there are none" (G24). An operation over 1,024 bytes is read: its
+        # move is invalid_finding (git_finding()).
         for e in g:
             if not plain_or_fast_forward(e):
                 trace.append('git-reflog-move')
                 fs.append(git_finding('git_reflog_move', collections.OrderedDict(
                     [('ref', ref), ('from', e[0]), ('to', e[1]), ('operation', e[3])]), trace))
+        if skipped:
+            fs.append(git_finding('git_reflog_lines_ignored', collections.OrderedDict(
+                [('ref', ref), ('lines', skipped)]), trace))
         return fs
     # "A loose ref or a line of `packed-refs` (in ref order)": by the ref's
     # full name, bytewise.

@@ -1323,6 +1323,10 @@ GIT_INPUT_ITEMS = ['an unknown ref read from its copy: provisional',
                    'a loose ref git calls broken: a word glued to its id',
                    'a loose ref git calls broken: a leading space',
                    'a loose ref git calls broken: a short id',
+                   # diff-v1 (88454c8): the order of a reflog record's
+                   # findings; an operation of any length read.
+                   'a reflog record with moves and lines git skips: the kinds table\'s order',
+                   'a reflog entry whose operation is over 1,024 bytes: read, its move invalid',
                    # ... "A loose ref's or `HEAD`'s last line without its
                    # newline is read, as git reads it; a `packed-refs` that
                    # ends without a newline is one git refuses, so a side git
@@ -1377,6 +1381,14 @@ def git_coverage(records, traces, tags):
             if rec['outcome'] == 'modified' and not kinds:
                 tags.add('git events: a loose ref whose bytes changed but not its value as '
                          'git reads it: nothing')
+        if 'git-reflog-move' in tr and 'git_reflog_lines_ignored' in kinds and \
+                'git_reflog_move' in kinds:
+            tags.add('git events: a reflog record with moves and lines git skips: the kinds '
+                     'table\'s order')
+        if 'interp:git:reflog' in tr and 'git-reflog-appended' in tr and \
+                'git-invalid-finding' in tr and 'invalid_finding' in kinds:
+            tags.add('git events: a reflog entry whose operation is over 1,024 bytes: read, '
+                     'its move invalid')
         if 'git-ref-lenient-HEAD' in tr and 'git-ev:HEAD switched' in end:
             tags.add('git events: HEAD git reads in a form not its own: switched')
         for form, item in (('glued', 'a word glued to its id'), ('leading-space',
