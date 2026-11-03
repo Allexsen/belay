@@ -1298,9 +1298,14 @@ GIT_INPUT_ITEMS = ['an unknown ref read from its copy: provisional',
                    'packed-refs metadata_only, not read: no evidence of before',
                    'an unknown ref with no copy: a provisional content_unavailable event',
                    'tags and remote-tracking refs read: no event',
-                   # A reflog is read by its bytes: entries before those it
-                   # gained, not git's, are not parsed.
-                   'a reflog whose old entries are not read']
+                   # E12 (decision 144): "parsing a reflog is parsing only
+                   # the entries it gained in this diff -- ... -- never its
+                   # older entries": old entries not git's are not parsed.
+                   'a reflog whose old entries are not read',
+                   # ... "those after before's bytes when they are a prefix
+                   # of after's ending at a line's end, and none otherwise":
+                   # a prefix by its bytes ending inside a line gained none.
+                   'a reflog whose before ends inside a line of after: none gained']
 
 
 def git_coverage(records, traces, tags):
@@ -1319,6 +1324,10 @@ def git_coverage(records, traces, tags):
             tags.add('git events: an unknown packed-refs read from its copy: provisional')
         if 'git-reflog-old-unparsed' in tr and 'git-reflog-appended' in tr:
             tags.add('git events: a reflog whose old entries are not read')
+        if 'git-reflog-prefix-mid-line' in tr and 'git-reflog-rewritten' in tr and \
+                'git-ev:moved:a reflog that gained none' in end:
+            tags.add('git events: a reflog whose before ends inside a line of after: '
+                     'none gained')
         if 'interp:git:ref' not in tr and 'interp:git:reflog' not in tr:
             continue
         place = ref.git_place(p)

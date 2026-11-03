@@ -72,7 +72,18 @@ says "pip, dpkg and git emit one `could_not_interpret` event naming it
 branches, `packed-refs`, their reflogs), and a reflog removed needs no
 copy"):
   G2 `repo` is the path of the directory named `.git` (`.git` at the root);
-  G3 a reflog that is not a prefix of its after gained no entries;
+  G3, G13 and G14 are settled by E12 (decision 144), as this file had
+     read them: "parsing a reflog is parsing only the entries it gained in
+     this diff -- those after before's bytes when they are a prefix of
+     after's ending at a line's end, and none otherwise (diff-v1, git:
+     `git_reflog_rewritten`) -- never its older entries." G3: a reflog
+     that is not a prefix of its after gained no entries, so nothing of it
+     is parsed. G13: only the entries after the prefix are parsed
+     (gained()), so "a side git cannot parse" is, for a reflog, an after
+     whose new entries are not git's, and before's own entries, git's or
+     not, are never read. G14: a before that is a prefix of after's by its
+     bytes but ends inside a line is "otherwise" -- it gained none, and
+     neither it nor the bytes after it are parsed;
   G5, G11 and G12 are settled by E12 (decision 141): "A side git cannot
      parse counts as one it cannot read (and is a `could_not_interpret`
      event, E10). A branch removed whose value before cannot be told
@@ -97,13 +108,7 @@ copy"):
   G10 a loose ref there before and not read (or not parsed: decision 141)
      is not absent by its reflog's zeros: that it was there is "the fact
      the refs give" -- no value before, so `git_branch_moved` with no
-     `from`;
-  G13 a reflog is read by its bytes: "when before's bytes are a prefix of
-     after's ..., `git_reflog_appended` counts the entries after it ...;
-     otherwise ... `git_reflog_rewritten`" -- only the entries after the
-     prefix are parsed, so "a side git cannot parse" is, for a reflog, an
-     after whose new entries are not git's; before's own entries, and a
-     reflog that is not a prefix, are never parsed (gained()).
+     `from`.
 
 Deliberately naive: both manifests in memory as dictionaries, the union of
 their paths sorted, ancestors found by walking a path's prefixes.
@@ -1173,7 +1178,7 @@ def load_event_rules():
         'E4': ['By interpreter, in the order text, pip, dpkg, git',
                'git by repository, then `HEAD` before every branch, then branch, then kind '
                '(decision 126)'],
-        # E12 (decisions 126, 132, 137, 141), each sentence git_explain() and
+        # E12 (decisions 126, 132, 137, 141, 144), each sentence git_explain() and
         # git_end() rely on.
         'E12': ['git\'s end hook derives repository-level events from the paths of this diff '
                 'it explained -- loose refs, `packed-refs`, `HEAD`, reflogs -- per repository '
@@ -1213,9 +1218,15 @@ def load_event_rules():
                 'on a side gives no value there -- before, the reflog\'s evidence may still give '
                 'one, and without one the event is `git_branch_moved` with no `from` (a branch '
                 'only in `packed-refs` too); after, the branch derives no event.',
-                # Decision 141: G5 (per side, read anew), G11 and G12 stated.
+                # Decision 141: G5 (per side, read anew), G11 and G12 stated;
+                # decision 144: G3, G13 and G14 stated -- a reflog parsed by
+                # the entries it gained, none when not a prefix ending at a
+                # line's end (gained()).
                 'A side git cannot parse counts as one it cannot read (and is a '
-                '`could_not_interpret` event, E10).',
+                '`could_not_interpret` event, E10); parsing a reflog is parsing only the '
+                'entries it gained in this diff -- those after before\'s bytes when they are a '
+                'prefix of after\'s ending at a line\'s end, and none otherwise (diff-v1, git: '
+                '`git_reflog_rewritten`) -- never its older entries.',
                 'A branch removed whose value before cannot be told derives no event '
                 '(`git_branch_deleted` needs `was`), and `HEAD` that cannot be read on a side '
                 'derives none.',
@@ -1971,7 +1982,9 @@ def pip_end(state, trace):
 # value, E12), and pip, dpkg and git emit one `could_not_interpret` event
 # naming it (E10)"; and E12 (decision 141): "A side git cannot parse counts
 # as one it cannot read (and is a `could_not_interpret` event, E10)"
-# (git_explain()). The
+# (git_explain()) -- for a reflog (decision 144), "parsing a reflog is
+# parsing only the entries it gained in this diff -- ... -- never its older
+# entries" (gained()). The
 # corpus writes only content git writes, and refs that are no ref at all
 # (git's own parser may accept more: the documents do not define the
 # formats, so the corpus stays within what git writes).
@@ -2043,11 +2056,14 @@ def parse_git(what, data):
 def gained(before, after):
     """The entries a reflog gained: "when before's bytes are a prefix of
     after's ending at a line's end (an absent before is empty), ... the
-    entries after it"; else False (git_reflog_rewritten: it gained none --
-    ambiguity G3). Only those entries are parsed -- None when they cannot
-    be: "otherwise, ..., `git_reflog_rewritten`" decides by the bytes, and
-    no rule reads before's own entries, so a reflog side git cannot parse is
-    only ever an after whose new entries are not git's (ambiguity G13)."""
+    entries after it"; else False (git_reflog_rewritten). Only those
+    entries are parsed -- None when they cannot be: E12 (decision 144; G3,
+    G13 and G14), "parsing a reflog is parsing only the entries it gained
+    in this diff -- those after before's bytes when they are a prefix of
+    after's ending at a line's end, and none otherwise (diff-v1, git:
+    `git_reflog_rewritten`) -- never its older entries", so a reflog side
+    git cannot parse is only ever an after whose new entries are not git's,
+    and a prefix ending inside a line gained none."""
     if after.startswith(before) and (before == b'' or before.endswith(b'\n')):
         return parse_git('reflog', after[len(before):])
     return False
@@ -2173,8 +2189,12 @@ def git_explain(what, p, b, a, outcome, state, trace):
     trace.append('git-read' + ('-unknown' if unknown else ''))
     if what == 'reflog':
         # A reflog is read by its bytes first: only the entries after
-        # before's are parsed (gained()), so only its after can fail.
+        # before's are parsed (gained()), so only its after can fail (E12,
+        # decision 144: "never its older entries"). Before's are
+        # parsed below for the coverage gate's trace alone.
         g = gained(raw.get('before', b''), raw['after'])
+        if g is False and raw['after'].startswith(raw.get('before', b'')):
+            trace.append('git-reflog-prefix-mid-line')  # G14: none gained, none parsed
         parsed = {s: raw[s] for s in regs}
         if g is None:
             parsed['after'] = None
