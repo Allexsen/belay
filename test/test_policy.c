@@ -13,6 +13,7 @@
 #include <dirent.h>
 #include <stdbool.h>
 #include <fcntl.h>
+#include <limits.h>
 #include <stdarg.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -132,8 +133,10 @@ TEST(header_records_and_trailer_are_the_pins) {
     sh("rm keep && printf 'def test_a():\\n    pass\\n' > tests/test_a.py");
     ASSERT_EQ_INT(EXIT_CHANGES, verify_(true));                 /* --exit-code: a violation */
     /* P-H1 to P-H8, in order */
-    char want[1024];
-    snprintf(want, sizeof want, "{\"belay_policy\":1,\"scopes\":[\"%s\"],\"baseline_sha256\":\"%s\",\"protect_sha256\":\"", g_scope, g_sha);
+    char want[PATH_MAX + 1024];
+    char real[PATH_MAX];
+    REQUIRE(realpath(g_scope, real) != NULL);              /* macOS: /tmp is /private/tmp */
+    snprintf(want, sizeof want, "{\"belay_policy\":1,\"scopes\":[\"%s\"],\"baseline_sha256\":\"%s\",\"protect_sha256\":\"", real, g_sha);
     ASSERT_EQ_INT(0, strncmp(g_out, want, strlen(want)));
     ASSERT_TRUE(strstr(g_out, "\",\"frozen_packages\":false,\"before_excluded\":[],\"after_excluded\":[],\"not_emitted\":"
                               "[{\"flag\":\"writes_outside_workdir\",\"why\":\"needs a scope wider than the workdir\"}],"
@@ -176,7 +179,7 @@ TEST(protected_paths_written_deleted_created) {
        "printf 'x\\n' > tests/sub/same.py");
     REQUIRE_MSG(export_(true) == EXIT_DONE, "%s", g_err);
     sh("printf 'A\\n' > tests/a.py && chmod 600 tests/b.py && rm tests/c.py && printf 'n\\n' > tests/new.py && "
-       "touch -d '2001-01-01' tests/d.py && printf 'x\\n' > tests/sub/same.py.tmp && mv tests/sub/same.py.tmp tests/sub/same.py && "
+       "touch -t 200101010000 tests/d.py && printf 'x\\n' > tests/sub/same.py.tmp && mv tests/sub/same.py.tmp tests/sub/same.py && "
        "printf 'W\\n' > .github/workflows/ci.yml && mkdir tests/.cache && printf 'z\\n' > tests/.cache/z");
     ASSERT_EQ_INT(EXIT_CHANGES, verify_(true));
     HAS("protected_path_written", "tests/a.py", ",\"rule\":\"tests/**\",\"outcome\":\"modified\",");
@@ -287,7 +290,7 @@ TEST(packages_frozen_or_not) {
         /* tool tampered with; tool.conf edited; other upgraded (its file replaced by the installer) */
         sh("printf 'evil\\n' > usr/bin/tool && printf 'edited\\n' > etc/tool.conf && printf 'three\\n' > usr/bin/other && "
            "o=$(python3 -c \"import hashlib;print(hashlib.md5(b'three\\\\n').hexdigest())\") && "
-           "sed -i 's/^Version: 1.0$/Version: 2.0/' var/lib/dpkg/status && "
+           "python3 -c \"import re;p='var/lib/dpkg/status';s=open(p).read();open(p,'w').write(s.replace('Version: 1.0\\\\n','Version: 2.0\\\\n'))\" && "
            "printf '%%s  usr/bin/other\\n' $o > var/lib/dpkg/info/other:amd64.md5sums");
         ASSERT_EQ_INT(frozen ? EXIT_CHANGES : EXIT_DONE, verify_(frozen));
         HAS("tampered_installed_package", "usr/bin/tool", frozen ? ",\"level\":\"violation\",\"db\":\"dpkg\",\"package\":\"tool:all\","

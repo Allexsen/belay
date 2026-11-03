@@ -186,7 +186,8 @@ TEST(a_bundle_rewritten_by_the_policy_is_never_read) {
     packages();
     REQUIRE_MSG(export_() == EXIT_DONE, "%s", g_err);
     char cmd[2048];
-    snprintf(cmd, sizeof cmd, "sed -i 's/\"at_reset\":\"match\"/\"at_reset\":\"mismatch\"/' '%s'", g_bundle);
+    snprintf(cmd, sizeof cmd, "python3 -c \"p='%s';s=open(p,'rb').read();open(p,'wb').write(s.replace(b'\\\"at_reset\\\":\\\"match\\\"',"
+             "b'\\\"at_reset\\\":\\\"mismatch\\\"'))\"", g_bundle);
     if (system(cmd) != 0) { /* the assertion says */ }
     ASSERT_EQ_INT(EXIT_REFUSED, verify_());
     ASSERT_EQ_INT(0, (int)strlen(g_out));
