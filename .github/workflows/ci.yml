@@ -159,6 +159,11 @@ jobs:
         run: make CFLAGS='-O2 -static' all
       - name: host reader against real containers (overlay2 store)
         run: sudo scripts/host-reader-e2e.sh bin/belay
+      - name: measured run on belay's corpus, as root (every class, setuid and immutable included)
+        run: |
+          python3 -I python/build_keys.py bin/belay
+          sudo python3 -I -B bench/corpus/corpus.py --per-class 20 --clean 200 --out corpus-root.json
+          sudo python3 -I -B bench/corpus/corpus.py --per-class 20 --clean 200 --no-spec --out corpus-root-nospec.json
       - name: switch Docker to the containerd image store
         run: |
           echo '{"features":{"containerd-snapshotter":true}}' | sudo tee /etc/docker/daemon.json
