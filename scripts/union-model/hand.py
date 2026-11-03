@@ -99,10 +99,32 @@ CASES = [
      [{"v": "d"}, {"k": "f"}],
      "/", ["/v", "/v/none/deeper"], [(".", "dir", 0, "/"), ("k", "reg", 1, "/k"),
                                      ("v", "dir", 0, "/v")]),
+    ("a mount point's entry: stat fields and a link's target only, no xattrs or protattr, "
+     "H-M5 U25",
+     [{"v": {"t": "d", "user.k": "1", "protattr": "i"}, "v/in": "f",
+       "h": {"t": "f", "user.k": "2", "protattr": "a"}, "s": "l:v",
+       "n": {"t": "f", "user.k": "3", "protattr": "i"}}, {"k": "f"}],
+     "/", ["/v", "/h", "/s"],
+     [(".", "dir", 0, "/"), ("h", "reg", 0, "/h"), ("k", "reg", 1, "/k"), ("n", "reg", 0, "/n"),
+      ("s", "lnk", 0, "/s"), ("v", "dir", 0, "/v")]),
     ("protattr: the upper layer's honoured, a lower one's not, U15",
      [{"u": {"t": "f", "protattr": "ia"}}, {"l": {"t": "f", "protattr": "i"}}],
      "/", [], [(".", "dir", 0, "/"), ("l", "reg", 1, "/l"), ("u", "reg", 0, "/u")]),
 ]
+
+
+# Fields beyond (path, type, layer, layer_path) that a case pins, by the start of its title.
+EXTRA = {
+    "protattr": (lambda r: r["protattr"], {".": "", "l": "", "u": "ia"}),
+    "a mount point's entry": (
+        lambda r: (r["mount"], r["xattrs"], r["protattr"], "sha256" in r, r.get("target")),
+        {".": (False, {}, "", False, None),
+         "h": (True, {}, "", False, None),
+         "k": (False, {}, "", True, None),
+         "n": (False, {"user.k": "33"}, "i", True, None),
+         "s": (True, {}, "", False, "v"),
+         "v": (True, {}, "", False, None)}),
+}
 
 
 def build(root, layers):
@@ -125,7 +147,8 @@ def build(root, layers):
             elif t.startswith("l:"):
                 os.symlink(t[2:], f)
             for k, val in x.items():
-                os.setxattr(f, P + k, val.encode(), follow_symlinks=False)
+                name = k if k.startswith("user.") else P + k     # a file's own, or the overlay's
+                os.setxattr(f, name, val.encode(), follow_symlinks=False)
     return paths
 
 
@@ -173,10 +196,11 @@ def main():
                    for r in recs]
             ok = got == want
             shown = got
-            if ok and n == len(CASES) - 1:
-                pa = {r["path"]: r["protattr"] for r in recs}
-                ok = pa == {".": "", "l": "", "u": "ia"}
-                shown = pa
+            extra = EXTRA.get(title.split(",")[0].split(":")[0])
+            if ok and extra:
+                seen = {r["path"]: extra[0](r) for r in recs}
+                ok = seen == extra[1]
+                shown = seen
         kern = ""
         if True:
             # The kernel too: in full where no redirect is followed, and around those it is.

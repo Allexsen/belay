@@ -435,10 +435,12 @@ class Model:
             r["size"] = st.st_size
         if r["type"] == "lnk":
             put_bytes(r, "target", os.readlink(full))
-        r["xattrs"] = {k: v.hex() for k, v in sorted(top.xattrs.items())
-                       if not k.startswith(u.prefix)}
+        # A mount point's entry is its stat fields (and a link's target) only: no xattrs, no
+        # protattr, no content (H-M5, decision 212; U25).
+        r["xattrs"] = {} if is_mount else {k: v.hex() for k, v in sorted(top.xattrs.items())
+                                           if not k.startswith(u.prefix)}
         # H-U8 as the kernel honours it: the upper layer's protattr only (U15).
-        pa = u.ovl(top, "protattr") if top.layer == 0 else None
+        pa = u.ovl(top, "protattr") if top.layer == 0 and not is_mount else None
         r["protattr"] = pa.decode("ascii") if pa is not None else ""
         r["mount"] = is_mount
         if content and r["type"] == "reg" and not is_mount:
