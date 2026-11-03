@@ -236,6 +236,35 @@ TEST(a_protected_path_that_cannot_be_verified_is_a_violation) {
     HAS("protected_path_unverifiable", "grow", ",\"reasons\":[\"unverified\"],");
 }
 
+/* verify captures at the bundle's hash limit: a protected file past the
+ * default 64 MiB, within 4 GiB, unchanged, is verified (PS-C3). */
+TEST(verify_hashes_at_the_bundles_limit) {
+    fresh("{\"belay_protect\":1,\"protect\":[{\"path\":\"mid\",\"mode\":[\"no_write\"]}]}");
+    char mid[600];
+    snprintf(mid, sizeof mid, "%s/mid", g_scope);
+    const int fd = open(mid, O_WRONLY | O_CREAT, 0644);
+    REQUIRE(fd >= 0 && ftruncate(fd, 65 << 20) == 0);
+    close(fd);
+    REQUIRE_MSG(export_(true) == EXIT_DONE, "%s", g_err);
+    ASSERT_EQ_INT(EXIT_DONE, verify_(true));
+    ASSERT_EQ_INT(0, count("protected_path_unverifiable"));
+}
+
+/* The bundle's own excludes are verify's: the same paths left out on both
+ * sides, so nothing below them is half-seen (unknown, not_captured). */
+TEST(verify_leaves_out_what_the_bundle_left_out) {
+    fresh(NULL);
+    sh("mkdir -p vendor/tests && printf 'x\\n' > vendor/tests/test_v.py");
+    ASSERT_EQ_INT(EXIT_DONE, belay("exclude", "--scope", g_scope, "--add", "vendor", NULL));
+    REQUIRE_MSG(export_(false) == EXIT_DONE, "%s", g_err);
+    sh("printf 'y\\n' > vendor/tests/test_v.py");
+    ASSERT_EQ_INT(EXIT_DONE, verify_(false));
+    ASSERT_TRUE(strstr(g_out, "\"before_excluded\":[{\"path\":\"vendor\",\"reason\":\"user\"") != NULL);
+    ASSERT_TRUE(strstr(g_out, "\"after_excluded\":[{\"path\":\"vendor\",\"reason\":\"user\"") != NULL);
+    ASSERT_TRUE(strstr(g_out, ",\"unknown\":0,") != NULL);
+    ASSERT_EQ_INT(0, count("touches_tests"));
+}
+
 /* ---- packages (decision 146) ---- */
 
 static void dpkg_fixture(void) {
@@ -447,6 +476,8 @@ int main(void) {
     RUN(protected_paths_written_deleted_created);
     RUN(expected_sha256_holds_or_says_why_not);
     RUN(a_protected_path_that_cannot_be_verified_is_a_violation);
+    RUN(verify_hashes_at_the_bundles_limit);
+    RUN(verify_leaves_out_what_the_bundle_left_out);
     RUN(packages_frozen_or_not);
     RUN(test_files_touched_and_weakened);
     RUN(ci_pytest_config_and_conftest);
