@@ -73,7 +73,8 @@ struct fsops {
     /* Whether, at this instant, some process has the regular file open for
      * writing or mapped shared-writable: 1 yes, 0 no, -1 cannot tell (no
      * facility on this platform or filesystem, or not permitted). Must not
-     * leave anything held on the file. Gates the content store (capture.c). */
+     * leave anything held on the file. Asked around every read for hashing:
+     * it marks the entry and gates the content store (capture.c). */
     int (*writer_present)(void *ctx, int fd);
     /* Bracket every writer_present call of one capture: begin prepares what
      * the probe needs, end puts it back (Linux: SIGIO, see fsops_linux.c).

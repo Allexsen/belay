@@ -1490,6 +1490,15 @@ TEST(v4_is_read_strictly) {
         belay_err_clear();
     }
     ASSERT_EQ_INT(0, read_raw(H4 ROOT_E MARKED T4(1, 1)));              /* as the writer writes it */
+    struct belay_manifest_reader *r = NULL;
+    REQUIRE(belay_manifest_open(g_path, &r) == 0);
+    struct belay_entry e;
+    while (belay_manifest_next(r, &e) == 1) { }
+    const struct belay_manifest_stats *t = belay_manifest_trailer(r);
+    REQUIRE(t != NULL);
+    ASSERT_EQ_INT(1, (int)t->writer_open);
+    ASSERT_EQ_INT(1, (int)t->unguarded);
+    belay_manifest_close(r);
     ASSERT_EQ_INT(0, read_raw(H3 ROOT_E REG ",\"sha256\":\"" HEX "\"}\n" T2N "}\n"));    /* v3 stays readable */
 }
 

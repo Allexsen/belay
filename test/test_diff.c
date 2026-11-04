@@ -1288,6 +1288,37 @@ TEST(a_marked_entry_is_unknown_and_its_hash_never_compared) {
     ASSERT_EQ_INT((int)DRBIT(DR_WRITER_OPEN), (int)v.reasons);
     REQUIRE(classify_one(&b, false, ANC_NONE, &v) == 0);    /* nor removed */
     ASSERT_EQ_INT(D_UNKNOWN, (int)v.outcome);
+    ASSERT_EQ_INT(DR_COUNT - 1, DR_WRITER_OPEN);            /* last among the reasons (V4-D4) */
+}
+
+/* V4-D2 where the values are not `changed`'s: across a type change a side's
+ * size and hash are carried (V6), a marked side's hash never. V4-D5: each
+ * side's counts, told apart. */
+#define HDR4(scope) "{\"belay_manifest\":4,\"created_ns\":1,\"scopes\":[\"" scope "\"],\"hash\":\"sha256\",\"hash_max_bytes\":1000," \
+                    "\"store_max_bytes\":0,\"excluded\":[],\"walk_start_ns\":0,\"source\":null}\n"
+#define ROOT4 "{\"path\":\".\",\"type\":\"dir\",\"mode\":16877,\"uid\":1,\"gid\":1,\"size\":1,\"mtime_ns\":1,\"ctime_ns\":1,\"ino\":1,\"dev\":1,\"nlink\":2}\n"
+#define END4(n, w, u) "{\"belay_manifest_end\":" #n ",\"vanished\":0,\"unreadable\":0,\"unstable\":0,\"mounts\":0,\"raced\":0," \
+                      "\"trusted\":0,\"reference\":\"none\",\"read_all\":\"check\",\"writer_open\":" #w ",\"unguarded\":" #u "}\n"
+static void put_file(const char *name, const char *text) {
+    char p[400];
+    snprintf(p, sizeof p, "%s/%s", g_dir, name);
+    FILE *f = fopen(p, "wb");
+    fputs(text, f);
+    fclose(f);
+}
+TEST(a_marked_hash_is_in_no_value_and_each_side_has_its_counts) {
+    put_file("before", HDR4("/s") ROOT4
+        "{\"path\":\"f\",\"type\":\"reg\",\"mode\":33188,\"uid\":1,\"gid\":1,\"size\":3,\"mtime_ns\":1,\"ctime_ns\":1,\"ino\":2,\"dev\":1,\"nlink\":1,"
+        "\"sha256\":\"" HA "\",\"writer_open\":true}\n" END4(2, 1, 1));
+    put_file("after", HDR4("/s") ROOT4
+        "{\"path\":\"f\",\"type\":\"dir\",\"mode\":16877,\"uid\":1,\"gid\":1,\"size\":1,\"mtime_ns\":1,\"ctime_ns\":1,\"ino\":2,\"dev\":1,\"nlink\":2}\n" END4(2, 0, 2));
+    REQUIRE(run() == 0);
+    ASSERT_TRUE(has("f", "\"outcome\":\"unknown\""));
+    ASSERT_TRUE(has("f", "\"unknown\":[\"writer_open\"]"));
+    ASSERT_TRUE(has("f", "\"size\":3"));              /* the rest of V6 stands */
+    ASSERT_TRUE(!has("f", "sha256"));
+    ASSERT_TRUE(strstr(g_text, "\"before_writer_open\":1,\"after_writer_open\":0,\"before_unguarded\":1,\"after_unguarded\":2}") != NULL);
+    ASSERT_TRUE(strstr(g_text, "\"provisional\":false") != NULL);
 }
 
 TEST(no_flag_combination_on_either_side_is_unchanged) {
@@ -1537,6 +1568,7 @@ int main(void) {
     RUN(absence_below_a_raced_non_directory_is_unknown);
     RUN(no_flag_combination_on_either_side_is_unchanged);
     RUN(a_marked_entry_is_unknown_and_its_hash_never_compared);
+    RUN(a_marked_hash_is_in_no_value_and_each_side_has_its_counts);
     RUN(values_carry_each_changed_field_on_each_side);
     RUN(values_keep_the_manifests_alternate_spellings);
     RUN(a_type_change_carries_each_sides_content_fields);

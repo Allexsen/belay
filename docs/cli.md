@@ -218,7 +218,10 @@ user does not own without `CAP_LEASE`. On overlayfs a mapping whose descriptor w
 seen. Those files are hashed as read, unmarked, and each manifest counts them as `unguarded`; a
 receipt says so on one line (`hashed with no check for a concurrent writer: 0 before, 412 after`).
 A writer that opens the file, writes and closes it entirely between the two questions, inside one
-timestamp tick, is seen by neither the probe nor the stat checks. The format is pinned in
+timestamp tick, is seen by neither the probe nor the stat checks. Nor is a writer on another
+machine, on a filesystem that grants leases locally. Asking takes a lease and releases it at once:
+a writer opening the file in that instant waits for microseconds, and one opening it with
+`O_NONBLOCK` gets `EAGAIN` and must retry. The format is pinned in
 [manifest-v4.md](../test/expect/manifest-v4.md). `bench/spike_torn.c` reproduces torn reads, with
 `pwrite` and through a shared mapping.
 
