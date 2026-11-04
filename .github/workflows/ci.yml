@@ -29,6 +29,8 @@ jobs:
       BELAY_SKIP_PROFILE: linux-x86_64
     steps:
       - uses: actions/checkout@v5
+        with:
+          fetch-depth: 0     # tags too: the binary reports git describe (scripts/version.sh)
       - run: uname -m
       - name: platform summary
         run: make platform
@@ -56,6 +58,8 @@ jobs:
       BELAY_SKIP_PROFILE: linux-arm64
     steps:
       - uses: actions/checkout@v5
+        with:
+          fetch-depth: 0     # tags too: the binary reports git describe (scripts/version.sh)
       - run: uname -m
       - name: platform summary
         run: make platform
@@ -73,6 +77,8 @@ jobs:
       BELAY_SKIP_PROFILE: macos-portable
     steps:
       - uses: actions/checkout@v5
+        with:
+          fetch-depth: 0     # tags too: the binary reports git describe (scripts/version.sh)
       - run: uname -m
       - name: platform summary
         run: make platform
@@ -91,6 +97,8 @@ jobs:
     # §0.4c: ASan + UBSan gate every PR.
     steps:
       - uses: actions/checkout@v5
+        with:
+          fetch-depth: 0     # tags too: the binary reports git describe (scripts/version.sh)
       - run: uname -m
       - name: platform summary
         run: make platform
@@ -143,6 +151,8 @@ jobs:
     # skips are the namespace tests (test/accounting/skips/docker.txt).
     steps:
       - uses: actions/checkout@v5
+        with:
+          fetch-depth: 0     # tags too: the binary reports git describe (scripts/version.sh)
       - name: build + test + /usr timing inside ubuntu:24.04
         run: |
           docker run --rm -v "$PWD:/src:ro" ubuntu:24.04 bash -euo pipefail -c '
@@ -188,6 +198,8 @@ jobs:
       BELAY_SKIP_PROFILE: filesystems
     steps:
       - uses: actions/checkout@v5
+        with:
+          fetch-depth: 0     # tags too: the binary reports git describe (scripts/version.sh)
       - name: install filesystem tools
         run: |
           sudo apt-get update -qq

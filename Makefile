@@ -18,7 +18,7 @@ CFLAGS	?= -O2
 # failure, not a warning nobody reads (audit 2026-10, R1). Every rule uses
 # WARN -- release, sanitizer, fuzz and tool builds alike.
 WARN	= -Wall -Wextra -std=c11 -Werror=switch -Werror=switch-enum -Werror=implicit-fallthrough
-INC	= -Iinclude -Isrc
+INC	= -Iinclude -Isrc -I$(BUILD)/gen
 BUILD	?= build
 BIN	= bin/belay
 
@@ -64,7 +64,7 @@ SAN_FLAGS	= -fsanitize=address,undefined -fno-omit-frame-pointer -g -O1
 SAN_BUILD	= $(BUILD)/san
 SAN_TEST_BIN	= $(TEST_SRC:test/%.c=$(SAN_BUILD)/test/%)
 
-.PHONY: dogfood-test e2e all clean test check check-san fuzz bench platform fs-scenarios gen gen-check measure oracle reference lib lint ci-check
+.PHONY: version-test dogfood-test e2e all clean test check check-san fuzz bench platform fs-scenarios gen gen-check measure oracle reference lib lint ci-check
 
 all: $(BIN) $(SESSION_OBJ)
 
@@ -74,6 +74,21 @@ platform:
 	@echo "core     : $(words $(CORE_SRC)) file(s)"
 	@echo "session  : $(words $(SESSION_SRC)) file(s) $(if $(filter Linux,$(UNAME_S)),(built),(skipped: not Linux))"
 	@echo "tests    : $(words $(TEST_SRC)) file(s)"
+
+# The version this build reports (scripts/version.sh): the header's as it is
+# for a release -- a clean tree at the tag v<header's> -- and with git's
+# description otherwise, so a development build is never taken for a release.
+# Remade every run, replaced only when it differs: what includes it is
+# rebuilt only when the version changes.
+VERSION_H	= $(BUILD)/gen/belay_build_version.h
+$(VERSION_H): FORCE
+	@mkdir -p $(dir $@)
+	@v=$$(sh scripts/version.sh "$$(sed -n 's/^#define BELAY_VERSION_STRING "\(.*\)"$$/\1/p' include/belay/belay.h)") && \
+	  printf '#define BELAY_BUILD_VERSION "%s"\n' "$$v" > $@.new && \
+	  { cmp -s $@.new $@ || mv -f $@.new $@; }
+$(BUILD)/cli/cli.o $(BUILD)/cli/verify.o $(SAN_BUILD)/cli/cli.o $(SAN_BUILD)/cli/verify.o: $(VERSION_H)
+.PHONY: FORCE
+FORCE:
 
 $(BIN): $(OBJ) | bin
 	$(CC) $(CFLAGS) -o $@ $(OBJ)
@@ -140,7 +155,12 @@ lint:
 ci-check:
 	@python3 scripts/check-ci.py
 
-check: all lint ci-check gen-check measure test e2e
+check: all lint ci-check gen-check measure test e2e version-test
+
+# The version a build reports (scripts/version.sh), against real repositories,
+# and its PEP 440 spelling for pybelay (PY-D2).
+version-test:
+	@sh scripts/version-test.sh
 
 # M1's done criterion, end to end through the real binary, unprivileged
 # (scripts/e2e.sh). Part of `check`, so every job running it runs this:

@@ -10,6 +10,8 @@
 #include "belay/error.h"
 #include "belay/json.h"
 #include "belay/manifest.h"
+#include "belay_build_version.h"
+#include "schema/diff_schema.h"
 
 #include <errno.h>
 #include <stdbool.h>
@@ -569,7 +571,9 @@ static int run(int argc, char **argv, FILE *out, FILE *err) {
     if (argc < 2) return usage(err, "no command");
     const char *cmd = argv[1];
     if (!strcmp(cmd, "--version") || !strcmp(cmd, "version")) {
-        fprintf(out, "belay %s (manifest v2, diff.v1)\n", BELAY_VERSION_STRING);
+        /* what this build is and writes: its version (scripts/version.sh), the
+         * manifest version it writes, diff.v1 */
+        fprintf(out, "belay %s (manifest v%d, diff.v%d)\n", BELAY_BUILD_VERSION, BELAY_MANIFEST_VERSION, DIFF_VERSION);
         return EXIT_DONE;
     }
     if (!strcmp(cmd, "help") || !strcmp(cmd, "--help") || !strcmp(cmd, "-h")) {
