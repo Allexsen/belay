@@ -366,9 +366,9 @@ t0=$(date +%s); slow end; t1=$(date +%s)
 sleep 1; hook pre t89 Bash "while it is made"; hook post t89 Bash      # its maker alive: not lost
 done_receipt s5 && [ -f "$T/state/dogfood/s5.receipt.txt" ] || fail "the detached session receipt never arrived"
 sh -c 'exit 0' & dead=$!; wait $dead
-printf '%s %s session\n' "$dead" "$(date +%s%N)" > "$T/state/dogfood/ghost.receipt-running.session"
-printf '%s %s turn\n' "$dead" "$(date +%s%N)" > "$T/state/dogfood/ghost2.receipt-running.turn"
-printf 'starting %s session\n' "$(date +%s%N)" > "$T/state/dogfood/young.receipt-running.session"
+printf '%s %s session\n' "$dead" "$(date +%s)000000000" > "$T/state/dogfood/ghost.receipt-running.session"
+printf '%s %s turn\n' "$dead" "$(date +%s)000000000" > "$T/state/dogfood/ghost2.receipt-running.turn"
+printf 'starting %s session\n' "$(date +%s)000000000" > "$T/state/dogfood/young.receipt-running.session"
 printf 'starting %s session\n' "$(( $(date +%s) - 120 ))000000000" > "$T/state/dogfood/old.receipt-running.session"
 hook pre t91 Bash "after"
 out=$(hook stop)
@@ -452,4 +452,39 @@ grep -A2 '^Bash: before$' "$R9" | grep -q '  A before-gap.txt' && grep -A2 '^Bas
 ! grep -q 'background writers\|^between tool calls' "$R9" || fail "an inactive gap read as background writing: $(cat "$R9")"
 printf '%s' "$out" | jq -e '.systemMessage | test("^belay: hooks failing: [a-z]+: checksum mismatch \\(hooks inactive\\)")' >/dev/null \
     || fail "the first good Stop did not say the hooks had been inactive: $out"
-echo "dogfood selftest: sequential, concurrent, background, cancelled, quiet turn said, other project, symlinked project, git folded, labels cut, background commands, directories folded, paths counted, failures said, inactive gaps unattributed, summary, touched folded, identical replacements folded, a watcher noted, long commands, git events, compiled Python, lost receipts, install: ok"
+# A BSD date (decision 131): macOS and the BSDs print %N as a literal N and
+# have no -d. The hooks' times stay integer nanoseconds, the turn is seen
+# and attributed as anywhere, and a lost receipt's time is still said.
+BD=$T/bsd-date; mkdir -p "$BD" "$T/bsd-state" && chmod 700 "$T/bsd-state"
+cat > "$BD/date" <<EOF
+#!/bin/sh
+for a; do case \$a in -d*|--date*) echo "date: illegal option -- d" >&2; exit 1 ;; esac; done
+for a; do shift; case \$a in +*%N*) a=\$(printf '%s' "\$a" | sed 's/%N/N/g') ;; esac; set -- "\$@" "\$a"; done
+exec '$(command -v date)' "\$@"
+EOF
+chmod +x "$BD/date"
+case $(PATH="$BD:$PATH" date +%s%N) in *N) ;; *) fail "the fake BSD date has %N" ;; esac
+! PATH="$BD:$PATH" date -u -d @0 +%H >/dev/null 2>&1 || fail "the fake BSD date takes -d"
+bsd() {  # bsd EVENT [tool_use_id summary]: a hook of session b1, under the BSD date
+    jq -cn --arg t "${2:-}" --arg s "${3:-}" '{session_id:"b1", tool_use_id:$t, tool_name:"Bash", tool_input:{command:$s}}' \
+        | PATH="$BD:$PATH" BELAY_STATE_DIR="$T/bsd-state" "$HOOK" "$1"
+}
+BL=$T/bsd-state/dogfood/b1.jsonl
+bsd start || :
+bsd pre t100 "write z" || :; printf 'z\n' > "$S/src/z.c"; bsd post t100 || :
+out=$(bsd stop) || :
+! grep -q N "$BL" || fail "a BSD date's literal N in the log: $(cat "$BL")"
+jq -se 'length == 4 and all(.[]; (.t0 | type == "number" and . == floor and . > 1e18) and (.t1 | type == "number" and . == floor) and .t1 >= .t0)' "$BL" >/dev/null \
+    || fail "the log's times under a BSD date are not integer nanoseconds: $(cat "$BL")"
+printf '%s' "$out" | jq -e '.systemMessage | test("^belay: 1 path changed this turn")' >/dev/null \
+    || fail "under a BSD date, the Stop line does not report the change: $out"
+RB=$(ls -t "$T/bsd-state/dogfood"/b1.turn-*.txt 2>/dev/null | head -1)
+[ -n "$RB" ] && grep -A2 '^Bash: write z$' "$RB" | grep -q '  A src/z\.c' \
+    || fail "under a BSD date, the change is not under its call: $(cat "$RB" 2>/dev/null)"
+sh -c 'exit 0' & dead=$!; wait $dead
+printf '%s 1793712345123456789 turn\n' "$dead" > "$T/bsd-state/dogfood/bghost.receipt-running.turn"
+out=$(bsd stop) || :
+printf '%s' "$out" | jq -e '.systemMessage | test("receipt of session bghost was lost: begun 13:25:45 UTC")' >/dev/null \
+    || fail "under a BSD date, a lost receipt's time is not said: $out"
+
+echo "dogfood selftest: sequential, concurrent, background, cancelled, quiet turn said, other project, symlinked project, git folded, labels cut, background commands, directories folded, paths counted, failures said, inactive gaps unattributed, summary, touched folded, identical replacements folded, a watcher noted, long commands, git events, compiled Python, lost receipts, install, a BSD date: ok"

@@ -23,9 +23,10 @@
 # checksum that no longer matches is said by the settings command itself:
 # install.sh.)
 #
-# Linux only, for now (decision 131): times come from `date +%s%N`, which
-# BSD and macOS `date` do not have (it prints a literal N), and a background
-# command's end is seen through /proc. Environment:
+# Times are integer nanoseconds since the epoch on every platform (decision
+# 131): `date`'s nanoseconds where it has them, python3's clock where it
+# does not (BSD and macOS `date` print a literal N for %N). A background
+# command's end is seen through /proc: Linux only, for now. Environment:
 #   BELAY                the binary (default ~/.local/bin/belay)
 #   BELAY_DOGFOOD_SCOPE  the repository to watch; other projects are ignored
 #   BELAY_STATE_DIR      belay's state directory (default as belay's)
@@ -35,7 +36,21 @@
 #                        (default ${TMPDIR:-/tmp}/claude-<uid>/*/<session>/tasks)
 
 set -u
-t0=$(date +%s%N)
+# The clock (decision 131): now, in integer nanoseconds since the epoch.
+# `date`'s where it prints only digits; else python3's (receipt.py needs it
+# anyway); else the seconds, padded. Kept as text too: the detached
+# session receipt's shell defines it the same way.
+clock='now_ns() {
+    _ns=$(date +%s%N 2>/dev/null)
+    case $_ns in ""|*[!0-9]*) _ns=$(python3 -I -c "import time; print(time.time_ns())" 2>/dev/null) ;; esac
+    case $_ns in ""|*[!0-9]*) _ns=$(date +%s)000000000 ;; esac
+    printf "%s\n" "$_ns"
+}'
+eval "$clock"
+# Seconds since the epoch as UTC HH:MM:SS, by arithmetic: the same as GNU
+# `date -u` gives, with no `date -d` (GNU) or `date -r` (BSD) to choose.
+utc_hms() { _s=$(( $1 % 86400 )); printf '%02d:%02d:%02d' $((_s / 3600)) $((_s % 3600 / 60)) $((_s % 60)); }
+t0=$(now_ns)
 ev=${1:-}
 BELAY=${BELAY:-$HOME/.local/bin/belay}
 SCOPE=${BELAY_DOGFOOD_SCOPE:-}
@@ -57,7 +72,7 @@ here=
 # that cannot be written, this invocation says it itself when it is a Stop.
 fail() {
     { mkdir -p "$D" && chmod 700 "$D" &&
-      printf '%s\t%s: %s\n' "$(date +%s%N)" "$ev" "$(printf '%s' "$1" | tr -d '\000-\037')" >> "$FAILING"; } \
+      printf '%s\t%s: %s\n' "$(now_ns)" "$ev" "$(printf '%s' "$1" | tr -d '\000-\037')" >> "$FAILING"; } \
         2>/dev/null || here="$ev: $1"
 }
 # JSON's string escapes, for a line made here.
@@ -80,7 +95,7 @@ say() {
     # What each Stop said, kept: a line missing on screen can then be told
     # from one never made (decision 156).
     case ${sid:-} in ''|*[!A-Za-z0-9_-]*) ;; *)        # a name, never a path
-        [ -z "$m" ] || printf '%s\t%s\n' "$(date +%s%N)" "$m" >> "$D/$sid.said" 2>/dev/null ;;
+        [ -z "$m" ] || printf '%s\t%s\n' "$(now_ns)" "$m" >> "$D/$sid.said" 2>/dev/null ;;
     esac
 }
 quit() { [ "$ev" = stop ] && say ""; exit 0; }
@@ -122,7 +137,7 @@ if [ -z "$cp" ]; then
     fail "belay mark failed: ${msg:-no checkpoint id}"
 fi
 rm -f "$D/$sid.mark-err.$$"
-t1=$(date +%s%N)
+t1=$(now_ns)
 # Names from Claude Code are [A-Za-z0-9_] in practice; anything else is
 # dropped rather than escaped by hand. The summary arrives JSON-encoded.
 clean() { printf '%s' "$1" | tr -cd 'A-Za-z0-9_.:-'; }
@@ -161,7 +176,7 @@ fi
 # (decision 143). A mark whose process is gone was never finished -- a
 # hook's timeout killed it, say -- and is said at the next Stop, by any
 # session's hook, once; one still "starting" after a minute likewise.
-now=$(date +%s%N)
+now=$(now_ns)
 for m in "$D"/*.receipt-running.*; do
     [ -f "$m" ] || continue
     read -r pid began _ < "$m" 2>/dev/null || continue
@@ -172,7 +187,7 @@ for m in "$D"/*.receipt-running.*; do
     fi
     rm -f "$m" || continue
     who=${m##*/}
-    fail "the ${who##*.} receipt of session ${who%%.receipt-running.*} was lost: begun $(date -u -d "@$((began / 1000000000))" +%H:%M:%S 2>/dev/null) UTC and never finished (the hook's timeout?)"
+    fail "the ${who##*.} receipt of session ${who%%.receipt-running.*} was lost: begun $(utc_hms $((began / 1000000000))) UTC and never finished (the hook's timeout?)"
 done
 
 case $ev in
@@ -192,10 +207,10 @@ end)
     M=$D/$sid.receipt-running.session
     printf 'starting %s session\n' "$now" > "$M"
     detach=; command -v setsid >/dev/null 2>&1 && detach=setsid
-    $detach sh -c '
-        printf "%s %s session\n" "$$" "$(date +%s%N)" > "$1"
+    $detach sh -c "$clock"'
+        printf "%s %s session\n" "$$" "$(now_ns)" > "$1"
         if ! python3 -I "$2/receipt.py" session "$3" "$4" "$5" "$6" "$7" 2>>"$6/$8.err" >/dev/null; then
-            printf "%s\tend: the session'"'"'s receipt failed (see %s)\n" "$(date +%s%N)" "$6/$8.err" >> "$6/failing"
+            printf "%s\tend: the session'"'"'s receipt failed (see %s)\n" "$(now_ns)" "$6/$8.err" >> "$6/failing"
         fi
         rm -f "$1"' sh "$M" "$HERE" "$LOG" "$BELAY" "$SCOPE" "$D" \
         "${BELAY_DOGFOOD_NOTES:-$SCOPE/NOTES/dogfood}" "$sid" </dev/null >/dev/null 2>&1 &
