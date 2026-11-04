@@ -11,6 +11,7 @@
 #include "state.h"
 
 #include "belay/belay.h"
+#include "belay_build_version.h"
 #include "belay/error.h"
 #include "belay/manifest.h"
 #include "policy/bundle.h"
@@ -186,7 +187,7 @@ int cmd_baseline(int argc, char **argv, FILE *out, FILE *err) {
     struct bundle_meta m = { .created_ns = c.created_ns, .has_protect = protect != NULL,
                              .hash_max_bytes = req.hash_max_bytes ? req.hash_max_bytes : BELAY_HASH_MAX_BYTES_DEFAULT };
     snprintf(m.scope, sizeof m.scope, "%s", st.scope.path);
-    snprintf(m.belay_version, sizeof m.belay_version, "%s", BELAY_VERSION_STRING);
+    snprintf(m.belay_version, sizeof m.belay_version, "%s", BELAY_BUILD_VERSION);
     if (protect != NULL) memcpy(m.protect_sha256, spec.sha256, 65);
     if (bundle_write(outp, manifest, st.store, &pk, &m, sha) == -1) { rc = cli_failed(err); goto done; }
     export_out(out, json, outp, sha, &pk);

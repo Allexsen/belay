@@ -103,6 +103,7 @@ TEST(a_usage_error_is_one_line_and_ids_are_strict) {
 TEST(help_and_version_exit_0) {
     ASSERT_EQ_INT(0, belay("--version", NULL));
     ASSERT_TRUE(strncmp(g_out, "belay ", 6) == 0);
+    ASSERT_TRUE(strstr(g_out, " (manifest v3, diff.v1)\n") != NULL);     /* what this build writes */
     ASSERT_EQ_INT(0, belay("help", NULL));
     ASSERT_TRUE(strstr(g_out, "exit codes") != NULL);
     static const char *const cmds[] = { "check", "mark", "diff", "log" };
