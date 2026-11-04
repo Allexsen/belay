@@ -465,6 +465,12 @@ EOF
 chmod +x "$BD/date"
 case $(PATH="$BD:$PATH" date +%s%N) in *N) ;; *) fail "the fake BSD date has %N" ;; esac
 ! PATH="$BD:$PATH" date -u -d @0 +%H >/dev/null 2>&1 || fail "the fake BSD date takes -d"
+# install.sh's commands record an inactive hook with the same clock.
+echo '#' >> "$FH/.local/share/belay/dogfood/receipt.py"
+(PATH="$BD:$PATH"; run_cmd PreToolUse t99 "inactive, BSD date" >/dev/null)
+tail -1 "$T/state/dogfood/failing" | grep -q '^[0-9]\{19\}	pre: checksum mismatch (hooks inactive)$' \
+    || fail "under a BSD date, an inactive hook's record has no integer time: $(tail -1 "$T/state/dogfood/failing")"
+HOME=$FH sh scripts/dogfood/install.sh "$BELAY" "$S" >/dev/null 2>&1
 bsd() {  # bsd EVENT [tool_use_id summary]: a hook of session b1, under the BSD date
     jq -cn --arg t "${2:-}" --arg s "${3:-}" '{session_id:"b1", tool_use_id:$t, tool_name:"Bash", tool_input:{command:$s}}' \
         | PATH="$BD:$PATH" BELAY_STATE_DIR="$T/bsd-state" "$HOOK" "$1"

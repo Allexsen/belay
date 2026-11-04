@@ -11,8 +11,9 @@
 # BELAY_BINARY is the release binary (installed as ~/.local/bin/belay);
 # REPOSITORY is the scope the hooks watch (this repo). Standard output is the
 # merge command and nothing else; the rest goes to standard error. Linux only,
-# for now: the commands it writes, like the hook, time failures with
-# `date +%s%N`, which macOS `date` lacks (decision 131).
+# for now. The commands it writes time a failure as the hook does (decision
+# 131): `date +%s%N` where it prints only digits, else python3's clock, else
+# the seconds padded.
 
 set -eu
 BIN=$1
@@ -37,7 +38,7 @@ $rsha  $DEST/receipt.py"
 # meanwhile unattributed, decision 122), and the Stop hook says so, naming
 # the files, every Stop until this is run again.
 cmd() {
-    rec="d=\"\${BELAY_STATE_DIR:-\${XDG_STATE_HOME:-\$HOME/.local/state}/belay}/dogfood\"; mkdir -p \"\$d\" && printf '%s\t$1: checksum mismatch (hooks inactive)\n' \"\$(date +%s%N)\" >> \"\$d/failing\""
+    rec="d=\"\${BELAY_STATE_DIR:-\${XDG_STATE_HOME:-\$HOME/.local/state}/belay}/dogfood\"; t=\$(date +%s%N 2>/dev/null); case \$t in ''|*[!0-9]*) t=\$(python3 -I -c 'import time; print(time.time_ns())' 2>/dev/null) ;; esac; case \$t in ''|*[!0-9]*) t=\$(date +%s)000000000 ;; esac; mkdir -p \"\$d\" && printf '%s\t$1: checksum mismatch (hooks inactive)\n' \"\$t\" >> \"\$d/failing\""
     if [ "$1" = stop ]; then
         cat <<EOF
 cd / && s='$sums'; if printf '%s\n' "\$s" | sha256sum -c --status 2>/dev/null; then BELAY_DOGFOOD_SCOPE='$REPO' '$DEST/belay-dogfood' stop; else $rec; printf '{"systemMessage":"belay: hooks inactive: checksum mismatch: %s-- run scripts/dogfood/install.sh"}\n' "\$(printf '%s\n' "\$s" | sha256sum -c 2>/dev/null | sed -n 's/: FAILED.*/ /p' | tr -d '\n"\\\\')"; fi
