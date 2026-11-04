@@ -13,6 +13,7 @@
 #include <errno.h>
 #include <limits.h>
 #include <fcntl.h>
+#include <ftw.h>
 #include <setjmp.h>
 #include <signal.h>
 #include <stdarg.h>
@@ -913,6 +914,77 @@ TEST(json_output_names_every_excluded_path) {
 
 /* Review gaps: an exclude names the symlink itself, never its target, and
  * siblings sharing a name's prefix are compared as usual. */
+/* Every entry under the state directory -- path, size, mtime, inode, links
+ * -- as one string: two equal snapshots mean nothing was written, created,
+ * replaced or removed there, whoever ran it (root ignores the read-only
+ * modes below; this does not). */
+static char *g_snap;
+static size_t g_snap_n;
+static FILE *g_snap_f;
+static int snap_one(const char *p, const struct stat *sb, int type, struct FTW *f) {
+    (void)type; (void)f;
+    fprintf(g_snap_f, "%s %lld %lld.%09ld %llu %llu\n", p, (long long)sb->st_size, (long long)sb->st_mtim.tv_sec,
+            sb->st_mtim.tv_nsec, (unsigned long long)sb->st_ino, (unsigned long long)sb->st_nlink);
+    return 0;
+}
+static char *snapshot(void) {
+    g_snap = NULL;
+    g_snap_f = open_memstream(&g_snap, &g_snap_n);
+    nftw(g_state, snap_one, 16, FTW_PHYS);
+    fclose(g_snap_f);
+    return g_snap;
+}
+
+/* Reads write nothing to the state directory (2026-11-04): log, exclude's
+ * list, verify, and a diff between two kept checkpoints whose diff is
+ * stored -- run against a read-only state directory, each succeeds and the
+ * directory is as it was. A diff whose pair was never diffed stores it,
+ * once. */
+TEST(reads_leave_the_state_directory_as_it_was) {
+    fresh();
+    char bundle[600];
+    snprintf(bundle, sizeof bundle, "%s/b.bundle", g_dir);
+    ASSERT_EQ_INT(0, belay("mark", "--scope", g_scope, NULL));
+    ASSERT_EQ_INT(0, belay("baseline", "export", "--scope", g_scope, "--out", bundle, "--json", NULL));   /* checkpoint 2 */
+    char sha[65] = "";
+    const char *k = strstr(g_out, "\"sha256\":\"");
+    ASSERT_TRUE(k != NULL);
+    memcpy(sha, k + 10, 64);
+    sh("printf 'c\\n' >> '%s/src/x.txt'", g_scope);
+    ASSERT_EQ_INT(0, belay("diff", "--scope", g_scope, "--since", "1", NULL));     /* checkpoint 3, diff-from-1 */
+    sh("printf 'd\\n' > '%s/src/y.txt'", g_scope);
+    ASSERT_EQ_INT(0, belay("mark", "--scope", g_scope, NULL));                     /* checkpoint 4, no diff stored */
+
+    sh("chmod -R a-w '%s'", g_state);
+    char *before = snapshot();
+    ASSERT_EQ_INT(0, belay("log", "--scope", g_scope, NULL));
+    ASSERT_TRUE(strstr(g_out, "diff 3") != NULL);
+    ASSERT_EQ_INT(0, belay("log", "--scope", g_scope, "--json", NULL));
+    ASSERT_EQ_INT(0, belay("exclude", "--scope", g_scope, NULL));
+    ASSERT_EQ_INT(0, belay("diff", "--scope", g_scope, "--since", "1", "--to", "3", NULL));
+    ASSERT_TRUE(strstr(g_out, "M src/x.txt") != NULL);
+    ASSERT_EQ_INT(0, belay("diff", "--scope", g_scope, "--since", "1", "--to", "3", "--json", NULL));
+    ASSERT_TRUE(strstr(g_out, "\"path\":\"src/x.txt\"") != NULL);
+    ASSERT_EQ_INT(EXIT_CHANGES, belay("diff", "--scope", g_scope, "--since", "1", "--to", "3", "--exit-code", NULL));
+    const int vrc = belay("verify", "--scope", g_scope, "--baseline", bundle, "--baseline-sha256", sha, NULL);
+    ASSERT_TRUE(vrc == 0);
+    char *after = snapshot();
+    ASSERT_EQ_STR(before, after);
+    free(before);
+    free(after);
+
+    /* the pair 1 -> 4 never diffed: stored on the first diff, not again */
+    sh("chmod -R u+w '%s'", g_state);
+    ASSERT_EQ_INT(0, belay("diff", "--scope", g_scope, "--since", "1", "--to", "4", NULL));
+    before = snapshot();
+    ASSERT_TRUE(strstr(before, "/checkpoints/4/diff-from-1.ndjson ") != NULL);
+    ASSERT_EQ_INT(0, belay("diff", "--scope", g_scope, "--since", "1", "--to", "4", NULL));
+    after = snapshot();
+    ASSERT_EQ_STR(before, after);
+    free(before);
+    free(after);
+}
+
 TEST(an_exclude_is_exact_on_links_and_prefixes) {
     fresh();
     sh("mkdir -p '%s/d/sub' '%s/a' '%s/a-' && printf 's\\n' > '%s/d/sub/s' && ln -s d '%s/ld' && "
@@ -976,6 +1048,7 @@ int main(void) {
     RUN(the_excludes_file_and_command_are_strict);
     RUN(json_output_names_every_excluded_path);
     RUN(an_exclude_is_exact_on_links_and_prefixes);
+    RUN(reads_leave_the_state_directory_as_it_was);
     free(g_out);
     free(g_err);
     char cmd[800];

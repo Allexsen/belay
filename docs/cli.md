@@ -86,6 +86,11 @@ writes is corrupt state (exit 4). Protected paths (a later milestone) will never
     lock                        one writer at a time
 ```
 
+Only `check`, `mark`, `diff` without `--to`, `baseline export` and `exclude --add`/`--remove`
+write there. `log`, `exclude` without options, `verify` and a `diff --to` whose pair's diff is
+already stored read it and write nothing; a `diff --to` stores its pair's diff the first time only,
+and every diff is computed afresh, whichever build stored the file.
+
 The state directory must belong to the user belay runs as and be writable by no one else; every
 directory above it must belong to that user or to root and be writable by no one else, unless it
 is sticky (as `/tmp` is) or only the user's own group may write it. Otherwise belay refuses (exit
