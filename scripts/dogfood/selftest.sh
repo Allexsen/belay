@@ -492,5 +492,24 @@ printf '%s 1793712345123456789 turn\n' "$dead" > "$T/bsd-state/dogfood/bghost.re
 out=$(bsd stop) || :
 printf '%s' "$out" | jq -e '.systemMessage | test("receipt of session bghost was lost: begun 13:25:45 UTC")' >/dev/null \
     || fail "under a BSD date, a lost receipt's time is not said: $out"
-
-echo "dogfood selftest: sequential, concurrent, background, cancelled, quiet turn said, other project, symlinked project, git folded, labels cut, background commands, directories folded, paths counted, failures said, inactive gaps unattributed, summary, touched folded, identical replacements folded, a watcher noted, long commands, git events, compiled Python, lost receipts, install, a BSD date: ok"
+# A symlinked TMPDIR (a zeroshot trial, 2026-11-04): the output file is found
+# through the link, under Claude Code's default tasks directory, while
+# /proc/PID/fd shows its resolved path. It must still be seen open: the
+# command running, noted beside the call, not ended at the next hook. Last,
+# with a state of its own: its writes are no other session's.
+mkdir -p "$T/tmp-real" "$T/sym-state" && chmod 700 "$T/sym-state" && ln -s "$T/tmp-real" "$T/tmp-link"
+YT="$T/tmp-link/claude-$(id -u)/proj/y1/tasks"; mkdir -p "$YT"
+sym() { (unset BELAY_DOGFOOD_TASKS; TMPDIR="$T/tmp-link" BELAY_STATE_DIR="$T/sym-state"; export TMPDIR BELAY_STATE_DIR; printf '%s' "$2" | "$HOOK" "$1"); }
+ycall='"session_id":"y1","tool_use_id":"t30","tool_name":"Bash","tool_input":{"command":"make watch","run_in_background":true}'
+ycat='"session_id":"y1","tool_use_id":"t31","tool_name":"Bash","tool_input":{"command":"cat README"}'
+sym start '{"session_id":"y1"}'
+sym pre "{$ycall}"
+sleep 60 > "$YT/bgt30.output" & held=$!
+sym post "{$ycall,\"tool_response\":{\"backgroundTaskId\":\"bgt30\"}}"
+sym pre "{$ycat}"; printf 'y\n' > "$S/sym.out"; sym post "{$ycat}"
+out=$(sym stop '{"session_id":"y1"}')
+kill $held; wait $held 2>/dev/null || :
+RY=$(ls -t "$T/sym-state/dogfood"/y1.turn-*.txt | head -1)
+grep -A2 '^Bash: cat README   (a background command was also running: Bash: make watch)$' "$RY" \
+    | grep -q '  A sym.out' || fail "under a symlinked TMPDIR, the running background command read as ended: $(cat "$RY")"
+echo "dogfood selftest: sequential, concurrent, background, cancelled, quiet turn said, other project, symlinked project, git folded, labels cut, background commands, directories folded, paths counted, failures said, inactive gaps unattributed, summary, touched folded, identical replacements folded, a watcher noted, long commands, git events, compiled Python, lost receipts, install, a BSD date, a symlinked TMPDIR: ok"

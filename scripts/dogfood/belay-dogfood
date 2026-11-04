@@ -150,12 +150,16 @@ log "{\"event\":\"$ev\",\"cp\":${cp:-null},\"tool_use_id\":\"$(clean "$tid")\",\
 # (decision 111). Its end is seen here, at the first hook after it: the
 # command's output file is no longer open in any process. Where that file
 # cannot be found, the next stop ends it -- so "may have written" never
-# outlives the turn unseen.
+# outlives the turn unseen. The file's directory is kept resolved, as
+# /proc/PID/fd shows it: one reached through a symlink (a TMPDIR that is
+# one) would otherwise never match, and the command would read as ended.
 B=$D/$sid.background
 if [ -n "$bg" ] && [ -n "${tid:-}" ]; then
     f=$(printf '%s' "$tid" | tr -cd 'A-Za-z0-9_-'); task=$(clean "$bgtask"); out=
     for t in ${BELAY_DOGFOOD_TASKS:-"${TMPDIR:-/tmp}"/claude-$(id -u)/*/"$sid"/tasks}; do
-        [ -e "$t/$task.output" ] && out=$t/$task.output && break
+        [ -e "$t/$task.output" ] || continue
+        r=$(cd -P "$t" 2>/dev/null && pwd -P) || r=$t
+        out=$r/$task.output && break
     done
     [ -n "$f" ] && mkdir -p "$B" 2>/dev/null && printf '%s' "$out" > "$B/$f"
 elif [ -d "$B" ] && [ -n "$cp" ]; then
