@@ -250,13 +250,14 @@ static long gitpos(const char *p, size_t len, const char *type) {
 }
 
 /* git's findings on a reflog that gained only moves leaving the ref where
- * it was: those fold, counted (2026-11-04). */
+ * it was: those fold, counted (2026-11-04). The index's "index changed"
+ * folds wherever it is. */
 static bool only_in_place(const struct jval *f) {
     size_t moves = 0;
     int64_t entries = 0;
     for (size_t i = 0; f != NULL && f->t == J_ARR && i < f->n; i++) {
         const char *k = jstr(&f->kids[i], "kind");
-        if (strncmp(k, "git_", 4) != 0) continue;
+        if (strncmp(k, "git_", 4) != 0 || strcmp(k, "git_index_changed") == 0) continue;
         if (strcmp(k, "git_reflog_move") == 0) {
             const struct jval *a = jget(&f->kids[i], "from"), *b = jget(&f->kids[i], "to");
             if (a == NULL || b == NULL || a->t != J_STR || b->t != J_STR || strcmp(a->s, b->s) != 0) return false;
@@ -270,15 +271,28 @@ static bool only_in_place(const struct jval *f) {
     return moves > 0 && (entries == 0 || entries == (int64_t)moves);
 }
 
+/* A finding of git's that keeps a .git path on its own line: any but the
+ * index's "index changed", which folds with the rest (2026-11-04). */
+/* A text edit among a record's findings. */
+static bool text_edit(const struct jval *f) {
+    for (size_t i = 0; f != NULL && f->t == J_ARR && i < f->n; i++) {
+        const char *k = jstr(&f->kids[i], "kind");
+        if (strcmp(k, "text_changed") == 0 || strcmp(k, "text_rewritten") == 0) return true;
+    }
+    return false;
+}
+
 static bool any_git(const struct jval *f) {
-    for (size_t i = 0; f != NULL && f->t == J_ARR && i < f->n; i++)
-        if (strncmp(jstr(&f->kids[i], "kind"), "git_", 4) == 0) return true;
+    for (size_t i = 0; f != NULL && f->t == J_ARR && i < f->n; i++) {
+        const char *k = jstr(&f->kids[i], "kind");
+        if (strncmp(k, "git_", 4) == 0 && strcmp(k, "git_index_changed") != 0) return true;
+    }
     return false;
 }
 
 /* What the changes section is built from. */
 struct ctx {
-    struct lines priv, tracked, other, ignored, gitvis;
+    struct lines priv, tracked, other, ignedit, ignored, gitvis;
     struct tallies ign, git;
     const unsigned char *cls;   /* each classified path's class, in order; NULL: path order */
     size_t ci;
@@ -293,10 +307,23 @@ static int record(const struct jval *r, struct ctx *x, const struct receipt_opts
     privilege(&why, r, have_path ? path : NULL, plen, o);
     if (why.bad) { free(why.p); belay_err_set(BELAY_ERR_NOMEM, 0, "receipt: out of memory"); return -1; }
     const char *outcome = jstr(r, "outcome");
+    const char *type = jstr(r, "type");
+    const bool is_dir = type != NULL && strcmp(type, "dir") == 0;
+    const long gp = have_path ? gitpos(path, plen, type) : -1;
+    unsigned char c = GC_UNTRACKED;
+    if (have_path && gp < 0 && x->cls != NULL) c = x->cls[x->ci++];
+    /* An edit to a git-ignored file -- its text, or its type, not a
+     * directory's -- is named, never folded: it is often .env or local
+     * configuration (2026-11-04). A binary rewritten (build output) folds,
+     * as added and removed entries do. */
+    const bool ign_edit = x->cls != NULL && c == GC_IGNORED && !is_dir &&
+                          (strcmp(outcome, "type_changed") == 0 ||
+                           (strcmp(outcome, "modified") == 0 && text_edit(jget(r, "findings"))));
     struct sb b = { 0 };
     sbf(&b, "  %s ", sym(outcome));
     if (have_path) esc(&b, path, plen);
     else sbf(&b, "(no path)");
+    if (ign_edit) sbf(&b, "   (git-ignored)");
     if (why.n) {
         sbf(&b, "   ");
         if (strcmp(outcome, "type_changed") == 0) {     /* the type change is said too (D8) */
@@ -340,10 +367,6 @@ static int record(const struct jval *r, struct ctx *x, const struct receipt_opts
     /* Privilege never folds; nor does an entry belay could not capture
      * reliably: each is named on its own line (S7 2026-10-31, row 73). */
     const bool is_priv = why.n != 0, unknown = strcmp(outcome, "unknown") == 0;
-    const char *type = jstr(r, "type");
-    const long gp = have_path ? gitpos(path, plen, type) : -1;
-    unsigned char c = GC_UNTRACKED;
-    if (have_path && gp < 0 && x->cls != NULL) c = x->cls[x->ci++];
     if (is_priv) return keep(&x->priv, b.p, false, o->all);
     if (gp >= 0) {      /* a repository's bookkeeping: one line, but what git says stays (decision 105) */
         const char *rest = path + gp + 4;
@@ -367,13 +390,13 @@ static int record(const struct jval *r, struct ctx *x, const struct receipt_opts
         }
         return 0;
     }
+    if (ign_edit) return keep(&x->ignedit, b.p, false, o->all);
     if (x->cls != NULL && c == GC_IGNORED) {      /* what git ignores: by top-level directory */
         if (o->all || unknown) return keep(&x->ignored, b.p, false, o->all);
         free(b.p);
         /* the key: "build/" for build and everything below it, "" at the top */
         const char *sl = memchr(path, '/', plen);
-        const bool dir = type != NULL && strcmp(type, "dir") == 0;
-        const size_t kl = sl != NULL ? (size_t)(sl - path) : dir ? plen : 0;
+        const size_t kl = sl != NULL ? (size_t)(sl - path) : is_dir ? plen : 0;
         char *key = malloc(kl + 2);
         if (key == NULL) { belay_err_set(BELAY_ERR_NOMEM, 0, "receipt: out of memory"); return -1; }
         memcpy(key, path, kl);
@@ -586,13 +609,14 @@ int receipt_render(FILE *diff, FILE *out, const struct receipt_opts *o) {
         for (size_t i = 0; i < SEC[s].l->n; i++) fprintf(out, "%s\n", SEC[s].l->v[i]);
         if (SEC[s].l->more) fprintf(out, "  and %zu more (--all shows them)\n", SEC[s].l->more);
     }
-    /* Changes: tracked, untracked (the only ones cut), ignored, then .git
-     * (2026-11-04). */
-    if (x.tracked.n || x.other.n || x.other.more || x.ignored.n || x.ign.n || x.gitvis.n || x.git.n) {
+    /* Changes: tracked, untracked (the only ones cut), ignored edits by
+     * name, the rest ignored, then .git (2026-11-04). */
+    if (x.tracked.n || x.other.n || x.other.more || x.ignedit.n || x.ignored.n || x.ign.n || x.gitvis.n || x.git.n) {
         fputs("\nchanges\n", out);
         for (size_t i = 0; i < x.tracked.n; i++) fprintf(out, "%s\n", x.tracked.v[i]);
         for (size_t i = 0; i < x.other.n; i++) fprintf(out, "%s\n", x.other.v[i]);
         if (x.other.more) fprintf(out, "  and %zu more (--all shows them)\n", x.other.more);
+        for (size_t i = 0; i < x.ignedit.n; i++) fprintf(out, "%s\n", x.ignedit.v[i]);
         for (size_t i = 0; i < x.ignored.n; i++) fprintf(out, "%s\n", x.ignored.v[i]);
         for (int top = 0; top < 2; top++)          /* directories, then files at the top */
             for (size_t i = 0; i < x.ign.n; i++) {
@@ -630,6 +654,7 @@ out:
     drop(&x.priv);
     drop(&x.tracked);
     drop(&x.other);
+    drop(&x.ignedit);
     drop(&x.ignored);
     drop(&x.gitvis);
     tallies_free(&x.ign);

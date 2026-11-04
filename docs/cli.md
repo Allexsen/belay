@@ -242,12 +242,14 @@ renamed or moved, commits added, history rewritten, HEAD switched), then every p
 inode flags, setuid, setgid or sticky bits, on a file changed, added or removed -- then the other
 changes. When the scope is in a git repository, belay asks git (`git ls-files`, `ls-tree HEAD`,
 `check-ignore`, run read-only) which of their paths are tracked, untracked or ignored, and lists
-tracked changes first and in full, then untracked ones, then what git ignores as one line per
-top-level directory (`git-ignored: 210 changes under build/`). That is git's word on the repository
+tracked changes first and in full, then untracked ones, then each git-ignored file whose text or
+type changed, by name (`M .env   (git-ignored)`: an ignored file edited is often local
+configuration), then the rest of what git ignores -- added, removed, binaries rewritten -- as one
+line per top-level directory (`git-ignored: 210 changes under build/`). That is git's word on the repository
 as it is now: a diff ending at an earlier checkpoint says so in one line. Without git or a
 repository, the changes are listed by path. A repository's own `.git` folds to one line
-(`git bookkeeping: 12 changes under .git/`); what git reports there (the index, a reflog, a ref)
-stays on its own line unless git's events in the same diff say it, hooks always stay, and a reflog
+(`git bookkeeping: 12 changes under .git/`), the index's "index changed" with it; what else git
+reports there (a reflog, a ref) stays on its own line unless git's events in the same diff say it, hooks always stay, and a reflog
 that only moved a ref where it was folds with the moves counted -- `(1 reset in place)`: a reset
 in place can discard uncommitted work. A record shows at most 15 of its findings, then "and N
 more". An entry belay could not capture reliably is named on its own line with the reason

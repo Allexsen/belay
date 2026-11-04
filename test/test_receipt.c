@@ -399,7 +399,8 @@ TEST(tracked_first_untracked_cut_ignored_folded_by_directory) {
 /* A repository's .git folds to one line (decision 105, as the dogfood
  * receipt): what git reports there stays unless git's events are in the
  * diff; hooks stay; a reflog that only moved a ref where it was folds, the
- * move counted -- a reset in place may have discarded work (2026-11-04). */
+ * move counted -- a reset in place may have discarded work -- and so does
+ * the index's "index changed" (2026-11-04). */
 TEST(git_bookkeeping_folds_and_counts_moves_in_place) {
     static const char *const recs =
         "{\"path\":\".git/hooks/pre-commit\",\"outcome\":\"added\",\"type\":\"reg\"}\n"
@@ -415,16 +416,41 @@ TEST(git_bookkeeping_folds_and_counts_moves_in_place) {
     static char diff[8192];
     snprintf(diff, sizeof diff, HEAD "%s" TRAIL("4", "3", "0", "0", "0", "0", "0"), recs);
     ASSERT_EQ_INT(0, render(diff, false));
-    ASSERT_TRUE(strstr(g_text, "  M src/m.c   sha256\n  M wt/.git   sha256\n  A .git/hooks/pre-commit\n  M .git/index\n      index changed\n"
-                               "  git bookkeeping: 2 changes under .git/ (2 resets in place)\n"
+    ASSERT_TRUE(strstr(g_text, "  M src/m.c   sha256\n  M wt/.git   sha256\n  A .git/hooks/pre-commit\n"
+                               "  git bookkeeping: 3 changes under .git/ (2 resets in place)\n"
                                "  git bookkeeping: 1 change under vendor/lib/.git/\n") != NULL);
     ASSERT_TRUE(strstr(g_text, "by reset") == NULL);
     snprintf(diff, sizeof diff, HEAD "%s{\"event\":\"git_head_switched\",\"interp\":\"git\",\"text\":\"HEAD main -> dev\"}\n"
              TRAIL("4", "3", "0", "0", "1", "0", "0"), recs);
-    ASSERT_EQ_INT(0, render(diff, false));                          /* git's events say it: the index folds too */
+    ASSERT_EQ_INT(0, render(diff, false));                          /* git's events say it: the same */
     ASSERT_TRUE(strstr(g_text, "  A .git/hooks/pre-commit\n  git bookkeeping: 3 changes under .git/ (2 resets in place)\n") != NULL);
     ASSERT_EQ_INT(0, render(diff, true));
     ASSERT_TRUE(strstr(g_text, "bookkeeping") == NULL && strstr(g_text, "  A .git/objects/ab/cd\n") != NULL);
+}
+
+/* An edit to a git-ignored file is named, never folded: often .env or local
+ * configuration. Its text or its type changed; a binary rewritten (build
+ * output), an entry added or removed, a directory: those fold (2026-11-04). */
+TEST(ignored_text_edits_are_named_and_the_rest_ignored_folds) {
+    static const char diff[] = HEAD
+        "{\"path\":\"out\",\"outcome\":\"modified\",\"type\":\"dir\",\"changed\":[\"mtime_ns\"]}\n"
+        "{\"path\":\"out/a.o\",\"outcome\":\"modified\",\"type\":\"reg\",\"changed\":[\"sha256\"]}\n"
+        "{\"path\":\"out/b.o\",\"outcome\":\"added\",\"type\":\"reg\"}\n"
+        "{\"path\":\"out/config.env\",\"outcome\":\"modified\",\"type\":\"reg\",\"changed\":[\"sha256\"],\"findings\":"
+        "[{\"kind\":\"text_changed\",\"lines_added\":1,\"lines_deleted\":0,\"text\":\"+1 -0 lines, first change at line 3\"}]}\n"
+        "{\"path\":\"out/link\",\"outcome\":\"type_changed\",\"type\":\"symlink\",\"type_before\":\"reg\"}\n"
+        "{\"path\":\"src/m.c\",\"outcome\":\"modified\",\"type\":\"reg\",\"changed\":[\"sha256\"]}\n"
+        "{\"path\":\"x.log\",\"outcome\":\"removed\",\"type\":\"reg\"}\n"
+        TRAIL("7", "7", "0", "0", "0", "0", "0");
+    g_class = fake_class;
+    g_class_fails = false;
+    ASSERT_EQ_INT(0, render(diff, false));
+    ASSERT_TRUE(strstr(g_text, "\nchanges\n  M src/m.c   sha256\n"
+                               "  M out/config.env   (git-ignored)\n      +1 -0 lines, first change at line 3\n"
+                               "  T out/link   (git-ignored)   reg -> symlink\n"
+                               "  git-ignored: 3 changes under out/\n  git-ignored: 1 change in the top directory\n") != NULL);
+    ASSERT_TRUE(strstr(g_text, "out/a.o") == NULL && strstr(g_text, "out/b.o") == NULL);
+    g_class = NULL;
 }
 
 int main(void) {
@@ -443,6 +469,7 @@ int main(void) {
     RUN(values_the_receipt_prints_are_escaped);
     RUN(tracked_first_untracked_cut_ignored_folded_by_directory);
     RUN(git_bookkeeping_folds_and_counts_moves_in_place);
+    RUN(ignored_text_edits_are_named_and_the_rest_ignored_folds);
     free(g_text);
     return belay_test_report();
 }
