@@ -47,13 +47,29 @@ static int table_mode(void *ctx, int side, const char *path, size_t len, struct 
 static char *g_text;
 static receipt_mode_fn g_fn = fake_mode;
 
+/* git's view, faked: src/ tracked, out/ and the top's x.log ignored, the
+ * rest untracked; or, with g_class_fails, git unavailable. */
+static bool g_class_fails;
+static size_t g_classified;
+static int fake_class(void *ctx, const char *const *paths, const size_t *lens, const bool *dir, size_t n,
+                      unsigned char *out) {
+    (void)ctx; (void)dir; (void)lens;
+    if (g_class_fails) return -1;
+    g_classified = n;
+    for (size_t i = 0; i < n; i++)
+        out[i] = !strncmp(paths[i], "src/", 4) ? 1 : !strncmp(paths[i], "out", 3) || !strcmp(paths[i], "x.log") ? 2 : 0;
+    return 0;
+}
+static receipt_class_fn g_class;
+static const char *g_note;
+
 static int render(const char *diff, bool all) {
     FILE *in = fmemopen((void *)diff, strlen(diff), "r");
     size_t n;
     free(g_text);
     g_text = NULL;
     FILE *out = open_memstream(&g_text, &n);
-    const struct receipt_opts o = { "checkpoint 3", "checkpoint 4", all, g_fn, NULL };
+    const struct receipt_opts o = { "checkpoint 3", "checkpoint 4", all, g_fn, NULL, g_class, NULL, g_note };
     const int r = receipt_render(in, out, &o);
     fclose(in);
     fclose(out);
@@ -340,6 +356,77 @@ TEST(values_the_receipt_prints_are_escaped) {
     ASSERT_TRUE(strstr(g_text, "\nprivilege\n") == NULL);              /* no forged heading */
 }
 
+/* 2026-11-04: with git's view, tracked changes first and never cut;
+ * untracked next, the only rows the fold counts; ignored ones one line per
+ * top-level directory; --all lists everything. Without it, path order. */
+TEST(tracked_first_untracked_cut_ignored_folded_by_directory) {
+    static char diff[65536];
+    size_t w = (size_t)snprintf(diff, sizeof diff, "%s", HEAD);
+    for (int i = 0; i < 60; i++)
+        w += (size_t)snprintf(diff + w, sizeof diff - w, "{\"path\":\"a%03d.txt\",\"outcome\":\"added\",\"type\":\"reg\"}\n", i);
+    w += (size_t)snprintf(diff + w, sizeof diff - w, "%s",
+        "{\"path\":\"out\",\"outcome\":\"added\",\"type\":\"dir\"}\n"
+        "{\"path\":\"out/a.o\",\"outcome\":\"added\",\"type\":\"reg\"}\n"
+        "{\"path\":\"out/b.o\",\"outcome\":\"added\",\"type\":\"reg\"}\n"
+        "{\"path\":\"src/m.c\",\"outcome\":\"modified\",\"type\":\"reg\",\"changed\":[\"sha256\"]}\n"
+        "{\"path\":\"src/n.c\",\"outcome\":\"removed\",\"type\":\"reg\"}\n"
+        "{\"path\":\"x.log\",\"outcome\":\"added\",\"type\":\"reg\"}\n"
+        TRAIL("1", "64", "0", "0", "0", "0", "0"));
+    g_class = fake_class;
+    g_class_fails = false;
+    g_note = "as the repository is now";
+    ASSERT_EQ_INT(0, render(diff, false));
+    ASSERT_EQ_INT(66, (int)g_classified);
+    const char *m = strstr(g_text, "\nchanges\n  M src/m.c   sha256\n  D src/n.c\n  A a000.txt\n");
+    ASSERT_TRUE(m != NULL);
+    ASSERT_TRUE(strstr(g_text, "  A a049.txt\n  and 10 more (--all shows them)\n"
+                               "  git-ignored: 3 changes under out/\n  git-ignored: 1 change in the top directory\n") != NULL);
+    ASSERT_TRUE(strstr(g_text, "a050.txt") == NULL && strstr(g_text, "out/a.o") == NULL);
+    ASSERT_TRUE(strstr(g_text, "  as the repository is now\n") != NULL);
+    ASSERT_EQ_INT(0, render(diff, true));                           /* --all: every row, nothing folded */
+    ASSERT_TRUE(strstr(g_text, "  A a059.txt\n  A out\n  A out/a.o\n  A out/b.o\n  A x.log\n") != NULL);
+    ASSERT_TRUE(strstr(g_text, "git-ignored") == NULL && strstr(g_text, "more") == NULL);
+    g_class_fails = true;                                           /* git cannot say: path order, as before */
+    ASSERT_EQ_INT(0, render(diff, false));
+    ASSERT_TRUE(strstr(g_text, "\nchanges\n  A a000.txt\n") != NULL);
+    ASSERT_TRUE(strstr(g_text, "  and 16 more (--all shows them)\n") != NULL);
+    ASSERT_TRUE(strstr(g_text, "as the repository is now") == NULL);
+    g_class = NULL;
+    g_class_fails = false;
+    g_note = NULL;
+}
+
+/* A repository's .git folds to one line (decision 105, as the dogfood
+ * receipt): what git reports there stays unless git's events are in the
+ * diff; hooks stay; a reflog that only moved a ref where it was folds, the
+ * move counted -- a reset in place may have discarded work (2026-11-04). */
+TEST(git_bookkeeping_folds_and_counts_moves_in_place) {
+    static const char *const recs =
+        "{\"path\":\".git/hooks/pre-commit\",\"outcome\":\"added\",\"type\":\"reg\"}\n"
+        "{\"path\":\".git/index\",\"outcome\":\"modified\",\"type\":\"reg\",\"findings\":[{\"kind\":\"git_index_changed\",\"text\":\"index changed\"}]}\n"
+        "{\"path\":\".git/logs/HEAD\",\"outcome\":\"modified\",\"type\":\"reg\",\"findings\":["
+        "{\"kind\":\"git_reflog_appended\",\"ref\":\"HEAD\",\"entries\":2,\"text\":\"HEAD: 2 reflog entries\"},"
+        "{\"kind\":\"git_reflog_move\",\"ref\":\"HEAD\",\"from\":\"aa\",\"to\":\"aa\",\"operation\":\"reset\",\"text\":\"HEAD aa -> aa by reset\"},"
+        "{\"kind\":\"git_reflog_move\",\"ref\":\"HEAD\",\"from\":\"aa\",\"to\":\"aa\",\"operation\":\"reset\",\"text\":\"HEAD aa -> aa by reset\"}]}\n"
+        "{\"path\":\".git/objects/ab/cd\",\"outcome\":\"added\",\"type\":\"reg\"}\n"
+        "{\"path\":\"src/m.c\",\"outcome\":\"modified\",\"type\":\"reg\",\"changed\":[\"sha256\"]}\n"
+        "{\"path\":\"vendor/lib/.git/objects/o\",\"outcome\":\"added\",\"type\":\"reg\"}\n"
+        "{\"path\":\"wt/.git\",\"outcome\":\"modified\",\"type\":\"reg\",\"changed\":[\"sha256\"]}\n";
+    static char diff[8192];
+    snprintf(diff, sizeof diff, HEAD "%s" TRAIL("4", "3", "0", "0", "0", "0", "0"), recs);
+    ASSERT_EQ_INT(0, render(diff, false));
+    ASSERT_TRUE(strstr(g_text, "  M src/m.c   sha256\n  M wt/.git   sha256\n  A .git/hooks/pre-commit\n  M .git/index\n      index changed\n"
+                               "  git bookkeeping: 2 changes under .git/ (2 resets in place)\n"
+                               "  git bookkeeping: 1 change under vendor/lib/.git/\n") != NULL);
+    ASSERT_TRUE(strstr(g_text, "by reset") == NULL);
+    snprintf(diff, sizeof diff, HEAD "%s{\"event\":\"git_head_switched\",\"interp\":\"git\",\"text\":\"HEAD main -> dev\"}\n"
+             TRAIL("4", "3", "0", "0", "1", "0", "0"), recs);
+    ASSERT_EQ_INT(0, render(diff, false));                          /* git's events say it: the index folds too */
+    ASSERT_TRUE(strstr(g_text, "  A .git/hooks/pre-commit\n  git bookkeeping: 3 changes under .git/ (2 resets in place)\n") != NULL);
+    ASSERT_EQ_INT(0, render(diff, true));
+    ASSERT_TRUE(strstr(g_text, "bookkeeping") == NULL && strstr(g_text, "  A .git/objects/ab/cd\n") != NULL);
+}
+
 int main(void) {
     RUN(a_receipt_puts_events_then_privilege_then_changes);
     RUN(long_sections_fold_but_privilege_never_does);
@@ -354,6 +441,8 @@ int main(void) {
     RUN(and_more_findings_are_counted_in_the_receipt);
     RUN(a_receipt_shows_the_values_a_person_reads);
     RUN(values_the_receipt_prints_are_escaped);
+    RUN(tracked_first_untracked_cut_ignored_folded_by_directory);
+    RUN(git_bookkeeping_folds_and_counts_moves_in_place);
     free(g_text);
     return belay_test_report();
 }

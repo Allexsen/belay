@@ -2,10 +2,12 @@
 #include "receipt.h"
 
 #include "util/jsonr.h"
+#include "cli/gitclass.h"
 
 #include "belay/error.h"
 #include "belay/json.h"
 
+#include <errno.h>
 #include <stdarg.h>
 #include <stdlib.h>
 #include <string.h>
@@ -196,8 +198,94 @@ static void privilege(struct sb *b, const struct jval *r, const char *path, size
     if (has(ch, "iflags")) sbf(b, "%sinode flags changed", b->n ? ", " : "");
 }
 
-static int record(const struct jval *r, struct lines *priv, struct lines *other,
-                  const struct receipt_opts *o) {
+/* A count under a name -- an ignored top-level directory, or a repository's
+ * .git -- with, for a .git, the moves that left a ref in place, by operation. */
+struct op { char *name; size_t n; };
+struct tally { char *key; size_t n; struct op *ops; size_t nops; };
+struct tallies { struct tally *v; size_t n; };
+
+static struct tally *tally(struct tallies *t, const char *key, size_t kl) {
+    for (size_t i = 0; i < t->n; i++)
+        if (strlen(t->v[i].key) == kl && memcmp(t->v[i].key, key, kl) == 0) return &t->v[i];
+    struct tally *q = realloc(t->v, (t->n + 1) * sizeof *q);
+    if (q == NULL) return NULL;
+    t->v = q;
+    struct tally *x = &t->v[t->n];
+    memset(x, 0, sizeof *x);
+    if ((x->key = strndup(key, kl)) == NULL) return NULL;
+    t->n++;
+    return x;
+}
+
+static int count_op(struct tally *x, const char *name) {
+    for (size_t i = 0; i < x->nops; i++)
+        if (strcmp(x->ops[i].name, name) == 0) { x->ops[i].n++; return 0; }
+    struct op *q = realloc(x->ops, (x->nops + 1) * sizeof *q);
+    if (q == NULL) return -1;
+    x->ops = q;
+    if ((x->ops[x->nops].name = strdup(name)) == NULL) return -1;
+    x->ops[x->nops++].n = 1;
+    return 0;
+}
+
+static void tallies_free(struct tallies *t) {
+    for (size_t i = 0; i < t->n; i++) {
+        for (size_t k = 0; k < t->v[i].nops; k++) free(t->v[i].ops[k].name);
+        free(t->v[i].ops);
+        free(t->v[i].key);
+    }
+    free(t->v);
+}
+
+/* Where a path is a repository's bookkeeping, as the dogfood receipt reads
+ * it (decision 105): the first ".git" followed by "/" or the end -- a .git
+ * that is a file points elsewhere and is none. The offset of ".git", or -1. */
+static long gitpos(const char *p, size_t len, const char *type) {
+    for (size_t i = 0; i + 4 <= len; i++) {
+        if (memcmp(p + i, ".git", 4) != 0 || (i + 4 < len && p[i + 4] != '/')) continue;
+        if (i + 4 == len && (type == NULL || strcmp(type, "dir") != 0)) return -1;
+        return (long)i;
+    }
+    return -1;
+}
+
+/* git's findings on a reflog that gained only moves leaving the ref where
+ * it was: those fold, counted (2026-11-04). */
+static bool only_in_place(const struct jval *f) {
+    size_t moves = 0;
+    int64_t entries = 0;
+    for (size_t i = 0; f != NULL && f->t == J_ARR && i < f->n; i++) {
+        const char *k = jstr(&f->kids[i], "kind");
+        if (strncmp(k, "git_", 4) != 0) continue;
+        if (strcmp(k, "git_reflog_move") == 0) {
+            const struct jval *a = jget(&f->kids[i], "from"), *b = jget(&f->kids[i], "to");
+            if (a == NULL || b == NULL || a->t != J_STR || b->t != J_STR || strcmp(a->s, b->s) != 0) return false;
+            moves++;
+        } else if (strcmp(k, "git_reflog_appended") == 0) {
+            entries += jint(&f->kids[i], "entries", 0);
+        } else {
+            return false;
+        }
+    }
+    return moves > 0 && (entries == 0 || entries == (int64_t)moves);
+}
+
+static bool any_git(const struct jval *f) {
+    for (size_t i = 0; f != NULL && f->t == J_ARR && i < f->n; i++)
+        if (strncmp(jstr(&f->kids[i], "kind"), "git_", 4) == 0) return true;
+    return false;
+}
+
+/* What the changes section is built from. */
+struct ctx {
+    struct lines priv, tracked, other, ignored, gitvis;
+    struct tallies ign, git;
+    const unsigned char *cls;   /* each classified path's class, in order; NULL: path order */
+    size_t ci;
+    bool git_events;            /* git's events say what its findings did (decision 126) */
+};
+
+static int record(const struct jval *r, struct ctx *x, const struct receipt_opts *o) {
     static char path[4096];
     size_t plen = 0;
     const bool have_path = rpath(r, path, sizeof path, &plen) == 0;
@@ -251,8 +339,53 @@ static int record(const struct jval *r, struct lines *priv, struct lines *other,
     if (b.bad) { free(b.p); belay_err_set(BELAY_ERR_NOMEM, 0, "receipt: out of memory"); return -1; }
     /* Privilege never folds; nor does an entry belay could not capture
      * reliably: each is named on its own line (S7 2026-10-31, row 73). */
-    const bool is_priv = why.n != 0;
-    return keep(is_priv ? priv : other, b.p, !is_priv && strcmp(outcome, "unknown") != 0, o->all);
+    const bool is_priv = why.n != 0, unknown = strcmp(outcome, "unknown") == 0;
+    const char *type = jstr(r, "type");
+    const long gp = have_path ? gitpos(path, plen, type) : -1;
+    unsigned char c = GC_UNTRACKED;
+    if (have_path && gp < 0 && x->cls != NULL) c = x->cls[x->ci++];
+    if (is_priv) return keep(&x->priv, b.p, false, o->all);
+    if (gp >= 0) {      /* a repository's bookkeeping: one line, but what git says stays (decision 105) */
+        const char *rest = path + gp + 4;
+        const size_t rl = plen - (size_t)gp - 4;
+        const bool hooks = (rl >= 6 && memcmp(rest, "/hooks", 6) == 0 && (rl == 6 || rest[6] == '/'));
+        const struct jval *f = jget(r, "findings");
+        if (o->all || unknown || hooks || !(x->git_events || !any_git(f) || only_in_place(f)))
+            return keep(&x->gitvis, b.p, false, o->all);
+        free(b.p);
+        struct tally *t = tally(&x->git, path, (size_t)gp);
+        if (t == NULL) { belay_err_set(BELAY_ERR_NOMEM, 0, "receipt: out of memory"); return -1; }
+        t->n++;
+        for (size_t i = 0; f != NULL && f->t == J_ARR && i < f->n; i++) {
+            const struct jval *a = jget(&f->kids[i], "from"), *z = jget(&f->kids[i], "to");
+            if (strcmp(jstr(&f->kids[i], "kind"), "git_reflog_move") == 0 && a != NULL && z != NULL &&
+                a->t == J_STR && z->t == J_STR && strcmp(a->s, z->s) == 0 &&
+                count_op(t, jstr(&f->kids[i], "operation")) == -1) {
+                belay_err_set(BELAY_ERR_NOMEM, 0, "receipt: out of memory");
+                return -1;
+            }
+        }
+        return 0;
+    }
+    if (x->cls != NULL && c == GC_IGNORED) {      /* what git ignores: by top-level directory */
+        if (o->all || unknown) return keep(&x->ignored, b.p, false, o->all);
+        free(b.p);
+        /* the key: "build/" for build and everything below it, "" at the top */
+        const char *sl = memchr(path, '/', plen);
+        const bool dir = type != NULL && strcmp(type, "dir") == 0;
+        const size_t kl = sl != NULL ? (size_t)(sl - path) : dir ? plen : 0;
+        char *key = malloc(kl + 2);
+        if (key == NULL) { belay_err_set(BELAY_ERR_NOMEM, 0, "receipt: out of memory"); return -1; }
+        memcpy(key, path, kl);
+        if (kl) key[kl] = '/';
+        struct tally *t = tally(&x->ign, key, kl ? kl + 1 : 0);
+        free(key);
+        if (t == NULL) { belay_err_set(BELAY_ERR_NOMEM, 0, "receipt: out of memory"); return -1; }
+        t->n++;
+        return 0;
+    }
+    if (x->cls != NULL && c == GC_TRACKED) return keep(&x->tracked, b.p, false, o->all);
+    return keep(&x->other, b.p, !unknown, o->all);
 }
 
 static int event(const struct jval *e, struct lines *ev, const struct receipt_opts *o) {
@@ -284,8 +417,61 @@ static int event(const struct jval *e, struct lines *ev, const struct receipt_op
     return keep(ev, b.p, true, o->all);
 }
 
+/* Pass 1 (when the diff can be read twice): each record's path outside a
+ * .git, in order, for git to classify; and whether git's events are there
+ * (they follow the records, E1). Lines that are not diff.v1 are left for
+ * pass 2 to refuse. */
+struct coll { char **p; size_t *len; bool *dir; size_t n, cap; bool git_events; };
+
+static int collect(FILE *diff, struct coll *c) {
+    char *line = NULL;
+    size_t cap = 0;
+    ssize_t got;
+    static char path[4096];
+    int rc = 0;
+    while (rc == 0 && (got = getline(&line, &cap, diff)) > 0) {
+        struct jval v;
+        if (jsonr_parse(line, (size_t)got, &v) == -1) { belay_err_clear(); continue; }
+        if (v.t == J_OBJ && jget(&v, "belay_diff") == NULL && jget(&v, "belay_diff_end") == NULL) {
+            size_t len;
+            if (jget(&v, "event") != NULL) {
+                c->git_events |= strcmp(jstr(&v, "interp"), "git") == 0;
+            } else if (rpath(&v, path, sizeof path, &len) == 0 && gitpos(path, len, jstr(&v, "type")) < 0) {
+                if (c->n == c->cap) {
+                    const size_t k = c->cap ? c->cap * 2 : 256;
+                    char **a = realloc(c->p, k * sizeof *a);
+                    size_t *b = a != NULL ? realloc(c->len, k * sizeof *b) : NULL;
+                    bool *d = b != NULL ? realloc(c->dir, k * sizeof *d) : NULL;
+                    if (a != NULL) c->p = a;
+                    if (b != NULL) c->len = b;
+                    if (d != NULL) c->dir = d;
+                    if (d == NULL) rc = -1;
+                    else c->cap = k;
+                }
+                if (rc == 0 && (c->p[c->n] = malloc(len + 1)) == NULL) rc = -1;
+                if (rc == 0) {
+                    memcpy(c->p[c->n], path, len);
+                    c->p[c->n][len] = '\0';
+                    c->len[c->n] = len;
+                    c->dir[c->n] = strcmp(jstr(&v, "type"), "dir") == 0 || strcmp(jstr(&v, "type_before"), "dir") == 0;
+                    c->n++;
+                }
+            } else {
+                belay_err_clear();
+            }
+        }
+        jsonr_free(&v);
+    }
+    free(line);
+    if (rc == -1) belay_err_set(BELAY_ERR_NOMEM, 0, "receipt: out of memory");
+    return rc;
+}
+
 int receipt_render(FILE *diff, FILE *out, const struct receipt_opts *o) {
-    struct lines ev = { 0 }, priv = { 0 }, other = { 0 };
+    struct lines ev = { 0 };
+    struct ctx x = { 0 };
+    struct coll col = { 0 };
+    unsigned char *cls = NULL;
     char *line = NULL;
     struct sb scope = { 0 };
     size_t cap = 0, lineno = 0;
@@ -293,6 +479,18 @@ int receipt_render(FILE *diff, FILE *out, const struct receipt_opts *o) {
     struct jval trailer = { 0 };
     bool have_trailer = false;
     int rc = -1;
+    const long start = ftell(diff);
+    if (start >= 0 && fseek(diff, start, SEEK_SET) == 0) {      /* it can be read twice */
+        if (collect(diff, &col) == -1) goto out;
+        if (fseek(diff, start, SEEK_SET) != 0) {
+            belay_err_set(BELAY_ERR_IO, errno, "receipt: cannot read the diff again");
+            goto out;
+        }
+        x.git_events = col.git_events;
+        if (o->classify != NULL && col.n > 0 && (cls = malloc(col.n)) != NULL &&
+            o->classify(o->class_ctx, (const char *const *)col.p, col.len, col.dir, col.n, cls) == 0)
+            x.cls = cls;
+    }
     while ((got = getline(&line, &cap, diff)) > 0) {
         lineno++;
         struct jval v;
@@ -328,7 +526,7 @@ int receipt_render(FILE *diff, FILE *out, const struct receipt_opts *o) {
         } else if (jget(&v, "event") != NULL) {
             r = event(&v, &ev, o);
         } else {
-            r = record(&v, &priv, &other, o);
+            r = record(&v, &x, o);
         }
         jsonr_free(&v);
         if (r == -1) goto out;
@@ -353,6 +551,7 @@ int receipt_render(FILE *diff, FILE *out, const struct receipt_opts *o) {
     if (c.n == 0 && nev == 0) fprintf(out, "  no changes\n");
     else fprintf(out, "  %s%sevents: %lld\n", c.n ? c.p : "", c.n ? "    " : "", (long long)nev);
     free(c.p);
+    if (x.cls != NULL && o->class_note != NULL) fprintf(out, "  %s\n", o->class_note);
     /* No banner (decision 14.7); one actionable line counting what changed
      * while it was read -- vanished, unstable or raced -- per side, since
      * only the after side is settled by running belay again: an earlier
@@ -380,14 +579,43 @@ int receipt_render(FILE *diff, FILE *out, const struct receipt_opts *o) {
         }
         fputc('\n', out);
     }
-    const struct { const char *title; struct lines *l; } SEC[] = {
-        { "events", &ev }, { "privilege", &priv }, { "changes", &other },
-    };
-    for (size_t s = 0; s < 3; s++) {
+    const struct { const char *title; struct lines *l; } SEC[] = { { "events", &ev }, { "privilege", &x.priv } };
+    for (size_t s = 0; s < 2; s++) {
         if (SEC[s].l->n == 0) continue;
         fprintf(out, "\n%s\n", SEC[s].title);
         for (size_t i = 0; i < SEC[s].l->n; i++) fprintf(out, "%s\n", SEC[s].l->v[i]);
         if (SEC[s].l->more) fprintf(out, "  and %zu more (--all shows them)\n", SEC[s].l->more);
+    }
+    /* Changes: tracked, untracked (the only ones cut), ignored, then .git
+     * (2026-11-04). */
+    if (x.tracked.n || x.other.n || x.other.more || x.ignored.n || x.ign.n || x.gitvis.n || x.git.n) {
+        fputs("\nchanges\n", out);
+        for (size_t i = 0; i < x.tracked.n; i++) fprintf(out, "%s\n", x.tracked.v[i]);
+        for (size_t i = 0; i < x.other.n; i++) fprintf(out, "%s\n", x.other.v[i]);
+        if (x.other.more) fprintf(out, "  and %zu more (--all shows them)\n", x.other.more);
+        for (size_t i = 0; i < x.ignored.n; i++) fprintf(out, "%s\n", x.ignored.v[i]);
+        for (int top = 0; top < 2; top++)          /* directories, then files at the top */
+            for (size_t i = 0; i < x.ign.n; i++) {
+                const struct tally *t = &x.ign.v[i];
+                if ((t->key[0] == '\0') != top) continue;
+                fprintf(out, "  git-ignored: %zu change%s ", t->n, t->n == 1 ? "" : "s");
+                if (top) fputs("in the top directory\n", out);
+                else { fputs("under ", out); receipt_fputs(out, t->key); fputc('\n', out); }
+            }
+        for (size_t i = 0; i < x.gitvis.n; i++) fprintf(out, "%s\n", x.gitvis.v[i]);
+        for (size_t i = 0; i < x.git.n; i++) {
+            const struct tally *t = &x.git.v[i];
+            fprintf(out, "  git bookkeeping: %zu change%s under ", t->n, t->n == 1 ? "" : "s");
+            receipt_fputs(out, t->key);
+            fputs(".git/", out);
+            for (size_t k = 0; k < t->nops; k++) {      /* a ref left in place may have lost work: said */
+                const char *op = t->ops[k].name;
+                fprintf(out, "%s%zu ", k ? ", " : " (", t->ops[k].n);
+                receipt_fputs(out, op[0] ? op : "move");
+                fprintf(out, "%s in place", t->ops[k].n != 1 && strchr(op, ' ') == NULL && op[0] ? "s" : "");
+            }
+            fputs(t->nops ? ")\n" : "\n", out);
+        }
     }
     if (ferror(out)) {
         belay_err_set(BELAY_ERR_IO, 0, "receipt: write failed");
@@ -399,8 +627,18 @@ out:
     free(line);
     free(scope.p);
     drop(&ev);
-    drop(&priv);
-    drop(&other);
+    drop(&x.priv);
+    drop(&x.tracked);
+    drop(&x.other);
+    drop(&x.ignored);
+    drop(&x.gitvis);
+    tallies_free(&x.ign);
+    tallies_free(&x.git);
+    for (size_t i = 0; i < col.n; i++) free(col.p[i]);
+    free(col.p);
+    free(col.len);
+    free(col.dir);
+    free(cls);
     return rc;
 }
 

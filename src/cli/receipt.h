@@ -5,7 +5,13 @@
  *  setgid, sticky) -- never folded, never filtered -- then the other
  *  records by path; each record at most RECEIPT_FINDINGS findings, then
  *  "and N more"; flagged entries named on their own lines, no global
- *  "provisional" banner. Every string from the diff is printed escaped:
+ *  "provisional" banner. With a classifier (git's view of the repository,
+ *  2026-11-04) the other records go tracked first, then untracked -- the
+ *  only ones RECEIPT_FOLD cuts -- then what git ignores, one line per
+ *  top-level directory; a repository's own .git folds to one line, what
+ *  git reports there staying unless git's events say it (as the dogfood
+ *  receipt does), moves that left a ref in place counted. --all folds
+ *  nothing. Every string from the diff is printed escaped:
  *  control bytes, C1 controls, invisible format and bidi characters and
  *  bytes that are not UTF-8 as \xNN, a
  *  backslash as \\ -- a path cannot forge a line, a heading or a terminal
@@ -34,11 +40,19 @@ struct receipt_meta {
  * may move forward only. `path` is the bytes, base64 already decoded. */
 typedef int (*receipt_mode_fn)(void *ctx, int side, const char *path, size_t len, struct receipt_meta *m);
 
+/* What git says of n paths (gitclass.h's GC_ values in out): 0, or -1 when
+ * it cannot say. */
+typedef int (*receipt_class_fn)(void *ctx, const char *const *paths, const size_t *lens, const bool *dir, size_t n,
+                                unsigned char *out);
+
 struct receipt_opts {
     const char *from, *to;      /* how the two sides are named in the heading */
     bool all;                   /* nothing folded */
     receipt_mode_fn mode;       /* NULL: setuid/setgid/sticky and caps on added or removed files cannot be told */
     void *mode_ctx;
+    receipt_class_fn classify;  /* NULL, or -1 from it: changes in path order, as before (2026-11-04) */
+    void *class_ctx;
+    const char *class_note;     /* said once when paths were classified: they were, as the repository is now */
 };
 
 /* Reads diff.v1 from `diff`, writes the receipt to `out`. 0; -1 with

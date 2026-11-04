@@ -912,8 +912,6 @@ TEST(json_output_names_every_excluded_path) {
     ASSERT_TRUE(strstr(g_out, "\"used\":true") != NULL);
 }
 
-/* Review gaps: an exclude names the symlink itself, never its target, and
- * siblings sharing a name's prefix are compared as usual. */
 /* Every entry under the state directory -- path, size, mtime, inode, links
  * -- as one string: two equal snapshots mean nothing was written, created,
  * replaced or removed there, whoever ran it (root ignores the read-only
@@ -990,6 +988,33 @@ TEST(reads_leave_the_state_directory_as_it_was) {
     free(after);
 }
 
+/* The receipt asks git (2026-11-04): a tracked change listed before an
+ * untracked one that sorts first, what git ignores folded by directory, a
+ * directory now a symlink not stopping git's answer for the rest; a diff to
+ * an earlier checkpoint says the classification is the repository's now. */
+TEST(the_receipt_orders_by_what_git_says) {
+    fresh();
+    sh("cd '%s' && git init -q && printf 'out/\\n' > .gitignore && mkdir -p d && printf 'f\\n' > d/f && "
+       "git add -A && git -c user.name=t -c user.email=t@t -c commit.gpgSign=false commit -q -m one", g_scope);
+    ASSERT_EQ_INT(0, belay("mark", "--scope", g_scope, NULL));
+    sh("cd '%s' && printf 'more\\n' >> src/x.txt && printf 'n\\n' > a.txt && mkdir -p out/o && printf 'o\\n' > out/o/a.o && "
+       "rm -r d && mkdir e && printf 'e\\n' > e/f && ln -s e d", g_scope);
+    ASSERT_EQ_INT(0, belay("diff", "--scope", g_scope, "--since", "1", NULL));
+    const char *x = strstr(g_out, "  M src/x.txt"), *a = strstr(g_out, "  A a.txt");
+    ASSERT_TRUE(x != NULL && a != NULL && x < a);
+    ASSERT_TRUE(strstr(g_out, "  git-ignored: 3 changes under out/\n") != NULL);
+    ASSERT_TRUE(strstr(g_out, "out/o") == NULL);
+    ASSERT_TRUE(strstr(g_out, "as the repository is now") == NULL);       /* the latest checkpoint */
+    ASSERT_EQ_INT(0, belay("mark", "--scope", g_scope, NULL));
+    ASSERT_EQ_INT(0, belay("diff", "--scope", g_scope, "--since", "1", "--to", "2", NULL));
+    ASSERT_TRUE(strstr(g_out, "  tracked, untracked and ignored: as the repository is now, not at checkpoint 2\n") != NULL);
+    ASSERT_TRUE(strstr(g_out, "  git-ignored: 3 changes under out/\n") != NULL);
+    ASSERT_EQ_INT(0, belay("diff", "--scope", g_scope, "--since", "1", "--to", "2", "--json", NULL));
+    ASSERT_TRUE(strstr(g_out, "\"path\":\"out/o/a.o\"") != NULL);           /* NDJSON untouched */
+}
+
+/* Review gaps: an exclude names the symlink itself, never its target, and
+ * siblings sharing a name's prefix are compared as usual. */
 TEST(an_exclude_is_exact_on_links_and_prefixes) {
     fresh();
     sh("mkdir -p '%s/d/sub' '%s/a' '%s/a-' && printf 's\\n' > '%s/d/sub/s' && ln -s d '%s/ld' && "
@@ -1054,6 +1079,7 @@ int main(void) {
     RUN(json_output_names_every_excluded_path);
     RUN(an_exclude_is_exact_on_links_and_prefixes);
     RUN(reads_leave_the_state_directory_as_it_was);
+    RUN(the_receipt_orders_by_what_git_says);
     free(g_out);
     free(g_err);
     char cmd[800];
