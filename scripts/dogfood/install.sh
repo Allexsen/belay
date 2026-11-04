@@ -51,6 +51,7 @@ EOF
 }
 W='Bash|Edit|Write|NotebookEdit|Agent|mcp__.*'
 jq -n --arg w "$W" --arg start "$(cmd start)" --arg pre "$(cmd pre)" --arg post "$(cmd post)" \
+      --arg batch "$(cmd batch)" --arg prompt "$(cmd prompt)" \
       --arg stop "$(cmd stop)" --arg end "$(cmd end)" '
   def h($c): [{"type": "command", "command": $c}];
   {"hooks": {
@@ -58,6 +59,8 @@ jq -n --arg w "$W" --arg start "$(cmd start)" --arg pre "$(cmd pre)" --arg post 
      "PreToolUse":         [{"matcher": $w, "hooks": h($pre)}],
      "PostToolUse":        [{"matcher": $w, "hooks": h($post)}],
      "PostToolUseFailure": [{"matcher": $w, "hooks": h($post)}],
+     "PostToolBatch":      [{"hooks": h($batch)}],
+     "UserPromptSubmit":   [{"hooks": h($prompt)}],
      "Stop":               [{"hooks": h($stop)}],
      "SessionEnd":         [{"hooks": [{"type": "command", "command": $end, "timeout": 10}]}]}}' \
     > "$DEST/settings-hooks.json"

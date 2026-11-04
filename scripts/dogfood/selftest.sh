@@ -408,7 +408,7 @@ printf '%s' '{"theme":"dark","hooks":{"PreToolUse":[{"matcher":"Bash","hooks":[{
 m=$(HOME=$FH sh scripts/dogfood/install.sh "$BELAY" "$S" 2>/dev/null)
 [ "$(printf '%s\n' "$m" | wc -l)" = 1 ] || fail "install.sh printed more than the merge command: $m"
 SH=$FH/.local/share/belay/dogfood/settings-hooks.json
-jq -e '.hooks | keys == ["PostToolUse","PostToolUseFailure","PreToolUse","SessionEnd","SessionStart","Stop"]' "$SH" >/dev/null || fail "no settings file"
+jq -e '.hooks | keys == ["PostToolBatch","PostToolUse","PostToolUseFailure","PreToolUse","SessionEnd","SessionStart","Stop","UserPromptSubmit"]' "$SH" >/dev/null || fail "no settings file"
 sh -c "$m" >/dev/null && sh -c "$m" >/dev/null || fail "the merge command failed"
 jq -e '.theme == "dark" and ([.hooks.PreToolUse[].hooks[].command] | (index("other-hook") != null)
         and (map(select(test("belay-dogfood"))) | length == 1) and (map(select(test("/old/"))) | length == 0))' \
@@ -554,4 +554,34 @@ grep -q '^  ignored    1 edited: \.env +1 -0; [0-9]* under out/$' "$RG" \
     || fail "an ignored file's edit not named in the summary, or a binary not folded: $(sed -n '/^summary$/,/^$/p' "$RG")"
 grep -A8 '^Bash: make$' "$RG" | grep -q '^  M \.env   (git-ignored)   +1 -0 lines' && ! grep -q 'c\.bin' "$RG" \
     || fail "an ignored file's edit not listed by name, or a binary listed: $(cat "$RG")"
-echo "dogfood selftest: sequential, concurrent, background, cancelled, quiet turn said, other project, symlinked project, git folded, labels cut, background commands, directories folded, paths counted, failures said, inactive gaps unattributed, summary, touched folded, identical replacements folded, a watcher noted, long commands, git events, compiled Python, lost receipts, install, a BSD date, a symlinked TMPDIR, a real repository: ok"
+# Calls with no post (turn-6124, 2026-11-04). Claude Code 2.1.318 runs
+# PreToolUse for a call it then denies, never a post, but lists the call
+# in the PostToolBatch that ends its batch: it never ran and must not stay
+# open beside every later call of the turn. A call the user interrupts gets
+# no post and no batch; the next prompt proves it gone. Session d1, a state
+# of its own.
+dh() { printf '%s' "$2" | BELAY_STATE_DIR="$T/den-state" "$HOOK" "$1"; }
+dc() { printf '{"session_id":"d1","tool_use_id":"%s","tool_name":"Bash","tool_input":{"command":"%s"}}' "$1" "$2"; }
+db() { printf '{"session_id":"d1","tool_calls":[%s]}' "$(printf '{"tool_use_id":"%s"},' "$@" | sed 's/,$//')"; }
+mkdir -p "$T/den-state" && chmod 700 "$T/den-state"
+dh start '{"session_id":"d1"}'
+dh pre "$(dc t40 'rm -rf build')"                       # denied: no post
+dh pre "$(dc t41 'write w')"; printf 'w\n' > "$S/den-w.c"; dh post "$(dc t41 'write w')"
+dh batch "$(db t40 t41)"
+dh pre "$(dc t42 'write v')"; printf 'v\n' > "$S/den-v.c"; dh post "$(dc t42 'write v')"
+dh batch "$(db t42)"
+dh pre "$(dc t43 'long job')"; printf 'q\n' > "$S/den-q.c"   # interrupted: no post, no batch
+dh prompt '{"session_id":"d1"}'
+dh pre "$(dc t44 'write u')"; printf 'u\n' > "$S/den-u.c"; dh post "$(dc t44 'write u')"
+dh batch "$(db t44)"
+dh stop '{"session_id":"d1"}' >/dev/null
+RD=$(ls -t "$T/den-state/dogfood"/d1.turn-*.txt | head -1)
+jq -se '[.[] | select(.event == "batch")] | length == 3 and .[0].tool_use_ids == ["t40","t41"] and (.[0] | has("cp") | not)' \
+    "$T/den-state/dogfood/d1.jsonl" >/dev/null || fail "the batches not logged, or with a checkpoint: $(cat "$T/den-state/dogfood/d1.jsonl")"
+! grep -q 'concurrent' "$RD" || fail "a call with no post kept open beside later calls: $(cat "$RD")"
+for c in "write w:w" "write v:v" "write u:u"; do
+    grep -A1 "^Bash: ${c%:*}\$" "$RD" | grep -q "  A den-${c#*:}\.c" || fail "${c%:*} not alone under its call: $(cat "$RD")"
+done
+grep -A1 '^Bash: long job   (cancelled)$' "$RD" | grep -q '  A den-q\.c' || fail "the interrupted call lost its change: $(cat "$RD")"
+! grep -q 'rm -rf build' "$RD" || fail "the denied call, which ran nothing, has changes: $(cat "$RD")"
+echo "dogfood selftest: sequential, concurrent, background, cancelled, quiet turn said, other project, symlinked project, git folded, labels cut, background commands, directories folded, paths counted, failures said, inactive gaps unattributed, summary, touched folded, identical replacements folded, a watcher noted, long commands, git events, compiled Python, lost receipts, install, a BSD date, a symlinked TMPDIR, a real repository, denied and interrupted calls: ok"
