@@ -349,13 +349,16 @@ static bool scripted_overlay(void *ctx, int fd) { (void)ctx; (void)fd; return g_
 
 TEST(the_probe_marks_on_a_writer_and_counts_what_it_could_not_ask) {
     static const struct { int start, end; bool overlay; size_t marked, unguarded; } cases[] = {
-        { 0, 0, false, 0, 0 },   { 1, 0, false, 12, 0 },  { 0, 1, false, 12, 0 },  { 1, 1, false, 12, 0 },
-        { -1, -1, false, 0, 12 }, { 0, -1, false, 0, 12 }, { -1, 0, false, 0, 12 },
-        { -1, 1, false, 12, 0 }, { 1, -1, false, 12, 0 }, /* a writer seen outranks "cannot tell" */
-        { 0, 0, true, 0, 12 },   { 1, 0, true, 12, 0 },
+        { 0, 0, false, 0, 0 },   { 1, 0, false, 13, 0 },  { 0, 1, false, 13, 0 },  { 1, 1, false, 13, 0 },
+        { -1, -1, false, 0, 13 }, { 0, -1, false, 0, 13 }, { -1, 0, false, 0, 13 },
+        { -1, 1, false, 13, 0 }, { 1, -1, false, 13, 0 }, /* a writer seen outranks "cannot tell" */
+        { 0, 0, true, 0, 13 },   { 1, 0, true, 13, 0 },
     };
     g_round_ns = 0;
     fresh_tree();
+    static char big[8192];                  /* over store_max_bytes: no copy wanted, probed all the same */
+    memset(big, 'x', sizeof big);
+    writef("d0/big", big, sizeof big);
     char out[400];
     snprintf(out, sizeof out, "%s/o.ndjson", g_dir);
     for (size_t i = 0; i < sizeof cases / sizeof cases[0]; i++) {
@@ -380,6 +383,10 @@ TEST(the_probe_marks_on_a_writer_and_counts_what_it_could_not_ask) {
 TEST(a_marked_entry_is_never_trusted_by_a_mark) {
     g_round_ns = 0;
     fresh_tree();
+    static char big[8192];                  /* too large to store: a text file without a copy is read anyway */
+    memset(big, 'x', sizeof big);
+    writef("d0/big", big, sizeof big);
+    usleep(30000);                     /* before the walk's start, whatever the tick: not racy */
     char prev[400], next[400];
     snprintf(prev, sizeof prev, "%s/p.ndjson", g_dir);
     snprintf(next, sizeof next, "%s/n.ndjson", g_dir);
@@ -390,7 +397,7 @@ TEST(a_marked_entry_is_never_trusted_by_a_mark) {
     g_writer_on = 0;
     g_ops.writer_present = g_real->writer_present;
     REQUIRE(r == 0);
-    ASSERT_EQ_INT(12, (int)st.writer_open);
+    ASSERT_EQ_INT(13, (int)st.writer_open);
     usleep(30000);                     /* past the reference point, whatever the tick */
     REQUIRE(capture(next, prev, &st) == 0);
     ASSERT_EQ_INT(0, (int)st.trusted);

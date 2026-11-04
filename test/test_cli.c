@@ -1105,29 +1105,44 @@ TEST(a_shared_mapping_writer_marks_every_pass_and_nothing_diffs_on_the_hash) {
         close(fd);
         for (long k = 0;; k++) {
             memset(m, (k & 1) ? 'B' : 'A', SZ);
+            __asm__ volatile("" ::: "memory");      /* the stores stay: nothing else reads them */
             if (k == 0 && write(ready[1], "x", 1) != 1) _exit(1);
         }
     }
     char c;
     REQUIRE(read(ready[0], &c, 1) == 1);
     int marks = 0, ordinary = 0;
+    char first[80] = "";
+    bool moved = false;                 /* the writer really writes: the hashes differ */
     for (int i = 0; i < 30; i++) {
         REQUIRE(belay("mark", "--scope", g_scope, "--full", "--json", NULL) == 0);
         const long id = marked(manifest, sizeof manifest);
         marks += trailer_num(manifest, "\"writer_open\":") == 1;
+        FILE *mf = fopen(manifest, "r");
+        REQUIRE(mf != NULL);
+        static char ml[4096];
+        while (fgets(ml, sizeof ml, mf) != NULL) {
+            const char *h = strstr(ml, "\"path\":\"big.dat\"") != NULL ? strstr(ml, "\"sha256\":\"") : NULL;
+            if (h == NULL) continue;
+            if (first[0] == '\0') snprintf(first, sizeof first, "%.74s", h);
+            else if (strncmp(first, h, 74) != 0) moved = true;
+        }
+        fclose(mf);
         char since[24], to[24];
         snprintf(since, sizeof since, "%ld", id - 1);
         snprintf(to, sizeof to, "%ld", id);
         REQUIRE(belay("diff", "--scope", g_scope, "--since", since, "--to", to, "--json", NULL) == 0);
         const char *r = strstr(g_out, "\"path\":\"big.dat\"");
-        if (r != NULL) {
-            const char *eol = strchr(r, '\n');
-            char rec[1024];
-            snprintf(rec, sizeof rec, "%.*s", (int)(eol - r), r);
-            if (strstr(rec, "\"outcome\":\"unknown\"") == NULL || strstr(rec, "\"unknown\":[\"writer_open\"]") == NULL ||
-                strstr(rec, "sha256") != NULL) ordinary++;
+        const char *eol = r != NULL ? strchr(r, '\n') : NULL;
+        char rec[1024] = "";
+        if (eol != NULL) snprintf(rec, sizeof rec, "%.*s", (int)(eol - r), r);
+        if (strstr(rec, "\"outcome\":\"unknown\"") == NULL || strstr(rec, "\"unknown\":[\"writer_open\"]") == NULL ||
+            strstr(rec, "sha256") != NULL) {
+            if (ordinary == 0) printf("      pass %d: %s\n", i, r != NULL ? rec : g_out);
+            ordinary++;
         }
-        if (strstr(g_out, "\"modified\":0,") == NULL) ordinary++;
+        if (strstr(g_out, "\"modified\":0,") == NULL || strstr(g_out, "\"provisional\":false") == NULL ||
+            strstr(g_out, "\"after_writer_open\":1,") == NULL) ordinary++;
     }
     kill(w, SIGKILL);
     waitpid(w, NULL, 0);
@@ -1135,6 +1150,7 @@ TEST(a_shared_mapping_writer_marks_every_pass_and_nothing_diffs_on_the_hash) {
     close(ready[1]);
     ASSERT_EQ_INT(30, marks);
     ASSERT_EQ_INT(0, ordinary);
+    ASSERT_TRUE(moved);
     /* The writer gone, a plain mark reads the file again (V4-R6). */
     REQUIRE(belay("mark", "--scope", g_scope, "--json", NULL) == 0);
     marked(manifest, sizeof manifest);
