@@ -255,6 +255,18 @@ def ignored_dirs(recs):
     return sorted(n.items())
 
 
+def ignored_edit(r):
+    """A record of an edit to a git-ignored file -- its text changed, or its
+    type, not a directory's -- which is never folded: an ignored file an
+    agent edits is often .env or local configuration (2026-11-04). A binary
+    rewritten (build output) folds by directory, as added and removed
+    ignored entries do."""
+    if "event" in r or r.get("type") == "dir":
+        return False
+    return r.get("outcome") == "type_changed" or r.get("outcome") == "modified" and any(
+        f.get("kind") in ("text_changed", "text_rewritten") for f in r.get("findings") or [])
+
+
 def in_place(recs):
     """Reflog moves that left their ref where it was (from == to: a reset
     or a stash in place, which can discard uncommitted work), counted by
@@ -268,10 +280,10 @@ def in_place(recs):
     return ", ".join(f"{k} {o}{'s' if k != 1 and ' ' not in o else ''} in place" for o, k in sorted(ops.items()))
 
 
-def line_of(r, outside):
+def line_of(r, outside, ignored=False):
     if "event" in r:
         return f"  {r.get('interp', '')} {short_ids(printable(r.get('text', '')))}"
-    s = f"  {SYM.get(r['outcome'], '?')} {path_of(r)}"
+    s = f"  {SYM.get(r['outcome'], '?')} {path_of(r)}" + ("   (git-ignored)" if ignored else "")
     if r["outcome"] == "unknown":
         s += "   unknown: " + ", ".join(r.get("unknown", []))
     elif r.get("findings"):
@@ -412,9 +424,10 @@ def compiled(p):
 def folded_git(r, events=False):
     """The repository a record's path is git's bookkeeping of ("" for the
     scope's own), or None: what the git interpreter reports -- refs, HEAD,
-    hooks, reflog moves, the index (a finding of a git_ kind) -- and every
-    path under hooks/ stay visible, as do privilege changes; the rest under a
-    .git directory folds to one line (decision 105). With `events` -- git's
+    hooks, reflog moves (a finding of a git_ kind) -- and every path under
+    hooks/ stay visible, as do privilege changes; the rest under a .git
+    directory folds to one line (decision 105), the index's "index changed"
+    with it (2026-11-04). With `events` -- git's
     events in the same section (decision 126) -- the events say what the
     findings did, and only hooks and privilege changes stay listed."""
     if "event" in r:
@@ -424,7 +437,8 @@ def folded_git(r, events=False):
         return None
     if path_of(r)[m.end():].startswith("hooks/") or path_of(r)[m.end():] == "hooks":
         return None
-    gf = [f for f in r.get("findings") or [] if f.get("kind", "").startswith("git_")]
+    gf = [f for f in r.get("findings") or [] if f.get("kind", "").startswith("git_")
+          and f.get("kind") != "git_index_changed"]
     if not events and gf and not only_in_place(gf):
         return None
     ch = set(r.get("changed") or [])
@@ -563,14 +577,22 @@ def summary(secs, net=None, cls=None):
             return p.startswith(BUILD) or p + "/" in BUILD     # build/ itself is build output too
         return cls.get(p) == "ignored" and not privilege_change(r) and r.get("outcome") != "unknown"
 
+    def ign(p):
+        return cls is not None and cls.get(p) == "ignored"
+
     per = by_path(recs)
+    files = by_path(net) if net is not None else per
+    # A git-ignored file edited in the end is named, never folded (2026-11-04).
+    ign_edited = {p for p, rs in files.items() if ign(p) and ignored_edit(rs[-1])
+                  and rs[-1].get("outcome") != "unknown" and not compiled(p)}
     edited, added, removed, gone = [], [], [], 0
+    ign_named = []
     added_dirs = set()
     unknown, priv, build, pyc = [], [], [], 0
     for p, rs in per.items():
         if any(privilege_change(r) for r in rs):
             priv.append(f"{SYM.get(rs[-1]['outcome'], '?')} {printable(p)}")
-        if folds(p, rs[-1]):
+        if folds(p, rs[-1]) and p not in ign_edited:
             build.append(rs[-1])
             continue
         if compiled(p):
@@ -582,9 +604,8 @@ def summary(secs, net=None, cls=None):
             unknown.append(f"{printable(p)} ({', '.join(rs[-1].get('unknown', []))})")
     eligible = {p for p, rs in per.items() if not folds(p, rs[-1]) and not compiled(p) and not GIT.match(p)
                 and rs[-1]["outcome"] != "unknown"}
-    files = by_path(net) if net is not None else per
     for p, rs in files.items():
-        if folds(p, rs[-1]) or compiled(p) or GIT.match(p):
+        if (folds(p, rs[-1]) and p not in ign_edited) or compiled(p) or GIT.match(p):
             continue
         outs = [r["outcome"] for r in rs]
         if outs[-1] == "unknown":
@@ -607,7 +628,7 @@ def summary(secs, net=None, cls=None):
                     elif f.get("kind") == "text_rewritten":
                         plus, minus, text = plus + f.get("lines_after", 0), minus + f.get("lines_before", 0), True
             kind = " (type changed)" if "type_changed" in outs else f" +{plus} -{minus}" if text else ""
-            edited.append(printable(p) + kind)
+            (ign_named if p in ign_edited else edited).append(printable(p) + kind)
     # A path back as it was, but for when it was written or which inode
     # holds it (a branch switched back, a stash popped): restored too.
     same = {p for p, rs in files.items() if rs[-1].get("outcome") == "metadata_only"
@@ -641,17 +662,18 @@ def summary(secs, net=None, cls=None):
         lines.append(f"  packages   {listed(pk)}")
     if priv:
         lines.append(f"  privilege  {listed(sorted(priv))}")
-    if build or pyc:
+    if build or pyc or ign_named:
         k = len(build)
         if cls is None:
             parts = [f"{k:,} change{'s' if k != 1 else ''} under build/, bin/"] if build else []
         else:
             dirs = [d or "the top directory" for d, _ in ignored_dirs(build)]
-            parts = [f"{k:,} git-ignored change{'s' if k != 1 else ''} under {listed([printable(d) for d in dirs])}"] \
-                if build else []
+            parts = [f"{len(ign_named):,} edited: {listed(sorted(ign_named))}"] if ign_named else []
+            if build:
+                parts.append(f"{k:,} under {listed([printable(d) for d in dirs])}")
         if pyc:
             parts.append(f"{pyc:,} compiled Python")
-        lines.append(f"  build      {'; '.join(parts)}")
+        lines.append(f"  {'build  ' if cls is None else 'ignored'}    {'; '.join(parts)}")
     if unknown:
         lines.append(f"  unknown    {len(unknown):,}: {listed(sorted(unknown))}")
     return ["", "summary"] + lines if lines else []
@@ -681,7 +703,7 @@ def render(scope, belay, secs, errors, net=None):
         lines.append("  receipt incomplete: " + printable(e.get("message", "")))
     cls = git_classes(scope, [r for _, recs, _, _ in secs for r in recs] + (net or []))
     lines.extend(summary(secs, net, cls))
-    rank = {"tracked": 0, "untracked": 1}
+    rank = {"tracked": 0, "untracked": 1, "ignored": 2}
     detail, touches = [], []
     for head, recs, outside, calls in secs:
         refs = []
@@ -695,7 +717,7 @@ def render(scope, belay, secs, errors, net=None):
             build = [r for r in recs if "event" not in r and path_of(r).startswith(BUILD)]
         else:               # git-ignored paths fold by top-level directory; privilege and unknown stay
             build = [r for r in recs if "event" not in r and cls.get(path_of(r)) == "ignored"
-                     and not privilege_change(r) and r.get("outcome") != "unknown"]
+                     and not privilege_change(r) and r.get("outcome") != "unknown" and not ignored_edit(r)]
         pyc = [r for r in recs if "event" not in r and r not in build and compiled(path_of(r))]
         events = any("event" in r and r.get("interp") == "git" for r in recs)
         git = {}
@@ -708,7 +730,7 @@ def render(scope, belay, secs, errors, net=None):
                 git.setdefault(repo, []).append(r)
                 continue
             shown.append(r)
-        if cls is not None:     # tracked changes first, then untracked (2026-11-04)
+        if cls is not None:     # tracked changes first, then untracked, then ignored edits (2026-11-04)
             shown.sort(key=lambda r: 3 if "event" in r else rank.get(cls.get(path_of(r)), 1))
         roots, under = folded_dirs(shown)
         same = [r for r in shown if touched(r) and id(r) not in under and id(r) not in roots]
@@ -721,7 +743,7 @@ def render(scope, belay, secs, errors, net=None):
                 lines.append(f"  {SYM[r['outcome']]} {printable(path_of(r))}/ and {k:,} "
                              f"entr{'ies' if k != 1 else 'y'} below it")
                 continue
-            lines.append(line_of(r, outside))
+            lines.append(line_of(r, outside, cls is not None and cls.get(path_of(r)) == "ignored"))
         if same:
             touches.append([path_of(r) for r in same])
             lines.append(f"  ~ {len(same):,} file{'s' if len(same) != 1 else ''} touched, content unchanged   "

@@ -333,7 +333,7 @@ printf '%s\n' "$sum" | grep -q '^  files      added [0-9]*: [^;]* (and [0-9]* mo
 printf '%s\n' "$sum" | grep -q "^  git        .*feature now at ${H%????????????????????????????}\$" || fail "git not summarised: $sum"   # git's event (E12)
 printf '%s\n' "$sum" | grep -q '^  packages   pip installed foo 1\.0' || fail "the package not summarised: $sum"
 printf '%s\n' "$sum" | grep -q '^  privilege  .*src/c\.c' || fail "the setuid bit not summarised: $sum"
-printf '%s\n' "$sum" | grep -q '^  build      2 git-ignored changes under build/; 3 compiled Python$' || fail "build output not counted: $sum"
+printf '%s\n' "$sum" | grep -q '^  ignored    2 under build/; 3 compiled Python$' || fail "build output not counted: $sum"
 grep -A30 '^Bash: glance$' "$R10" | grep -q '^  git-ignored: 2 changes under build/$' || fail "git-ignored paths not folded: $(cat "$R10")"
 ! printf '%s\n' "$sum" | grep -q 'build/ (+' || fail "build/ listed as an added directory: $sum"
 ! printf '%s\n' "$sum" | grep -q 'pyc\|__pycache__' || fail "compiled Python listed as edits: $sum"
@@ -518,10 +518,12 @@ grep -A2 '^Bash: cat README   (a background command was also running: Bash: make
 # what git ignores folds by top-level directory; a stash in place folds into
 # git's bookkeeping, counted, never silently; and the summary is the turn's
 # net result, what a call changed and a later one undid counted as touched
-# and restored. Its own repository and state: its writes are no other
-# session's.
+# and restored. An ignored file whose text changed (.env) is named, in the
+# summary and under its call; a binary rewritten under out/ folds. Its own
+# repository and state: its writes are no other session's.
 G=$T/gitrepo; mkdir -p "$G/src" "$T/git-state" && chmod 700 "$T/git-state"
-printf 'out/\n' > "$G/.gitignore"; printf 'z\n' > "$G/src/z.c"; printf 'y\n' > "$G/src/y.c"
+printf 'out/\n.env\n' > "$G/.gitignore"; printf 'z\n' > "$G/src/z.c"; printf 'y\n' > "$G/src/y.c"
+printf 'A=1\n' > "$G/.env"; mkdir -p "$G/out"; printf '\000bin1' > "$G/out/c.bin"
 gg() { git -C "$G" -c user.name=t -c user.email=t@t -c commit.gpgSign=false "$@"; }
 gg init -q && gg add -A && gg commit -q -m one
 gk() {  # gk EVENT [tool_use_id summary]: a hook of session g1, on the repository
@@ -532,6 +534,7 @@ gk start
 gk pre t40 "make"
 mkdir -p "$G/out/o"; printf 'o\n' > "$G/out/o/a.o"; printf 'o\n' > "$G/out/b.o"
 printf 'n\n' > "$G/aaa.txt"; printf 'z2\n' >> "$G/src/z.c"; printf 'y2\n' >> "$G/src/y.c"
+printf 'B=2\n' >> "$G/.env"; printf '\000bin2' > "$G/out/c.bin"
 gk post t40
 gk pre t41 "stash and pop"; gg stash -q && gg stash pop -q; gk post t41
 gk pre t42 "undo y"; printf 'y\n' > "$G/src/y.c"; gk post t42
@@ -547,4 +550,8 @@ grep -A8 '^Bash: stash and pop$' "$RG" | grep -q '^  git bookkeeping: [0-9]* cha
 grep -q '^  edited     1: src/z\.c +1 -0; 1 more touched and restored$' "$RG" \
     || fail "the summary is not the turn's net result: $(sed -n '/^summary$/,/^$/p' "$RG")"
 grep -A3 '^Bash: undo y$' "$RG" | grep -q '^  M src/y\.c' || fail "a call's own change no longer listed: $(cat "$RG")"
+grep -q '^  ignored    1 edited: \.env +1 -0; [0-9]* under out/$' "$RG" \
+    || fail "an ignored file's edit not named in the summary, or a binary not folded: $(sed -n '/^summary$/,/^$/p' "$RG")"
+grep -A8 '^Bash: make$' "$RG" | grep -q '^  M \.env   (git-ignored)   +1 -0 lines' && ! grep -q 'c\.bin' "$RG" \
+    || fail "an ignored file's edit not listed by name, or a binary listed: $(cat "$RG")"
 echo "dogfood selftest: sequential, concurrent, background, cancelled, quiet turn said, other project, symlinked project, git folded, labels cut, background commands, directories folded, paths counted, failures said, inactive gaps unattributed, summary, touched folded, identical replacements folded, a watcher noted, long commands, git events, compiled Python, lost receipts, install, a BSD date, a symlinked TMPDIR, a real repository: ok"
