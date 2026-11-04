@@ -161,6 +161,113 @@ def path_of(r):
     return r.get("path") or ("(base64) " + r.get("path_b64", ""))
 
 
+GIT_ENV = ("GIT_DIR", "GIT_WORK_TREE", "GIT_INDEX_FILE", "GIT_OBJECT_DIRECTORY", "GIT_COMMON_DIR",
+           "GIT_NAMESPACE", "GIT_ALTERNATE_OBJECT_DIRECTORIES")
+PATHSPEC = re.compile(rb"pathspec '(.*)' (?:is beyond a symbolic link|is in submodule)", re.I)
+
+
+def _git(args, cwd, inp=None):
+    """git with nothing of the caller's repository selection, and no write
+    a read could make (optional locks off, no fsmonitor)."""
+    env = {k: v for k, v in os.environ.items() if k not in GIT_ENV}
+    env["GIT_OPTIONAL_LOCKS"] = "0"
+    return subprocess.run(["git", "-c", "core.fsmonitor=false", *args], cwd=cwd, input=inp,
+                          capture_output=True, env=env, timeout=60)
+
+
+def git_classes(scope, recs):
+    """Each record's path outside any .git: "tracked" (in the index or in
+    HEAD), "ignored" (git check-ignore) or "untracked" -- as the repository
+    is now, not as it was when the records were captured. None when there
+    is no git, the scope is in no repository, or git fails: the receipt
+    then keeps path order (2026-11-04)."""
+    paths = {}
+    for r in recs:
+        if "event" in r or "path" not in r or GIT.match(r["path"]):
+            continue
+        paths[r["path"]] = paths.get(r["path"], False) or r.get("type") == "dir" or r.get("type_before") == "dir"
+    if not paths:
+        return {}
+    try:
+        rp = _git(["rev-parse", "--show-toplevel", "--show-prefix"], scope)
+        if rp.returncode != 0:
+            return None
+        top, prefix = (rp.stdout.split(b"\n") + [b"", b""])[:2]
+        top = os.fsdecode(top)
+        lf = _git(["ls-files", "-z"], top)
+        if lf.returncode != 0:
+            return None
+        lt = _git(["ls-tree", "-r", "-z", "--name-only", "HEAD"], top)      # no commit yet: none
+        tracked = set(lf.stdout.split(b"\0")) | (set(lt.stdout.split(b"\0")) if lt.returncode == 0 else set())
+        tracked.discard(b"")
+        holding = set()                                 # directories that hold a tracked file
+        for t in tracked:
+            i = t.rfind(b"/")
+            while i > 0 and t[:i] not in holding:
+                holding.add(t[:i])
+                i = t.rfind(b"/", 0, i)
+        out, ask = {}, {}
+        links = {}
+        for p, isdir in paths.items():
+            full = prefix + os.fsencode(p)
+            if full in tracked or full in holding:
+                out[p] = "tracked"
+                continue
+            # git refuses a path below a symlink (the whole call fails): such a
+            # path was removed with its directory, and is shown, not folded.
+            d, below = os.path.dirname(p), False
+            while d and not below:
+                if d not in links:
+                    links[d] = os.path.islink(os.path.join(scope, d))
+                below, d = links[d], os.path.dirname(d)
+            if below:
+                out[p] = "untracked"
+                continue
+            ask[full + (b"/" if isdir else b"")] = p
+        for _ in range(8):
+            if not ask:
+                break
+            ci = _git(["check-ignore", "-z", "--stdin"], top, b"\0".join(ask) + b"\0")
+            if ci.returncode in (0, 1):
+                ign = set(ci.stdout.split(b"\0"))
+                for f, p in ask.items():
+                    out[p] = "ignored" if f in ign else "untracked"
+                ask = {}
+                break
+            m = PATHSPEC.search(ci.stderr)
+            bad = next((f for f in ask if m and f.rstrip(b"/") == m.group(1).rstrip(b"/")), None)
+            if bad is None:
+                return None
+            out[ask.pop(bad)] = "untracked"
+        return out if not ask else None
+    except (OSError, subprocess.SubprocessError, ValueError):
+        return None
+
+
+def ignored_dirs(recs):
+    """Git-ignored records counted by their top-level directory, in order:
+    [("build/", 210), ("bin/", 2), ("", 1)] -- "" for files at the top."""
+    n = {}
+    for r in recs:
+        p = path_of(r)
+        k = p.split("/", 1)[0] + "/" if "/" in p or r.get("type") == "dir" else ""
+        n[k] = n.get(k, 0) + 1
+    return sorted(n.items())
+
+
+def in_place(recs):
+    """Reflog moves that left their ref where it was (from == to: a reset
+    or a stash in place, which can discard uncommitted work), counted by
+    operation: "1 reset in place", "2 checkouts in place"."""
+    ops = {}
+    for r in recs:
+        for f in r.get("findings") or []:
+            if f.get("kind") == "git_reflog_move" and f.get("from") == f.get("to"):
+                o = f.get("operation", "?")
+                ops[o] = ops.get(o, 0) + 1
+    return ", ".join(f"{k} {o}{'s' if k != 1 and ' ' not in o else ''} in place" for o, k in sorted(ops.items()))
+
+
 def line_of(r, outside):
     if "event" in r:
         return f"  {r.get('interp', '')} {short_ids(printable(r.get('text', '')))}"
@@ -317,13 +424,26 @@ def folded_git(r, events=False):
         return None
     if path_of(r)[m.end():].startswith("hooks/") or path_of(r)[m.end():] == "hooks":
         return None
-    if not events and any(f.get("kind", "").startswith("git_") for f in r.get("findings") or []):
+    gf = [f for f in r.get("findings") or [] if f.get("kind", "").startswith("git_")]
+    if not events and gf and not only_in_place(gf):
         return None
     ch = set(r.get("changed") or [])
     b, a = r.get("before", {}), r.get("after", {})
     if ch & {"caps", "iflags"} or "mode" in ch and (b.get("mode", 0) ^ a.get("mode", 0)) & 0o7000:
         return None
     return m.group(1)
+
+
+def only_in_place(gf):
+    """git's findings on a reflog that gained only moves leaving its ref
+    where it was (2026-11-04): those fold, counted (in_place), the rest of
+    what git reports stays."""
+    moves = [f for f in gf if f.get("kind") == "git_reflog_move"]
+    if not moves or any(f.get("from") != f.get("to") for f in moves):
+        return False
+    rest = [f for f in gf if f.get("kind") != "git_reflog_move"]
+    return all(f.get("kind") == "git_reflog_appended" for f in rest) and \
+        sum(f.get("entries", 0) for f in rest) in (0, len(moves))
 
 
 def privilege_change(r):
@@ -419,33 +539,56 @@ def git_items(recs):
     return uniq
 
 
-def summary(secs):
+def summary(secs, net=None, cls=None):
     """The turn at a glance (decision 125), before any section: what was
     edited (with line counts), added, removed; git; packages; privilege;
     build output; unknown. Each line names a few and counts the rest; the
-    sections below hold every record."""
+    sections below hold every record. With `net` -- the diff from the
+    turn's first checkpoint to its last -- what was edited, added and
+    removed is the turn's net result, and what calls changed and later
+    undid is counted as touched and restored (2026-11-04); the sections
+    keep each call's own changes. With `cls` (git_classes), git-ignored
+    paths are what folds, in place of build/ and bin/."""
     recs = [r for h, rs, _, _ in secs for r in rs]
-    per = {}
-    for r in recs:
-        if "event" not in r:
-            per.setdefault(path_of(r), []).append(r)
+
+    def by_path(rs):
+        per = {}
+        for r in rs:
+            if "event" not in r:
+                per.setdefault(path_of(r), []).append(r)
+        return per
+
+    def folds(p, r):
+        if cls is None:
+            return p.startswith(BUILD) or p + "/" in BUILD     # build/ itself is build output too
+        return cls.get(p) == "ignored" and not privilege_change(r) and r.get("outcome") != "unknown"
+
+    per = by_path(recs)
     edited, added, removed, gone = [], [], [], 0
     added_dirs = set()
-    unknown, priv, build, pyc = [], [], 0, 0
+    unknown, priv, build, pyc = [], [], [], 0
     for p, rs in per.items():
         if any(privilege_change(r) for r in rs):
             priv.append(f"{SYM.get(rs[-1]['outcome'], '?')} {printable(p)}")
-        if p.startswith(BUILD) or p + "/" in BUILD:     # build/ itself is build output too
-            build += 1
+        if folds(p, rs[-1]):
+            build.append(rs[-1])
             continue
         if compiled(p):
             pyc += 1
             continue
         if GIT.match(p):
             continue
+        if rs[-1]["outcome"] == "unknown":
+            unknown.append(f"{printable(p)} ({', '.join(rs[-1].get('unknown', []))})")
+    eligible = {p for p, rs in per.items() if not folds(p, rs[-1]) and not compiled(p) and not GIT.match(p)
+                and rs[-1]["outcome"] != "unknown"}
+    files = by_path(net) if net is not None else per
+    for p, rs in files.items():
+        if folds(p, rs[-1]) or compiled(p) or GIT.match(p):
+            continue
         outs = [r["outcome"] for r in rs]
         if outs[-1] == "unknown":
-            unknown.append(f"{printable(p)} ({', '.join(rs[-1].get('unknown', []))})")
+            continue
         elif "added" in outs and outs[-1] == "removed":
             gone += 1
         elif "added" in outs:
@@ -465,13 +608,21 @@ def summary(secs):
                         plus, minus, text = plus + f.get("lines_after", 0), minus + f.get("lines_before", 0), True
             kind = " (type changed)" if "type_changed" in outs else f" +{plus} -{minus}" if text else ""
             edited.append(printable(p) + kind)
+    # A path back as it was, but for when it was written or which inode
+    # holds it (a branch switched back, a stash popped): restored too.
+    same = {p for p, rs in files.items() if rs[-1].get("outcome") == "metadata_only"
+            and set(rs[-1].get("changed") or []) <= {"mtime_ns", "ctime_ns", "ino", "dev", "nlink"}}
+    restored = len(eligible - (set(files) - same)) if net is not None else 0
     # An added directory stands for what was added below it.
     roots = sorted(d for d in added_dirs if not any(d.startswith(o + "/") for o in added_dirs))
     shown = [f"{printable(d)}/ (+{sum(1 for p in added if p.startswith(d + '/'))})" for d in roots]
     shown += [printable(p) for p in sorted(added) if not any(p == d or p.startswith(d + "/") for d in roots)]
     lines = []
+    back = f"{restored:,} {'more ' if edited else ''}touched and restored" if restored else ""
     if edited:
-        lines.append(f"  edited     {len(edited):,}: {listed(sorted(edited))}")
+        lines.append(f"  edited     {len(edited):,}: {listed(sorted(edited))}" + (f"; {back}" if back else ""))
+    elif back:
+        lines.append(f"  edited     none in the end; {back}")
     if added or removed or gone:
         parts = []
         if added:
@@ -491,7 +642,13 @@ def summary(secs):
     if priv:
         lines.append(f"  privilege  {listed(sorted(priv))}")
     if build or pyc:
-        parts = [f"{build:,} change{'s' if build != 1 else ''} under build/, bin/"] if build else []
+        k = len(build)
+        if cls is None:
+            parts = [f"{k:,} change{'s' if k != 1 else ''} under build/, bin/"] if build else []
+        else:
+            dirs = [d or "the top directory" for d, _ in ignored_dirs(build)]
+            parts = [f"{k:,} git-ignored change{'s' if k != 1 else ''} under {listed([printable(d) for d in dirs])}"] \
+                if build else []
         if pyc:
             parts.append(f"{pyc:,} compiled Python")
         lines.append(f"  build      {'; '.join(parts)}")
@@ -500,7 +657,7 @@ def summary(secs):
     return ["", "summary"] + lines if lines else []
 
 
-def render(scope, belay, secs, errors):
+def render(scope, belay, secs, errors, net=None):
     lines = []
     sha = ""
     try:
@@ -522,7 +679,9 @@ def render(scope, belay, secs, errors):
     lines.append(head)
     for e in errors:
         lines.append("  receipt incomplete: " + printable(e.get("message", "")))
-    lines.extend(summary(secs))
+    cls = git_classes(scope, [r for _, recs, _, _ in secs for r in recs] + (net or []))
+    lines.extend(summary(secs, net, cls))
+    rank = {"tracked": 0, "untracked": 1}
     detail, touches = [], []
     for head, recs, outside, calls in secs:
         refs = []
@@ -532,7 +691,11 @@ def render(scope, belay, secs, errors):
                 refs.append(f"[{len(detail)}]")
         lines.append("")
         lines.append(head + ("   " + " ".join(refs) if refs else ""))
-        build = [r for r in recs if "event" not in r and path_of(r).startswith(BUILD)]
+        if cls is None:     # no git, no repository: build/ and bin/ fold by name, as before
+            build = [r for r in recs if "event" not in r and path_of(r).startswith(BUILD)]
+        else:               # git-ignored paths fold by top-level directory; privilege and unknown stay
+            build = [r for r in recs if "event" not in r and cls.get(path_of(r)) == "ignored"
+                     and not privilege_change(r) and r.get("outcome") != "unknown"]
         pyc = [r for r in recs if "event" not in r and r not in build and compiled(path_of(r))]
         events = any("event" in r and r.get("interp") == "git" for r in recs)
         git = {}
@@ -542,9 +705,11 @@ def render(scope, belay, secs, errors):
                 continue
             repo = folded_git(r, events)
             if repo is not None:
-                git[repo] = git.get(repo, 0) + 1
+                git.setdefault(repo, []).append(r)
                 continue
             shown.append(r)
+        if cls is not None:     # tracked changes first, then untracked (2026-11-04)
+            shown.sort(key=lambda r: 3 if "event" in r else rank.get(cls.get(path_of(r)), 1))
         roots, under = folded_dirs(shown)
         same = [r for r in shown if touched(r) and id(r) not in under and id(r) not in roots]
         repl = [r for r in shown if replaced(r) and id(r) not in under and id(r) not in roots]
@@ -565,12 +730,18 @@ def render(scope, belay, secs, errors):
             touches.append([path_of(r) for r in repl])
             lines.append(f"  ~ {len(repl):,} entr{'ies' if len(repl) != 1 else 'y'} replaced with identical content   "
                          f"[t{len(touches)}]")
-        if build:
+        if build and cls is None:
             lines.append(f"  build output: {len(build)} change{'s' if len(build) != 1 else ''} under build/, bin/")
+        elif build:
+            for d, k in ignored_dirs(build):
+                lines.append(f"  git-ignored: {k:,} change{'s' if k != 1 else ''} "
+                             + (f"under {printable(d)}" if d else "in the top directory"))
         if pyc:
             lines.append(f"  compiled Python: {len(pyc)} change{'s' if len(pyc) != 1 else ''} (__pycache__/, *.pyc)")
-        for repo, k in git.items():
-            lines.append(f"  git bookkeeping: {k} change{'s' if k != 1 else ''} under {repo}.git/")
+        for repo, rs in git.items():
+            k, ip = len(rs), in_place(rs)
+            lines.append(f"  git bookkeeping: {k} change{'s' if k != 1 else ''} under {repo}.git/"
+                         + (f" ({ip})" if ip else ""))
     if detail:
         lines.append("")
         lines.append("the calls in full")
@@ -678,7 +849,11 @@ def turn(events, belay, scope, d, sid, lo, hi):
     secs, errors, _, throughout = sections(events, belay, scope, lo, hi, persistent, d, sid)
     with open(pf, "w") as f:
         json.dump([[p, list(u)] for p, u in sorted(throughout)], f)
-    text, n, paths = render(scope, belay, secs, errors)
+    try:        # the turn's net result, for the summary (2026-11-04); without it, the calls' sum
+        net = diff(belay, scope, lo, hi) if lo != hi else []
+    except (RuntimeError, ValueError, OSError):
+        net = None
+    text, n, paths = render(scope, belay, secs, errors, net)
     path = os.path.join(d, f"{sid}.turn-{hi}.txt")
     with open(path, "w") as f:
         f.write(text)

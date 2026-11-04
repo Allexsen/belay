@@ -66,7 +66,8 @@ want "$T/out" 'removed vim:amd64 2:9.0-1'
 want "$T/out" 'privilege'
 want "$T/out" 'bin/tool   setuid added (mode 0755 -> 4755)'
 want "$T/out" '+2 -1 lines, first change at line 2'
-want "$T/out" 'refs/heads/main 1111111111111111111111111111111111111111 -> 2222222222222222222222222222222222222222'
+want "$T/out" 'git   main 1111111111111111111111111111111111111111 -> 2222222222222222222222222222222222222222'
+want "$T/out" 'git bookkeeping: 1 change under repo/.git/'      # the ref's file: its event says it (2026-11-04)
 want "$T/out" 'hook pre-commit changed'
 
 code 0 "$BELAY" diff --scope "$S" --since 1 --to 2 --json

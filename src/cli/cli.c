@@ -2,6 +2,7 @@
 #include "cli.h"
 #include "cli_internal.h"
 
+#include "gitclass.h"
 #include "receipt.h"
 #include "state.h"
 
@@ -470,6 +471,12 @@ static int mode_of(void *ctx, int side, const char *path, size_t len, struct rec
     return 0;
 }
 
+/* The receipt's classifier: git on the scope as it is now (gitclass.h). */
+static int classify(void *ctx, const char *const *paths, const size_t *lens, const bool *dir, size_t n,
+                    unsigned char *out) {
+    return gitclass(ctx, paths, lens, dir, n, out);
+}
+
 static int cmd_diff(const struct opts *o, FILE *out, FILE *err) {
     long from, to = 0;
     if (!parse_id(o->since, &from)) return usage(err, "diff needs --since ID, a checkpoint id");
@@ -485,6 +492,7 @@ static int cmd_diff(const struct opts *o, FILE *out, FILE *err) {
     char work[PATH_MAX] = "";                   /* a stored diff's pair: computed here, not in the state */
     struct modes m = { 0 };
     FILE *in = NULL;
+    char note[128] = "";
     if (state_list(&st, &list, &n) == -1) { rc = failed(err); goto done; }
     bool have_from = false, have_to = to == 0;
     for (size_t i = 0; i < n; i++) {
@@ -580,7 +588,15 @@ static int cmd_diff(const struct opts *o, FILE *out, FILE *err) {
             goto done;
         }
         for (int s = 0; s < 2; s++) m.side[s].got = belay_manifest_next(m.side[s].r, &m.side[s].e);
-        const struct receipt_opts ro = { label_a, label_b, o->all, mode_of, &m };
+        /* tracked, untracked and ignored are git's word now: said, when the
+         * diff ends at an earlier checkpoint (2026-11-04) */
+        long latest = 0;
+        for (size_t i = 0; i < n; i++) if (list[i].id > latest) latest = list[i].id;
+        if (to < latest)
+            snprintf(note, sizeof note, "tracked, untracked and ignored: as the repository is now, not at checkpoint %ld",
+                     to);
+        const struct receipt_opts ro = { label_a, label_b, o->all, mode_of, &m, o->docker != NULL ? NULL : classify,
+                                         st.scope.path, note[0] ? note : NULL };
         if (receipt_render(in, out, &ro) == -1) { rc = failed(err); goto done; }
         if (now.id != 0 && (now.raced || now.unstable || now.vanished)) {
             fprintf(out, "\ncheckpoint %ld, captured now\n", now.id);

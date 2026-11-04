@@ -18,6 +18,7 @@ S=$T/repo
 mkdir -p "$S/src" "$S/tests" "$S/keepdir" "$T/state" && chmod 700 "$T/state"
 printf 'a\n' > "$S/src/a.c"
 printf 'def test_x(): assert 1\n' > "$S/tests/test_x.py"
+printf 'build/\nbin/\n' > "$S/.gitignore"     # what git ignores folds (the repository is made below)
 export BELAY BELAY_DOGFOOD_SCOPE="$S" BELAY_STATE_DIR="$T/state" CLAUDE_PROJECT_DIR="$S" \
        BELAY_DOGFOOD_NOTES="$T/notes"
 fail() { echo "dogfood selftest: FAIL: $*" >&2; exit 1; }
@@ -332,7 +333,8 @@ printf '%s\n' "$sum" | grep -q '^  files      added [0-9]*: [^;]* (and [0-9]* mo
 printf '%s\n' "$sum" | grep -q "^  git        .*feature now at ${H%????????????????????????????}\$" || fail "git not summarised: $sum"   # git's event (E12)
 printf '%s\n' "$sum" | grep -q '^  packages   pip installed foo 1\.0' || fail "the package not summarised: $sum"
 printf '%s\n' "$sum" | grep -q '^  privilege  .*src/c\.c' || fail "the setuid bit not summarised: $sum"
-printf '%s\n' "$sum" | grep -q '^  build      2 changes under build/, bin/; 3 compiled Python$' || fail "build output not counted: $sum"
+printf '%s\n' "$sum" | grep -q '^  build      2 git-ignored changes under build/; 3 compiled Python$' || fail "build output not counted: $sum"
+grep -A30 '^Bash: glance$' "$R10" | grep -q '^  git-ignored: 2 changes under build/$' || fail "git-ignored paths not folded: $(cat "$R10")"
 ! printf '%s\n' "$sum" | grep -q 'build/ (+' || fail "build/ listed as an added directory: $sum"
 ! printf '%s\n' "$sum" | grep -q 'pyc\|__pycache__' || fail "compiled Python listed as edits: $sum"
 grep -A30 '^Bash: glance$' "$R10" | grep -q '^  compiled Python: 3 changes (__pycache__/, \*\.pyc)$' || fail "compiled Python not folded: $(cat "$R10")"
@@ -512,4 +514,37 @@ kill $held; wait $held 2>/dev/null || :
 RY=$(ls -t "$T/sym-state/dogfood"/y1.turn-*.txt | head -1)
 grep -A2 '^Bash: cat README   (a background command was also running: Bash: make watch)$' "$RY" \
     | grep -q '  A sym.out' || fail "under a symlinked TMPDIR, the running background command read as ended: $(cat "$RY")"
-echo "dogfood selftest: sequential, concurrent, background, cancelled, quiet turn said, other project, symlinked project, git folded, labels cut, background commands, directories folded, paths counted, failures said, inactive gaps unattributed, summary, touched folded, identical replacements folded, a watcher noted, long commands, git events, compiled Python, lost receipts, install, a BSD date, a symlinked TMPDIR: ok"
+# A real repository (2026-11-04): tracked changes first, then untracked ones;
+# what git ignores folds by top-level directory; a stash in place folds into
+# git's bookkeeping, counted, never silently; and the summary is the turn's
+# net result, what a call changed and a later one undid counted as touched
+# and restored. Its own repository and state: its writes are no other
+# session's.
+G=$T/gitrepo; mkdir -p "$G/src" "$T/git-state" && chmod 700 "$T/git-state"
+printf 'out/\n' > "$G/.gitignore"; printf 'z\n' > "$G/src/z.c"; printf 'y\n' > "$G/src/y.c"
+gg() { git -C "$G" -c user.name=t -c user.email=t@t -c commit.gpgSign=false "$@"; }
+gg init -q && gg add -A && gg commit -q -m one
+gk() {  # gk EVENT [tool_use_id summary]: a hook of session g1, on the repository
+    jq -cn --arg t "${2:-}" --arg s "${3:-}" '{session_id:"g1", tool_use_id:$t, tool_name:"Bash", tool_input:{command:$s}}' \
+        | BELAY_DOGFOOD_SCOPE="$G" CLAUDE_PROJECT_DIR="$G" BELAY_STATE_DIR="$T/git-state" "$HOOK" "$1"
+}
+gk start
+gk pre t40 "make"
+mkdir -p "$G/out/o"; printf 'o\n' > "$G/out/o/a.o"; printf 'o\n' > "$G/out/b.o"
+printf 'n\n' > "$G/aaa.txt"; printf 'z2\n' >> "$G/src/z.c"; printf 'y2\n' >> "$G/src/y.c"
+gk post t40
+gk pre t41 "stash and pop"; gg stash -q && gg stash pop -q; gk post t41
+gk pre t42 "undo y"; printf 'y\n' > "$G/src/y.c"; gk post t42
+out=$(gk stop)
+RG=$(ls -t "$T/git-state/dogfood"/g1.turn-*.txt | head -1)
+grep -A4 '^Bash: make$' "$RG" | sed -n 2p | grep -q '^  M src/' || fail "a tracked change not listed first: $(cat "$RG")"
+grep -A6 '^Bash: make$' "$RG" | grep -q '^  A aaa\.txt' || fail "an untracked file not listed: $(cat "$RG")"
+grep -A6 '^Bash: make$' "$RG" | grep -q '^  git-ignored: [0-9]* changes under out/$' && ! grep -q '^  A out/' "$RG" \
+    || fail "git-ignored output not folded by its directory: $(cat "$RG")"
+grep -A8 '^Bash: stash and pop$' "$RG" | grep -q '^  git bookkeeping: [0-9]* changes\{0,1\} under \.git/ (1 reset in place)$' \
+    || fail "a reset in place not counted in git's bookkeeping: $(cat "$RG")"
+! grep -q 'by reset$' "$RG" || fail "a reset in place listed as a finding: $(cat "$RG")"
+grep -q '^  edited     1: src/z\.c +1 -0; 1 more touched and restored$' "$RG" \
+    || fail "the summary is not the turn's net result: $(sed -n '/^summary$/,/^$/p' "$RG")"
+grep -A3 '^Bash: undo y$' "$RG" | grep -q '^  M src/y\.c' || fail "a call's own change no longer listed: $(cat "$RG")"
+echo "dogfood selftest: sequential, concurrent, background, cancelled, quiet turn said, other project, symlinked project, git folded, labels cut, background commands, directories folded, paths counted, failures said, inactive gaps unattributed, summary, touched folded, identical replacements folded, a watcher noted, long commands, git events, compiled Python, lost receipts, install, a BSD date, a symlinked TMPDIR, a real repository: ok"

@@ -240,12 +240,23 @@ previous manifest that is a symlink or a FIFO is corrupt state (exit 4).
 Events first, under `events` (packages installed, upgraded, removed; branches created, deleted,
 renamed or moved, commits added, history rewritten, HEAD switched), then every privilege change -- capabilities,
 inode flags, setuid, setgid or sticky bits, on a file changed, added or removed -- then the other
-changes by path. A record shows at most 15 of its findings, then "and N more". An entry belay could
-not capture reliably is named on its own line with the reason (`raced`, `unstable`, `unverified`,
-...). There is no "provisional" banner; when entries changed while they were read (raced, unstable
-or vanished), one line counts them for each side: those of the newer side are settled by running
-belay again; those of an earlier checkpoint stay in any diff from it. Sections of more than 50 entries fold to
-"and N more" (`--all` shows everything); privilege changes and unknown entries never fold.
+changes. When the scope is in a git repository, belay asks git (`git ls-files`, `ls-tree HEAD`,
+`check-ignore`, run read-only) which of their paths are tracked, untracked or ignored, and lists
+tracked changes first and in full, then untracked ones, then what git ignores as one line per
+top-level directory (`git-ignored: 210 changes under build/`). That is git's word on the repository
+as it is now: a diff ending at an earlier checkpoint says so in one line. Without git or a
+repository, the changes are listed by path. A repository's own `.git` folds to one line
+(`git bookkeeping: 12 changes under .git/`); what git reports there (the index, a reflog, a ref)
+stays on its own line unless git's events in the same diff say it, hooks always stay, and a reflog
+that only moved a ref where it was folds with the moves counted -- `(1 reset in place)`: a reset
+in place can discard uncommitted work. A record shows at most 15 of its findings, then "and N
+more". An entry belay could not capture reliably is named on its own line with the reason
+(`raced`, `unstable`, `unverified`, ...). There is no "provisional" banner; when entries changed
+while they were read (raced, unstable or vanished), one line counts them for each side: those of
+the newer side are settled by running belay again; those of an earlier checkpoint stay in any diff
+from it. Past 50 events, or 50 untracked changes (or changes by path, without git), the rest fold
+to "and N more" (`--all` shows everything and folds nothing); tracked changes, privilege changes
+and unknown entries never fold. `--json` is the diff itself, unaffected.
 
 Every path and text is printed escaped -- in the receipt, in error lines, and whatever belay
 reads back from its state: control characters, C1 controls, DEL, invisible format and bidi
