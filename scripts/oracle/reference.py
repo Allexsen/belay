@@ -60,6 +60,16 @@ Its only sources:
     as `not_captured` derives no event -- the core's `could_not_interpret`
     and `content_unavailable` included, and E6's list never names it
     (decision 118);
+  - test/expect/manifest-v4.md, READ AT RUN TIME (the words relied on checked
+    at start-up, V4_WORDS): `writer_open`'s row in diff-fields.md's columns,
+    as V4-D1 gives it; V4-D2 (`sha256` not compared, in no value), V4-D3 (on
+    one side only: `unknown`), V4-D4 (the reason, last), V4-D5 (four trailer
+    keys, at the end, `0` before v4), V4-D6 (`provisional` is unchanged) and
+    V4-R4 (an earlier version reads as absent and `0`); with diff-v1's rule 1,
+    which says the same (checked too). V4-D3 gives a one-sided entry carrying
+    both flags two reasons, where the prose's `unknown` sentence still says
+    "its one reason": the pin, the later, is followed. V4-D7 to D9 and V4-S1 to
+    S3 are outside the diff.
 Never the generated blocks of the spec, never src/ or include/: every check
 that quotes a spec reads it through spec_prose(), which withholds them
 (decision 119); a check that quotes a pin reads that pin.
@@ -278,11 +288,21 @@ INPUT_COUNTS = ['vanished', 'unstable', 'raced']
 # ... "and `events` the event records (`belay_diff_end` counts path records
 # only)" ...
 EVENTS = 'events'
-TRAILER_KEYS = (['belay_diff_end'] + OUTCOMES + [DIR_TIMESTAMPS_ONLY, EVENTS]
-                + ['before_' + c for c in INPUT_COUNTS] + ['after_' + c for c in INPUT_COUNTS]
-                + ['provisional', 'before_sha256', 'after_sha256'])
+TRAILER_KEYS_SHAPE = (['belay_diff_end'] + OUTCOMES + [DIR_TIMESTAMPS_ONLY, EVENTS]
+                      + ['before_' + c for c in INPUT_COUNTS]
+                      + ['after_' + c for c in INPUT_COUNTS]
+                      + ['provisional', 'before_sha256', 'after_sha256'])
+# V4-D5: "`before_writer_open`, `after_writer_open`, `before_unguarded`,
+# `after_unguarded`, ints, each that manifest's trailer count (`0` for a
+# manifest before v4), in that order, after every key it has." The "### Trailer"
+# paragraph and the "Shape" example predate the pin and do not show them
+# (ambiguity X2's form: the pin is followed; the example is accepted either way).
+V4_COUNTS = ['writer_open', 'unguarded']
+V4_TRAILER_KEYS = [w + c for c in V4_COUNTS for w in ('before_', 'after_')]
+TRAILER_KEYS = TRAILER_KEYS_SHAPE + V4_TRAILER_KEYS
 # One-sided reasons, from "Present on one side only".
 NOT_CAPTURED, LISTING_INCOMPLETE, RACED = 'not_captured', 'listing_incomplete', 'raced'
+WRITER_OPEN = 'writer_open'
 # docs/spec/diff-v1.md, "Present on one side only": its rules are ordered,
 # and the first is what a path the side lacking it excluded means for the
 # diff (manifest-v2.md's "Readers" points there). one_sided() takes them in
@@ -322,7 +342,8 @@ def shape_example_keys():
 
 
 _shape_header, _shape_trailer = shape_example_keys()
-if _shape_header not in (HEADER_KEYS_SHAPE, HEADER_KEYS) or _shape_trailer != TRAILER_KEYS:
+if _shape_header not in (HEADER_KEYS_SHAPE, HEADER_KEYS) or \
+        _shape_trailer not in (TRAILER_KEYS_SHAPE, TRAILER_KEYS):
     raise SystemExit('spec: the "Shape" example\'s header or trailer keys are not the ones '
                      'reference.py writes: %r' % (shape_example_keys(),))
 
@@ -351,6 +372,57 @@ def v2_r7():
         if w not in rows[0][1]:
             raise SystemExit('pin: manifest-v2.md V2-R7 no longer says what reference.py '
                              'assumes: %r' % w)
+
+# test/expect/manifest-v4.md, the words this file relies on, by row. Read by
+# v4_pin() once the table reader is defined.
+MANIFEST_V4_PIN = os.path.join(REPO, 'test', 'expect', 'manifest-v4.md')
+V4_WORDS = {
+    'V4-D1': ['As with `raced` (diff-v1\'s rule 1), on either side the outcome is `unknown`, '
+              'whatever else differs: `size`, `mode`, the type.'],
+    'V4-D2': ['On an entry with `writer_open` on either side, `sha256` is not compared: it is '
+              'never in `changed`, and no before or after value carries it, across a type '
+              'change included, where diff-values V6 otherwise carries a regular file\'s hash '
+              '(the marked side\'s only). Every other field is compared and listed as for '
+              '`raced`.'],
+    'V4-D3': ['A path on one side only whose entry carries `writer_open`: `unknown`, never '
+              '`added` or `removed`. diff-v1\'s one-sided rules decide first: an earlier rule '
+              'that applies (`not_captured`, `listing_incomplete`, a raced ancestor) gives its '
+              'one reason, as it would without the flag. Otherwise the reasons are the entry\'s '
+              'own: `writer_open`, after `raced` when it carries both.'],
+    'V4-D4': ['The reason is `writer_open`, last in `unknown` when others are present'],
+    'V4-D5': ['`before_writer_open`, `after_writer_open`, `before_unguarded`, '
+              '`after_unguarded`, ints, each that manifest\'s trailer count (`0` for a manifest '
+              'before v4), in that order, after every key it has.'],
+    'V4-D6': ['`provisional` is unchanged: it stays any of the six counts `vanished`, '
+              '`unstable`, `raced`, per side.'],
+    'V4-R4': ['reads as `writer_open` absent on every entry and both trailer counts `0`'],
+}
+RULE_1_V4 = ('`writer_open` (manifest v4) is treated the same way, with its own reason, and the '
+             'entry\'s hash is not compared at all')
+
+
+def v4_pin():
+    """manifest-v4.md's rows, the words relied on checked, and the field's row
+    V4-D1 gives "in `diff-fields.md`'s columns", as a row of that table."""
+    rows = {}
+    for l in open(MANIFEST_V4_PIN, encoding='utf-8').read().splitlines():
+        m = re.match(r'\| (V4-[A-Z]?[0-9]+) \|', l)
+        if m:
+            rows[m.group(1)] = l
+    for r, words in V4_WORDS.items():
+        for w in words:
+            if w not in rows.get(r, ''):
+                raise SystemExit('pin: manifest-v4.md %s no longer says what reference.py '
+                                 'assumes: %r' % (r, w))
+    if RULE_1_V4 not in ' '.join(spec_prose(SPEC).split()):
+        raise SystemExit('spec: rule 1 no longer says what reference.py assumes of `writer_open`')
+    m = re.search(r"in `diff-fields.md`'s columns: `writer_open` \\\| (.*?) \\\| (.*?) \\\| "
+                  r'(.*?) \\\| (.*?) \\\| (.*?)\.', rows['V4-D1'])
+    if not m:
+        raise SystemExit('pin: manifest-v4.md V4-D1 no longer gives the field\'s row')
+    return dict(zip(('compared as', 'for types', 'on mount roots', 'absent means', 'source'),
+                    m.groups()), field=WRITER_OPEN)
+
 
 # ---------------------------------------------------------------------------
 # The pins, parsed at run time.
@@ -444,6 +516,9 @@ class Field:
 
 def load_fields():
     rows = md_table(open(FIELDS_PIN, encoding='utf-8').read(), 'field')
+    # V4-D1's row: "`diff-fields.md` is unchanged and states the fields of a
+    # manifest before v4"; this one is the pin's.
+    rows = rows + [v4_pin()]
     fields = collections.OrderedDict((r['field'], Field(r)) for r in rows)
     rules = {r['rule']: r['statement'] for r in
              md_table(open(FIELDS_PIN, encoding='utf-8').read(), 'rule')}
@@ -457,6 +532,8 @@ def load_fields():
         'unreadable': lambda f: f.cls == FLAG,
         'link_target': lambda f: 'neither side is `unreadable`' in f.source,
         'xattrs_sha256': lambda f: f.spelling_of == 'xattrs',
+        WRITER_OPEN: lambda f: f.cls == FLAG and f.scope == 'everything',
+        'sha256': lambda f: f.cls == CONTENT,
     }
     for name, ok in need.items():
         if name not in fields or not ok(fields[name]):
@@ -655,8 +732,15 @@ def one_sided(p, present, lacking_entries, added, lacking_excluded):
     # holding this path before that walk ended."
     if anc['type'] != 'dir' and anc.get(RACED):
         return 'unknown', [RACED], trace + ['raced-ancestor']
-    if present.get(RACED):
-        return 'unknown', [RACED], trace + ['raced-one-sided']
+    # V4-D3: "diff-v1's one-sided rules decide first: an earlier rule that
+    # applies ... gives its one reason, as it would without the flag. Otherwise
+    # the reasons are the entry's own: `writer_open`, after `raced` when it
+    # carries both." An ancestor carrying `writer_open` is no reason here: only
+    # `raced` says the entry may have become a directory.
+    own = [f for f in (RACED, WRITER_OPEN) if present.get(f)]
+    if own:
+        return 'unknown', own, trace + [{RACED: 'raced-one-sided',
+                                         WRITER_OPEN: 'writer-open-one-sided'}[f] for f in own]
     return ('added' if added else 'removed'), [], trace + ['known-absence']
 
 
@@ -756,6 +840,11 @@ def both_sides(b, a, ctx):
     # either side and neither side a mount root (O2, checked in load_fields;
     # prose `changed` paragraph).
     read_both = not mount_root and 'metadata' not in scopes
+    # V4-D2: "On an entry with `writer_open` on either side, `sha256` is not
+    # compared".
+    marked = bool(b.get(WRITER_OPEN) or a.get(WRITER_OPEN))
+    if marked:
+        trace.append('writer-open')
 
     # Fields whose absence means "could not be read" (`absent means: unknown`),
     # present on one side only: unknown under rule 4 (`iflags_unknown`) --
@@ -801,6 +890,10 @@ def both_sides(b, a, ctx):
         if mount_root and not s.on_mount_roots:
             if raw_differs:
                 trace.append('not-on-mount-root:' + f)
+            continue
+        if f == 'sha256' and marked:                             # V4-D2
+            if raw_differs:
+                trace.append('writer-open-hash-not-compared')
             continue
         if s.absent == 'unknown':
             if vb is None or va is None:
@@ -850,7 +943,10 @@ def both_sides(b, a, ctx):
             else:
                 meta = True
     unk_scopes = {FIELDS[f].cls for f in unk_fields}
-    reasons = flag_why + [f + '_unknown' for f in unk_fields]
+    # V4-D4: `writer_open` "last in `unknown` when others are present": after
+    # a field's reason too.
+    reasons = ([r for r in flag_why if r != WRITER_OPEN] + [f + '_unknown' for f in unk_fields]
+               + [r for r in flag_why if r == WRITER_OPEN])
     content_unknown = 'content' in scopes or CONTENT in unk_scopes
     meta_unknown = 'metadata' in scopes or (unk_scopes - {CONTENT})
     if 'everything' in scopes:                                   # rule 1
@@ -1064,6 +1160,11 @@ def record_values(rb, ra, changed, trace):
             trace.append('values:V6-raced')
         vb = side_values_v6(rb, trace, 'before')
         va = side_values_v6(ra, trace, 'after')
+        # V4-D2: "no before or after value carries it", V6's list included.
+        if rb.get(WRITER_OPEN) or ra.get(WRITER_OPEN):
+            trace.append('values:V4-D2')
+            vb = [(k, x) for k, x in vb if k != 'sha256']
+            va = [(k, x) for k, x in va if k != 'sha256']
     elif changed:
         vb, va = side_values(rb, changed), side_values(ra, changed)
         if not vb or not va:
@@ -2993,6 +3094,9 @@ def diff(before, after, store=None):
     inputs = [('before_' + c, tb[c]) for c in INPUT_COUNTS] + [('after_' + c, ta[c]) for c in INPUT_COUNTS]
     trailer += inputs + [('provisional', any(v != 0 for _, v in inputs)),
                          ('before_sha256', shab), ('after_sha256', shaa)]
+    # V4-D5, V4-R4; none of them in `inputs`, so none in `provisional` (V4-D6).
+    trailer += [(w + c, t.get(c, 0)) for c in V4_COUNTS
+                for w, t in (('before_', tb), ('after_', ta))]
     assert [k for k, _ in trailer] == TRAILER_KEYS
     return header, records, events, trailer, traces
 
