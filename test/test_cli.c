@@ -923,8 +923,13 @@ static size_t g_snap_n;
 static FILE *g_snap_f;
 static int snap_one(const char *p, const struct stat *sb, int type, struct FTW *f) {
     (void)type; (void)f;
-    fprintf(g_snap_f, "%s %lld %lld.%09ld %llu %llu\n", p, (long long)sb->st_size, (long long)sb->st_mtim.tv_sec,
-            sb->st_mtim.tv_nsec, (unsigned long long)sb->st_ino, (unsigned long long)sb->st_nlink);
+#ifdef __APPLE__
+    const struct timespec mt = sb->st_mtimespec;
+#else
+    const struct timespec mt = sb->st_mtim;
+#endif
+    fprintf(g_snap_f, "%s %lld %lld.%09ld %llu %llu\n", p, (long long)sb->st_size, (long long)mt.tv_sec,
+            (long)mt.tv_nsec, (unsigned long long)sb->st_ino, (unsigned long long)sb->st_nlink);
     return 0;
 }
 static char *snapshot(void) {
