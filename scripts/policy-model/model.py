@@ -216,6 +216,65 @@ P37 New with decision 186. The forms: in a directory `__pycache__`, `<name>.<tag
 P38 New with decision 186. packages_no_hash still counts every line without a hash, `.pyc`
     included: the row's subject is "Files a database lists without a hash", and "never checked
     -- a `.pyc` aside" says what becomes of them, not what is counted.
+
+P41 New with manifest v4. B-4 still says a bundle holds "manifest v3"; V4-R4 says "belay writes
+    v4 only, from the release that adds it" and V4-R2 that a reader accepts `1` to `4`. Read: a
+    bundle export writes holds v4; one holding v2 or v3 stays accepted, as earlier versions
+    with `writer_open` absent and both counts `0`.
+
+P42 New with manifest v4. What reads a marked `sha256` outside the diff. V4-2 says it "is kept for
+    debugging; it may be bytes the file never held", yet V4-D2 stops only the diff's comparison,
+    under "The diff", and the rows that compare a manifest's hash with another value are not
+    amended. Read as written, then, as a `raced` entry's hash is (V4-D1: "As with `raced`"):
+    PS-M4 against an after entry marked gives protected_hash_mismatch `other bytes`, with
+    `actual`, and P-F3's `provisional` says it may not hold, beside the
+    protected_path_unverifiable V4-D7 gives. The other reading, that a hash kept for debugging
+    decides nothing, gives only the latter; a violation stands either way.
+
+P43 New with manifest v4. `self_consistent`, the same way: P11's "a regular file after with that
+    sha256" reads a marked entry's hash as written. A marked RECORD has no copy, so its rows
+    cannot be read: `false`, as for any RECORD not held.
+
+P44 New with manifest v4. `at_reset` of a file marked at export: V4 changes no row of B-P6, whose
+    words are "pip compares its RECORD's sha256 with the manifest's own" and for dpkg the MD5 of
+    the same read: `match` or `mismatch` as written. Nothing else in its enumeration fits (the
+    entry has a hash, so it is not `unverified`). A database file marked at export is still read
+    for its package lines: B-6's "one line per file a package database in the baseline lists"
+    has no exception, and V4 adds none.
+
+P45 New with manifest v4. A one-sided entry carrying both `raced` and `writer_open`: diff-v1 says
+    "for the one-sided case, its one reason" and "reason `raced`"; V4-D3 says "reason
+    `writer_open`"; V4-D4 says "last in `unknown` when others are present". Read: both, in the
+    reasons' order. The earlier bullets of diff-v1's "first of these that applies decides" keep
+    their place, since V4-D3 reads "as a one-sided `raced` entry": a marked path the other side
+    excluded is `not_captured` alone, and E11 applies. An ancestor carrying `writer_open` decides
+    nothing: diff-v1's ancestor bullet names `raced`, and neither V4-D1 nor V4-D3 extends it.
+
+P46 New with manifest v4. P13's "a regular file of size 0 (its content is known)" does not hold
+    for a marked entry: V4-2 gives it no `stored`, and a writer had the file, so a marked empty
+    file is not held and nothing is counted from it.
+
+P47 New with manifest v4. What a rule whose subject is an outcome does with a marked path, which
+    is never `added`, `removed`, `modified` or `type_changed` (V4-D1, V4-D3): touches_tests,
+    python_startup_hook_changed, conffile_changed, PS-M1..M3 give nothing, as their rows name
+    those outcomes; a row reading "any outcome" (edits_ci_config, conftest_changed,
+    privilege_changed) gives its record, provisional (P-F3). new_executable_on_path: "added" and
+    "replaced" are outcomes too, so a marked file there gives a record only through "a file whose
+    execute bits were added", read from both manifests.
+
+P48 New with manifest v4. A `.pth` beside a RECORD that lists it but is marked after: that RECORD
+    has no copy, so "in no RECORD after" is decided without it, as for any RECORD not held.
+
+P49 New with manifest v4. V4-D7 says "policy-v1's PS-M5", a row of protect-spec.md: read as that
+    row, and policy-v1's order of `reasons`, with `writer_open` last in both.
+
+P50 New with manifest v4. V4-D7 adds a flag to PS-M5's list, which reads "whose entry there", on
+    "a side its modes read" (P6); then it says, with no side, "a protected path that carries it
+    is `protected_path_unverifiable`". Read as written, the later and narrower sentence: a path a
+    rule matches, whatever the rule's modes, whose entry carries it on either side. So P6 does
+    not apply to a marked path, and a new file a writer holds, under a `no_write`-only rule, is a
+    violation, though no_write reads before and the file was not there. P6 stands for every
+    other `unknown`.
 """
 
 import base64
@@ -242,9 +301,9 @@ KINDS = (
 KIND_INDEX = {k: i for i, k in enumerate(KINDS)}
 NOT_EMITTED = [{"flag": "writes_outside_workdir", "why": "needs a scope wider than the workdir"}]
 
-ENTRY_FLAGS = ("unverified", "unstable", "unreadable", "raced", "mount")            # P2
-REASON_ORDER = ENTRY_FLAGS + ("xattrs_unknown", "iflags_unknown", "not_captured",
-                              "listing_incomplete")
+ENTRY_FLAGS = ("unverified", "unstable", "unreadable", "raced", "mount", "writer_open")   # V4-D7
+REASON_ORDER = ENTRY_FLAGS[:-1] + ("xattrs_unknown", "iflags_unknown", "not_captured",  # P2
+                                   "listing_incomplete", "writer_open")                # V4-D4
 FIELD_ORDER = ("mode", "uid", "gid", "size", "mtime_ns", "ctime_ns", "ino", "dev", "nlink",
                "iflags", "caps", "xattrs", "sha256", "rdev", "link_target")
 
@@ -540,12 +599,14 @@ def is_text(data):
     return b"\0" not in data and is_utf8(data)
 
 
-def view(raw, hash_max):
+def view(raw, hash_max, writers=frozenset()):
     """The manifest entries a capture with this hash bound records (manifest-v1, PS-C3).
 
     `raw`: path -> what the harness measured: type, mode, uid, gid, size, mtime_ns, ctime_ns,
     ino, dev, nlink, iflags, caps, xattrs, xattrs_unknown, readable, data (the bytes, for a
-    regular file it could read within its read limit), link_target, rdev.
+    regular file it could read within its read limit), link_target, rdev. `writers`: the
+    (dev, ino) pairs a process held open for writing, or mapped shared-writable, throughout the
+    capture: the probe asks of an inode, so every name of a held file is marked (V4-R5).
     """
     out = {}
     for p, r in raw.items():
@@ -564,8 +625,9 @@ def view(raw, hash_max):
                 if r["data"] is None:
                     raise AssertionError("no bytes measured for a file within the hash bound: %r" % p)
                 e["sha256"] = sha256(r["data"])
-                e["stored"] = claimed_for_copy(p, r["size"]) or (
-                    r["size"] <= STORE_MAX and is_text(r["data"]))
+                e["writer_open"] = (r["dev"], r["ino"]) in writers                   # V4-2
+                e["stored"] = not e["writer_open"] and (                             # V4-R5
+                    claimed_for_copy(p, r["size"]) or (r["size"] <= STORE_MAX and is_text(r["data"])))
         elif r["type"] == "dir" and not r["readable"]:
             e["unreadable"] = True
         elif r["type"] == "lnk" and r["link_target"] is None:
@@ -578,7 +640,7 @@ def held(e):
     """A regular file's content, when a copy of it is held (P13), else None."""
     if e is None or e["type"] != "reg":
         return None
-    if e["stored"] or (e["size"] == 0 and e["sha256"] is not None):
+    if e["stored"] or (e["size"] == 0 and e["sha256"] is not None and not e["writer_open"]):  # P46
         return e["data"]
     return None
 
@@ -637,18 +699,19 @@ def _one_sided(p, have, lacking):
             return "unknown", ["listing_incomplete"]
         if anc["type"] != "dir" and anc["raced"]:
             return "unknown", ["raced"]
-    if have["raced"]:
-        return "unknown", ["raced"]
+    rs = [f for f in ("raced", "writer_open") if have[f]]                  # V4-D3, P45
+    if rs:
+        return "unknown", rs
     return None, None
 
 
 def _both(b, a, bs, as_, identity):
     t = a["type"]
     mount = b["mount"] or a["mount"]
-    raced = b["raced"] or a["raced"]
+    everything = b["raced"] or a["raced"] or b["writer_open"] or a["writer_open"]   # V4-D1
     if b["type"] != t:
         rec = {"outcome": "type_changed", "type": t, "type_before": b["type"], "changed": ["type"]}
-        if raced:
+        if everything:
             rec["outcome"] = "unknown"
             rec["unknown"] = _reasons(_flag_reasons(b) | _flag_reasons(a))
         return rec
@@ -667,6 +730,7 @@ def _both(b, a, bs, as_, identity):
     differs["caps"] = attrs_read and b.get("caps") != a.get("caps")
     differs["xattrs"] = attrs_read and b.get("xattrs") != a.get("xattrs")
     differs["sha256"] = (t == "reg" and b["sha256"] is not None and a["sha256"] is not None
+                         and not b["writer_open"] and not a["writer_open"]            # V4-D2
                          and b["sha256"] != a["sha256"])
     differs["rdev"] = t in ("blk", "chr") and b.get("rdev") != a.get("rdev")
     differs["link_target"] = (t == "lnk" and not b["unreadable"] and not a["unreadable"]
@@ -679,7 +743,7 @@ def _both(b, a, bs, as_, identity):
     xu = b.get("xattrs_unknown") or a.get("xattrs_unknown")
     changed = [f for f in FIELD_ORDER if f != "ctime_ns" and differs.get(f)]
     ctime_only = (t in ("reg", "lnk") and not mount and b["ctime_ns"] != a["ctime_ns"])
-    if raced:
+    if everything:
         outcome = "unknown"
     elif content:
         outcome = "modified"
@@ -1635,7 +1699,8 @@ def protected_flags(spec, recs, B, A):
             if ("no_create" in r.modes or r.expected is not None) and a is not None:
                 sides.add("after")
             hit_sides |= sides
-        if hit_sides:
+        marked = any(e is not None and e["writer_open"] for e in (b, a))              # P50
+        if hit_sides or marked:
             ents = [e for s, e in (("before", b), ("after", a)) if s in hit_sides]
             flagged = [f for f in ENTRY_FLAGS if any(e[f] for e in ents)]
             if unknown or flagged:
@@ -1660,7 +1725,7 @@ def protected_flags(spec, recs, B, A):
             why = "absent"
         elif a["type"] != "reg":
             why = "not a regular file"
-        elif a["sha256"] is not None and a["sha256"] != r.expected:
+        elif a["sha256"] is not None and a["sha256"] != r.expected:                  # P42
             why, actual = "other bytes", a["sha256"]
         if why is None:
             continue
@@ -1774,7 +1839,7 @@ def self_consistent(ev, recs, A, scope):
             if q is None:
                 continue
             e = A.get(q)
-            if e is None or e["type"] != "reg" or e["sha256"] != hx:
+            if e is None or e["type"] != "reg" or e["sha256"] != hx:                  # P43
                 return False
         return True
     status = ev.paths[0]
@@ -1985,7 +2050,7 @@ def inside(path, scope):
     return path == scope or path.startswith(scope.rstrip("/") + "/")
 
 
-def export_expect(scope, out_real, spec_raw, excluded, B_raw):
+def export_expect(scope, out_real, spec_raw, excluded, B_raw, writers=frozenset()):
     """(exit, result): result is {hash_max, protect_sha256, lines, outside, integrity} on 0."""
     spec = None
     if spec_raw is not None:
@@ -2001,7 +2066,7 @@ def export_expect(scope, out_real, spec_raw, excluded, B_raw):
                 if covers(r.comps, x["path"]):
                     return 3, "an exclusion covers %s" % r.pattern
     hash_max = HASH_BOUND_SPEC if spec is not None else HASH_DEFAULT
-    B = view(B_raw, hash_max)
+    B = view(B_raw, hash_max, writers)
     lines, outside = bundle_packages(B, scope)
     integrity = []
     for l in lines:
@@ -2054,6 +2119,165 @@ def verify_refusal(exported, spec_raw, digest_given, digest_true, excluded_after
 # The bundle as export writes it (baseline-bundle.md B-1..B-7), checked against what the model
 # expects of it: the layout and the package lines exactly; the manifest only as B-4 describes it.
 
+MANIFEST_VERSION = 4                  # V4-1, V4-R4: belay writes v4 only
+V1_HEADER = ("belay_manifest", "created_ns", "scopes", "hash", "hash_max_bytes", "store_max_bytes")
+V4_HEADER = V1_HEADER + ("excluded", "walk_start_ns", "source")           # v2's, then V3-2
+ENTRY_KEY_ORDER = ("path", "type", "mode", "uid", "gid", "size", "mtime_ns", "ctime_ns", "ino", "dev",
+                   "nlink", "iflags", "caps", "xattrs", "xattrs_sha256", "xattrs_unknown", "sha256",
+                   "unverified", "unstable", "rdev", "link_target", "target_outside_scope", "stored",
+                   "mount", "unreadable", "raced", "writer_open")         # manifest-v1; V4's line
+V3_TRAILER = ("belay_manifest_end", "vanished", "unreadable", "unstable", "mounts", "raced", "trusted",
+              "reference", "read_all")
+V4_TRAILER = V3_TRAILER + ("writer_open", "unguarded")                    # V4-3, V4-4
+
+
+def read_manifest(content):
+    """A manifest's bytes -> (header, entries, trailer), each an object in its key order."""
+    lines = content.rstrip(b"\n").split(b"\n")
+    objs = [json.loads(ln) for ln in lines]
+    return objs[0], objs[1:-1], objs[-1]
+
+
+def entry_path(o):
+    return base64.b64decode(o["path_b64"]) if "path_b64" in o else o["path"].encode("utf-8")
+
+
+def marked_entry_problem(o):
+    """V4-2's "when", which V4-R3 has a reader enforce; None when it holds."""
+    if o.get("writer_open") is not True:
+        return "writer_open is %r, never false" % (o["writer_open"],)
+    if o["type"] != "reg" or "sha256" not in o or "stored" in o or any(
+            f in o for f in ("unverified", "unstable", "unreadable", "mount")):
+        return "writer_open on an entry V4-2 does not allow: %r" % (o,)
+    return None
+
+
+def manifest_problems(content, B, unguarded):
+    """What a capture's v4 manifest must be (the V4 rows), against the model's entries `B`:
+    problems found (strings). `unguarded`: the trailer's expected count, or None when the
+    harness could not tell it."""
+    problems = []
+    mh, entries, mt = read_manifest(content)
+    if mh.get("belay_manifest") != MANIFEST_VERSION:
+        problems.append("V4-1: belay_manifest %r" % (mh.get("belay_manifest"),))
+    keys = tuple("scopes" if k == "scopes_b64" else k for k in mh)
+    if keys != V4_HEADER:
+        problems.append("V4: the header's keys %r" % (keys,))
+    if tuple(mt) != V4_TRAILER:
+        problems.append("V4-3,V4-4: the trailer's keys %r" % (tuple(mt),))
+    marked = set()
+    for o in entries:
+        ks = ["path" if k == "path_b64" else "link_target" if k == "link_target_b64" else k for k in o]
+        if ks != [k for k in ENTRY_KEY_ORDER if k in ks] or set(ks) - set(ENTRY_KEY_ORDER):
+            problems.append("V4: an entry's keys in the wrong order: %r" % (ks,))
+        if "writer_open" in o:
+            marked.add(entry_path(o))
+            why = marked_entry_problem(o)
+            if why:
+                problems.append("V4-2: " + why)
+    want = set(p for p, e in B.items() if e["writer_open"])
+    if marked != want:
+        problems.append("V4-2: entries marked %r, not %r" % (sorted(marked), sorted(want)))
+    if mt.get("writer_open") != len(marked):
+        problems.append("V4-3: the trailer's writer_open %r, %d entries carry it" % (mt.get("writer_open"), len(marked)))
+    if unguarded is not None and mt.get("unguarded") != unguarded:
+        problems.append("V4-4: the trailer's unguarded %r, not %r" % (mt.get("unguarded"), unguarded))
+    return problems
+
+
+def unguarded_count(B, answered):
+    """V4-4: regular files read and hashed with no answer from the probe, a marked one excluded.
+    `answered`: the probe can tell on this filesystem, for files the user owns."""
+    return 0 if answered else sum(1 for e in B.values()
+                                  if e["type"] == "reg" and e["sha256"] is not None and not e["writer_open"])
+
+
+def downgrade_manifest(content, version):
+    """The bytes an earlier release would have written for this capture (V4-R4): version 2 or 3,
+    no v4 key, and for 2 no `source`."""
+    mh, entries, mt = read_manifest(content)
+    if any("writer_open" in o for o in entries):
+        raise ValueError("no earlier version can hold writer_open")
+    mh["belay_manifest"] = version
+    if version < 3:
+        mh.pop("source")
+    for k in ("writer_open", "unguarded"):
+        mt.pop(k)
+    return b"".join(enc(o).encode("utf-8") + b"\n" for o in [mh] + entries + [mt])
+
+
+def flag_manifest(content, flags):
+    """The manifest with these entries given these flags, its counts kept true (V4-R3): the
+    capture a concurrent writer or a race would have made. `flags`: path -> flag names. Only
+    `raced` and `writer_open`, on an entry with no `stored`: a copy would have to go too."""
+    mh, entries, mt = read_manifest(content)
+    out = []
+    for o in entries:
+        names = flags.get(entry_path(o), ())
+        if names:
+            assert "stored" not in o, "flag_manifest: a stored entry"
+            o = dict(o)
+            for f in ("raced", "writer_open"):
+                if f in names and f not in o:
+                    o[f] = True
+                    mt[f] += 1
+        out.append(o)
+    return b"".join(enc(o).encode("utf-8") + b"\n" for o in [mh] + out + [mt])
+
+
+def apply_flags(entries, flags):
+    """`flag_manifest`, on the model's own entries."""
+    for p, names in flags.items():
+        for f in names:
+            entries[p][f] = True
+
+
+def break_manifest(content, how):
+    """A manifest V4-R2 or V4-R3 has a strict reader refuse. `how` names the break."""
+    mh, entries, mt = read_manifest(content)
+    plain = next(o for o in entries if o["type"] == "reg" and "stored" not in o)
+    if how == "trailer-missing-writer-open":
+        mt.pop("writer_open")
+    elif how == "trailer-missing-unguarded":
+        mt.pop("unguarded")
+    elif how == "v3-with-trailer-key":
+        mh["belay_manifest"] = 3
+        mt.pop("writer_open")
+    elif how == "v3-with-entry-key":
+        mh["belay_manifest"] = 3
+        mt.pop("writer_open")
+        mt.pop("unguarded")
+        plain["writer_open"] = True
+    elif how == "count-too-low":
+        plain["writer_open"] = True
+    elif how == "count-too-high":
+        mt["writer_open"] = 1
+    elif how == "false":
+        plain["writer_open"] = False
+    elif how == "not-a-bool":
+        plain["writer_open"] = 1
+        mt["writer_open"] = 1
+    elif how == "on-stored":
+        o = next(x for x in entries if "stored" in x)
+        o["writer_open"] = True
+        mt["writer_open"] = 1
+    elif how == "on-dir":
+        o = next(x for x in entries if x["type"] == "dir")
+        o["writer_open"] = True
+        mt["writer_open"] = 1
+    elif how == "on-unverified":
+        o = next(x for x in entries if "unverified" in x)
+        o["writer_open"] = True
+        mt["writer_open"] = 1
+    elif how == "no-hash":
+        del plain["sha256"]
+        plain["writer_open"] = True
+        mt["writer_open"] = 1
+    else:
+        raise ValueError(how)
+    return b"".join(enc(o).encode("utf-8") + b"\n" for o in [mh] + entries + [mt])
+
+
 HEADER_KEYS = {
     "bundle": (["belay_bundle", "size", "created_ns", "belay_version", "scopes", "hash_max_bytes",
                 "protect_sha256"],
@@ -2066,7 +2290,7 @@ HEADER_KEYS = {
 }
 
 
-def check_bundle(data, exp, scope):
+def check_bundle(data, exp, scope, unguarded=None):
     """Problems found (strings); sets exp["manifest_sha256"] from the manifest member."""
     problems = []
     members = []
@@ -2145,9 +2369,9 @@ def check_bundle(data, exp, scope):
         except ValueError:
             problems.append("B-4: the manifest is not NDJSON")
             mh, mt = {}, {}
-        if mh.get("belay_manifest") != 3 or list(mh)[-1:] != ["source"] or mh.get("source") is not None:
-            problems.append("B-4/V3-1,V3-2: not manifest v3 with a null source (header ends %r)"
-                            % (list(mh.items())[-2:],))
+        if mh.get("source", "absent") is not None:
+            problems.append("B-4/V3-2: not a null source (%r)" % (mh.get("source", "absent"),))
+        problems.extend("B-4/" + p for p in manifest_problems(content, exp["B"], unguarded))    # P41
         if mh.get("hash_max_bytes") != exp["hash_max"]:
             problems.append("B-4/PS-C3: the manifest's hash_max_bytes %r, not %r" % (mh.get("hash_max_bytes"), exp["hash_max"]))
         if mt.get("trusted") != 0 or mt.get("read_all") != "check":
