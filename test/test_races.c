@@ -931,6 +931,13 @@ TEST(sigio_is_ignored_only_while_a_capture_probes) {
     ASSERT_EQ_INT(0, sigaction(SIGIO, NULL, &cur));
     ASSERT_TRUE(cur.sa_handler == SIG_DFL);                         /* after: restored */
 
+    g_sigio_during = NULL;                                          /* no store: probed all the same */
+    arm(NONE, NULL, NULL);
+    ASSERT_EQ_INT(0, check(NULL));
+    ASSERT_TRUE(g_sigio_during == (probes ? SIG_IGN : SIG_DFL));
+    ASSERT_EQ_INT(0, sigaction(SIGIO, NULL, &cur));
+    ASSERT_TRUE(cur.sa_handler == SIG_DFL);
+
     ASSERT_EQ_INT(0, sigaction(SIGIO, &mine, NULL));
     g_sigio_during = NULL;
     arm(NONE, NULL, NULL);

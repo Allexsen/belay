@@ -117,6 +117,8 @@ static bool linux_is_overlay(void *ctx, int root_fd) {
  *  writing or mapped shared-writable (both keep the inode's write count up),
  *  so taking one and releasing it at once answers the question without
  *  holding anything: a writer is never blocked by more than these two calls.
+ *  (An O_NONBLOCK open for writing inside that window fails with EWOULDBLOCK
+ *  instead of waiting.)
  *  A write(2) in flight holds its file open, so one already copying data
  *  when the read begins is always seen.
  *

@@ -161,9 +161,12 @@ int prev_load(const struct fsops *ops, const char *path, const char *scope, uint
         if (!e->is_mount && !e->raced && !e->unstable && !e->unreadable && e->ctime_ns > info->newest_validated_ns &&
             !now_excluded(opts, e->path, e->path_len))
             info->newest_validated_ns = e->ctime_ns;
-        if (e->type != BELAY_T_REG || !e->has_hash || e->raced || e->unstable || e->writer_open) continue;
+        if (e->type != BELAY_T_REG || !e->has_hash || e->raced || e->unstable) continue;
         struct prev_rec r = { e->dev, e->ino, e->size, e->mtime_ns, e->ctime_ns, e->mode,
                               e->has_stored, { 0 } };
+        /* Marked: indexed, never to match (V4-R6). Skipping it would leave a
+         * hard link's unmarked name to speak for the inode. */
+        if (e->writer_open) r.size = UINT64_MAX;
         for (int k = 0; k < 32; k++)          /* the reader checked: 64 lowercase hex digits */
             r.sha256[k] = (uint8_t)(hexv(e->sha256_hex[2 * k]) << 4 | hexv(e->sha256_hex[2 * k + 1]));
         if ((rc = put(p, &r)) != 0) break;

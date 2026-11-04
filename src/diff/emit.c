@@ -96,7 +96,7 @@ static uint32_t value_fields(const struct verdict *v, const struct belay_entry *
     if (!type_differs) return v->changed;
     uint32_t f = FBIT(F_MODE);
     switch (e->type) {
-    case BELAY_T_REG: f |= FBIT(F_SIZE) | FBIT(F_SHA256); break;
+    case BELAY_T_REG: f |= FBIT(F_SIZE) | (e->writer_open ? 0 : FBIT(F_SHA256)); break;    /* V4-D2 */
     case BELAY_T_LNK: f |= FBIT(F_LINK_TARGET); break;
     case BELAY_T_CHR: case BELAY_T_BLK: f |= FBIT(F_RDEV); break;
     case BELAY_T_DIR: case BELAY_T_FIFO: case BELAY_T_SOCK: break;
