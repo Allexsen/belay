@@ -209,8 +209,10 @@ measure: $(MEASURE)
 # The diff core against a naive reference on a generated corpus of manifest
 # pairs (scripts/oracle/). ORACLE_BASES scales the corpus (~15 pairs each).
 ORACLE_BASES	?= 200
-# The M1.5 hooks on scripted sessions (scripts/dogfood/selftest.sh): needs jq,
-# python3 and GNU date; run by the linux-x86_64 CI job.
+# The M1.5 hooks on scripted sessions (scripts/dogfood/selftest.sh): needs jq
+# and python3. Any date will do: the hooks' clock is portable and a BSD date is
+# simulated (decision 131); background-command detection reads /proc (Linux).
+# Run by the linux-x86_64 CI job.
 dogfood-test: $(BIN)
 	@sh scripts/dogfood/selftest.sh $(BIN)
 
