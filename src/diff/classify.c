@@ -148,8 +148,11 @@ int classify_one(const struct belay_entry *present, bool is_after, enum anc abse
                 absent == ANC_RACED, -1);
     if (absent == ANC_SEALED) v->reasons = DRBIT(DR_NOT_CAPTURED);
     else if (absent == ANC_INCOMPLETE) v->reasons = DRBIT(DR_LISTING_INCOMPLETE);
-    else if (absent == ANC_RACED || present->raced) v->reasons = DRBIT(DR_RACED);
-    if (present->writer_open) v->reasons |= DRBIT(DR_WRITER_OPEN);      /* V4-D3 */
+    else if (absent == ANC_RACED) v->reasons = DRBIT(DR_RACED);
+    else {                                  /* no earlier rule decided: the entry's own (V4-D3) */
+        if (present->raced) v->reasons |= DRBIT(DR_RACED);
+        if (present->writer_open) v->reasons |= DRBIT(DR_WRITER_OPEN);
+    }
     v->outcome = v->reasons ? D_UNKNOWN : is_after ? D_ADDED : D_REMOVED;
     return 0;
 }
