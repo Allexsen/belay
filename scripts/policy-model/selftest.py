@@ -72,12 +72,12 @@ def kinds(**n):
 NOT_EMITTED = '"not_emitted":[{"flag":"writes_outside_workdir","why":"needs a scope wider than the workdir"}],"tests_counted":["python"]}'
 
 
-def verify(spec_raw, before, after, lines=(), outside=0):
+def verify(spec_raw, before, after, lines=(), outside=0, wb=frozenset(), wa=frozenset()):
     spec = model.parse_spec(spec_raw) if spec_raw is not None else None
     hm = model.HASH_BOUND_SPEC if spec else model.HASH_DEFAULT
     ctx = {"scope": "/w", "bundle_sha256": "b" * 64, "spec": spec,
-           "before": model.Side(model.view(before, hm), 10, []),
-           "after": model.Side(model.view(after, hm), 10, []),
+           "before": model.Side(model.view(before, hm, wb), 10, []),
+           "after": model.Side(model.view(after, hm, wa), 10, []),
            "bundle_lines": list(lines), "outside_scope": outside,
            "before_sha256": "1" * 64, "after_sha256": "2" * 64}
     out, flags, _r, _e = model.verify_lines(ctx)
@@ -310,6 +310,105 @@ def fixture_git_reset():
         '"text":"refs/heads/main in .git: reflog rewritten","paths":[".git/logs/refs/heads/main"]}'])
 
 
+def fixture_writer_open():
+    """Manifest v4: the example of the pin, then V4-D1..D4 and V4-D7 by hand."""
+    spec = b'{"belay_protect":1,"protect":[{"path":"g/**","mode":["no_write"]}]}'
+    H = {(10, 4)}                                      # the inode a writer held
+    base = {b".": raw("dir", D, ino=2), b"g": raw("dir", D, ino=3)}
+    x = raw("reg", F, b"one\n", ino=4)
+    moved = raw("reg", F, b"one\n", ino=4, mtime=200)
+    other = raw("reg", F, b"three\n", ino=4, mtime=200)
+
+    def rec(b, a, wb=frozenset(), wa=frozenset()):
+        B = dict(base)
+        A = dict(base)
+        if b is not None:
+            B[b"g/x"] = b
+        if a is not None:
+            A[b"g/x"] = a
+        r = model.diff(model.Side(model.view(B, model.HASH_DEFAULT, wb), 10, []),
+                       model.Side(model.view(A, model.HASH_DEFAULT, wa), 10, []))
+        return r.get(b"g/x")
+    # the pin's example: the mtime moved, the entry marked
+    check("V4's example record", rec(x, moved, wa=H),
+          {"outcome": "unknown", "type": "reg", "changed": ["mtime_ns"], "unknown": ["writer_open"]})
+    check("nothing differs, marked on one side: still unknown (V4-D1)", rec(x, x, wb=H),
+          {"outcome": "unknown", "type": "reg", "unknown": ["writer_open"]})
+    check("marked on both, the size differs: unknown, no sha256 in changed (V4-D2)", rec(x, other, wb=H, wa=H),
+          {"outcome": "unknown", "type": "reg", "changed": ["size", "mtime_ns"], "unknown": ["writer_open"]})
+    check("the type differs: unknown (V4-D1)", rec(x, raw("lnk", 0o120777, ino=4, link=b"t"), wb=H),
+          {"outcome": "unknown", "type": "lnk", "type_before": "reg", "changed": ["type"], "unknown": ["writer_open"]})
+    check("one side, before: never removed (V4-D3)", rec(x, None, wb=H),
+          {"outcome": "unknown", "type": "reg", "unknown": ["writer_open"]})
+    check("one side, after: never added (V4-D3)", rec(None, x, wa=H),
+          {"outcome": "unknown", "type": "reg", "unknown": ["writer_open"]})
+    check("not held: modified, as ever", rec(x, other),
+          {"outcome": "modified", "type": "reg", "changed": ["size", "mtime_ns", "sha256"]})
+    locked = raw("reg", 0o100000, b"one\n", ino=4, mtime=200)
+    locked["readable"] = False
+    locked["iflags"] = None
+    check("last among the reasons (V4-D4)", rec(x, locked, wb=H)["unknown"],
+          ["unverified", "unreadable", "iflags_unknown", "writer_open"])
+    check("the order of the reasons ends in writer_open", model.REASON_ORDER[-2:], ("listing_incomplete", "writer_open"))
+    # the capture: no copy, no mark without a hash (V4-2, V4-R5)
+    v = model.view({b"f": x, b"same": dict(x)}, model.HASH_DEFAULT, H)
+    check("held: marked, no copy, every name of the inode", [(e["writer_open"], e["stored"]) for e in v.values()],
+          [(True, False), (True, False)])
+    check("over the hash limit: unverified, not marked", model.view({b"f": x}, 1, H)[b"f"]["writer_open"], False)
+    check("a marked side is not held, an empty one included (P46)", model.held(
+        model.view({b"f": raw("reg", F, b"", ino=4)}, model.HASH_DEFAULT, H)[b"f"]), None)
+    # V4-D7 in policy.v1, and what stays quiet
+    B = {**base, b"g/x": x}
+    got, flags = verify(spec, B, {**base, b"g/x": other}, wa=H)
+    check("a protected path carrying it (V4-D7): unverifiable, never written", got[1:-1], [
+        '{"flag":"protected_path_unverifiable","level":"violation","path":"g/x","rule":"g/**","reasons":["writer_open"],'
+        '"text":"g/x: protected by g/**, cannot be verified: writer_open","paths":["g/x"]}'])
+    check("the trailer: unknown 1, provisional false (V4-D6)", (json.loads(got[-1])["unknown"], json.loads(got[-1])["provisional"]), (1, False))
+    check("and a violation fails the run", model.verify_exit(flags, True), 1)
+    got, _f = verify(b'{"belay_protect":1,"protect":[{"path":"g/x","expected_sha256":"%s"}]}'
+                     % model.sha256(b"one\n").encode(), B, {**base, b"g/x": other}, wa=H)
+    check("a marked hash against expected_sha256 (P42): provisional, and unverifiable",
+          [json.loads(ln)["flag"] for ln in got[1:-1]], ["protected_hash_mismatch", "protected_path_unverifiable"])
+    check("that mismatch is provisional", json.loads(got[1])["provisional"], True)
+    got, _f = verify(spec, base, {**base, b"g/x": x}, wa=H)
+    check("a new file a writer holds, under no_write only (P50)", json.loads(got[1])["reasons"], ["writer_open"])
+    tests = {b".": raw("dir", D, ino=2), b"tests": raw("dir", D, ino=3), b"tests/test_api.py": raw("reg", F, TEST_API, ino=4)}
+    weak = {**tests, b"tests/test_api.py": raw("reg", F, b"\n", ino=4, mtime=200)}
+    got, _f = verify(None, tests, weak, wa=H)
+    check("a test file marked: no outcome the rules name, no copy to count (P47)", got[1:-1], [])
+
+
+def fixture_manifest_v4():
+    """V4's Lines, on the pin's example trailer."""
+    entry = {"path": "data.bin", "type": "reg", "mode": 33188, "uid": 1000, "gid": 1000, "size": 4, "mtime_ns": 1,
+             "ctime_ns": 1, "ino": 92219, "dev": 2096, "nlink": 1, "iflags": 524288, "sha256": "e" * 64, "writer_open": True}
+    root = {"path": ".", "type": "dir", "mode": 16877, "uid": 1000, "gid": 1000, "size": 4096, "mtime_ns": 1,
+            "ctime_ns": 1, "ino": 2, "dev": 2096, "nlink": 2}
+    head = {"belay_manifest": 4, "created_ns": 1, "scopes": ["/w"], "hash": "sha256", "hash_max_bytes": 1, "store_max_bytes": 1,
+            "excluded": [], "walk_start_ns": 1, "source": None}
+    tail = {"belay_manifest_end": 2, "vanished": 0, "unreadable": 0, "unstable": 0, "mounts": 1, "raced": 0, "trusted": 0,
+            "reference": "none", "read_all": "check", "writer_open": 1, "unguarded": 0}
+    data = b"".join(model.enc(o).encode() + b"\n" for o in (head, root, entry, tail))
+    B = {b".": {"writer_open": False}, b"data.bin": {"writer_open": True}}
+    check("the pin's lines hold", model.manifest_problems(data, B, 0), [])
+    check("another unguarded count is seen", len(model.manifest_problems(data, B, 3)), 1)
+    check("an entry the model did not mark is seen", len(model.manifest_problems(data, {b".": B[b"."], b"data.bin": {"writer_open": False}}, 0)), 1)
+    check("writer_open after raced", model.ENTRY_KEY_ORDER[-2:], ("raced", "writer_open"))
+    check("the trailer's order", model.V4_TRAILER[-3:], ("read_all", "writer_open", "unguarded"))
+    plain = data.replace(b',"writer_open":true', b"").replace(b'"writer_open":1', b'"writer_open":0')
+    h3, _e3, t3 = model.read_manifest(model.downgrade_manifest(plain, 3))
+    check("v3 keeps source, loses both counts", (h3["belay_manifest"], "source" in h3, "writer_open" in t3, "unguarded" in t3), (3, True, False, False))
+    h2, _e2, _t2 = model.read_manifest(model.downgrade_manifest(plain, 2))
+    check("v2 loses source", (h2["belay_manifest"], "source" in h2), (2, False))
+    flagged = model.flag_manifest(plain, {b"data.bin": ["raced", "writer_open"]})
+    _h, es, tr = model.read_manifest(flagged)
+    check("flags keep their order, and the counts true", (list(es[1])[-2:], tr["raced"], tr["writer_open"]), (["raced", "writer_open"], 1, 1))
+    for bad in ({"writer_open": False}, {"writer_open": True, "stored": "e"}, {"writer_open": True, "unverified": True}):
+        o = dict(entry, **bad)
+        check("V4-2's when: %r" % (bad,), model.marked_entry_problem(o) is not None, True)
+    check("V4-2's when, a good entry", model.marked_entry_problem(entry), None)
+
+
 def tables():
     P = [("tests/**", "tests", True), ("tests/**", "tests/a/b", True), ("tests/**", "tests/.cache/x", False),
          (".github/workflows/**", ".github/workflows/ci.yml", True), ("tests/.cache/**", "tests/.cache/x", True),
@@ -371,7 +470,7 @@ def run():
     del FAILS[:]
     for f in (tables, fixture_protected_write, fixture_privilege_path, fixture_iflags_decision_163, fixture_text_cut,
               fixture_pip_reinstall_judged, fixture_pyc_decision_186, fixture_pip_bundle,
-              fixture_dpkg_bundle_and_tamper, fixture_git_reset):
+              fixture_dpkg_bundle_and_tamper, fixture_git_reset, fixture_writer_open, fixture_manifest_v4):
         try:
             f()
         except Exception as e:  # a crash is a failure, named

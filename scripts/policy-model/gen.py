@@ -14,11 +14,18 @@ A scenario is a dict:
              ("right", "wrong", "missing"), to (None, "check", "trusted"), excludes_add,
              corrupt (None, "trailing", "unknown-key", "short"), manifest ("v2": the bundle's
              manifest rewritten as an earlier release wrote it; "container": with a host
-             reader's source), tmpdir ("inside": verify's
-             $TMPDIR, where it makes its own state directory, is the scope's `tmp`)
+             reader's source; "v3": as v2, keeping `source`; "flags": the entries `flags` names
+             given those flags; "break:<how>": a manifest V4-R2 or V4-R3 refuses), flags (path ->
+             flag names), after_flags (the same, on a `to: check` checkpoint's manifest),
+             mark_writers ("first": with `to: trusted`, the hold ends before the second mark;
+             "both": it does not), tmpdir ("inside": verify's $TMPDIR, where it makes its own
+             state directory, is the scope's `tmp`)
   refusal    the refusal label it exercises (coverage), if any
   workdir    "disk": built on the disk's temporary directory (ext4 here) rather than PM_WORKDIR,
              for a filesystem that sets its own inode flags on every new file
+  writers    (before, after): the files a process holds open for writing across that side's
+             capture, each a path, or (path, "mmap") for a shared-writable mapping whose
+             descriptor is closed (manifest v4). A hold at export ends before the episode
 
 Ops are tuples; `apply` performs them. Paths are str, or bytes when not UTF-8.
 """
@@ -362,7 +369,7 @@ def S(name, tree, episode=(), spec=None, tags=(), **kw):
     d = {"name": name, "tree": list(tree), "episode": list(episode), "spec": spec,
          "tags": list(tags), "excludes": kw.pop("excludes", []), "out": kw.pop("out", "outside"),
          "verify": kw.pop("verify", {}), "refusal": kw.pop("refusal", None),
-         "workdir": kw.pop("workdir", None)}
+         "workdir": kw.pop("workdir", None), "writers": tuple(list(w) for w in kw.pop("writers", ([], [])))}
     assert not kw, kw
     return d
 
@@ -845,8 +852,215 @@ def scenarios():
           tags=["P40"], refusal="verify:order-spec-refused-before-corrupt"))
     for c in ("trailing", "unknown-key", "short"):
         add(S("verify-corrupt-" + c, BASE, [], TW, verify={"corrupt": c}, refusal="verify:corrupt-" + c))
+    out.extend(writer_scenarios())
     names = [s["name"] for s in out]
     assert len(names) == len(set(names)), "duplicate scenario names"
+    return out
+
+
+BLOB = b"\x00\x01 no copy is kept of a binary file\n"
+BIG = 4294967296 + 1
+
+
+def writer_scenarios():
+    """Manifest v4: a file a process held open for writing, or mapped shared-writable, when it was
+    read. A marked entry is never `added`, `removed`, `modified` or `type_changed`, so every rule
+    that reads an outcome, a copy or a hash is taken through one here."""
+    out = []
+    add = out.append
+    G = "grader/check.py"
+    GW = spec_of(rule("grader/**", "no_write"))
+    ND = spec_of(rule("grader/**", "no_delete"))
+    NC = spec_of(rule("grader/**", "no_create"))
+    ALL = spec_of(rule("grader/**", "no_write", "no_delete", "no_create"))
+    GH = lambda h, *m: spec_of(rule(G, *m, expected=h))
+    OTHER = b"print('pass')\n"
+    NEW = "grader/new.py"
+
+    # -- a marked entry on a protected path: on either side, on both, whatever else differs
+    add(S("wo-before-only", BASE, [], GW, writers=([G], [])))
+    add(S("wo-after-only", BASE, [], GW, writers=([], [G])))
+    add(S("wo-both", BASE, [], GW, writers=([G], [G])))
+    add(S("wo-before-modified", BASE, [("write", G, OTHER)], GW, writers=([G], [])))
+    add(S("wo-after-modified", BASE, [("write", G, OTHER)], GW, writers=([], [G])))
+    add(S("wo-both-modified", BASE, [("write", G, OTHER)], GW, writers=([G], [G])))
+    add(S("wo-after-same-size-other-bytes", BASE, [("write", G, GRADER.replace(b"0", b"1"))], GW, writers=([], [G])))
+    add(S("wo-after-chmod", BASE, [("chmod", G, 0o600)], GW, writers=([], [G])))
+    add(S("wo-after-touch", BASE, [("touch", G)], GW, writers=([], [G])))
+    add(S("wo-after-renamed-over", BASE, [("replace", G, OTHER)], GW, writers=([], [G])))
+    add(S("wo-before-to-symlink", BASE, [("rm", G), ("symlink", G, "/etc/hostname")], GW, writers=([G], [])))
+    add(S("wo-after-from-symlink", BASE + [("symlink", "grader/link", "check.py")],
+          [("rm", "grader/link"), ("file", "grader/link", b"now a file\n")], GW, writers=([], ["grader/link"])))
+    add(S("wo-before-became-dir", BASE, [("rm", G), ("file", G + "/inner.py", b"x = 1\n")], ALL, writers=([G], []), tags=["P45"]))
+    add(S("wo-mmap-before", BASE, [], GW, writers=([(G, "mmap")], [])))
+    add(S("wo-mmap-after", BASE, [("write", G, OTHER)], GW, writers=([], [(G, "mmap")])))
+    add(S("wo-binary", BASE + [("file", "grader/blob.bin", BLOB)], [], GW, writers=(["grader/blob.bin"], ["grader/blob.bin"])))
+    add(S("wo-empty", BASE + [("file", "grader/empty", b"")], [], GW, writers=(["grader/empty"], [])))
+    add(S("wo-not-utf8", BASE + [("file", b"grader/\xff.bin", BLOB)], [], GW, writers=([], [b"grader/\xff.bin"])))
+    add(S("wo-hardlink-other-name", BASE + [("hardlink", "elsewhere/link.py", G)], [], GW, writers=([], ["elsewhere/link.py"])))
+    add(S("wo-first-rule-names-it", BASE, [], spec_of(rule("grader/**", "no_create"), rule(G, "no_write")),
+          writers=([G], []), tags=["P5"]))
+    add(S("wo-only-other-file-held", BASE, [("write", G, OTHER)], GW, writers=(["README.md"], ["README.md"])))
+
+    # -- on one side only: never added or removed (V4-D3), and protected whatever the side (P50)
+    add(S("wo-one-side-before-no-delete", BASE, [("rm", G)], ND, writers=([G], [])))
+    add(S("wo-one-side-before-no-write", BASE, [("rm", G)], GW, writers=([G], [])))
+    add(S("wo-one-side-before-no-create", BASE, [("rm", G)], NC, writers=([G], []), tags=["P50"]))
+    add(S("wo-one-side-after-no-create", BASE, [("file", NEW, b"x = 1\n")], NC, writers=([], [NEW])))
+    add(S("wo-one-side-after-no-write", BASE, [("file", NEW, b"x = 1\n")], GW, writers=([], [NEW]), tags=["P50"]))
+    add(S("wo-one-side-after-no-delete", BASE, [("file", NEW, b"x = 1\n")], ND, writers=([], [NEW]), tags=["P50"]))
+    add(S("wo-one-side-after-all", BASE, [("file", NEW, b"x = 1\n")], ALL, writers=([], [NEW])))
+    # the same question with no `writer_open` at all: whether "a side its modes read" holds for `unknown`
+    add(S("p6-raced-one-side-before-no-create", BASE + [("file", "grader/blob.bin", BLOB)], [("rm", "grader/blob.bin")], NC,
+          verify={"manifest": "flags", "flags": {b"grader/blob.bin": ["raced"]}}, tags=["P6"]))
+    add(S("p6-raced-one-side-after-no-write", BASE, [("file", "grader/blob.bin", BLOB)], GW,
+          verify={"to": "check", "after_flags": {b"grader/blob.bin": ["raced"]}}, tags=["P6"]))
+    add(S("p6-not-captured-no-create", BASE + [("file", "grader/sub/x.bin", BLOB)], [("chmod", "grader/sub", 0o000)], NC,
+          tags=["P6", "P25"]))
+    add(S("wo-one-side-before-excluded-after", BASE, [("write", "README.md", b"x\n")], None, writers=(["tests/test_api.py"], []),
+          verify={"excludes_add": ["tests"], "to": "check"}, tags=["P13", "P45"]))
+
+    # -- with another flag: on the other side, or (`raced`, the only one V4-2 allows) the same entry
+    sec = "grader/secret.txt"
+    add(S("wo-before-unreadable-after", BASE, [("chmod", G, 0o000)], GW, writers=([G], []), tags=["P25", "P29"]))
+    add(S("wo-after-unreadable-before", BASE + [("file", sec, b"s\n"), ("chmod", sec, 0o000)], [("chmod", sec, 0o644)], GW,
+          writers=([], [sec]), tags=["P25", "P29"]))
+    add(S("wo-before-unverified-after", BASE + [("file", "grader/big.bin", BLOB)], [("sparse", "grader/big.bin", BIG)], GW,
+          writers=(["grader/big.bin"], [])))
+    add(S("wo-after-unverified-before", BASE + [("sparse", "grader/big.bin", BIG)], [("write", "grader/big.bin", BLOB)], GW,
+          writers=([], ["grader/big.bin"])))
+    add(S("wo-big-file-not-marked", BASE + [("sparse", "data/big.bin", 67108865)], [], None,
+          writers=(["data/big.bin"], ["data/big.bin"])))
+    TREE_B = BASE + [("file", "grader/blob.bin", BLOB)]
+    B_ = b"grader/blob.bin"
+    add(S("wo-flag-alone", TREE_B, [], GW, verify={"manifest": "flags", "flags": {B_: ["writer_open"]}}))
+    add(S("wo-raced-same-entry-before", TREE_B, [], GW, verify={"manifest": "flags", "flags": {B_: ["raced", "writer_open"]}}))
+    add(S("wo-raced-same-entry-after", TREE_B, [], GW, verify={"to": "check", "after_flags": {B_: ["raced", "writer_open"]}}))
+    add(S("wo-raced-both-sides", TREE_B, [], GW, verify={"manifest": "flags", "flags": {B_: ["raced", "writer_open"]}, "to": "check",
+                                                          "after_flags": {B_: ["writer_open"]}}))
+    add(S("wo-raced-other-side", TREE_B, [], GW, verify={"manifest": "flags", "flags": {B_: ["raced"]}, "to": "check",
+                                                          "after_flags": {B_: ["writer_open"]}}))
+    add(S("wo-raced-one-side-before", TREE_B, [("rm", "grader/blob.bin")], ND,
+          verify={"manifest": "flags", "flags": {B_: ["raced", "writer_open"]}}, tags=["P45"]))
+    add(S("wo-raced-one-side-after", BASE, [("file", "grader/blob.bin", BLOB)], NC,
+          verify={"to": "check", "after_flags": {B_: ["raced", "writer_open"]}}, tags=["P45"]))
+
+    # -- expected_sha256: the marked hash decides nothing (P42); `absent` and the type do not rest on it
+    add(S("wo-hash-right-after", BASE, [], GH(sha(GRADER)), writers=([], [G])))
+    add(S("wo-hash-wrong-after", BASE, [("write", G, OTHER)], GH(sha(GRADER)), writers=([], [G]), tags=["P42"]))
+    add(S("wo-hash-wrong-after-with-no-write", BASE, [("write", G, OTHER)], GH(sha(GRADER), "no_write"), writers=([], [G]), tags=["P42"]))
+    add(S("wo-hash-right-before", BASE, [], GH(sha(GRADER)), writers=([G], [])))
+    add(S("wo-hash-wrong-before", BASE, [("write", G, OTHER)], GH(sha(GRADER)), writers=([G], [])))
+    add(S("wo-hash-absent", BASE, [("rm", G)], GH(sha(GRADER), "no_write"), writers=([G], [])))
+    add(S("wo-hash-not-regular", BASE, [("rm", G), ("dir", G)], GH(sha(GRADER)), writers=([G], [])))
+
+    # -- test files: no outcome the rule names (P47), and a marked side has no copy to count from
+    T = "tests/test_api.py"
+    WEAK = TEST_API.replace(b'    assert "a" in "abc"\n', b"")
+    add(S("wo-tests-weakened-after", BASE, [("write", T, WEAK)], writers=([], [T]), tags=["P13", "P47"]))
+    add(S("wo-tests-weakened-before", BASE, [("write", T, WEAK)], writers=([T], []), tags=["P13", "P47"]))
+    add(S("wo-tests-weakened-both", BASE, [("write", T, WEAK)], writers=([T], [T]), tags=["P13", "P47"]))
+    add(S("wo-tests-removed", BASE, [("rm", T)], writers=([T], []), tags=["P13", "P47"]))
+    add(S("wo-tests-added-skip", BASE, [("file", "tests/test_new.py", b"import pytest\n\n@pytest.mark.skip\ndef test_x():\n    assert 0\n")],
+          writers=([], ["tests/test_new.py"]), tags=["P13", "P47"]))
+    add(S("wo-tests-emptied-after", BASE, [("write", T, b"")], writers=([], [T]), tags=["P13", "P46"]))
+    add(S("wo-tests-empty-before-filled", BASE + [("file", "tests/test_e.py", b"")], [("write", "tests/test_e.py", TEST_API)],
+          writers=(["tests/test_e.py"], []), tags=["P13", "P46"]))
+    add(S("wo-tests-marked-protected", BASE, [("write", T, WEAK)], spec_of(rule("tests/**", "no_write")), writers=([], [T]), tags=["P47"]))
+
+    # -- configuration: an "any outcome" row stands, a row reading copies has none
+    add(S("wo-conftest", BASE, [], writers=([], ["tests/conftest.py"]), tags=["P47"]))
+    add(S("wo-conftest-one-side", BASE, [("rm", "tests/conftest.py")], writers=(["tests/conftest.py"], []), tags=["P47"]))
+    CI = ".github/workflows/ci.yml"
+    add(S("wo-ci", BASE + [("file", CI, CI_YML)], [("write", CI, CI_YML + b"      - run: true\n")], writers=([], [CI]), tags=["P47"]))
+    add(S("wo-ci-one-side", BASE, [("file", CI, CI_YML)], writers=([], [CI]), tags=["P47"]))
+    add(S("wo-pytest-ini", BASE + [("file", "pytest.ini", PYTEST_INI)], [("write", "pytest.ini", PYTEST_INI + b"xfail_strict = false\n")],
+          writers=([], ["pytest.ini"]), tags=["P15"]))
+    add(S("wo-pyproject-before", BASE, [("write", "pyproject.toml", PYPROJECT.replace(b'addopts = "-q"', b'addopts = "-x"'))],
+          writers=(["pyproject.toml"], []), tags=["P15"]))
+
+    # -- PATH, privilege: read from the manifests
+    add(S("wo-path-added", BASE + [("dir", "bin")], [("file", "bin/tool", b"#!/bin/sh\n", 0o755)], writers=([], ["bin/tool"]), tags=["P47"]))
+    add(S("wo-path-exec-bits", BASE + [("file", "bin/tool", b"#!/bin/sh\n", 0o644)], [("chmod", "bin/tool", 0o755)],
+          writers=([], ["bin/tool"]), tags=["P18", "P47"]))
+    add(S("wo-path-replaced", BASE + [("dir", "bin/tool")], [("rmtree", "bin/tool"), ("file", "bin/tool", b"#!/bin/sh\n", 0o755)],
+          writers=([], ["bin/tool"]), tags=["P47"]))
+    add(S("wo-priv-setuid", BASE + [("file", "tools/run", b"#!/bin/sh\n", 0o755)], [("chmod", "tools/run", 0o4755)],
+          writers=([], ["tools/run"])))
+    add(S("wo-priv-one-side", BASE, [("file", "tools/new", b"#!/bin/sh\n", 0o2755)], writers=([], ["tools/new"]), tags=["P32"]))
+
+    # -- git: a marked ref or reflog has no copy; a marked hook is `unknown`, which no hook finding names
+    Gt = BASE + git_ops()
+    REF, LOG = ".git/refs/heads/main", ".git/logs/refs/heads/main"
+    RESET = [("write", REF, (C[0] + "\n").encode()), ("append", LOG, reflog([(C[1], C[0], "reset: moving to HEAD~1")]))]
+    add(S("wo-git-ref-after", Gt, RESET, writers=([], [REF]), tags=["P17"]))
+    add(S("wo-git-reflog-after", Gt, RESET, writers=([], [LOG]), tags=["P17"]))
+    add(S("wo-git-reflog-before", Gt, RESET, writers=([LOG], []), tags=["P17"]))
+    add(S("wo-git-reflog-rewritten", Gt, [("write", LOG, reflog(GIT_LOG[:1]))], writers=([], [LOG]), tags=["P17"]))
+    add(S("wo-git-reflog-removed", Gt, [("rm", LOG)], writers=([LOG], []), tags=["P17"]))
+    add(S("wo-git-hook-changed", Gt, [("write", ".git/hooks/pre-push", b"#!/bin/sh\nexit 1\n")], writers=([], [".git/hooks/pre-push"])))
+    add(S("wo-git-hook-added", Gt, [("file", ".git/hooks/pre-commit", b"#!/bin/sh\n", 0o755)], writers=([], [".git/hooks/pre-commit"])))
+    add(S("wo-git-hook-removed", Gt, [("rm", ".git/hooks/post-merge")], writers=([".git/hooks/post-merge"], [])))
+    add(S("wo-git-hook-exec", Gt, [("chmod", ".git/hooks/post-merge", 0o755)], writers=([], [".git/hooks/post-merge"]), tags=["P16"]))
+
+    # -- packages: the file, the database, on either side; frozen or not
+    FOO = pip_ops("foo", "1.0", FOO_FILES)
+    CORE = SITE + "/foo/core.py"
+    REC = SITE + "/foo-1.0.dist-info/RECORD"
+    D = dpkg_ops([TOOL, LIBX])
+    TOOLF, CONF, STATUS = "usr/bin/tool", "etc/tool.conf", "var/lib/dpkg/status"
+    bar = pip_ops("bar", "2.0", {"bar/__init__.py": (b"X = 1\n", 0o644)})
+    BAR_REC = SITE + "/bar-2.0.dist-info/RECORD"
+    for frozen in (False, True):
+        f = "-frozen" if frozen else "-free"
+        PS = spec_of(frozen=frozen)
+        add(S("wo-pip-file-after" + f, BASE + FOO, [], PS, writers=([], [CORE])))
+        add(S("wo-pip-file-before-removed" + f, BASE + FOO, [("rm", CORE)], PS, writers=([CORE], [])))
+        add(S("wo-pip-record-after" + f, BASE + FOO, [], PS, writers=([], [REC])))
+        add(S("wo-dpkg-file-after" + f, BASE + D, [("write", TOOLF, b"#!/bin/sh\necho owned\n")], PS, writers=([], [TOOLF])))
+        add(S("wo-pip-install-record" + f, BASE + FOO, bar, PS, writers=([], [BAR_REC]), tags=["P10", "P43"]))
+    add(S("wo-pip-record-before", BASE + FOO, [], spec_of(), writers=([REC], [])))
+    add(S("wo-pip-record-forged", BASE + FOO,
+          [op for op in pip_ops("foo", "1.0", dict(FOO_FILES, **{"foo/core.py": (b"def run():\n    return 9\n", 0o644)}))
+           if op[1] in (CORE, REC)], spec_of(), writers=([], [REC]), tags=["P8"]))
+    add(S("wo-pip-removed-record", BASE + FOO, [("rmtree", SITE + "/foo-1.0.dist-info"), ("rmtree", SITE + "/foo")], spec_of(),
+          writers=([REC], []), tags=["P10"]))
+    add(S("wo-pip-install-file", BASE + FOO, bar, spec_of(), writers=([], [SITE + "/bar/__init__.py"]), tags=["P43"]))
+    up = ([("rmtree", SITE + "/foo-1.0.dist-info")] + pip_ops("foo", "2.0", FOO_FILES, write=False))
+    add(S("wo-pip-upgrade-record", BASE + FOO, up, spec_of(), writers=([], [SITE + "/foo-2.0.dist-info/RECORD"]), tags=["P10", "P43"]))
+    add(S("wo-pip-at-reset-match", BASE + FOO, [], spec_of(), writers=([CORE], []), tags=["P44"]))
+    add(S("wo-pip-at-reset-mismatch", BASE + pip_ops("baz", "0.1", {"baz.py": (b"B = 1\n", 0o644)}, bad={"baz.py"}), [], spec_of(),
+          writers=([SITE + "/baz.py"], []), tags=["P44"]))
+    add(S("wo-pip-pth-in-marked-record", BASE + pip_ops("pthpkg", "1.0", {"pthpkg.pth": (b"import pthpkg\n", 0o644)}),
+          [("write", SITE + "/pthpkg.pth", b"import os\n")], spec_of(),
+          writers=([], [SITE + "/pthpkg-1.0.dist-info/RECORD"]), tags=["P48"]))
+    add(S("wo-pip-pth-marked", BASE + FOO, [("file", SITE + "/evil.pth", b"import os\n")], writers=([], [SITE + "/evil.pth"]), tags=["P47"]))
+    PYCF = SITE + "/pycpkg/__pycache__/core.cpython-312.pyc"
+    PYC_TREE = (pip_ops("pycpkg", "1.0", {"pycpkg/core.py": (b"def run():\n    return 1\n", 0o644)},
+                        extra_rows=["pycpkg/__pycache__/core.cpython-312.pyc,,"]) + [("file", PYCF, b"\xcb\x0d\x0d\x0a core")])
+    add(S("wo-pyc-marked", BASE + PYC_TREE, [("write", PYCF, b"\xcb\x0d\x0d\x0a PATCHED")], spec_of(), writers=([], [PYCF]), tags=["P36"]))
+    add(S("wo-dpkg-conffile", BASE + D, [("write", CONF, b"verbose = true\n")], spec_of(), writers=([], [CONF]), tags=["P47"]))
+    add(S("wo-dpkg-at-reset", BASE + D, [], spec_of(), writers=([TOOLF], []), tags=["P44"]))
+    add(S("wo-dpkg-status-before", BASE + D, [], spec_of(), writers=([STATUS], []), tags=["P44"]))
+    add(S("wo-dpkg-status-after", BASE + D, [], spec_of(), writers=([], [STATUS])))
+    add(S("wo-dpkg-md5sums-before", BASE + D, [], spec_of(), writers=(["var/lib/dpkg/info/tool.md5sums"], []), tags=["P44"]))
+    tool2 = dict(TOOL, version="1.1-1", files=dict(TOOL["files"], **{TOOLF: (TOOL_V2, 0o755)}))
+    upg = [op for op in dpkg_ops([tool2, LIBX]) if op[1] != CONF]
+    add(S("wo-dpkg-upgrade-status", BASE + D, upg, spec_of(), writers=([], [STATUS]), tags=["P10"]))
+    add(S("wo-dpkg-upgrade-file", BASE + D, upg, spec_of(), writers=([], [TOOLF]), tags=["P10", "P43"]))
+
+    # -- V4-R6: mark never trusts a marked entry; a writer gone is read again, one still there marked
+    add(S("wo-mark-writer-gone", BASE, [], None, writers=([], ["README.md"]), verify={"to": "trusted", "mark_writers": "first"}))
+    add(S("wo-mark-writer-stays", BASE, [], None, writers=([], ["README.md"]), verify={"to": "trusted", "mark_writers": "both"}))
+
+    # -- V4-R2, V4-R4: earlier manifests read as unmarked, and a strict reader's refusals
+    add(S("verify-v3-bundle", BASE, [("write", "tests/test_api.py", TEST_API.replace(b"        assert True\n", b""))],
+          spec_of(rule("tests/**", "no_write")), verify={"manifest": "v3"}, tags=["P41"]))
+    add(S("verify-v3-bundle-packages", BASE + FOO, [("write", CORE, b"x = 1\n")], spec_of(frozen=True), verify={"manifest": "v3"}, tags=["P41"]))
+    for how in ("trailer-missing-writer-open", "trailer-missing-unguarded", "v3-with-trailer-key", "v3-with-entry-key",
+                "count-too-low", "count-too-high", "false", "not-a-bool", "on-stored", "on-dir", "on-unverified", "no-hash"):
+        tree = BASE + [("file", "data/blob.bin", BLOB)] + ([("sparse", "data/big.bin", 67108865)] if how == "on-unverified" else [])
+        add(S("verify-v4-refused-" + how, tree, [], None, verify={"manifest": "break:" + how}, refusal="verify:v4-" + how))
     return out
 
 
