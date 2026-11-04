@@ -10,11 +10,13 @@
 #include "belay/manifest.h"
 #include "belay/error.h"
 
+#include <fcntl.h>
 #include <limits.h>
 #include <stdbool.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/mman.h>
 #include <sys/stat.h>
 #include <sys/time.h>
 #include <unistd.h>
@@ -222,11 +224,42 @@ TEST(timestamps_saturate_at_the_int64_bounds) {
 
 /* ---- the addendum's rows and these checks, both ways ---- */
 
+/* A9. A kernel's behaviour, not belay's: the file's mtime is set far back, so
+ * the check does not depend on how fine the filesystem's timestamps are. */
+TEST(a_first_store_through_a_mapping_moves_mtime) {
+#ifndef __linux__
+    SKIP("Linux's page_mkwrite stamping");
+#else
+    char path[300];
+    snprintf(path, sizeof path, "%s/mapped", g_dir);
+    const int fd = open(path, O_RDWR | O_CREAT | O_TRUNC, 0600);
+    REQUIRE(fd != -1);
+    REQUIRE(write(fd, "0123456789", 10) == 10);
+    REQUIRE(fsync(fd) == 0);
+    const struct timespec old[2] = { { 1000000000, 0 }, { 1000000000, 0 } };
+    REQUIRE(futimens(fd, old) == 0);
+    char *m = mmap(NULL, 10, PROT_READ | PROT_WRITE, MAP_SHARED, fd, 0);
+    REQUIRE(m != MAP_FAILED);
+    close(fd);
+    struct stat a, b;
+    m[0] = 'x';
+    REQUIRE(stat(path, &a) == 0);
+    ASSERT_TRUE(a.st_mtim.tv_sec != old[0].tv_sec);                  /* the first store stamps */
+    const struct timespec back[2] = { { 1000000000, 0 }, { 1000000000, 0 } };
+    REQUIRE(utimensat(AT_FDCWD, path, back, 0) == 0);
+    m[1] = 'y';                                                       /* the page is dirty already */
+    REQUIRE(stat(path, &b) == 0);
+    ASSERT_TRUE(b.st_mtim.tv_sec == old[0].tv_sec);
+    munmap(m, 10);
+    unlink(path);
+#endif
+}
+
 static const char *const CHECKS[] = {
     "inline_xattrs_are_at_most_8192_bytes", "a_line_is_at_most_65536_bytes",
     "a_path_is_at_most_4095_bytes", "a_link_target_is_at_most_4095_bytes",
     "caps_is_at_most_128_hex_digits", "hex_digits_are_lowercase", "the_depth_limit_is_128",
-    "timestamps_saturate_at_the_int64_bounds",
+    "timestamps_saturate_at_the_int64_bounds", "a_first_store_through_a_mapping_moves_mtime",
 };
 
 TEST(every_addendum_row_has_a_check_and_every_check_a_row) {
@@ -266,6 +299,7 @@ int main(void) {
     RUN(hex_digits_are_lowercase);
     RUN(the_depth_limit_is_128);
     RUN(timestamps_saturate_at_the_int64_bounds);
+    RUN(a_first_store_through_a_mapping_moves_mtime);
     RUN(every_addendum_row_has_a_check_and_every_check_a_row);
     char cmd[400];
     snprintf(cmd, sizeof cmd, "rm -rf '%s'", g_dir);
