@@ -14,9 +14,12 @@
 #include "schema/diff_schema.h"
 
 #include <errno.h>
+#include <fcntl.h>
+#include <limits.h>
 #include <stdbool.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/stat.h>
 #include <time.h>
 #include <unistd.h>
 
@@ -479,6 +482,7 @@ static int cmd_diff(const struct opts *o, FILE *out, FILE *err) {
     struct checkpoint *list = NULL, now = { 0 };
     size_t n = 0;
     char a[PATH_MAX + 160], b[PATH_MAX + 160], d[PATH_MAX + 200], label_a[64], label_b[64];
+    char work[PATH_MAX] = "";                   /* a stored diff's pair: computed here, not in the state */
     struct modes m = { 0 };
     FILE *in = NULL;
     if (state_list(&st, &list, &n) == -1) { rc = failed(err); goto done; }
@@ -494,8 +498,23 @@ static int cmd_diff(const struct opts *o, FILE *out, FILE *err) {
         rc = EXIT_USAGE;
         goto done;
     }
-    state_close(&st);                            /* a capture, and diff-from-N written: under the lock */
-    if ((rc = open_scope(o, true, &st, err)) != 0) goto done;
+    /* A diff between two kept checkpoints whose diff is already stored is
+     * a read: it writes nothing to the state directory. It is computed
+     * afresh, as always -- by this build, not whichever wrote the stored
+     * one -- into a work directory of its own, removed once opened. Any
+     * other diff writes (a capture, or a stored diff not there yet), so
+     * under the lock. */
+    bool stored = false;
+    if (to != 0) {
+        char rel[64];
+        struct stat ds_st;
+        snprintf(rel, sizeof rel, "%ld/diff-from-%ld.ndjson", to, from);
+        stored = st.cp_fd != -1 && fstatat(st.cp_fd, rel, &ds_st, AT_SYMLINK_NOFOLLOW) == 0;
+    }
+    if (!stored) {
+        state_close(&st);
+        if ((rc = open_scope(o, true, &st, err)) != 0) goto done;
+    }
     if (state_check_manifest(&st, from) == -1 || (to != 0 && state_check_manifest(&st, to) == -1)) {
         rc = failed(err);
         goto done;
@@ -512,11 +531,24 @@ static int cmd_diff(const struct opts *o, FILE *out, FILE *err) {
     snprintf(label_a, sizeof label_a, "checkpoint %ld", from);
     state_manifest(&st, from, a, sizeof a);
     state_manifest(&st, to, b, sizeof b);
-    snprintf(d, sizeof d, "%s/checkpoints/%ld/diff-from-%ld.ndjson", st.dir, to, from);
+    if (stored) {
+        const char *tmp = getenv("TMPDIR");
+        snprintf(work, sizeof work, "%s/belay-diff.XXXXXX", tmp != NULL && tmp[0] == '/' ? tmp : "/tmp");
+        if (mkdtemp(work) == NULL) {
+            belay_err_set(BELAY_ERR_IO, errno, "cannot create a work directory in %s", tmp != NULL ? tmp : "/tmp");
+            work[0] = '\0';
+            rc = failed(err);
+            goto done;
+        }
+        snprintf(d, sizeof d, "%s/diff.ndjson", work);
+    } else {
+        snprintf(d, sizeof d, "%s/checkpoints/%ld/diff-from-%ld.ndjson", st.dir, to, from);
+    }
     const struct belay_diff_opts dopts = { .store_dir = st.store };
     struct belay_diff_stats ds;
     if (belay_diff(a, b, d, &dopts, &ds) == -1) { rc = failed(err); goto done; }
     in = fopen(d, "r");
+    if (work[0] != '\0') unlink(d);             /* read from the open stream; nothing left behind */
     if (in == NULL) {
         belay_err_set(BELAY_ERR_IO, errno, "cannot read %s", d);
         rc = failed(err);
@@ -560,6 +592,7 @@ static int cmd_diff(const struct opts *o, FILE *out, FILE *err) {
     if (o->exit_code && ds.records > 0) rc = EXIT_CHANGES;
 done:
     if (in != NULL) fclose(in);
+    if (work[0] != '\0') { unlink(d); rmdir(work); }
     belay_manifest_close(m.side[0].r);
     belay_manifest_close(m.side[1].r);
     free(list);
