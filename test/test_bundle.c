@@ -127,6 +127,43 @@ static int read_back(const char *path, const char *want, struct bundle *b) {
     return bundle_read(path, want, work, man, store, b);
 }
 
+/* A row whose file a writer held at reset is unverified, for pip and for
+ * dpkg: a marked hash is no hash (manifest-v4 V4-D8). */
+TEST(a_file_held_at_reset_is_unverified) {
+#ifndef __linux__
+    SKIP("no lease facility here");
+#else
+    fixture();
+    char p[700];
+    snprintf(p, sizeof p, "%s/lib/site-packages/foo/__init__.py", g_scope);
+    const int w1 = open(p, O_WRONLY);
+    snprintf(p, sizeof p, "%s/usr/bin/hello", g_scope);
+    const int w2 = open(p, O_WRONLY);
+    REQUIRE(w1 >= 0 && w2 >= 0);
+    const int rc = export_(NULL);
+    close(w1);
+    close(w2);
+    REQUIRE_MSG(rc == EXIT_DONE, "%s", g_err);
+    size_t n;
+    char *b = slurp(g_out_path, &n), hex[65];
+    REQUIRE(b != NULL);
+    sha_of(b, n, hex);
+    free(b);
+    struct bundle bd;
+    REQUIRE_MSG(read_back(g_out_path, hex, &bd) == 0, "%s", belay_err_msg());
+    int seen = 0;
+    for (size_t i = 0; i < bd.packages.n; i++) {
+        const char *l = line_of(&bd.packages.v[i]);
+        if (strstr(l, "foo/__init__.py") != NULL || strstr(l, "usr/bin/hello") != NULL) {
+            seen++;
+            ASSERT_TRUE(strstr(l, " unverified") != NULL);
+        }
+    }
+    ASSERT_EQ_INT(2, seen);
+    bundle_free(&bd);
+#endif
+}
+
 TEST(export_lists_every_database_row_with_what_it_said_at_reset) {
     fixture();
     REQUIRE_MSG(export_(NULL) == EXIT_DONE, "%s", g_err);
@@ -564,6 +601,7 @@ int main(void) {
     snprintf(g_state, sizeof g_state, "%s/state", g_dir);
     snprintf(g_out_path, sizeof g_out_path, "%s/out.bundle", g_dir);
     RUN(export_lists_every_database_row_with_what_it_said_at_reset);
+    RUN(a_file_held_at_reset_is_unverified);
     RUN(a_file_changed_after_its_capture_fails_the_export);
     RUN(a_bundle_reads_back_what_was_written);
     RUN(a_bundle_whose_bytes_are_not_the_digest_given_is_never_parsed);

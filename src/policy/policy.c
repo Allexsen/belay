@@ -572,7 +572,7 @@ static void protected(struct state *s, const char *p, size_t n, const struct bel
         const char *why = NULL;
         if (a == NULL) why = "absent";
         else if (a->type != BELAY_T_REG) why = "not a regular file";
-        else if (!a->has_hash) continue;                /* unverifiable, said above */
+        else if (!a->has_hash || a->writer_open) continue;      /* unverifiable, said above (V4-D8) */
         else if (strcmp(a->sha256_hex, r->sha256) != 0) why = "other bytes";
         if (why == NULL) continue;
         struct flag *f = add(c, PK_PROTECTED_HASH_MISMATCH, d != NULL && unknown);
@@ -941,8 +941,12 @@ static int signals(struct state *s, const char *p, size_t n, const struct belay_
         const bool lnk = a->type == BELAY_T_LNK, xreg = a->type == BELAY_T_REG && (a->mode & 0111);
         const bool xadded = b != NULL && b->type == BELAY_T_REG && a->type == BELAY_T_REG &&
                             ((a->mode & 0111) & ~(b->mode & 0111)) != 0;
-        if ((!strcmp(o, "added") && (lnk || xreg)) || ((!strcmp(o, "modified") || !strcmp(o, "metadata_only")) && xadded) ||
-            (!strcmp(o, "type_changed") && (lnk || xreg))) {
+        /* A marked entry is unknown for its hash, not its mode: what the
+         * outcome would have said still speaks, provisionally (V4-D9). */
+        const bool marked = prov && has_str(jget(&d->v, "unknown"), "writer_open");
+        if (((!strcmp(o, "added") || (marked && b == NULL)) && (lnk || xreg)) ||
+            ((!strcmp(o, "modified") || !strcmp(o, "metadata_only") || (marked && b != NULL && b->type == a->type)) && xadded) ||
+            ((!strcmp(o, "type_changed") || (marked && b != NULL && b->type != a->type)) && (lnk || xreg))) {
             struct flag *f = add(c, PK_NEW_EXECUTABLE_ON_PATH, prov);
             fs(c, f, "path", p, n);
             fstr(c, f, "outcome", o);

@@ -1288,6 +1288,16 @@ TEST(a_marked_entry_is_unknown_and_its_hash_never_compared) {
     ASSERT_EQ_INT((int)DRBIT(DR_WRITER_OPEN), (int)v.reasons);
     REQUIRE(classify_one(&b, false, ANC_NONE, &v) == 0);    /* nor removed */
     ASSERT_EQ_INT(D_UNKNOWN, (int)v.outcome);
+    /* an earlier rule decides alone: E11's not_captured stays the only reason */
+    REQUIRE(classify_one(&b, true, ANC_SEALED, &v) == 0);
+    ASSERT_EQ_INT((int)DRBIT(DR_NOT_CAPTURED), (int)v.reasons);
+    REQUIRE(classify_one(&b, true, ANC_INCOMPLETE, &v) == 0);
+    ASSERT_EQ_INT((int)DRBIT(DR_LISTING_INCOMPLETE), (int)v.reasons);
+    REQUIRE(classify_one(&b, true, ANC_RACED, &v) == 0);
+    ASSERT_EQ_INT((int)DRBIT(DR_RACED), (int)v.reasons);
+    b.raced = true;                                         /* its own two flags: both */
+    REQUIRE(classify_one(&b, true, ANC_NONE, &v) == 0);
+    ASSERT_EQ_INT((int)(DRBIT(DR_RACED) | DRBIT(DR_WRITER_OPEN)), (int)v.reasons);
     ASSERT_EQ_INT(DR_COUNT - 1, DR_WRITER_OPEN);            /* last among the reasons (V4-D4) */
 }
 

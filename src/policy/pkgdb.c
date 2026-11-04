@@ -515,7 +515,7 @@ static int hash_both(int rootfd, const char *rel, size_t n, char md5[33], char s
 static int line_at(const struct belay_entry *e, struct pkg_line *x, int rootfd) {
     if (e->type != BELAY_T_REG) { x->at_reset = AT_NOT_A_FILE; return 0; }
     if (x->expected[0] == '\0') { x->at_reset = AT_NO_HASH; return 0; }
-    if (!e->has_hash) { x->at_reset = AT_UNVERIFIED; return 0; }
+    if (!e->has_hash || e->writer_open) { x->at_reset = AT_UNVERIFIED; return 0; }   /* V4-D8 */
     if (x->db == PKG_PIP) {
         x->at_reset = strcmp(x->expected, e->sha256_hex) == 0 ? AT_MATCH : AT_MISMATCH;
         return 0;
