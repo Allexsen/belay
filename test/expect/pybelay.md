@@ -13,7 +13,7 @@ the interface (BELAY_DESIGN §5); nothing here adds a format. Written by hand; a
 | id | rule |
 |---|---|
 | PY-D1 | The distribution is `pybelay` on PyPI, and the import name is `pybelay` too. `belay` on PyPI is another project (BrianPugh/belay, a MicroPython library, 0.30.1 on 2026-11-03), which imports as `belay`. |
-| PY-D2 | Its version is the belay release's, in PEP 440 (`v0.1.0-alpha.3` is `0.1.0a3`). One release, one binary, one wheel set. |
+| PY-D2 | Its version is the belay binary's (`belay --version`), in PEP 440. A release's: `v0.1.0-alpha.3` is `0.1.0a3`. A development build's carries git's description as a local version: `0.1.0-alpha.2+95-ga2054b3` is `0.1.0a2+95.ga2054b3`, `-dirty` becomes `.dirty`, and `+unknown` (no git) stays `+unknown`; such a wheel is never published (PEP 440: local versions are not for public indexes). One release, one binary, one wheel set. |
 | PY-D3 | Wheels only, one per release target, each tagged `py3-none-<platform>` (no extension: any Python 3.9 or later): Linux x86_64 and aarch64, tagged for both manylinux and musllinux since the binary is static; macOS arm64. No sdist: one could not carry a checked binary. |
 | PY-D4 | Each wheel vendors its target's binary from the same release, taken from the release's assets after their `SHA256SUMS` and provenance attestation are checked, and records its sha256 in the package. |
 | PY-D5 | Before its first call in a process, the package hashes the vendored binary and compares it with the recorded digest: on a mismatch it raises `BinaryMismatch` and runs nothing. No environment variable or argument selects another binary. `pybelay.binary_path()` returns the vendored binary's path (for an orchestrator to copy into a sandbox: in-sandbox mode). |
