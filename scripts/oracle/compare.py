@@ -41,8 +41,10 @@ the driver's diff and reference.diff() must agree on
   (`unknown` too), under a key the manifest uses, never both `{}` (V2).
   Disagreements are grouped by the rule that explains them; OTHER is what no
   rule of the reference's trace explains.
-Every pair is also run in the other three combinations of manifest versions
-(.before.alt/.after.alt: the same manifests in the other version), and each
+Every pair is also run in the other combinations of manifest versions whose
+files exist (.before.alt/.after.alt: the same manifests in the other of
+versions 1 and 2; .before.v3/.after.v3, .before.v4/.after.v4: in those
+versions; an entry carrying `writer_open` exists in version 4 only), and each
 of those diffs must be the pair's own, byte for byte, but for
 `before_manifest_version`/`after_manifest_version` (the files' versions),
 `before_excluded`/`after_excluded` (`[]` in v2, `null` in v1: V2-R7)
@@ -97,6 +99,10 @@ the generator's labels (coverage(), required(), gate()):
     directory, below a mount), alone and beside ones read, which derive no
     event (E11), and ones unknown on one side for another reason
     (listing_incomplete, raced), still provisional (E2);
+  - every manifest v4 item (V4_SCENARIOS): `writer_open` before, after and on
+    both sides against what else differs, beside `raced` and each other
+    reason, on one side only, on a claimed path; the trailer's counts; v4
+    against v3, v2 and v1;
   - every manifest-version item (VERSION_SCENARIOS): the four combinations
     of versions, identical entries in two versions (V2-R4) and in v2 with
     only the v2 statements different (V2-R6), each kind of walk a v2
@@ -365,6 +371,10 @@ def compare_record(path, exp, got, trace, orders):
         groups.append('OTHER: an empty `unknown`')
     if len(set(ug)) != len(ug):
         groups.append('OTHER: a reason twice')
+    # V4-D4: "last in `unknown` when others are present", whatever the
+    # reasons table says of the others.
+    if ref.WRITER_OPEN in ug and ug[-1] != ref.WRITER_OPEN:
+        groups.append('V4-D4: `writer_open` is not the last reason')
     if set(ue) != set(ug):
         for r in sorted(set(ue) ^ set(ug)):
             if r == 'iflags_unknown':
@@ -436,7 +446,12 @@ def run_driver(driver, stem, before='.before', after='.after'):
 # version (the entries are v1's)" and the v2 statements "decide nothing"
 # (test/expect/manifest-v2.md V2-R4, V2-R6).
 OTHER_VERSIONS = [('.before.alt', '.after'), ('.before', '.after.alt'),
-                  ('.before.alt', '.after.alt')]
+                  ('.before.alt', '.after.alt'),
+                  # Versions 3 and 4 (V3-R5, V4-R4): among themselves, and
+                  # version 4 against the pair's own.
+                  ('.before.v3', '.after.v3'), ('.before.v3', '.after.v4'),
+                  ('.before.v4', '.after.v3'), ('.before.v4', '.after.v4'),
+                  ('.before', '.after.v4'), ('.before.v4', '.after')]
 
 
 def manifest_version(path):
@@ -477,6 +492,11 @@ def check_versions(stem, own, others):
                  'after_excluded': ref.header_excluded(stem + after)[0],
                  'before_sha256': ref.trailer_of(stem + before)[1],
                  'after_sha256': ref.trailer_of(stem + after)[1]}
+        # V4-R4, V4-D5: that file's own counts, `0` before v4 -- so a v4
+        # manifest's `unguarded` is not in its v3 counterpart's diff.
+        for w, side in (('before_', before), ('after_', after)):
+            for c in ref.V4_COUNTS:
+                names[w + c] = ref.trailer_of(stem + side)[0].get(c, 0)
         for what, x, y in (('header', lines[0], got[0]), ('trailer', lines[-1], got[-1])):
             want = [(k, names.get(k, v)) for k, v in json.loads(x, object_pairs_hook=list)]
             have = json.loads(y, object_pairs_hook=list)
@@ -1752,7 +1772,9 @@ def interp_coverage(stem, tags):
 # manifest, and against one with exclusions of its own.
 V2_KEYS = {'header': ('walk_start_ns',),
            'trailer': ('trusted', 'reference', 'read_all')}
-VERSION_SCENARIOS = (['before v%d, after v%d' % vv for vv in ((1, 1), (1, 2), (2, 1), (2, 2))]
+VERSION_SCENARIOS = (['before v%d, after v%d' % vv for vv in ((1, 1), (1, 2), (2, 1), (2, 2),
+                                                             (3, 3), (3, 4), (4, 3), (4, 4),
+                                                             (1, 4), (4, 1), (2, 4), (4, 2))]
                      + ['the versions differ, every entry the same (V2-R4)',
                         'the versions differ, entries differ',
                         'v2 on both sides, every entry the same, only the v2 statements differ '
@@ -1784,14 +1806,14 @@ def version_coverage(stem, tags):
         h, _, entries = ref.load(stem + side)
         t = ref.trailer_of(stem + side)[0]
         st = {k: (h if line == 'header' else t)[k] for line, ks in V2_KEYS.items() for k in ks} \
-            if h['belay_manifest'] == 2 else None
+            if h['belay_manifest'] >= 2 else None
         sides.append((h['belay_manifest'], entries, st, h.get('excluded', [])))
     (vb, eb, sb, xb), (va, ea, sa, xa) = sides
     tags.add('before v%d, after v%d' % (vb, va))
     if vb != va:
         tags.add('the versions differ, every entry the same (V2-R4)' if eb == ea else
                  'the versions differ, entries differ')
-        if xb or xa:
+        if (xb or xa) and 1 in (vb, va):
             tags.add('v2 with exclusions against v1')
     elif vb == 2 and eb == ea and same(xb, xa) and not same(sorted(sb.items()),
                                                              sorted(sa.items())):
@@ -1838,7 +1860,170 @@ def version_coverage(stem, tags):
                  'v2: walk_start_ns not 0')
 
 
-KINDS = ('cell', 'field pair', 'optional', 'scenario', 'interpreter', 'manifest version')
+# Manifest v4 (test/expect/manifest-v4.md), from each pair's own two files
+# alone. `writer_open` on a side, or both, against what else differs on that
+# entry (V4-D1, V4-D2; a type change cannot be marked on both sides, V4-2:
+# only a regular file carries it); beside `raced` (V4-D1) and beside the other
+# reasons (V4-D4); on one side only (V4-D3), where the earlier rules decide, with
+# `raced` on the entry too, and an ancestor that is marked and not raced, which
+# decides nothing; the trailer counts (V4-D5, V4-D6, V4-R4); the other versions (V4-R4).
+W_SIDES = ('before only', 'after only', 'on both sides')
+W_DIFFS = ('only the hash differs', 'the size differs', 'the mode differs', 'nothing differs')
+W_RACED = ('raced on the marked side', 'raced on the other side', 'raced on both sides')
+W_OTHERS = ('unverified', 'unstable', 'unreadable', 'mount', 'xattrs_unknown', 'iflags_unknown')
+V4_SCENARIOS = (['writer_open %s, %s' % (s, d) for s in W_SIDES for d in W_DIFFS]
+                + ['writer_open %s, the type differs' % s for s in W_SIDES[:2]]
+                + ['writer_open %s, %s, the hash differs' % (s, r)
+                   for s in W_SIDES[:2] for r in W_RACED]
+                + ['writer_open on both sides, raced on one side, the size differs',
+                   'writer_open on both sides, raced on both sides, the hash differs',
+                   'writer_open, raced, the type differs',
+                   'writer_open, every field differs, ctime_ns too',
+                   'writer_open, only ctime_ns differs',
+                   'writer_open, the other side stored',
+                   'writer_open, the other side stored, the hash differs']
+                + ['writer_open beside the reason %s' % r for r in W_OTHERS]
+                + ['writer_open on one side only: added', 'writer_open on one side only: removed',
+                   'writer_open and raced on one side only',
+                   'writer_open and raced on one side only, the other side excluded it',
+                   'writer_open and raced on one side only, below an unstable directory on the '
+                   'other side',
+                   'writer_open on one side only, the other side excluded it',
+                   'writer_open on one side only, below a sealed directory on the other side',
+                   'writer_open on one side only, below an unstable directory on the other side',
+                   'writer_open on one side only, below a raced non-directory on the other side',
+                   'a path on one side only below a marked regular file, not raced',
+                   'writer_open on a path an interpreter claims, both sides',
+                   'writer_open on a path an interpreter claims, one side only',
+                   'writer_open on a path an interpreter claims, the other side excluded it',
+                   'trailer: writer_open not 0 before', 'trailer: writer_open not 0 after',
+                   'trailer: the two writer_open counts differ, neither 0',
+                   'trailer: unguarded not 0 before', 'trailer: unguarded not 0 after',
+                   'trailer: the two unguarded counts differ, neither 0',
+                   'trailer: writer_open and unguarded not 0, every walk count 0 (V4-D6)',
+                   'trailer: unguarded not 0, nothing marked, every entry the same',
+                   'versions: a marked entry in v4 against v3',
+                   'versions: a marked entry in v4 against v2',
+                   'versions: a marked entry in v4 against v1',
+                   'versions: v3 against v4, nothing marked, unguarded not 0',
+                   'versions: v3 against v4, every entry the same'])
+
+
+def v4_coverage(stem, tags):
+    hb, scope, eb = ref.load(stem + '.before')
+    ha, _, ea = ref.load(stem + '.after')
+    tb, ta = ref.trailer_of(stem + '.before')[0], ref.trailer_of(stem + '.after')[0]
+    W = ref.WRITER_OPEN
+    mb, ma = ({p for p, e in es.items() if e.get(W)} for es in (eb, ea))
+    for p in set(eb) & set(ea):
+        b, a = eb[p], ea[p]
+        if not (b.get(W) or a.get(W)):
+            continue
+        side = (W_SIDES[2] if b.get(W) and a.get(W) else W_SIDES[0] if b.get(W) else W_SIDES[1])
+        D = {k for k in set(b) | set(a) if not same(b.get(k), a.get(k))} - {W}
+        if b['type'] != a['type']:
+            if not (b.get('raced') or a.get('raced')):
+                tags.add('writer_open %s, the type differs' % side)
+            else:
+                tags.add('writer_open, raced, the type differs')
+            continue
+        rb, ra = bool(b.get('raced')), bool(a.get('raced'))
+        hash_differs = 'sha256' in b and 'sha256' in a and b['sha256'] != a['sha256']
+        if not (rb or ra):
+            only = D - {'stored'}
+            for d, want in zip(W_DIFFS, ({'sha256'}, {'size'}, {'mode'}, set())):
+                if only == want:
+                    tags.add('writer_open %s, %s' % (side, d))
+            if only == {'ctime_ns'}:
+                tags.add('writer_open, only ctime_ns differs')
+            if {'mode', 'uid', 'gid', 'size', 'mtime_ns', 'ctime_ns', 'ino', 'nlink',
+                    'sha256'} <= D:
+                tags.add('writer_open, every field differs, ctime_ns too')
+        elif side == W_SIDES[2]:
+            if rb != ra and 'size' in D:
+                tags.add('writer_open on both sides, raced on one side, the size differs')
+            if rb and ra and hash_differs:
+                tags.add('writer_open on both sides, raced on both sides, the hash differs')
+        elif hash_differs:
+            marked_raced = (rb if b.get(W) else ra)
+            other_raced = (ra if b.get(W) else rb)
+            tags.add('writer_open %s, %s, the hash differs'
+                     % (side, W_RACED[2] if marked_raced and other_raced else
+                        W_RACED[0] if marked_raced else W_RACED[1]))
+        for x in (b, a):
+            if 'stored' in x:
+                tags.add('writer_open, the other side stored')
+                if hash_differs:
+                    tags.add('writer_open, the other side stored, the hash differs')
+            for f in W_OTHERS[:-1]:
+                if x.get(f):
+                    tags.add('writer_open beside the reason %s' % f)
+        if ('iflags' in b) != ('iflags' in a) and not (b.get('mount') or a.get('mount')):
+            tags.add('writer_open beside the reason iflags_unknown')
+        if ref.claim(scope, p):
+            tags.add('writer_open on a path an interpreter claims, both sides')
+    for p in set(eb) ^ set(ea):
+        present, lacking, lx, word = ((ea, eb, ref.excluded(hb), 'added') if p in ea
+                                      else (eb, ea, ref.excluded(ha), 'removed'))
+        anc = ref.nearest_ancestor(lacking, p)
+        e = present[p]
+        if anc.get(W) and anc['type'] == 'reg' and not anc.get('raced') and \
+                not e.get(W) and not e.get('raced') and ref.covering(lx, p) is None:
+            tags.add('a path on one side only below a marked regular file, not raced')
+        if not e.get(W):
+            continue
+        if ref.claim(scope, p):
+            tags.add('writer_open on a path an interpreter claims, one side only')
+        if ref.covering(lx, p) is not None:
+            tags.add('writer_open on one side only, the other side excluded it')
+            if e.get('raced'):
+                tags.add('writer_open and raced on one side only, the other side excluded it')
+            if ref.claim(scope, p):
+                tags.add('writer_open on a path an interpreter claims, the other side excluded '
+                         'it')
+        elif anc['type'] == 'dir' and (anc.get('unreadable') or anc.get('mount')):
+            tags.add('writer_open on one side only, below a sealed directory on the other side')
+        elif anc['type'] == 'dir' and anc.get('unstable'):
+            tags.add('writer_open on one side only, below an unstable directory on the other '
+                     'side')
+            if e.get('raced'):
+                tags.add('writer_open and raced on one side only, below an unstable directory '
+                         'on the other side')
+        elif anc['type'] != 'dir' and anc.get('raced'):
+            tags.add('writer_open on one side only, below a raced non-directory on the other '
+                     'side')
+        elif e.get('raced'):
+            tags.add('writer_open and raced on one side only')
+        else:
+            tags.add('writer_open on one side only: %s' % word)
+    wb, wa = tb.get(W, 0), ta.get(W, 0)
+    ub, ua = tb.get('unguarded', 0), ta.get('unguarded', 0)
+    for n, what, side in ((wb, 'writer_open', 'before'), (wa, 'writer_open', 'after'),
+                          (ub, 'unguarded', 'before'), (ua, 'unguarded', 'after')):
+        if n:
+            tags.add('trailer: %s not 0 %s' % (what, side))
+    if wb and wa and wb != wa:
+        tags.add('trailer: the two writer_open counts differ, neither 0')
+    if ub and ua and ub != ua:
+        tags.add('trailer: the two unguarded counts differ, neither 0')
+    six = [t[c] for t in (tb, ta) for c in ref.INPUT_COUNTS]
+    if (wb or wa) and (ub or ua) and not any(six):
+        tags.add('trailer: writer_open and unguarded not 0, every walk count 0 (V4-D6)')
+    if (ub or ua) and not (mb or ma) and eb == ea:
+        tags.add('trailer: unguarded not 0, nothing marked, every entry the same')
+    vb, va = hb['belay_manifest'], ha['belay_manifest']
+    for v, o, m in ((vb, va, mb), (va, vb, ma)):
+        if v == 4 and o < 4 and m:
+            tags.add('versions: a marked entry in v4 against v%d' % o)
+    if {vb, va} == {3, 4}:
+        if not (mb or ma) and (ub or ua):
+            tags.add('versions: v3 against v4, nothing marked, unguarded not 0')
+        if eb == ea:
+            tags.add('versions: v3 against v4, every entry the same')
+
+
+KINDS = ('cell', 'field pair', 'optional', 'scenario', 'interpreter', 'manifest version',
+         'manifest v4')
 
 
 def coverage(stems):
@@ -1857,6 +2042,10 @@ def coverage(stems):
         version_coverage(stem, tags)
         for t in tags:
             cov['manifest version'][t] += 1
+        tags = set()
+        v4_coverage(stem, tags)
+        for t in tags:
+            cov['manifest v4'][t] += 1
     return cov
 
 
@@ -1869,7 +2058,8 @@ def required():
             + [('optional', f) for f in OPTIONAL]
             + [('scenario', s) for s in SCENARIOS]
             + [('interpreter', s) for s in INTERP_SCENARIOS]
-            + [('manifest version', s) for s in VERSION_SCENARIOS])
+            + [('manifest version', s) for s in VERSION_SCENARIOS]
+            + [('manifest v4', s) for s in V4_SCENARIOS])
     return need, infeasible
 
 
@@ -1891,7 +2081,8 @@ def print_gate(cov):
                         ('optional', 'optional fields on one side only'),
                         ('scenario', 'scenarios'),
                         ('interpreter', 'interpreters, with no store; git\'s events with one'),
-                        ('manifest version', 'manifest versions and v2 statements')):
+                        ('manifest version', 'manifest versions and v2 statements'),
+                        ('manifest v4', 'manifest v4: writer_open and its trailer counts')):
         items = [i for k, i in need if k == kind]
         lack = [i for k, i in missing if k == kind]
         print('   %s: %d/%d, fewest pairs %d' % (title, len(items) - len(lack), len(items),
@@ -1999,8 +2190,8 @@ def main():
                                  for (rc, _, raw), oth in zip(ran, others)
                                  if rc == 0 and raw is not None)
     print('== manifest versions (V2-R4): %d pairs whose own diff succeeded, each also run in the '
-          'other combinations of versions whose files exist (a side with exclusions is v2 '
-          'only): %d agree in all of them, %d do not; pairs by other combinations run: %s'
+          'other combinations of versions whose files exist (a side with exclusions has no '
+          'v1, a marked one nothing before v4): %d agree in all of them, %d do not; pairs by other combinations run: %s'
           % (nver, nver - bad_pairs, bad_pairs, dict(sorted(combos.items()))))
     by_what = collections.defaultdict(list)
     for name, lab, combo, what, want, got in version_issues:
@@ -2032,7 +2223,7 @@ def main():
 
     # Refusals.
     bad_refusals = []
-    for stem in refusals:                       # in all four combinations of versions
+    for stem in refusals:                       # in every combination of versions
         for before, after in [('.before', '.after')] + OTHER_VERSIONS:
             if not exists(stem, before, after):
                 continue
@@ -2047,7 +2238,7 @@ def main():
                                                      manifest_version(stem + after)),
                                      r.returncode, os.path.exists(out), ok_ref))
     print('== scope refusal: %d/%d pairs of different scopes refused with no output file, in '
-          'each of the four combinations of versions'
+          'each combination of versions'
           % (len(refusals) - len({b[0] for b in bad_refusals}), len(refusals)))
     for b in bad_refusals:
         print('   NOT REFUSED: %s [%s] %s: exit %d, output file left: %s, reference refuses: %s'

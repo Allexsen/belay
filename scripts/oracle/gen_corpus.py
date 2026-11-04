@@ -41,6 +41,17 @@ The diff header (V2-R7) carries each manifest's `excluded` as written, `null`
 for v1: the exclusion pairs are built in the versions that show it (an empty
 list, path_b64, both reasons, a path both sides excluded, v1 against v2).
 
+Manifest versions 3 and 4 (test/expect/manifest-v3.md, manifest-v4.md): the
+cycle of combinations also holds them; every side is also written in each of
+them it can hold (.v3, .v4), and compare.py runs those. v3 is v2 plus `source`,
+always `null` here (a container's source is not generated: V3-R4's refusal is
+not covered). v4 is v3 plus the entry flag `writer_open` (its "when" is
+v4_violation()) and the trailer's `writer_open` and `unguarded`; a side with a
+marked entry has no counterpart before v4 (V4-R2), so it is written in v4 only.
+`unguarded` comes from the writer's own stream, unless the tree says
+(Tree.unguarded); it counts files read, so it stays within the hashed, unmarked
+files less `trusted` (V4-4). writer_open() builds the gate's v4 items.
+
 Exclusions (V2-2; docs/spec/diff-v1.md, "Present on one side only"): a
 tree's excluded paths have no entry, nothing below them is recorded (no entry, no other
 exclusion), and each one's parent is a directory that was listed -- neither
@@ -207,11 +218,11 @@ def load_manifest_pin():
 
 KEYS, TYPES, PIN_RULES = load_manifest_pin()
 TYPE_NAMES = list(TYPES)
-ENTRY_KEYS = [k[0] for k in KEYS['entry']]
+ENTRY_KEYS = [k[0] for k in KEYS['entry']] + ['writer_open']
 REQUIRED_FIELDS = [k[0] for k in KEYS['entry']
                    if k[3].startswith('required') and k[0] not in ('path', 'type')]
 OPTIONAL_FIELDS = [k[0] for k in KEYS['entry'] if k[3].startswith('optional')]
-FLAG_FIELDS = [k[0] for k in KEYS['entry'] if k[2] == 'bool']
+FLAG_FIELDS = [k[0] for k in KEYS['entry'] if k[2] == 'bool'] + ['writer_open']
 
 # The rules violations() implements, exactly as the pin states them.
 IMPLEMENTED_RULES = [
@@ -343,6 +354,48 @@ def load_manifest_v2_pin():
 
 
 KEYS_V2 = load_manifest_v2_pin()       # the v2 header's and trailer's keys, in order
+
+# Manifest versions 3 and 4, read from their pins' Lines tables; the words the
+# writer relies on checked (a changed pin stops the generator).
+MANIFEST_V3_PIN = os.path.join(REPO, 'test', 'expect', 'manifest-v3.md')
+MANIFEST_V4_PIN = os.path.join(REPO, 'test', 'expect', 'manifest-v4.md')
+V4_ENTRY_WHEN = ('a regular file with `sha256`, no `stored`, and none of `unverified`, `unstable`, '
+                 '`unreadable`, `mount`; absent otherwise, never `false`')
+V4_ORDER = ("Key order: an entry's as v1's, with `writer_open` after `raced`. The trailer: v3's "
+            "keys in v3's order, then V4-3, then V4-4. A trailer key is never optional.")
+V4_UNGUARDED = ['Carrying `writer_open` excludes an entry from this count.',
+                'A file not read (`trusted`) is not counted.']
+V4_R3_BOUND = 'and so is an `unguarded` larger than the trailer\'s entries'
+
+
+def load_later_versions():
+    """(v3's keys, v4's keys, v4's entry keys): v2's with what each adds."""
+    text3 = open(MANIFEST_V3_PIN, encoding='utf-8').read()
+    rows3 = {r['id']: r for r in md_table(text3, 'id')}
+    if rows3['V3-1']['value'] != '`3`' or rows3['V3-2']['key'] != '`source`' or \
+            not rows3['V3-2']['value'].startswith('`null`: ') or \
+            "Key order within each line: v2's keys in v2's order, then `source`." not in text3:
+        die('pin: manifest-v3.md no longer says what this generator writes')
+    text4 = open(MANIFEST_V4_PIN, encoding='utf-8').read()
+    rows4 = {r['id']: r for r in md_table(text4, 'id')}
+    if V4_R3_BOUND not in text4:
+        die('pin: V4-R3 no longer bounds `unguarded`; review Writer.unguarded() first')
+    if rows4['V4-1']['value'] != '`4`' or rows4['V4-2']['when'] != V4_ENTRY_WHEN or \
+            rows4['V4-2']['key'] != '`writer_open`' or V4_ORDER not in ' '.join(text4.split()) or \
+            [rows4[r]['key'] for r in ('V4-3', 'V4-4')] != ['`writer_open`', '`unguarded`'] or \
+            not all(w in rows4['V4-4']['value'] for w in V4_UNGUARDED):
+        die('pin: manifest-v4.md no longer says what this generator writes')
+    k3 = dict(KEYS_V2, header=KEYS_V2['header'] + [('source', ('source',), 'null', 'required (v3)')])
+    new = [(k, (k,), 'int', 'required (v4)') for k in ('writer_open', 'unguarded')]
+    k4 = dict(k3, trailer=k3['trailer'] + new)
+    at = [k[0] for k in KEYS['entry']].index('raced') + 1
+    entry = KEYS['entry'][:at] + [('writer_open', ('writer_open',), 'bool', 'optional (v4)')] + \
+        KEYS['entry'][at:]
+    return k3, k4, entry
+
+
+KEYS_V3, KEYS_V4, ENTRY_V4 = load_later_versions()
+KEYS_OF = {1: KEYS, 2: KEYS_V2, 3: KEYS_V3, 4: KEYS_V4}
 
 # ---------------------------------------------------------------------------
 # Values.
@@ -516,6 +569,7 @@ class Tree:
         self.created = rng.randrange(1 << 59, 1 << 61)
         self.store_max = rng.choice([0, 4096, 65536])
         self.vanished = 0
+        self.unguarded = None                   # V4-4: None, for the writer to choose
         self.e = {}
         # Manifest v2's `excluded` (V2-2): {path bytes: {'reason', 'dev',
         # 'ino'}}. Nothing at or below such a path is in self.e; its parent
@@ -635,6 +689,10 @@ def fix_entry(e, t, rng):
         if e.get('unstable') and e.get('unreadable'):                     # 7
             del e['unreadable']
         settle_hash(e, t, rng)                                            # 5, 6, 14, header 1
+    if e.get('writer_open'):                                              # V4-2
+        e.pop('stored', None)                   # "its copy is not kept"
+        if typ != 'reg' or 'sha256' not in e or e.get('mount'):
+            del e['writer_open']
     if typ == 'dir':
         seals = [k for k in ('unreadable', 'unstable', 'mount') if e.get(k)]
         for k in seals[1:]:                                               # 11
@@ -798,6 +856,17 @@ def entry_violations(e, t):
     return v
 
 
+def marked(t):
+    """The entries of t carrying `writer_open`."""
+    return [e for e in t.e.values() if e.get('writer_open')]
+
+
+def v4_violation(e):
+    """V4-2's "when", V4-R3: "An entry breaking V4-2's "when" is rejected"."""
+    return e.get('writer_open') and (e['type'] != 'reg' or 'sha256' not in e or any(
+        k in e for k in ('stored', 'unverified', 'unstable', 'unreadable', 'mount')))
+
+
 def violations(t):
     v = []
     root = t.e.get(b'.')
@@ -818,6 +887,8 @@ def violations(t):
             elif pe.get('unreadable') or pe.get('mount'):
                 v.append('below a sealed directory %r' % p)
         v += ['%r: rule %s' % (p, r) for r in entry_violations(e, t)]
+        if v4_violation(e):
+            v.append('%r: V4-2' % p)
         # test/expect/manifest-v1-addendum.md A3 and A4: a reader rejects a
         # longer path or link target.
         if len(p) > ADDENDUM_MAX['path'] or len(e.get('link_target', b'')) > \
@@ -874,6 +945,9 @@ def enc_obj(keys, d):
         elif kind == 'bool':
             assert v is True, (canon, v)
             enc = 'true'
+        elif kind == 'null':                    # v3's `source`, here always `null`
+            assert v is None, (canon, v)
+            enc = 'null'
         elif kind == 'array':
             assert isinstance(v, list) and v and all(isinstance(x, str) for x in v), (canon, v)
             enc = '[' + ','.join(jstr(x) for x in v) + ']'
@@ -890,22 +964,24 @@ def enc_obj(keys, d):
 
 
 def write_manifest(t, path, version=1, st=None):
-    """The tree as a manifest of `version` 1 or 2; a v2 one carries the
-    statements `st` (v2_statements()) under the keys V2-2..V2-6 add."""
-    keys = KEYS if version == 1 else KEYS_V2
+    """The tree as a manifest of `version` 1 to 4; from v2 it carries the
+    statements `st` (v2_statements()) under the keys V2-2..V2-6 add, from v3
+    `source`, and in v4 `writer_open` and the trailer's two counts."""
+    keys = KEYS_OF[version]
+    entry_keys = ENTRY_V4 if version == 4 else KEYS['entry']
     header = {'belay_manifest': version, 'created_ns': t.created, 'scopes': [t.scope],
               'hash': 'sha256', 'hash_max_bytes': t.limit, 'store_max_bytes': t.store_max}
     lines = [None]
     n = {'unreadable': 0, 'unstable': 0, 'mount': 0, 'raced': 0}
     for p in sorted(t.e):
         e = t.e[p]
-        lines.append(enc_obj(KEYS['entry'], e))
+        lines.append(enc_obj(entry_keys, e))
         for k in n:
             n[k] += bool(e.get(k))
     trailer = {'belay_manifest_end': len(t.e), 'vanished': t.vanished,
                'unreadable': n['unreadable'], 'unstable': n['unstable'], 'mounts': n['mount'],
                'raced': n['raced']}
-    if version == 2:
+    if version >= 2:
         v = v2_violations(t, st)
         if v:
             die('generator bug: v2 statements %r: %s' % (st, v))
@@ -914,8 +990,13 @@ def write_manifest(t, path, version=1, st=None):
         trailer.update((k, st[k]) for k in V2_STATED['trailer'])
     else:
         # A version 1 manifest cannot say what was not walked: a tree with
-        # exclusions is written in version 2 only (Writer.pair).
+        # exclusions is written in version 2 or later only (Writer.pair).
         assert version == 1 and not t.x, (version, sorted(t.x))
+    if version >= 3:
+        header['source'] = None
+    if version == 4:
+        trailer['writer_open'] = len(marked(t))
+        trailer['unguarded'] = st['unguarded']
     lines[0] = enc_obj(keys['header'], header)
     lines.append(enc_obj(keys['trailer'], trailer))
     for l in lines:
@@ -932,7 +1013,7 @@ def write_manifest(t, path, version=1, st=None):
 # kind of walk cycles over V2_WALKS, its numbers come from the writer's own
 # random stream (the trees' stream is left as it was).
 
-VERSION_PAIRS = [(1, 1), (1, 2), (2, 1), (2, 2)]
+VERSION_PAIRS = [(1, 1), (1, 2), (2, 1), (2, 2), (3, 3), (3, 4), (4, 3), (4, 4)]
 # (read_all, reference, trusted: 'some' (1 up to the regular files) or 0).
 # "every N marks" and "... newest N below the previous M": numbers filled in.
 V2_WALKS = ([('', 'walk_start', 'some'), ('', 'newest_ctime', 'some'), ('', 'walk_start', 0),
@@ -954,7 +1035,8 @@ def excluded_list(t):
 
 def v2_statements(t, rng, walk, ws_zero):
     read_all, reference, trusted = walk
-    regs = sum(e['type'] == 'reg' for e in t.e.values())
+    # Not a marked file: it was read (V4-R6: it is never trusted).
+    regs = sum(e['type'] == 'reg' and not e.get('writer_open') for e in t.e.values())
     read_all = read_all.replace('every N', 'every %d' % rng.choice([2, 10, 64])) \
         .replace('newest N below the previous M', 'newest %d below the previous %d'
                  % (t.created - 10 ** 9, t.created - 10 ** 9 + rng.randrange(1, 10 ** 9)))
@@ -967,7 +1049,8 @@ def v2_violations(t, st):
     """What makes these v2 statements invalid for this tree: the pin's kinds
     and values (V2-2..V2-6) and the spec's agreement rule (V2_AGREEMENT)."""
     v = []
-    if sorted(st) != sorted(V2_STATED['header'] + V2_STATED['trailer']):
+    if sorted(k for k in st if k != 'unguarded') != \
+            sorted(V2_STATED['header'] + V2_STATED['trailer']):
         v.append('keys %r' % sorted(st))
     if type(st.get('walk_start_ns')) is not int or st['walk_start_ns'] < 0:
         v.append('walk_start_ns')
@@ -1017,19 +1100,35 @@ class Writer:
         pair(): made for the side's tree when it is written."""
         return lambda t: v2_statements(t, self.vrng, walk, ws_zero)
 
+    def unguarded(self, t, st):
+        """V4-4 for one side, beside its statements: the tree's, or a number
+        from the writer's stream, of the files read and hashed, unmarked,
+        less those `trusted` says were not read."""
+        most = max(0, sum('sha256' in e and not e.get('writer_open') for e in t.e.values())
+                   - st['trusted'])
+        n = t.unguarded if t.unguarded is not None else min(most, self.vrng.choice([0, 0, 1, 3]))
+        if n > most:
+            die('generator bug: unguarded %d of the %d files it can count' % (n, most))
+        return dict(st, unguarded=n)
+
     def write_both_versions(self, t, path, version, st):
-        """path in `version`, path.alt in the other one, with the same v2
+        """path in `version`, path.v3 and path.v4 in those, and, for v1 and v2,
+        path.alt in the other one, with the same statements. A side with a
+        `writer_open` entry exists in version 4 only (V4-R2) -- and a tree
+        with exclusions has no version 1
         statements -- but a tree with exclusions has no version 1
         counterpart (version 1 cannot say what was not walked, and the same
         entries without `excluded` would claim a known absence, which V2-2
         forbids: "nothing is ever excluded silently"): it is written in
-        version 2 only, with no .alt, and compare.py runs the pair in the
-        combinations of versions whose files exist."""
+        version 2 or later only, with no .alt, and compare.py runs the pair
+        in the combinations of versions whose files exist."""
+        st = self.unguarded(t, st)
         write_manifest(t, path, version, st)
-        if not t.x:
+        if version <= 2 and not t.x and not marked(t):
             write_manifest(t, path + '.alt', 3 - version, st)
-        else:
-            assert version == 2, version
+        if not marked(t):
+            write_manifest(t, path + '.v3', 3, st)
+        write_manifest(t, path + '.v4', 4, st)
 
     def pair(self, b, a, label, versions=None, statements=(None, None), store=None):
         """One pair, in `versions` (before, after) or the next combination of
@@ -1043,10 +1142,13 @@ class Writer:
             if v:
                 die('generator bug (%s): %s' % (label, v[:5]))
         vb, va = versions or VERSION_PAIRS[self.k % len(VERSION_PAIRS)]
-        if versions is None:                    # a side with exclusions is version 2
-            vb, va = (2 if b.x else vb), (2 if a.x else va)
-        elif (b.x and vb != 2) or (a.x and va != 2):
+        if versions is None:        # a side with exclusions is not v1, one marked is v4
+            vb, va = (max(v, 2) if t.x else v for v, t in ((vb, b), (va, a)))
+            vb, va = (4 if marked(t) else v for v, t in ((vb, b), (va, a)))
+        elif (b.x and vb == 1) or (a.x and va == 1):
             die('generator bug (%s): exclusions in a version 1 manifest' % label)
+        elif (marked(b) and vb != 4) or (marked(a) and va != 4):
+            die('generator bug (%s): writer_open before version 4' % label)
         sb, sa = (self.statements(t) if st is None else st(t)
                   for st, t in zip(statements, (b, a)))
         stem = os.path.join(self.out, 'pair-%05d' % self.k)
@@ -1067,7 +1169,7 @@ class Writer:
                           statements[::-1], store)]
 
     def targeted(self, rng, label, build, cells=(), pairs=(), optional=(), scenarios=(),
-                 interp=(), version=(), versions=None, statements=(None, None)):
+                 interp=(), version=(), versions=None, statements=(None, None), v4=()):
         """One targeted pair: built ONCE -- no retries; build(rng) is written
         so that it cannot fail -- written both ways round, and checked to show
         what it was built for, as compare.py's coverage gate sees it: its
@@ -1076,7 +1178,8 @@ class Writer:
         Anything else stops the generator, naming the pair."""
         unknown = [s for s in scenarios if s not in compare.SCENARIOS] + \
             [s for s in interp if s not in compare.INTERP_SCENARIOS] + \
-            [s for s in version if s not in compare.VERSION_SCENARIOS]
+            [s for s in version if s not in compare.VERSION_SCENARIOS] + \
+            [s for s in v4 if s not in compare.V4_SCENARIOS]
         if unknown:
             die('%r names scenarios the gate does not have: %s' % (label, unknown))
         r = build(rng)
@@ -1089,7 +1192,8 @@ class Writer:
         want = ([('cell', c) for c in cells] + [('field pair', p) for p in pairs]
                 + [('optional', f) for f in optional] + [('scenario', s) for s in scenarios]
                 + [('interpreter', s) for s in interp]
-                + [('manifest version', s) for s in version])
+                + [('manifest version', s) for s in version]
+                + [('manifest v4', s) for s in v4])
         lacking = [x for x in want if not cov[x[0]][x[1]]]
         if lacking:
             die('the pair built for %r (%s) does not show %s' % (label, stems[0], lacking))
@@ -4374,6 +4478,364 @@ def git_events(w, rng):
             'a loose ref removed, unread before: no event']))
 
 
+def writer_open(w, rng):
+    """Manifest v4 (test/expect/manifest-v4.md): compare.py's V4_SCENARIOS, and
+    versions 3 and 4 among VERSION_SCENARIOS. Each pair is written both ways
+    round, so "before only" and "after only", `added` and `removed`, come
+    together. Nothing here depends on the cycle of versions: a marked side is
+    v4 wherever it is written."""
+    W = 'writer_open'
+
+    def base(rng):
+        """An unflagged tree of a size limit a hashed file can change within,
+        with no unguarded file (a case gives it one), and a hashed file of it,
+        at least a byte long; the file is not in the tree yet."""
+        t = Tree(rng, limit=size_limit(rng))
+        t.unguarded = 0
+        clear_flags(t.e[b'.'], t, rng)
+        for _ in range(rng.randrange(1, 4)):
+            e = subject(rng, t, rng.choice(['dir', 'fifo', 'lnk']))
+            t.e[e['path']] = clear_flags(e, t, rng)
+        return t, clear_flags(subject(rng, t, 'reg', extras=False), t, rng)
+
+    def changed(e, t, rng, what):
+        """A copy of e with what differs, and nothing else."""
+        e2 = copy.deepcopy(e)
+        if what == 'hash':
+            e2['sha256'] = unlike_hash(rng, e['sha256'])
+        elif what == 'size':
+            e2['size'] = e['size'] - 1 if e['size'] else 1
+        elif what == 'mode':
+            e2['mode'] = (e['mode'] & S_IFMT) | other(rng, PERMS, e['mode'] & 0o7777)
+        return e2
+
+    def unlike_hash(rng, h):
+        new = hexs(rng)
+        return new if new != h else hexs(rng)
+
+    # The side and the difference: V4-D1, V4-D2.
+    for side, sides in zip(compare.W_SIDES[1:], ((False, True), (True, True))):
+        for d, what in zip(compare.W_DIFFS, ('hash', 'size', 'mode', None)):
+            def build(rng):
+                t, e = base(rng)
+                e2 = changed(e, t, rng, what)
+                if sides[0]:
+                    e[W] = True
+                if sides[1]:
+                    e2[W] = True
+                return with_subject(t, e, e2)
+            scen = ['writer_open %s, %s' % (s, d) for s in
+                    (compare.W_SIDES[:2] if sides == (False, True) else compare.W_SIDES[2:])]
+            w.targeted(rng, 'writer_open %s, %s' % (side, d), build, v4=scen)
+
+    # Every field at once, ctime_ns among them, and ctime_ns alone: rule 5 is
+    # not reached, so it is in no `changed` (the `changed` paragraph).
+    def every_field(rng):
+        t, e = base(rng)
+        e2 = changed(changed(changed(e, t, rng, 'hash'), t, rng, 'size'), t, rng, 'mode')
+        e2['uid'], e2['gid'] = other(rng, IDS, e['uid']), other(rng, IDS, e['gid'])
+        e2['mtime_ns'] += 1
+        e2['ctime_ns'] += 1
+        e2['ino'] += 1
+        e2['nlink'] += 1
+        e2[W] = True
+        return with_subject(t, e, e2)
+    w.targeted(rng, 'writer_open, every field differs', every_field,
+               v4=['writer_open, every field differs, ctime_ns too'])
+
+    def only_ctime(rng):
+        t, e = base(rng)
+        e2 = copy.deepcopy(e)
+        e2['ctime_ns'] += 1
+        e2[W] = True
+        return with_subject(t, e, e2)
+    w.targeted(rng, 'writer_open, only ctime_ns differs', only_ctime,
+               v4=['writer_open, only ctime_ns differs'])
+
+    # A type change (V4-D1), its values without the hash (V4-D2 over V6): to
+    # every other type; a directory cannot race unless sealed (rule 10).
+    for t2 in TYPE_NAMES:
+        if t2 == 'reg':
+            continue
+        def build(rng):
+            t, e = base(rng)
+            e[W] = True
+            e2 = change_type(clear_flags(copy.deepcopy(e), t, rng), t2, t, rng)
+            return with_subject(t, e, e2)
+        w.targeted(rng, 'writer_open, a reg becomes a %s' % t2, build,
+                   v4=['writer_open %s, the type differs' % s for s in compare.W_SIDES[:2]])
+
+    def raced_swap(rng):
+        t, e = base(rng)
+        e[W] = True
+        e['raced'] = True
+        e2 = change_type(clear_flags(copy.deepcopy(e), t, rng), 'lnk', t, rng)
+        return with_subject(t, e, e2)
+    w.targeted(rng, 'writer_open, raced, a reg becomes a lnk', raced_swap,
+               v4=['writer_open, raced, the type differs'])
+
+    # `raced` beside it (V4-D1, V4-D4).
+    for r, (on_marked, on_other) in zip(compare.W_RACED, ((True, False), (False, True),
+                                                          (True, True))):
+        def build(rng):
+            t, e = base(rng)
+            e2 = changed(e, t, rng, 'hash')
+            e[W] = True
+            if on_marked:
+                e['raced'] = True
+            if on_other:
+                e2['raced'] = True
+            return with_subject(t, e, e2)
+        w.targeted(rng, 'writer_open, %s, the hash differs' % r, build,
+                   v4=['writer_open %s, %s, the hash differs' % (s, r)
+                       for s in compare.W_SIDES[:2]])
+
+    def both_one_raced(rng):
+        t, e = base(rng)
+        e2 = changed(e, t, rng, 'size')
+        e[W] = e2[W] = True
+        e2['raced'] = True
+        return with_subject(t, e, e2)
+    w.targeted(rng, 'writer_open on both sides, raced on one, the size differs', both_one_raced,
+               v4=['writer_open on both sides, raced on one side, the size differs'])
+
+    def both_both_raced(rng):
+        t, e = base(rng)
+        e2 = changed(e, t, rng, 'hash')
+        e[W] = e2[W] = e['raced'] = e2['raced'] = True
+        return with_subject(t, e, e2)
+    w.targeted(rng, 'writer_open and raced on both sides, the hash differs', both_both_raced,
+               v4=['writer_open on both sides, raced on both sides, the hash differs'])
+
+    # `stored` on the other side (not compared, and no longer `text`: "stored
+    # on every side it exists on").
+    for what, scen in ((None, 'writer_open, the other side stored'),
+                       ('hash', 'writer_open, the other side stored, the hash differs')):
+        def build(rng):
+            t, e = base(rng)
+            e2 = changed(e, t, rng, what)
+            e['stored'] = e['sha256']
+            e2[W] = True
+            return with_subject(t, e, e2)
+        w.targeted(rng, scen, build, v4=[scen])
+
+    # The other reasons on the other side (V4-D4: writer_open last): each
+    # flag V4-2 keeps off the marked entry itself, xattrs_unknown on it too,
+    # and iflags on one side only, the field's reason after the flags'.
+    for f in compare.W_OTHERS:
+        def build(rng):
+            t, e = base(rng)
+            e2 = copy.deepcopy(e)
+            e[W] = True
+            if f == 'iflags_unknown':
+                e['iflags'] = rng.choice(IFLAGS)
+                e2.pop('iflags', None)
+            elif f == 'xattrs_unknown':
+                for x in (e, e2):
+                    for k in ('xattrs', 'xattrs_sha256', 'caps'):
+                        x.pop(k, None)
+                e['xattrs_unknown'] = True
+            else:
+                e2 = in_context(f, e2, t, rng)
+            return with_subject(t, e, e2)
+        w.targeted(rng, 'writer_open beside %s' % f, build,
+                   v4=['writer_open beside the reason %s' % f])
+
+    # On one side only (V4-D3), and each earlier rule, which gives its one reason.
+    def one_side(rng):
+        t, e = base(rng)
+        a = t.copy()
+        e[W] = True
+        a.e[e['path']] = e
+        return t, a
+    w.targeted(rng, 'writer_open on one side only', one_side,
+               v4=['writer_open on one side only: added', 'writer_open on one side only: removed'])
+
+    def one_side_raced(rng):
+        t, a = one_side(rng)
+        marked(a)[0]['raced'] = True
+        return t, a
+    w.targeted(rng, 'writer_open and raced on one side only', one_side_raced,
+               v4=['writer_open and raced on one side only'])
+
+    def one_side_excluded(rng):
+        t, e = base(rng)
+        a = t.copy()
+        e[W] = True
+        a.e[e['path']] = e
+        exclude(t, e['path'])
+        return t, a
+    w.targeted(rng, 'writer_open on one side only, excluded on the other', one_side_excluded,
+               v4=['writer_open on one side only, the other side excluded it'])
+
+    def one_side_excluded_raced(rng):
+        t, a = one_side_excluded(rng)
+        marked(a)[0]['raced'] = True
+        return t, a
+    w.targeted(rng, 'writer_open and raced on one side only, excluded on the other',
+               one_side_excluded_raced,
+               v4=['writer_open and raced on one side only, the other side excluded it'])
+
+    def below(rng, how):
+        """d/f on one side, marked; d on both, as `how` on the other."""
+        t, _ = base(rng)
+        d = clear_flags(subject(rng, t, 'dir', extras=False), t, rng)
+        t.e[d['path']] = d
+        a = t.copy()
+        e = clear_flags(subject(rng, a, 'reg', extras=False, parent=d['path']), a, rng)
+        e[W] = True
+        a.e[e['path']] = e
+        if how == 'mount':
+            d['dev'] = other_dev(t, rng)
+            for k in ATTRS:
+                d.pop(k, None)
+        d[how] = True
+        return t, a
+    w.targeted(rng, 'writer_open below a sealed directory', lambda r: below(r, 'unreadable'),
+               v4=['writer_open on one side only, below a sealed directory on the other side'])
+    w.targeted(rng, 'writer_open below a mount', lambda r: below(r, 'mount'),
+               v4=['writer_open on one side only, below a sealed directory on the other side'])
+    w.targeted(rng, 'writer_open below an unstable directory', lambda r: below(r, 'unstable'),
+               v4=['writer_open on one side only, below an unstable directory on the other '
+                   'side'])
+
+    def below_unstable_raced(rng):
+        t, a = below(rng, 'unstable')
+        marked(a)[0]['raced'] = True
+        return t, a
+    w.targeted(rng, 'writer_open and raced below an unstable directory', below_unstable_raced,
+               v4=['writer_open and raced on one side only, below an unstable directory on the '
+                   'other side'])
+
+    def below_raced_file(rng):
+        """A regular file on one side, raced; a directory on the other
+        holding a marked file."""
+        t, f = base(rng)
+        a = t.copy()
+        f = clear_flags(f, t, rng)
+        f['raced'] = True
+        t.e[f['path']] = f
+        d = clear_flags(new_entry(rng, a, f['path'], 'dir', extras=False), a, rng)
+        a.e[d['path']] = d
+        e = clear_flags(subject(rng, a, 'reg', extras=False, parent=d['path']), a, rng)
+        e[W] = True
+        a.e[e['path']] = e
+        return t, a
+    w.targeted(rng, 'writer_open below a raced non-directory', below_raced_file,
+               v4=['writer_open on one side only, below a raced non-directory on the other '
+                   'side'])
+
+    def below_marked_file(rng):
+        """The same with the file marked and not raced, the child not marked:
+        the absence is known -- `raced` alone says "it may have become a
+        directory holding this path"."""
+        t, f = base(rng)
+        a = t.copy()
+        f = clear_flags(f, t, rng)
+        f[W] = True
+        t.e[f['path']] = f
+        d = clear_flags(new_entry(rng, a, f['path'], 'dir', extras=False), a, rng)
+        a.e[d['path']] = d
+        e = clear_flags(subject(rng, a, 'reg', extras=False, parent=d['path']), a, rng)
+        a.e[e['path']] = e
+        return t, a
+    w.targeted(rng, 'a path below a marked regular file', below_marked_file,
+               v4=['a path on one side only below a marked regular file, not raced'])
+
+    # A path an interpreter claims: `unknown` like a raced one, and a marked
+    # copy is no copy. No store: every side `missing` or `no_store`.
+    for path in (b'.git/HEAD', b'v/x-1.dist-info/RECORD', b'var/lib/dpkg/status'):
+        def claimed(rng, one, excluded=False):
+            t, _ = base(rng)
+            dirs, q = [], path
+            while b'/' in q:
+                q = q.rsplit(b'/', 1)[0]
+                dirs.append(q)
+            for q in reversed(dirs):
+                t.e.setdefault(q, clear_flags(new_entry(rng, t, q, 'dir', extras=False), t, rng))
+            e = clear_flags(new_entry(rng, t, path, 'reg', extras=False), t, rng)
+            e['size'] = min(e['size'], t.limit)
+            a = t.copy()
+            e2 = changed(e, t, rng, 'hash')
+            e2[W] = True
+            a.e[path] = e2
+            if not one:
+                e['stored'] = e['sha256']
+                t.e[path] = e
+            if excluded:
+                exclude(t, path)
+            return t, a
+        w.targeted(rng, 'writer_open on %r, both sides' % path, lambda r: claimed(r, False),
+                   v4=['writer_open on a path an interpreter claims, both sides'])
+        w.targeted(rng, 'writer_open on %r, one side' % path, lambda r: claimed(r, True),
+                   v4=['writer_open on a path an interpreter claims, one side only'])
+        w.targeted(rng, 'writer_open on %r, excluded on the other side' % path,
+                   lambda r: claimed(r, True, True),
+                   v4=['writer_open on a path an interpreter claims, the other side excluded it'])
+
+    # The trailer (V4-D5, V4-D6): counts on each side, different, every walk
+    # count 0 so that `provisional` is false; then unguarded with nothing
+    # marked, on the same entries, which no record shows.
+    def counts(rng):
+        t, e = base(rng)
+        for _ in range(4):
+            x = clear_flags(subject(rng, t, 'reg', extras=False), t, rng)
+            t.e[x['path']] = x
+        t.e[e['path']] = e
+        a = t.copy()
+        regs = sorted(p for p, x in t.e.items() if x['type'] == 'reg')
+        t.e[regs[0]][W] = True
+        for p in regs[:3]:
+            a.e[p][W] = True
+        t.unguarded, a.unguarded = 2, 1
+        return t, a
+    w.targeted(rng, 'trailer: writer_open 1 and 3, unguarded 2 and 1', counts,
+               statements=(w.statements_for(('check', 'none', 0), False),) * 2,
+               v4=['trailer: writer_open not 0 before', 'trailer: writer_open not 0 after',
+                   'trailer: the two writer_open counts differ, neither 0',
+                   'trailer: unguarded not 0 before', 'trailer: unguarded not 0 after',
+                   'trailer: the two unguarded counts differ, neither 0',
+                   'trailer: writer_open and unguarded not 0, every walk count 0 (V4-D6)'])
+
+    # Versions (V4-R4, V3-R5): the versions given, so that none depends on the cycle.
+    read_all = (w.statements_for(('check', 'none', 0), False),) * 2
+
+    def plain(rng):
+        t, e = base(rng)
+        t.e[e['path']] = e
+        return t, t.copy()
+
+    def guarded_not(rng):
+        t, a = plain(rng)
+        t.unguarded = 1
+        return t, a
+
+    def marked_after(rng):
+        t, e = base(rng)
+        e2 = changed(e, t, rng, 'hash')
+        e2[W] = True
+        return with_subject(t, e, e2)
+
+    w.targeted(rng, 'v3 on both sides', plain, versions=(3, 3), statements=read_all,
+               version=['before v3, after v3'])
+    w.targeted(rng, 'v4 on both sides', plain, versions=(4, 4), statements=read_all,
+               version=['before v4, after v4'])
+    w.targeted(rng, 'v3 and v4, the same entries', plain, versions=(3, 4), statements=read_all,
+               version=['before v3, after v4', 'before v4, after v3'],
+               v4=['versions: v3 against v4, every entry the same'])
+    w.targeted(rng, 'v4 with unguarded, the same entries', guarded_not, versions=(4, 4),
+               statements=read_all,
+               v4=['trailer: unguarded not 0, nothing marked, every entry the same'])
+    w.targeted(rng, 'v4 with unguarded, against v3', guarded_not, versions=(4, 3),
+               statements=read_all,
+               v4=['versions: v3 against v4, nothing marked, unguarded not 0'])
+    for v in (1, 2, 3):
+        w.targeted(rng, 'a marked entry in v4 against v%d' % v, marked_after, versions=(v, 4),
+                   statements=read_all, version=['before v%d, after v4' % v,
+                                                 'before v4, after v%d' % v],
+                   v4=['versions: a marked entry in v4 against v%d' % v])
+
+
 def targeted(w, rng):
     cells(w, rng)
     field_pairs(w, rng)
@@ -4393,6 +4855,7 @@ def targeted(w, rng):
     exclusions(w, rng)
     interpreters(w, rng)
     git_events(w, rng)
+    writer_open(w, rng)
 
 
 # ---------------------------------------------------------------------------
@@ -4402,7 +4865,8 @@ OPS = ['add', 'add', 'remove', 'content', 'size', 'mode', 'uid', 'gid', 'ino', '
        'ctime', 'mtime', 'type', 'flag', 'flag', 'unflag', 'iflags', 'caps', 'xattrs',
        'xattrs_sha256', 'xattrs_unknown', 'stored', 'limit', 'root_unstable', 'root_unreadable',
        'link', 'rdev', 'seal', 'unseal', 'remount', 'vanished', 'exclude', 'unexclude']
-RANDOM_FLAGS = ['raced', 'unstable', 'unverified', 'unreadable', 'mount', 'xattrs_unknown']
+RANDOM_FLAGS = ['raced', 'unstable', 'unverified', 'unreadable', 'mount', 'xattrs_unknown',
+                'writer_open']
 
 
 def mutate_random(t, rng, nops):
@@ -4525,6 +4989,12 @@ def randomized(w, rng, n):
                 ps = sorted(p for p in base.e if p != b'.')
                 if ps:
                     exclude(base, rng.choice(ps), rng.choice(EXCLUDED_REASONS))
+            fix(base, rng)
+        if rng.random() < 0.25:                 # marked files every variant starts from
+            for e in rng.sample(sorted((e for e in base.e.values() if e['type'] == 'reg'),
+                                       key=lambda e: e['path']),
+                                min(2, sum(e['type'] == 'reg' for e in base.e.values()))):
+                e['writer_open'] = True
             fix(base, rng)
         variants = [base]
         for _ in range(4):
