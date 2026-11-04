@@ -8,6 +8,11 @@
 #   start   SessionStart              the session's base checkpoint
 #   pre     PreToolUse   (writing)    a checkpoint before the call
 #   post    PostToolUse(Failure)      a checkpoint after it
+#   batch   PostToolBatch             the calls the batch ended, logged: a
+#                                     call in it with no post never ran
+#                                     (denied); no checkpoint
+#   prompt  UserPromptSubmit          a checkpoint: a call interrupted
+#                                     (no post, no batch) ended before it
 #   stop    Stop                      a checkpoint; the turn's receipt; one
 #                                     line for every turn since the user's
 #                                     message (decision 197), "nothing
@@ -62,7 +67,7 @@ in=$(cat)
 # other project (decision 156: hooks that stopped watching it would be silent).
 [ -n "$SCOPE" ] && [ -n "${CLAUDE_PROJECT_DIR:-}" ] || exit 0
 [ "$CLAUDE_PROJECT_DIR" = "$SCOPE" ] || [ "$(cd "$CLAUDE_PROJECT_DIR" 2>/dev/null && pwd -P)" = "$(cd "$SCOPE" 2>/dev/null && pwd -P)" ] || exit 0
-case $ev in start|pre|post|stop|end) ;; *) exit 0 ;; esac
+case $ev in start|pre|post|batch|prompt|stop|end) ;; *) exit 0 ;; esac
 
 D=$STATE/dogfood
 FAILING=$D/failing
@@ -106,7 +111,7 @@ command -v jq >/dev/null 2>&1 || { fail "jq not found"; quit; }
 # command's first line, a file, a tool's name -- already JSON-encoded; and
 # the whole command, for the receipt's detail (turn-267: a label cut at 200
 # characters hid the `git fetch` that wrote what it was blamed for).
-eval "$(printf '%s' "$in" | jq -r '((.tool_input.command // .tool_input.file_path // .tool_input.notebook_path // .tool_input.description // "") | tostring) as $c | @sh "sid=\(.session_id // "") tid=\(.tool_use_id // "") tool=\(.tool_name // "") agent=\(.agent_type // "") bgtask=\(.tool_response.backgroundTaskId // (if .tool_input.run_in_background == true then "?" else "" end)) summary=\($c | split("\n")[0] | .[0:200] | @json) full=\($c | .[0:65536]) transcript=\(.transcript_path // "")"' 2>/dev/null)" || { fail "the hook's input could not be read"; quit; }
+eval "$(printf '%s' "$in" | jq -r '((.tool_input.command // .tool_input.file_path // .tool_input.notebook_path // .tool_input.description // "") | tostring) as $c | @sh "sid=\(.session_id // "") tid=\(.tool_use_id // "") tool=\(.tool_name // "") agent=\(.agent_type // "") bgtask=\(.tool_response.backgroundTaskId // (if .tool_input.run_in_background == true then "?" else "" end)) summary=\($c | split("\n")[0] | .[0:200] | @json) full=\($c | .[0:65536]) transcript=\(.transcript_path // "") batch=\([.tool_calls[]?.tool_use_id // empty | tostring | gsub("[^A-Za-z0-9_-]"; "")] | map(select(. != "")) | join(" "))"' 2>/dev/null)" || { fail "the hook's input could not be read"; quit; }
 case ${sid:-} in ''|*[!A-Za-z0-9_-]*) fail "the hook's input names no session"; quit ;; esac   # a name, never a path
 
 mkdir -p "$D" 2>/dev/null && chmod 700 "$D" 2>/dev/null || { fail "cannot create $D"; quit; }
@@ -115,6 +120,14 @@ LOG=$D/$sid.jsonl
 # One line, one write, appended: concurrent hooks never interleave (each line
 # is far under PIPE_BUF). The checkpoint id orders events, not the log.
 log() { printf '%s\n' "$1" >> "$LOG" 2>/dev/null || fail "cannot write $LOG"; }
+
+# A batch ended: its calls' ids, logged, and nothing else -- no checkpoint
+# (a call in it with no post never ran; one that ran has its own).
+if [ "$ev" = batch ]; then
+    ids=; for i in $batch; do ids="$ids${ids:+,}\"$i\""; done
+    log "{\"event\":\"batch\",\"tool_use_ids\":[$ids],\"t0\":$t0,\"t1\":$(now_ns)}"
+    exit 0
+fi
 
 # The whole command, once per call, in a file of its own: the log's lines
 # stay short (one write each), and only the call's own pre hook writes it.

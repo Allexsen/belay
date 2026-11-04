@@ -14,7 +14,12 @@ Attribution (NOTES design m1.5-structure, section 4): the session's
 checkpoints, in id order, cut time into intervals; each interval's changes go
 to the calls open across it -- one call, several concurrent ones, or none
 ("between tool calls": background writers). A call opens at its pre
-checkpoint and closes at its post one, or, cancelled, at the next stop.
+checkpoint and closes at its post one. Claude Code sends no post for a call
+that never ran -- denied, or blocked by a hook -- but lists it in the batch
+it ends (PostToolBatch): such a call closes where it opened, having changed
+nothing. Nor for a call the user interrupted, and no batch either; the next
+prompt (UserPromptSubmit) or stop proves it gone: it closes there
+(2026-11-04, checked against Claude Code 2.1.318).
 """
 import json
 import os
@@ -47,10 +52,13 @@ def load(path):
 
 def calls_of(events, d=None, sid=None):
     """{tool_use_id: {tool, summary, full, agent, pre, post}} -- post is the
-    closing checkpoint: the call's own, or the next stop's for one
-    cancelled; `full` the whole command, from the hook's file for the call
-    in `d`, when there is one."""
-    calls, stops = {}, sorted(e["cp"] for e in events if e.get("event") == "stop" and e.get("cp"))
+    closing checkpoint: the call's own; its pre for one that never ran (a
+    batch lists it, no post came); else, interrupted, the next prompt's or
+    stop's. `full` the whole command, from the hook's file for the call in
+    `d`, when there is one."""
+    calls = {}
+    stops = sorted(e["cp"] for e in events if e.get("event") in ("stop", "prompt") and e.get("cp"))
+    batched = {t for e in events if e.get("event") == "batch" for t in e.get("tool_use_ids") or []}
     for e in events:
         tid = e.get("tool_use_id")
         if not tid or e.get("cp") is None:
@@ -85,10 +93,13 @@ def calls_of(events, d=None, sid=None):
                     c["full"] = f.read()
             except OSError:
                 pass
-    for c in calls.values():
+    for tid, c in calls.items():
         if c["pre"] is not None and c["post"] is None:
-            later = [s for s in stops if s > c["pre"]]
-            c["post"] = later[0] if later else None
+            if re.sub(r"[^A-Za-z0-9_-]", "", tid) in batched:     # never ran: changed nothing
+                c["post"], c["not_run"] = c["pre"], True
+            else:
+                later = [s for s in stops if s > c["pre"]]
+                c["post"] = later[0] if later else None
             c["cancelled"] = True
     return calls
 
