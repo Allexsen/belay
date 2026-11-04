@@ -450,18 +450,21 @@ int cap_read_file(int pfd, const char *name, const struct stat *st, const char *
     }
 
     /*
-     *  A copy is kept only if no writer had the file open when the read
-     *  began, nor when it ended (fsops writer_present). The stability check
-     *  cannot see a write(2) already in flight -- it stamps the file before
-     *  copying data -- so the bytes read may be a mix no state of the file
-     *  ever held, and a restore from that copy would write a file that never
-     *  existed. A writer in flight holds the file open, so the probe sees it.
-     *  The hash is still recorded: at worst a wrong line in a diff, never
-     *  corrupted data. Where the platform cannot tell (-1: macOS, a
-     *  filesystem without leases, a file not ours) the copy is kept
-     *  unguarded, as the spec says.
+     *  Every file hashed is probed for a writer when the read begins and when
+     *  it ends (fsops writer_present). The stability check cannot see a
+     *  write(2) already in flight -- it stamps the file before copying data
+     *  -- nor stores through a mapping already dirty, so the bytes read may
+     *  be a mix no state of the file ever held. A writer seen at either
+     *  point marks the entry `writer_open`: the hash is kept, a diff never
+     *  compares it, and no copy is kept, as a restore from one would write a
+     *  file that never existed. Where the probe has no answer (-1: macOS, a
+     *  filesystem without leases, a file not ours; on overlayfs a mapping
+     *  whose descriptor was closed is not seen) the entry is not marked and
+     *  the file is counted `unguarded`, and its copy is kept, as the spec
+     *  says (test/expect/manifest-v4.md).
      */
-    if (want && wc->ops->writer_present(wc->ops->ctx, fd) == 1) want = false;
+    const int writer_start = wc->ops->writer_present(wc->ops->ctx, fd);
+    if (writer_start == 1) want = false;
 
     /* A store that fails -- here, mid-copy or at commit -- keeps no copy;
      * the entry is recorded as if no copy had been wanted (R11). */
@@ -481,7 +484,8 @@ int cap_read_file(int pfd, const char *name, const struct stat *st, const char *
         wc->store_failed++;
         want = false;
     }
-    if (h == 0 && want && wc->ops->writer_present(wc->ops->ctx, fd) == 1) {
+    const int writer_end = h == 0 ? wc->ops->writer_present(wc->ops->ctx, fd) : 0;
+    if (writer_end == 1 && want) {
         belay_store_abort(&tx);                 /* a writer opened during the read */
         want = false;
     }
@@ -509,6 +513,8 @@ int cap_read_file(int pfd, const char *name, const struct stat *st, const char *
     }
 
     e->has_hash = true;
+    if (writer_start == 1 || writer_end == 1) e->writer_open = true;
+    else if (writer_start == -1 || writer_end == -1 || wc->scope_overlay) wc->unguarded++;
     /* Unclaimed binary content is not kept: the text interpreter could not
      * use it. Claimed content is kept whatever it is. */
     if (want && !(claim.keep == BELAY_KEEP_DEFAULT && binary)) {

@@ -1220,13 +1220,14 @@ TEST(absence_below_a_raced_non_directory_is_unknown) {
 
 /* The schema's promise, checked exhaustively: no combination of flags on
  * either side classifies as unchanged, for any entry type, even when every
- * compared field is equal. The six flags are listed here by hand, from the
- * spec (diff-v1, rules 1, 3 and 4), not read from DIFF_FIELDS: a flag the
+ * compared field is equal. The seven flags are listed here by hand, from the
+ * spec (diff-v1, rules 1, 3 and 4; manifest-v4), not read from DIFF_FIELDS: a flag the
  * table demoted would otherwise drop out of this test with it (audit 2026-10,
  * class 1). */
 static void set_flag(struct belay_entry *e, enum entry_field f) {
     switch (f) {
     case F_RACED: e->raced = true; break;
+    case F_WRITER_OPEN: e->writer_open = true; break;
     case F_UNSTABLE: e->unstable = true; break;
     case F_UNVERIFIED: e->unverified = true; break;
     case F_UNREADABLE: e->unreadable = true; break;
@@ -1241,8 +1242,56 @@ static void set_flag(struct belay_entry *e, enum entry_field f) {
     }
 }
 
+/* manifest-v4 V4-D1..D3: a marked entry is unknown on either side, whatever
+ * differs; its hash is never compared; on one side only, never added. */
+TEST(a_marked_entry_is_unknown_and_its_hash_never_compared) {
+    const struct diff_ctx ctx = { 0, 0, false };
+    static struct belay_entry b, a;
+    struct verdict v;
+    memset(&b, 0, sizeof b);
+    b.type = a.type = BELAY_T_REG;
+    b.mode = 0100644;
+    b.has_hash = true;
+    memset(b.sha256_hex, 'a', 64);
+    a = b;
+    memset(a.sha256_hex, 'b', 64);
+    for (int side = 0; side < 2; side++) {
+        b.writer_open = side == 0;
+        a.writer_open = side == 1;
+        REQUIRE(classify_both(&ctx, &b, &a, &v) == 0);
+        ASSERT_EQ_INT(D_UNKNOWN, (int)v.outcome);
+        ASSERT_TRUE(v.reasons & DRBIT(DR_WRITER_OPEN));
+        ASSERT_TRUE(!(v.changed & FBIT(F_SHA256)));
+    }
+    a.size = 7;                                     /* a size that proves a change: still unknown */
+    REQUIRE(classify_both(&ctx, &b, &a, &v) == 0);
+    ASSERT_EQ_INT(D_UNKNOWN, (int)v.outcome);
+    ASSERT_TRUE(v.changed & FBIT(F_SIZE));
+    a.size = 0;
+    a.mode = 0100600;                               /* a mode change likewise */
+    REQUIRE(classify_both(&ctx, &b, &a, &v) == 0);
+    ASSERT_EQ_INT(D_UNKNOWN, (int)v.outcome);
+    a.mode = b.mode;
+    memcpy(a.sha256_hex, b.sha256_hex, 64);         /* nothing differs: not unchanged either */
+    REQUIRE(classify_both(&ctx, &b, &a, &v) == 0);
+    ASSERT_EQ_INT(D_UNKNOWN, (int)v.outcome);
+    a.type = BELAY_T_LNK;                           /* nor a type change */
+    a.mode = 0120777;
+    a.has_hash = false;
+    a.writer_open = false;
+    b.writer_open = true;
+    REQUIRE(classify_both(&ctx, &b, &a, &v) == 0);
+    ASSERT_EQ_INT(D_UNKNOWN, (int)v.outcome);
+    ASSERT_EQ_INT((int)DRBIT(DR_WRITER_OPEN), (int)v.reasons);
+    REQUIRE(classify_one(&b, true, ANC_NONE, &v) == 0);     /* on one side: never added */
+    ASSERT_EQ_INT(D_UNKNOWN, (int)v.outcome);
+    ASSERT_EQ_INT((int)DRBIT(DR_WRITER_OPEN), (int)v.reasons);
+    REQUIRE(classify_one(&b, false, ANC_NONE, &v) == 0);    /* nor removed */
+    ASSERT_EQ_INT(D_UNKNOWN, (int)v.outcome);
+}
+
 TEST(no_flag_combination_on_either_side_is_unchanged) {
-    static const enum entry_field flags[] = { F_RACED, F_UNSTABLE, F_UNVERIFIED, F_UNREADABLE,
+    static const enum entry_field flags[] = { F_RACED, F_WRITER_OPEN, F_UNSTABLE, F_UNVERIFIED, F_UNREADABLE,
                                               F_MOUNT, F_XATTRS_UNKNOWN };
     const int nf = (int)(sizeof flags / sizeof flags[0]);
     const struct diff_ctx ctx = { 0, 0, false };
@@ -1487,6 +1536,7 @@ int main(void) {
     RUN(absence_below_a_file_is_known);
     RUN(absence_below_a_raced_non_directory_is_unknown);
     RUN(no_flag_combination_on_either_side_is_unchanged);
+    RUN(a_marked_entry_is_unknown_and_its_hash_never_compared);
     RUN(values_carry_each_changed_field_on_each_side);
     RUN(values_keep_the_manifests_alternate_spellings);
     RUN(a_type_change_carries_each_sides_content_fields);

@@ -66,7 +66,7 @@ int entry_put_field(const struct belay_entry *e, enum entry_field f, char *buf, 
     case F_SHA256: return ap(buf, cap, w, "\"%s\":\"%s\"", k, e->sha256_hex);
     case F_STORED: return ap(buf, cap, w, "\"%s\":\"%s\"", k, e->stored_hex);
     case F_XATTRS_UNKNOWN: case F_UNVERIFIED: case F_UNSTABLE: case F_TARGET_OUTSIDE:
-    case F_MOUNT: case F_UNREADABLE: case F_RACED:
+    case F_MOUNT: case F_UNREADABLE: case F_RACED: case F_WRITER_OPEN:
         return ap(buf, cap, w, "\"%s\":true", k);                /* the flags */
     case F_COUNT:
         break;

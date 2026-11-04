@@ -28,6 +28,7 @@
 #include "diff/classify.h"
 
 #define DIFF_PIN   "test/expect/diff-fields.md"
+#define V4_PIN     "test/expect/manifest-v4.md"
 #define FORMAT_PIN "test/expect/manifest-v1.md"
 #define KINDS_PIN  "test/expect/finding-kinds.md"
 #define EVENTS_PIN "test/expect/diff-events.md"
@@ -157,10 +158,44 @@ struct pin_row { int set; enum change_class cls; enum unknown_scope scope; unsig
                  enum mount_roots mr; enum absent_means am; };
 static struct pin_row PIN[F_COUNT];
 
+/* writer_open's row is in the v4 pin (V4-D1), in diff-fields.md's columns,
+ * escaped inside the rule's cell: diff-fields.md states the fields before v4. */
+static int load_v4_row(void) {
+    FILE *f = fopen(V4_PIN, "r");
+    if (f == NULL) return -1;
+    static char line[4096];
+    int found = -1;
+    while (fgets(line, sizeof line, f) != NULL) {
+        const char *row = strncmp(line, "| V4-D1 |", 9) == 0 ? strstr(line, "`writer_open` \\| ") : NULL;
+        if (row == NULL) continue;
+        struct pin_row *r = &PIN[F_WRITER_OPEN];
+        r->set++;
+        char cell[4][64];
+        row = strstr(row, "\\| ") + 3;
+        for (int c = 0; c < 4; c++) {
+            const char *end = strstr(row, " \\| ");
+            if (end == NULL || (size_t)(end - row) >= sizeof cell[c]) { fclose(f); return -1; }
+            memcpy(cell[c], row, (size_t)(end - row));
+            cell[c][end - row] = '\0';
+            row = end + 4;
+        }
+        for (size_t w = 0; w < sizeof CLASS_WORDS / sizeof CLASS_WORDS[0]; w++)
+            if (strcmp(CLASS_WORDS[w].word, cell[0]) == 0) { r->cls = CLASS_WORDS[w].cls; r->scope = CLASS_WORDS[w].scope; }
+        r->types = types_of(cell[1]);
+        r->mr = strcmp(cell[2], "compared") == 0 ? MR_COMPARED : MR_UNSET;
+        for (size_t w = 0; w < sizeof ABSENT_WORDS / sizeof ABSENT_WORDS[0]; w++)
+            if (strcmp(ABSENT_WORDS[w].word, cell[3]) == 0) r->am = ABSENT_WORDS[w].am;
+        found = 0;
+    }
+    fclose(f);
+    return found;
+}
+
 static int load_diff_pin(void) {
     static struct table t;
     if (read_table(DIFF_PIN, "field", &t) < 0) return -1;
     memset(PIN, 0, sizeof PIN);
+    if (load_v4_row() == -1) return -1;
     for (int i = 0; i < t.n; i++) {
         if (t.cols[i] < 5) return -1;
         const int f = field_named(t.cell[i][0]);
@@ -238,7 +273,7 @@ static bool vary(struct belay_entry *a, int f) {
     case F_LINK_TARGET: if (!a->has_link_target) return false; a->link_target[0] = 'u'; return true;
     case F_PATH: case F_TYPE: case F_XATTRS_SHA256: case F_XATTRS_UNKNOWN: case F_UNVERIFIED:
     case F_UNSTABLE: case F_TARGET_OUTSIDE: case F_STORED: case F_MOUNT: case F_UNREADABLE:
-    case F_RACED: case F_COUNT:
+    case F_RACED: case F_WRITER_OPEN: case F_COUNT:
         return false;
     }
     return false;
@@ -394,7 +429,7 @@ TEST(frozen_format_keys_types_and_rules_match_the_schema) {
     check_line_keys(&t, "header", hn, ha, hk, H_COUNT);
     const char *en[F_COUNT], *ea[F_COUNT], *ek[F_COUNT];
     for (int i = 0; i < F_COUNT; i++) { en[i] = ENTRY_FIELDS[i].name; ea[i] = ENTRY_FIELDS[i].alt; ek[i] = ENTRY_FIELDS[i].kind; }
-    check_line_keys(&t, "entry", en, ea, ek, F_COUNT);
+    check_line_keys(&t, "entry", en, ea, ek, F_V1_COUNT);
     for (int i = 0, pos = 0; i < t.n; i++) {
         if (strcmp(t.cell[i][0], "entry") != 0) continue;
         const bool req = strncmp(t.cell[i][4], "required", 8) == 0;
@@ -443,7 +478,7 @@ TEST(frozen_format_keys_types_and_rules_match_the_schema) {
         if (want != ENTRY_RULES[k - 1].types)
             BELAY_FAIL("rule %d applies to %#x in the pin, %#x in the code", k, want, ENTRY_RULES[k - 1].types);
     }
-    ASSERT_EQ_INT((int)ENTRY_RULE_COUNT, entry_rules);
+    ASSERT_EQ_INT((int)ENTRY_RULE_COUNT_V1, entry_rules);
     ASSERT_EQ_INT((int)ENTRY_HEADER_RULE_COUNT, header_rules);
 }
 

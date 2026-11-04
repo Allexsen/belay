@@ -28,8 +28,10 @@ enum entry_field {
     F_IFLAGS, F_CAPS, F_XATTRS, F_XATTRS_SHA256, F_XATTRS_UNKNOWN,
     F_SHA256, F_UNVERIFIED, F_UNSTABLE, F_RDEV, F_LINK_TARGET, F_TARGET_OUTSIDE,
     F_STORED, F_MOUNT, F_UNREADABLE, F_RACED,
+    F_WRITER_OPEN,      /* version 4: past F_V1_COUNT, in no earlier version's key set */
     F_COUNT
 };
+#define F_V1_COUNT F_WRITER_OPEN    /* the fields of versions 1 to 3 */
 #define FBIT(f) (1u << (f))
 
 /* Entry types: the manifest's spelling and the S_IFMT bits `mode` carries
@@ -77,6 +79,7 @@ struct entry_rule {
 };
 extern const struct entry_rule ENTRY_RULES[];
 extern const size_t ENTRY_RULE_COUNT;
+extern const size_t ENTRY_RULE_COUNT_V1;    /* the rules of versions 1 to 3: the first ones */
 
 /* The header and trailer lines: their fields in canonical order. The
  * writer prints these names, the reader decodes by them, and the spec's
@@ -105,6 +108,9 @@ extern const struct line_field_def HEADER3_FIELDS[H3_COUNT];
 enum source_field { SRC_DOCKER, SRC_IMAGE, SRC_COUNT };
 extern const struct line_field_def SOURCE_FIELDS[SRC_COUNT];
 extern const struct line_field_def TRAILER2_FIELDS[TR2_COUNT];
+/* Version 4's additions (test/expect/manifest-v4.md), after v2's keys. */
+enum trailer4_field { TR4_WRITER_OPEN, TR4_UNGUARDED, TR4_COUNT };
+extern const struct line_field_def TRAILER4_FIELDS[TR4_COUNT];
 /* The keys of one `excluded` element, in order. */
 enum excluded_field { EX_PATH, EX_REASON, EX_DEV, EX_INO, EX_COUNT };
 extern const struct line_field_def EXCLUDED_FIELDS[EX_COUNT];

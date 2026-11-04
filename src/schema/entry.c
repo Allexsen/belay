@@ -117,6 +117,9 @@ const struct entry_field_def ENTRY_FIELDS[F_COUNT] = {
         "directory, the entire subtree below it is ABSENT.** `diff` MUST report such a subtree "
         "as *contents unknown* and never as *unchanged*. Without this field an unreadable "
         "directory is byte-identical to an empty one." },
+    [F_WRITER_OPEN] = { "writer_open", NULL, "bool", false,
+        "Version 4. A writer had the file open, or mapped shared-writable, at the start or end of "
+        "its read: `sha256` may be of bytes the file never held. Never compared by a diff." },
     [F_RACED] = { "raced", NULL, "bool", false,
         "`true`. The entry changed after it was recorded, before the walk ended: re-stat'ed "
         "at the end of the walk, its inode, device, mode, size, mtime or ctime differed, or it "
@@ -156,6 +159,14 @@ const struct line_field_def TRAILER_FIELDS[TR_COUNT] = {
     [TR_RACED] = { "raced", NULL, "int",
         "Entries carrying `raced`. Non-zero means the tree was changing during the walk, so the "
         "manifest is not a single instant." },
+};
+
+const struct line_field_def TRAILER4_FIELDS[TR4_COUNT] = {
+    [TR4_WRITER_OPEN] = { "writer_open", NULL, "int", "Entries carrying `writer_open`." },
+    [TR4_UNGUARDED] = { "unguarded", NULL, "int",
+        "Regular files read and hashed in this walk with no answer from the writer probe: it could "
+        "not tell, or the scope is on overlayfs, where a shared mapping whose descriptor was "
+        "closed is not seen. An entry carrying `writer_open` is not counted, nor a file not read." },
 };
 
 const struct line_field_def HEADER2_FIELDS[H2_COUNT] = {
@@ -287,8 +298,16 @@ const struct entry_rule ENTRY_RULES[] = {
       "A `mount` carries no `sha256`." },
     { R_EXCLUDES, T_ALL, FBIT(F_MOUNT), EXTRAS, NULL, "extended metadata on a mount point", NULL,
       "A `mount` carries no extended metadata (`iflags`, `caps`, `xattrs`, `xattrs_sha256`, `xattrs_unknown`)." },
+    /* Version 4 (manifest-v4.md, V4-2): past ENTRY_RULE_COUNT_V1, so not in the frozen v1 spec. */
+    { R_FORBID, T_ALL & ~T_REG, FBIT(F_WRITER_OPEN), 0, NULL, "writer_open on a non-regular file", NULL,
+      "`writer_open` appears only on `reg`." },
+    { R_IMPLIES, T_REG, FBIT(F_WRITER_OPEN), FBIT(F_SHA256), NULL, "writer_open without sha256", NULL,
+      "`writer_open` requires `sha256`." },
+    { R_EXCLUDES, T_REG, FBIT(F_WRITER_OPEN), FBIT(F_STORED), NULL, "writer_open with stored", NULL,
+      "`writer_open` excludes `stored`." },
 };
 const size_t ENTRY_RULE_COUNT = sizeof ENTRY_RULES / sizeof ENTRY_RULES[0];
+const size_t ENTRY_RULE_COUNT_V1 = sizeof ENTRY_RULES / sizeof ENTRY_RULES[0] - 3;
 
 uint32_t entry_present(const struct belay_entry *e) {
     uint32_t p = 0;
@@ -307,6 +326,7 @@ uint32_t entry_present(const struct belay_entry *e) {
     if (e->is_mount) p |= FBIT(F_MOUNT);
     if (e->unreadable) p |= FBIT(F_UNREADABLE);
     if (e->raced) p |= FBIT(F_RACED);
+    if (e->writer_open) p |= FBIT(F_WRITER_OPEN);
     return p;
 }
 
@@ -414,7 +434,7 @@ enum {
     B_IFLAGS = 1u << 0, B_CAPS = 1u << 1, B_XATTRS = 1u << 2, B_XINLINE = 1u << 3,
     B_XUNKNOWN = 1u << 4, B_HASH = 1u << 5, B_UNVERIFIED = 1u << 6, B_LINK = 1u << 7,
     B_OUTSIDE = 1u << 8, B_STORED = 1u << 9, B_MOUNT = 1u << 10, B_RDEV = 1u << 11,
-    B_UNSTABLE = 1u << 12, B_UNREADABLE = 1u << 13, B_RACED = 1u << 14,
+    B_UNSTABLE = 1u << 12, B_UNREADABLE = 1u << 13, B_RACED = 1u << 14, B_WRITER_OPEN = 1u << 15,
 };
 
 struct w { unsigned char *p; size_t n, cap; int ok; };
@@ -440,7 +460,7 @@ size_t entry_pack(const struct belay_entry *e, unsigned char *buf, size_t cap) {
                 (e->target_outside_scope ? B_OUTSIDE : 0) | (e->has_stored ? B_STORED : 0) |
                 (e->is_mount ? B_MOUNT : 0) | (e->has_rdev ? B_RDEV : 0) |
                 (e->unstable ? B_UNSTABLE : 0) | (e->unreadable ? B_UNREADABLE : 0) |
-                (e->raced ? B_RACED : 0),
+                (e->raced ? B_RACED : 0) | (e->writer_open ? B_WRITER_OPEN : 0),
     };
     struct w w = { buf, 0, cap, 1 };
     put(&w, &h, sizeof h);
@@ -488,6 +508,7 @@ int entry_unpack(const unsigned char *buf, size_t len, const unsigned char *path
     e->is_mount = h.bits & B_MOUNT;      e->has_rdev = h.bits & B_RDEV;
     e->unstable = h.bits & B_UNSTABLE;   e->unreadable = h.bits & B_UNREADABLE;
     e->raced = h.bits & B_RACED;
+    e->writer_open = h.bits & B_WRITER_OPEN;
     get(&r, e->link_target, h.link_len);
     e->link_target[h.link_len] = '\0';
     e->link_target_len = h.link_len;

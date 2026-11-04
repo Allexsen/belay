@@ -453,6 +453,23 @@ TEST(ignored_text_edits_are_named_and_the_rest_ignored_folds) {
     g_class = NULL;
 }
 
+/* Manifest v4: what the writer probe could not ask, on one line, only when
+ * there is something to say. */
+TEST(files_hashed_unguarded_are_said_on_one_line) {
+    static const char tail[] = ",\"before_writer_open\":0,\"after_writer_open\":0,\"before_unguarded\":3,\"after_unguarded\":4}\n";
+    static char diff[2048], end[1024];
+    snprintf(end, sizeof end, "%s", TRAIL("0", "0", "0", "0", "0", "0", "0"));
+    char *close_brace = strrchr(end, '}');
+    REQUIRE(close_brace != NULL);
+    snprintf(close_brace, sizeof end - (size_t)(close_brace - end), "%s", tail);
+    snprintf(diff, sizeof diff, "%s%s", HEAD, end);
+    ASSERT_EQ_INT(0, render(diff, false));
+    ASSERT_TRUE(strstr(g_text, "  hashed with no check for a concurrent writer: 3 before, 4 after\n") != NULL);
+    snprintf(diff, sizeof diff, HEAD "%s", TRAIL("0", "0", "0", "0", "0", "0", "0"));
+    ASSERT_EQ_INT(0, render(diff, false));
+    ASSERT_TRUE(strstr(g_text, "concurrent writer") == NULL);
+}
+
 int main(void) {
     RUN(a_receipt_puts_events_then_privilege_then_changes);
     RUN(long_sections_fold_but_privilege_never_does);
@@ -470,6 +487,7 @@ int main(void) {
     RUN(tracked_first_untracked_cut_ignored_folded_by_directory);
     RUN(git_bookkeeping_folds_and_counts_moves_in_place);
     RUN(ignored_text_edits_are_named_and_the_rest_ignored_folds);
+    RUN(files_hashed_unguarded_are_said_on_one_line);
     free(g_text);
     return belay_test_report();
 }

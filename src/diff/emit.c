@@ -292,9 +292,15 @@ int emit_trailer(struct emitter *em, const struct diff_inputs *in) {
         if (ap(&b, ",\"%s\":%zu", DIFF_TRAILER_FIELDS[counts[i].f].name, counts[i].v) == -1) return -1;
         em->provisional |= counts[i].v != 0;
     }
-    if (ap(&b, ",\"%s\":%s,\"%s\":\"%s\",\"%s\":\"%s\"}", DIFF_TRAILER_FIELDS[DT_PROVISIONAL].name,
+    if (ap(&b, ",\"%s\":%s,\"%s\":\"%s\",\"%s\":\"%s\"", DIFF_TRAILER_FIELDS[DT_PROVISIONAL].name,
            em->provisional ? "true" : "false", DIFF_TRAILER_FIELDS[DT_BEFORE_SHA256].name,
            in->before_sha256, DIFF_TRAILER_FIELDS[DT_AFTER_SHA256].name, in->after_sha256) == -1)
+        return -1;
+    /* Manifest v4 (V4-D5): after every key the trailer had; not in provisional (V4-D6). */
+    if (ap(&b, ",\"%s\":%zu,\"%s\":%zu,\"%s\":%zu,\"%s\":%zu}", DIFF_TRAILER_FIELDS[DT_BEFORE_WRITER_OPEN].name,
+           in->before->writer_open, DIFF_TRAILER_FIELDS[DT_AFTER_WRITER_OPEN].name, in->after->writer_open,
+           DIFF_TRAILER_FIELDS[DT_BEFORE_UNGUARDED].name, in->before->unguarded,
+           DIFF_TRAILER_FIELDS[DT_AFTER_UNGUARDED].name, in->after->unguarded) == -1)
         return -1;
     return put_line(em, &b);
 }

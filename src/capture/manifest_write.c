@@ -198,11 +198,11 @@ int capture_write_root(const struct fsops *ops, const char *out_path, const char
         }
         memcpy(wc->abs, real, wc->scope_len);
         if (store_open(ops, opts->store_dir, &wc->store) == -1) goto cleanup;
-        /* Copies are gated by the writer probe (capture.c), which needs
-         * the platform prepared for it until the capture is over. */
-        ops->probe_begin(ops->ctx);
-        probing = true;
     }
+    /* Every file hashed is probed for a writer (capture.c), which needs the
+     * platform prepared for it until the capture is over. */
+    ops->probe_begin(ops->ctx);
+    probing = true;
 
     /* The scope root itself is an entry, path ".". Without it a chmod or
      * chown on the root is invisible. Like every directory it is emitted
@@ -339,6 +339,10 @@ int capture_write_root(const struct fsops *ops, const char *out_path, const char
                      wc->trusted, TRAILER2_FIELDS[TR2_REFERENCE].name, reference,
                      TRAILER2_FIELDS[TR2_READ_ALL].name, wc->line);
     }
+    /* Version 4: what the writer probe found, and what it could not ask. */
+    if (tw >= 0)
+        tw = fprintf(out, ",\"%s\":%zu,\"%s\":%zu", TRAILER4_FIELDS[TR4_WRITER_OPEN].name, tally.writer_open,
+                     TRAILER4_FIELDS[TR4_UNGUARDED].name, wc->unguarded);
     if (tw < 0 || fputs("}\n", out) == EOF) {
         belay_err_set(BELAY_ERR_IO, errno, "manifest: trailer write failed");
         goto cleanup;
@@ -373,6 +377,7 @@ int capture_write_root(const struct fsops *ops, const char *out_path, const char
         stats->prefilter = wc->prev != NULL;
         stats->prefilter_skipped = prev_why;
         stats->trusted = wc->trusted;
+        stats->unguarded = wc->unguarded;
         stats->racy = wc->racy;
         stats->newest_ctime_ns = wc->newest_ctime_ns;
         stats->previous_newest_ns = wc->prev != NULL ? pinfo.newest_validated_ns : INT64_MIN;

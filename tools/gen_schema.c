@@ -70,7 +70,7 @@ static void wrap(const char *first, const char *text, int indent) {
  * (FORBID, PRESENT_IFF); combinations are the numbered rules' business. */
 static unsigned allowed_on(int f) {
     unsigned on = T_ALL;
-    for (size_t i = 0; i < ENTRY_RULE_COUNT; i++) {
+    for (size_t i = 0; i < ENTRY_RULE_COUNT_V1; i++) {
         const struct entry_rule *r = &ENTRY_RULES[i];
         if (!(r->a & FBIT(f))) continue;
         if (r->kind == R_FORBID) on &= ~r->types;
@@ -81,7 +81,7 @@ static unsigned allowed_on(int f) {
 
 static unsigned required_on(int f) {
     if (ENTRY_FIELDS[f].required) return T_ALL;
-    for (size_t i = 0; i < ENTRY_RULE_COUNT; i++) {
+    for (size_t i = 0; i < ENTRY_RULE_COUNT_V1; i++) {
         const struct entry_rule *r = &ENTRY_RULES[i];
         if (r->kind == R_PRESENT_IFF && r->a == FBIT(f)) return r->types;
     }
@@ -108,7 +108,7 @@ static void carried_by(char *out, size_t cap, int f) {
 
 static void entries_block(void) {
     printf("| field | kind | carried by | meaning |\n|---|---|---|---|\n");
-    for (int f = 0; f < F_COUNT; f++) {
+    for (int f = 0; f < F_V1_COUNT; f++) {          /* manifest-v1.md is frozen; v4's is in its pin */
         const struct entry_field_def *d = &ENTRY_FIELDS[f];
         char by[160];
         if (strchr(d->description, '|') != NULL || strchr(d->description, '\n') != NULL)
@@ -147,7 +147,7 @@ static void schema_block(void) {
     char buf[1024];
     size_t n = 0;
 
-    for (int f = 0; f < F_COUNT; f++) {
+    for (int f = 0; f < F_V1_COUNT; f++) {
         const struct entry_field_def *d = &ENTRY_FIELDS[f];
         n += (size_t)snprintf(buf + n, sizeof buf - n, "%s`%s`%s%s%s", f ? ", " : "", d->name,
                               d->alt ? "|`" : "", d->alt ? d->alt : "", d->alt ? "`" : "");
@@ -173,7 +173,7 @@ static void schema_block(void) {
 
     printf("- **Types, fields and flags agree** -- exactly the combinations the writer produces.\n"
            "  A reader applies these rules in this order and reports the first one violated:\n\n");
-    for (size_t i = 0; i < ENTRY_RULE_COUNT; i++) {
+    for (size_t i = 0; i < ENTRY_RULE_COUNT_V1; i++) {
         char lead[32];
         snprintf(lead, sizeof lead, "  %zu. ", i + 1);
         wrap(lead, ENTRY_RULES[i].doc, (int)strlen(lead));

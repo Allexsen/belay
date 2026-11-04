@@ -21,7 +21,7 @@ extern const enum entry_field DECODE_ORDER[F_COUNT];
 
 /* An entry line: canonical key order, every field, then the schema's rules.
  * 0, or -1 with the error set. */
-int decode_entry(const struct obj *o, struct belay_entry *e);
+int decode_entry(const struct obj *o, uint64_t version, struct belay_entry *e);
 
 /* The header line, version 1 or 2, each by its own key set; a v2 header's
  * `excluded` decoded into `excluded` (BELAY_EXCLUDED_MAX), which

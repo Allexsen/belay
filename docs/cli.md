@@ -202,6 +202,26 @@ The rules are pinned in [host-reader.md](../test/expect/host-reader.md). `make u
 belay's reading of the layers against an independent model of overlayfs, which is itself checked
 against the kernel.
 
+## A file being written while it is read
+
+The stat checks around a read cannot see every write: a `write(2)` already in flight has stamped the
+file before its bytes land, and stores through a shared mapping stamp it only on the first store to
+a clean page. Such a read can hash bytes the file never held. So belay asks the kernel, at the start
+and the end of each file's read, whether some process has it open for writing or mapped
+shared-writable. If so, the entry carries `writer_open`: the hash is kept but no diff compares it,
+no copy is kept, and the diff says `unknown`, reason `writer_open`, whatever else changed. A file a
+process merely keeps open for writing is `unknown` for as long as it does; once the writer is gone,
+`mark` reads it again. Each capture counts those entries in its manifest's trailer.
+
+The kernel cannot always answer: on macOS, on filesystems without leases, and for files belay's
+user does not own without `CAP_LEASE`. On overlayfs a mapping whose descriptor was closed is not
+seen. Those files are hashed as read, unmarked, and each manifest counts them as `unguarded`; a
+receipt says so on one line (`hashed with no check for a concurrent writer: 0 before, 412 after`).
+A writer that opens the file, writes and closes it entirely between the two questions, inside one
+timestamp tick, is seen by neither the probe nor the stat checks. The format is pinned in
+[manifest-v4.md](../test/expect/manifest-v4.md). `bench/spike_torn.c` reproduces torn reads, with
+`pwrite` and through a shared mapping.
+
 ## mark: which files are read
 
 A regular file is not read again, and keeps the previous checkpoint's hash, when its inode, mode,

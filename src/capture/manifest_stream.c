@@ -78,10 +78,16 @@ int stream_entry(struct stream *s, const struct belay_entry *e) {
     if (e->unstable)   s->n_unstable++;
     if (e->is_mount)   s->n_mounts++;
     if (e->raced)    s->n_raced++;
+    if (e->writer_open) s->n_writer_open++;
     return 0;
 }
 
-int stream_end(const struct stream *s, const uint64_t v[TR_COUNT]) {
+int stream_end(const struct stream *s, const uint64_t v[TR_COUNT], size_t writer_open) {
+    if (writer_open != s->n_writer_open) {
+        belay_err_set(BELAY_ERR_CORRUPT, 0, "manifest: trailer says %zu writer_open, read %zu",
+                      writer_open, s->n_writer_open);
+        return -1;
+    }
     if (v[TR_ENTRIES] != s->n_entries || v[TR_UNREADABLE] != s->n_unreadable || v[TR_UNSTABLE] != s->n_unstable ||
         v[TR_MOUNTS] != s->n_mounts || v[TR_RACED] != s->n_raced) {
         belay_err_set(BELAY_ERR_CORRUPT, 0,
