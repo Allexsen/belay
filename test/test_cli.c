@@ -20,8 +20,12 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/mman.h>
 #include <sys/resource.h>
 #include <sys/stat.h>
+#ifdef __linux__
+#include <sys/vfs.h>
+#endif
 #include <sys/wait.h>
 #include <unistd.h>
 
@@ -104,7 +108,7 @@ TEST(a_usage_error_is_one_line_and_ids_are_strict) {
 TEST(help_and_version_exit_0) {
     ASSERT_EQ_INT(0, belay("--version", NULL));
     ASSERT_TRUE(strncmp(g_out, "belay ", 6) == 0);
-    ASSERT_TRUE(strstr(g_out, " (manifest v3, diff.v1)\n") != NULL);     /* what this build writes */
+    ASSERT_TRUE(strstr(g_out, " (manifest v4, diff.v1)\n") != NULL);     /* what this build writes */
     ASSERT_EQ_INT(0, belay("help", NULL));
     ASSERT_TRUE(strstr(g_out, "exit codes") != NULL);
     static const char *const cmds[] = { "check", "mark", "diff", "log" };
@@ -1035,6 +1039,152 @@ TEST(an_exclude_is_exact_on_links_and_prefixes) {
     ASSERT_TRUE(strstr(g_out, "\"path\":\"a-/y\",\"outcome\":\"removed\"") != NULL);
 }
 
+/* Manifest v4 (test/expect/manifest-v4.md). A real writer, a real lease
+ * probe, the whole path to the diff. Where the kernel cannot show the writer
+ * these say so: macOS has no leases; on overlayfs (the docker job's /tmp) a
+ * mapping whose descriptor was closed is not seen. */
+static const char *why_no_probe(const char *dir) {
+#ifndef __linux__
+    (void)dir;
+    return "no lease facility here";
+#else
+    char p[700];
+    snprintf(p, sizeof p, "%s/.leasable", dir);
+    const int w = open(p, O_WRONLY | O_CREAT, 0600);
+    if (w != -1) close(w);
+    const int fd = open(p, O_RDONLY);
+    const int ok = fd != -1 && fcntl(fd, F_SETLEASE, F_RDLCK) == 0;
+    if (ok) fcntl(fd, F_SETLEASE, F_UNLCK);
+    if (fd != -1) close(fd);
+    unlink(p);
+    if (!ok) return "this filesystem has no leases";
+    struct statfs s;
+    if (statfs(dir, &s) == 0 && s.f_type == 0x794c7630) return "overlayfs: a closed mapping is not seen";
+    return NULL;
+#endif
+}
+
+/* A number after `key` in the last line of the file `path`, or -1. */
+static long trailer_num(const char *path, const char *key) {
+    FILE *f = fopen(path, "r");
+    if (f == NULL) return -1;
+    static char line[1 << 16], last[1 << 16];
+    while (fgets(line, sizeof line, f) != NULL) strcpy(last, line);
+    fclose(f);
+    const char *k = strstr(last, key);
+    return k != NULL ? atol(k + strlen(key)) : -1;
+}
+
+/* The latest checkpoint's id and manifest, from `mark --json` in g_out. */
+static long marked(char *manifest, size_t cap) {
+    const char *m = strstr(g_out, "\"manifest\":\"");
+    if (m == NULL) return -1;
+    m += 12;
+    const char *e = strchr(m, '"');
+    snprintf(manifest, cap, "%.*s", (int)(e - m), m);
+    return atol(g_out + 6);                                 /* {"id":N */
+}
+
+TEST(a_shared_mapping_writer_marks_every_pass_and_nothing_diffs_on_the_hash) {
+    fresh();
+    const char *no = why_no_probe(g_scope);
+    if (no != NULL) SKIP(no);
+    enum { SZ = 4 << 20 };
+    char big[700], manifest[900];
+    snprintf(big, sizeof big, "%s/big.dat", g_scope);
+    sh("head -c %d /dev/zero | tr '\\0' A > '%s'", (int)SZ, big);
+    REQUIRE(belay("mark", "--scope", g_scope, "--json", NULL) == 0);
+    int ready[2];
+    REQUIRE(pipe(ready) == 0);
+    const pid_t w = fork();
+    REQUIRE(w != -1);
+    if (w == 0) {                       /* maps, closes the descriptor, stores for ever */
+        const int fd = open(big, O_RDWR);
+        char *m = mmap(NULL, SZ, PROT_READ | PROT_WRITE, MAP_SHARED, fd, 0);
+        if (m == MAP_FAILED) _exit(1);
+        close(fd);
+        for (long k = 0;; k++) {
+            memset(m, (k & 1) ? 'B' : 'A', SZ);
+            if (k == 0 && write(ready[1], "x", 1) != 1) _exit(1);
+        }
+    }
+    char c;
+    REQUIRE(read(ready[0], &c, 1) == 1);
+    int marks = 0, ordinary = 0;
+    for (int i = 0; i < 30; i++) {
+        REQUIRE(belay("mark", "--scope", g_scope, "--full", "--json", NULL) == 0);
+        const long id = marked(manifest, sizeof manifest);
+        marks += trailer_num(manifest, "\"writer_open\":") == 1;
+        char since[24], to[24];
+        snprintf(since, sizeof since, "%ld", id - 1);
+        snprintf(to, sizeof to, "%ld", id);
+        REQUIRE(belay("diff", "--scope", g_scope, "--since", since, "--to", to, "--json", NULL) == 0);
+        const char *r = strstr(g_out, "\"path\":\"big.dat\"");
+        if (r != NULL) {
+            const char *eol = strchr(r, '\n');
+            char rec[1024];
+            snprintf(rec, sizeof rec, "%.*s", (int)(eol - r), r);
+            if (strstr(rec, "\"outcome\":\"unknown\"") == NULL || strstr(rec, "\"unknown\":[\"writer_open\"]") == NULL ||
+                strstr(rec, "sha256") != NULL) ordinary++;
+        }
+        if (strstr(g_out, "\"modified\":0,") == NULL) ordinary++;
+    }
+    kill(w, SIGKILL);
+    waitpid(w, NULL, 0);
+    close(ready[0]);
+    close(ready[1]);
+    ASSERT_EQ_INT(30, marks);
+    ASSERT_EQ_INT(0, ordinary);
+    /* The writer gone, a plain mark reads the file again (V4-R6). */
+    REQUIRE(belay("mark", "--scope", g_scope, "--json", NULL) == 0);
+    marked(manifest, sizeof manifest);
+    ASSERT_TRUE(trailer_num(manifest, "\"writer_open\":") == 0);
+}
+
+TEST(a_quiet_tree_has_no_marked_entry) {
+    fresh();
+    char manifest[900];
+    sh("head -c 200000 /dev/zero | tr '\\0' A > '%s/big.dat'", g_scope);
+    REQUIRE(belay("mark", "--scope", g_scope, "--json", NULL) == 0);
+    for (int i = 0; i < 3; i++) {
+        REQUIRE(belay("mark", "--scope", g_scope, "--full", "--json", NULL) == 0);
+        const long id = marked(manifest, sizeof manifest);
+        ASSERT_TRUE(trailer_num(manifest, "\"writer_open\":") == 0);
+        char since[24], to[24];
+        snprintf(since, sizeof since, "%ld", id - 1);
+        snprintf(to, sizeof to, "%ld", id);
+        REQUIRE(belay("diff", "--scope", g_scope, "--since", since, "--to", to, "--json", NULL) == 0);
+        ASSERT_TRUE(strstr(g_out, "\"unknown\":0,") != NULL);
+        ASSERT_TRUE(strstr(g_out, "\"before_writer_open\":0,\"after_writer_open\":0,\"before_unguarded\":") != NULL);
+    }
+}
+
+TEST(a_held_open_writer_on_a_small_file_marks_it) {
+    fresh();
+    const char *no = why_no_probe(g_scope);
+    if (no != NULL && strncmp(no, "overlayfs", 9) != 0) SKIP(no);    /* an open descriptor is seen there */
+    char env[700], manifest[900];
+    snprintf(env, sizeof env, "%s/.env", g_scope);
+    sh("printf 'A=1\\n' > '%s'", env);
+    REQUIRE(belay("mark", "--scope", g_scope, "--json", NULL) == 0);
+    const int w = open(env, O_WRONLY | O_APPEND);
+    REQUIRE(w != -1);
+    REQUIRE(write(w, "B=2\n", 4) == 4);
+    REQUIRE(belay("mark", "--scope", g_scope, "--full", "--json", NULL) == 0);
+    const long id = marked(manifest, sizeof manifest);
+    ASSERT_TRUE(trailer_num(manifest, "\"writer_open\":") == 1);
+    sh("grep -q '\"path\":\".env\".*\"writer_open\":true' '%s'", manifest);
+    sh("! grep '\"path\":\".env\"' '%s' | grep -q stored", manifest);       /* no copy */
+    char since[24], to[24];
+    snprintf(since, sizeof since, "%ld", id - 1);
+    snprintf(to, sizeof to, "%ld", id);
+    REQUIRE(belay("diff", "--scope", g_scope, "--since", since, "--to", to, "--json", NULL) == 0);
+    const char *r = strstr(g_out, "\"path\":\".env\"");
+    REQUIRE(r != NULL);                 /* the size moved too: still unknown (V4-D1) */
+    ASSERT_TRUE(strstr(r, "\"outcome\":\"unknown\"") != NULL && strstr(r, "\"unknown\":[\"writer_open\"]") != NULL);
+    close(w);
+}
+
 int main(void) {
     snprintf(g_dir, sizeof g_dir, "/tmp/belay_cli_%d", (int)getpid());
     mkdir(g_dir, 0700);
@@ -1080,6 +1230,9 @@ int main(void) {
     RUN(an_exclude_is_exact_on_links_and_prefixes);
     RUN(reads_leave_the_state_directory_as_it_was);
     RUN(the_receipt_orders_by_what_git_says);
+    RUN(a_shared_mapping_writer_marks_every_pass_and_nothing_diffs_on_the_hash);
+    RUN(a_quiet_tree_has_no_marked_entry);
+    RUN(a_held_open_writer_on_a_small_file_marks_it);
     free(g_out);
     free(g_err);
     char cmd[800];

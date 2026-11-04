@@ -46,6 +46,7 @@ static int differs(const struct diff_ctx *ctx, enum entry_field f, const struct 
         return b->has_xattrs != a->has_xattrs ||
                (b->has_xattrs && strcmp(b->xattrs_sha256_hex, a->xattrs_sha256_hex) != 0);
     case F_SHA256:
+        if (b->writer_open || a->writer_open) return NOT_COMPARED;     /* it may be torn (V4-D2) */
         return b->has_hash && a->has_hash ? strcmp(b->sha256_hex, a->sha256_hex) != 0 : -1;
     case F_RDEV:   return b->has_rdev && a->has_rdev ? b->rdev != a->rdev : -1;
     case F_LINK_TARGET:
@@ -54,7 +55,7 @@ static int differs(const struct diff_ctx *ctx, enum entry_field f, const struct 
                memcmp(b->link_target, a->link_target, b->link_target_len) != 0;
     case F_PATH: case F_TYPE: case F_XATTRS_SHA256: case F_XATTRS_UNKNOWN: case F_UNVERIFIED:
     case F_UNSTABLE: case F_TARGET_OUTSIDE: case F_STORED: case F_MOUNT: case F_UNREADABLE:
-    case F_RACED:
+    case F_RACED: case F_WRITER_OPEN:
         return NOT_COMPARED;
     case F_COUNT:
         break;
@@ -148,6 +149,7 @@ int classify_one(const struct belay_entry *present, bool is_after, enum anc abse
     if (absent == ANC_SEALED) v->reasons = DRBIT(DR_NOT_CAPTURED);
     else if (absent == ANC_INCOMPLETE) v->reasons = DRBIT(DR_LISTING_INCOMPLETE);
     else if (absent == ANC_RACED || present->raced) v->reasons = DRBIT(DR_RACED);
+    if (present->writer_open) v->reasons |= DRBIT(DR_WRITER_OPEN);      /* V4-D3 */
     v->outcome = v->reasons ? D_UNKNOWN : is_after ? D_ADDED : D_REMOVED;
     return 0;
 }

@@ -189,7 +189,7 @@ static int fail(struct belay_manifest_reader *r) {
 static int parse_trailer(struct belay_manifest_reader *r, const struct obj *o) {
     uint64_t v[TR_COUNT];
     if (decode_trailer(o, r->header.version, v, &r->trailer) == -1) return -1;
-    if (stream_end(&r->st, v) == -1) return -1;
+    if (stream_end(&r->st, v, r->trailer.writer_open) == -1) return -1;
     r->trailer.entries    = (size_t)v[TR_ENTRIES];
     r->trailer.vanished   = (size_t)v[TR_VANISHED];
     r->trailer.unreadable = (size_t)v[TR_UNREADABLE];
@@ -235,7 +235,7 @@ int belay_manifest_next(struct belay_manifest_reader *r, struct belay_entry *e) 
         return 0;
     }
 
-    if (decode_entry(&o, e) == -1) return fail(r);
+    if (decode_entry(&o, r->header.version, e) == -1) return fail(r);
     if (entry_check_header(&r->header, e) == -1) return fail(r);
     /* v2: nothing at or below an excluded path is recorded (V2-2); a
      * manifest that records one is not what a writer writes. */

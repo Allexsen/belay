@@ -602,6 +602,11 @@ int receipt_render(FILE *diff, FILE *out, const struct receipt_opts *o) {
         }
         fputc('\n', out);
     }
+    /* One line for what the writer probe could not ask (manifest v4). */
+    const int64_t ug[2] = { jint(&trailer, "before_unguarded", 0), jint(&trailer, "after_unguarded", 0) };
+    if (ug[0] > 0 || ug[1] > 0)
+        fprintf(out, "  hashed with no check for a concurrent writer: %lld before, %lld after\n",
+                (long long)(ug[0] > 0 ? ug[0] : 0), (long long)(ug[1] > 0 ? ug[1] : 0));
     const struct { const char *title; struct lines *l; } SEC[] = { { "events", &ev }, { "privilege", &x.priv } };
     for (size_t s = 0; s < 2; s++) {
         if (SEC[s].l->n == 0) continue;

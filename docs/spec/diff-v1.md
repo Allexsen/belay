@@ -105,6 +105,10 @@ file.
 | `provisional` | bool | Any of the six counts above is not 0: a tree changed while it was walked, so the result is provisional (manifest-v1, obligations on a consumer). The records name each flagged path; `vanished` paths have none. |
 | `before_sha256` | string | The sha256 of the first manifest's bytes as this diff read them: the whole file. |
 | `after_sha256` | string | The sha256 of the second manifest's bytes, likewise. |
+| `before_writer_open` | int | The first manifest's `writer_open`: entries a concurrent writer may have torn. `0` before manifest v4. |
+| `after_writer_open` | int | The second manifest's `writer_open`. |
+| `before_unguarded` | int | The first manifest's `unguarded`: files hashed with no answer from the writer probe. `0` before manifest v4. |
+| `after_unguarded` | int | The second manifest's `unguarded`. |
 <!-- END GENERATED: diff-trailer -->
 
 ## Outcomes
@@ -152,7 +156,10 @@ table below generates. Flags on **either** side make part of the comparison unkn
 are collected.
 
 1. `raced` on either side: `unknown`. Its recorded fields may not be the state at the end of its
-   walk, so not even a difference proves a change.
+   walk, so not even a difference proves a change. `writer_open` (manifest v4) is treated the same
+   way, with its own reason, and the entry's hash is not compared at all: a writer had the file
+   when it was read, so the hash may be of bytes the file never held. A path on one side only that
+   carries it is `unknown`, never `added` or `removed` (`test/expect/manifest-v4.md`, V4-D1 to D3).
 2. Types differ: `type_changed`.
 3. **Content**: a content field that differs is proof (`size` for a regular file or symlink, the
    hash when both sides have one, the link target when neither side is `unreadable`, the device
@@ -235,6 +242,7 @@ one side only.
 | `iflags_unknown` | Inode flags recorded on one side only: absent means they could not be read. |
 | `listing_incomplete` | Absent on a side whose nearest recorded ancestor directory is `unstable`: possibly present. |
 | `not_captured` | Absent on a side whose nearest recorded ancestor directory is `unreadable` or a `mount`, or that excluded the path or a directory above it (manifest v2's `excluded`): nothing there was captured. |
+| `writer_open` | A concurrent writer: some process had the file open for writing, or mapped shared-writable, when it was read, so its hash may be of bytes it never held. Never compared. |
 <!-- END GENERATED: diff-reasons -->
 
 ## How each manifest field is compared
@@ -270,6 +278,7 @@ one side only.
 | `mount` | flag |  | compared | flag | content | Contents not captured. |
 | `unreadable` | flag |  | compared | flag | content | Contents unknown unless another content field proves a change. |
 | `raced` | flag |  | compared | flag | everything | Everything unknown: the recorded fields may not be the state at the end of the walk, so no difference is proof. |
+| `writer_open` | flag |  | compared | flag | everything | Everything unknown: the hash may be torn and is not compared, and a writer was at the file, so no difference is proof (manifest-v4 V4-D1, V4-D2). |
 <!-- END GENERATED: diff-fields -->
 
 ## Interpreters

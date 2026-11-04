@@ -161,7 +161,7 @@ int prev_load(const struct fsops *ops, const char *path, const char *scope, uint
         if (!e->is_mount && !e->raced && !e->unstable && !e->unreadable && e->ctime_ns > info->newest_validated_ns &&
             !now_excluded(opts, e->path, e->path_len))
             info->newest_validated_ns = e->ctime_ns;
-        if (e->type != BELAY_T_REG || !e->has_hash || e->raced || e->unstable) continue;
+        if (e->type != BELAY_T_REG || !e->has_hash || e->raced || e->unstable || e->writer_open) continue;
         struct prev_rec r = { e->dev, e->ino, e->size, e->mtime_ns, e->ctime_ns, e->mode,
                               e->has_stored, { 0 } };
         for (int k = 0; k < 32; k++)          /* the reader checked: 64 lowercase hex digits */

@@ -14,9 +14,10 @@
 
 /* Entry keys in canonical order: the schema's fields, each followed by its
  * base64 spelling where it has one. */
-static size_t entry_keys(const char *keys[2 * F_COUNT]) {
+static size_t entry_keys(const char *keys[2 * F_COUNT], uint64_t version) {
     size_t n = 0;
-    for (size_t f = 0; f < F_COUNT; f++) {
+    const size_t fields = version >= 4 ? F_COUNT : F_V1_COUNT;     /* each version by its own keys */
+    for (size_t f = 0; f < fields; f++) {
         keys[n++] = ENTRY_FIELDS[f].name;
         if (ENTRY_FIELDS[f].alt != NULL) keys[n++] = ENTRY_FIELDS[f].alt;
     }
@@ -378,6 +379,7 @@ static int decode_field(const struct obj *o, enum entry_field f, struct belay_en
     case F_MOUNT:      return get_flag(o, k, &e->is_mount);
     case F_UNREADABLE: return get_flag(o, k, &e->unreadable);
     case F_RACED:      return get_flag(o, k, &e->raced);
+    case F_WRITER_OPEN: return get_flag(o, k, &e->writer_open);
     case F_COUNT:      break;
     }
     return lex_corrupt("internal error: no decoder for a field");
@@ -387,13 +389,13 @@ const enum entry_field DECODE_ORDER[F_COUNT] = {
     F_PATH, F_TYPE, F_MODE, F_UID, F_GID, F_SIZE, F_INO, F_DEV, F_NLINK, F_MTIME, F_CTIME,
     F_SHA256, F_STORED, F_UNVERIFIED, F_UNSTABLE, F_TARGET_OUTSIDE, F_MOUNT, F_UNREADABLE,
     F_RACED, F_RDEV, F_IFLAGS, F_CAPS, F_XATTRS, F_XATTRS_SHA256, F_XATTRS_UNKNOWN,
-    F_LINK_TARGET,
+    F_LINK_TARGET, F_WRITER_OPEN,
 };
 
-int decode_entry(const struct obj *o, struct belay_entry *e) {
+int decode_entry(const struct obj *o, uint64_t version, struct belay_entry *e) {
     memset(e, 0, sizeof *e);
     const char *keys[2 * F_COUNT];
-    if (lex_order(o, keys, entry_keys(keys)) == -1) return -1;
+    if (lex_order(o, keys, entry_keys(keys, version)) == -1) return -1;
     for (size_t i = 0; i < F_COUNT; i++)
         if (decode_field(o, DECODE_ORDER[i], e) == -1) return -1;
     /* Which fields and flags belong to which types -- exactly the
@@ -417,11 +419,13 @@ static int get_text(const struct obj *o, const char *key, char *out, size_t cap)
 }
 
 int decode_trailer(const struct obj *o, uint64_t version, uint64_t v[TR_COUNT], struct belay_manifest_stats *t) {
-    const char *keys[TR_COUNT + TR2_COUNT];
+    const char *keys[TR_COUNT + TR2_COUNT + TR4_COUNT];
     size_t n = 0;
     for (size_t i = 0; i < TR_COUNT; i++) keys[n++] = TRAILER_FIELDS[i].name;
     if (version >= 2)
         for (size_t i = 0; i < TR2_COUNT; i++) keys[n++] = TRAILER2_FIELDS[i].name;
+    if (version >= 4)
+        for (size_t i = 0; i < TR4_COUNT; i++) keys[n++] = TRAILER4_FIELDS[i].name;
     if (lex_order(o, keys, n) == -1) return -1;
     for (size_t i = 0; i < TR_COUNT; i++)
         if (get_u64(o, keys[i], true, &v[i], NULL) == -1) return -1;
@@ -442,6 +446,14 @@ int decode_trailer(const struct obj *o, uint64_t version, uint64_t v[TR_COUNT], 
         return lex_corrupt("trailer reference and read_all disagree");
     if (none && trusted != 0) return lex_corrupt("trailer trusts files without a reference");
     if (trusted > v[TR_ENTRIES]) return lex_corrupt("trailer trusts more files than entries");
+    if (version < 4) return 0;
+    uint64_t wopen, unguarded;
+    if (get_u64(o, TRAILER4_FIELDS[TR4_WRITER_OPEN].name, true, &wopen, NULL) == -1 ||
+        get_u64(o, TRAILER4_FIELDS[TR4_UNGUARDED].name, true, &unguarded, NULL) == -1)
+        return -1;
+    if (unguarded > v[TR_ENTRIES]) return lex_corrupt("trailer has more unguarded files than entries");
+    t->writer_open = (size_t)wopen;
+    t->unguarded = (size_t)unguarded;
     return 0;
 }
 

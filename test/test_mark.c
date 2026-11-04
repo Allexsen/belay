@@ -340,6 +340,63 @@ TEST(a_rewrite_during_the_walk_after_its_read_is_read_by_every_mark) {
 static int g_writer_on;
 static int w_writer(void *ctx, int fd) { return g_writer_on ? 1 : g_real->writer_present(ctx, fd); }
 
+/* What the probe answers at each read's two calls, and what that records
+ * (manifest-v4 V4-2, V4-4, V4-R5): `g_answers` holds the start and the end. */
+static int g_answers[2], g_call;
+static int scripted(void *ctx, int fd) { (void)ctx; (void)fd; return g_answers[g_call++ & 1]; }
+static bool g_overlay;
+static bool scripted_overlay(void *ctx, int fd) { (void)ctx; (void)fd; return g_overlay; }
+
+TEST(the_probe_marks_on_a_writer_and_counts_what_it_could_not_ask) {
+    static const struct { int start, end; bool overlay; size_t marked, unguarded; } cases[] = {
+        { 0, 0, false, 0, 0 },   { 1, 0, false, 12, 0 },  { 0, 1, false, 12, 0 },  { 1, 1, false, 12, 0 },
+        { -1, -1, false, 0, 12 }, { 0, -1, false, 0, 12 }, { -1, 0, false, 0, 12 },
+        { -1, 1, false, 12, 0 }, { 1, -1, false, 12, 0 }, /* a writer seen outranks "cannot tell" */
+        { 0, 0, true, 0, 12 },   { 1, 0, true, 12, 0 },
+    };
+    g_round_ns = 0;
+    fresh_tree();
+    char out[400];
+    snprintf(out, sizeof out, "%s/o.ndjson", g_dir);
+    for (size_t i = 0; i < sizeof cases / sizeof cases[0]; i++) {
+        struct belay_manifest_stats st;
+        g_answers[0] = cases[i].start;
+        g_answers[1] = cases[i].end;
+        g_call = 0;
+        g_overlay = cases[i].overlay;
+        g_ops.writer_present = scripted;
+        g_ops.is_overlay = scripted_overlay;
+        const int r = capture(out, NULL, &st);
+        g_ops.writer_present = g_real->writer_present;
+        g_ops.is_overlay = g_real->is_overlay;
+        REQUIRE(r == 0);
+        ASSERT_EQ_INT((int)cases[i].marked, (int)st.writer_open);
+        ASSERT_EQ_INT((int)cases[i].unguarded, (int)st.unguarded);
+    }
+}
+
+/* A hash a writer may have torn never outlives the writer through the
+ * prefilter: the stat does not move under a dirty mapping (V4-R6). */
+TEST(a_marked_entry_is_never_trusted_by_a_mark) {
+    g_round_ns = 0;
+    fresh_tree();
+    char prev[400], next[400];
+    snprintf(prev, sizeof prev, "%s/p.ndjson", g_dir);
+    snprintf(next, sizeof next, "%s/n.ndjson", g_dir);
+    struct belay_manifest_stats st;
+    g_ops.writer_present = w_writer;
+    g_writer_on = 1;
+    const int r = capture(prev, NULL, &st);
+    g_writer_on = 0;
+    g_ops.writer_present = g_real->writer_present;
+    REQUIRE(r == 0);
+    ASSERT_EQ_INT(12, (int)st.writer_open);
+    usleep(30000);                     /* past the reference point, whatever the tick */
+    REQUIRE(capture(next, prev, &st) == 0);
+    ASSERT_EQ_INT(0, (int)st.trusted);
+    ASSERT_EQ_INT(0, (int)st.writer_open);
+}
+
 TEST(a_mark_keeps_the_copies_a_full_capture_would) {
     g_round_ns = 0;
     fresh_tree();
@@ -604,23 +661,23 @@ TEST(the_v2_trailer_says_how_the_walk_read) {
     struct belay_manifest_stats st;
     REQUIRE(capture(prev, NULL, &st) == 0);
     ends(prev, h, sizeof h, t, sizeof t);
-    ASSERT_TRUE(strstr(h, "{\"belay_manifest\":3,") == h);
+    ASSERT_TRUE(strstr(h, "{\"belay_manifest\":4,") == h);
     ASSERT_TRUE(strstr(h, ",\"excluded\":[],\"walk_start_ns\":") != NULL && strstr(h, "\"walk_start_ns\":0}") == NULL);
-    ASSERT_TRUE(strstr(t, ",\"trusted\":0,\"reference\":\"none\",\"read_all\":\"check\"}") != NULL);
+    ASSERT_TRUE(strstr(t, ",\"trusted\":0,\"reference\":\"none\",\"read_all\":\"check\",\"writer_open\":0,\"unguarded\":") != NULL);
     REQUIRE(capture(next, prev, &st) == 0);
     ends(next, h, sizeof h, t, sizeof t);
-    ASSERT_TRUE(strstr(t, ",\"trusted\":12,\"reference\":\"walk_start\",\"read_all\":\"\"}") != NULL);
+    ASSERT_TRUE(strstr(t, ",\"trusted\":12,\"reference\":\"walk_start\",\"read_all\":\"\",\"writer_open\":0,") != NULL);
     ASSERT_EQ_STR("walk_start", st.reference);
     const struct belay_manifest_opts why = { .hash_max_bytes = 1u << 20, .store_max_bytes = 4096,
                                              .store_dir = store, .full_reason = "asked for (--full)" };
     REQUIRE(capture_write(&g_ops, next, g_tree, &why, &st) == 0);
     ends(next, h, sizeof h, t, sizeof t);
-    ASSERT_TRUE(strstr(t, ",\"trusted\":0,\"reference\":\"none\",\"read_all\":\"asked for (--full)\"}") != NULL);
+    ASSERT_TRUE(strstr(t, ",\"trusted\":0,\"reference\":\"none\",\"read_all\":\"asked for (--full)\",\"writer_open\":0,") != NULL);
     /* without the walk's start: the newest-ctime reference, said */
     REQUIRE(unknown_start(prev) == 0);
     REQUIRE(capture(next, prev, &st) == 0);
     ends(next, h, sizeof h, t, sizeof t);
-    ASSERT_TRUE(strstr(t, "\"reference\":\"newest_ctime\",\"read_all\":\"\"}") != NULL);
+    ASSERT_TRUE(strstr(t, "\"reference\":\"newest_ctime\",\"read_all\":\"\",\"writer_open\":0,") != NULL);
 }
 
 /* V2-2 (excluded's reason): a path configured for the scope is not walked,
@@ -786,6 +843,8 @@ int main(void) {
     RUN(a_change_in_the_root_is_the_newest_ctime);
     RUN(a_rewrite_during_the_walk_after_its_read_is_read_by_every_mark);
     RUN(a_mark_keeps_the_copies_a_full_capture_would);
+    RUN(the_probe_marks_on_a_writer_and_counts_what_it_could_not_ask);
+    RUN(a_marked_entry_is_never_trusted_by_a_mark);
     RUN(a_small_binary_file_without_a_copy_is_trusted);
     RUN(the_fallback_reads_everything_on_coarse_timestamps);
     RUN(a_reflog_is_kept_past_the_store_limit);

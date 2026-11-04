@@ -40,7 +40,7 @@
  */
 
 struct stream {
-    size_t n_entries, n_unreadable, n_unstable, n_mounts, n_raced;
+    size_t n_entries, n_unreadable, n_unstable, n_mounts, n_raced, n_writer_open;
     bool   have_root;
     bool   root_unreadable;
 
@@ -59,6 +59,6 @@ int stream_entry(struct stream *s, const struct belay_entry *e);
 
 /* The trailer's values (indexed by enum trailer_field) against what was
  * read. 0, or -1. */
-int stream_end(const struct stream *s, const uint64_t v[TR_COUNT]);
+int stream_end(const struct stream *s, const uint64_t v[TR_COUNT], size_t writer_open);
 
 #endif

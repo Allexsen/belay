@@ -20,7 +20,7 @@
 
 /* The version belay writes; its reader reads 1 and 2, each by its own key
  * set (test/expect/manifest-v2.md, V2-R1..R3). */
-#define BELAY_MANIFEST_VERSION 3
+#define BELAY_MANIFEST_VERSION 4
 #define BELAY_MANIFEST_VERSION_MIN 1
 
 /* What a capture did not walk (v2's `excluded`). */
@@ -162,6 +162,7 @@ struct belay_entry {
      *  mount points.)
      */
     bool     raced;
+    bool     writer_open;   /* a writer at the start or end of the read: the hash may be torn */
 };
 
 struct belay_manifest_opts {
@@ -249,6 +250,9 @@ struct belay_manifest_stats {
     size_t mounts;      /* mount points: recorded, contents not captured */
     size_t raced;     /* entries that changed after being recorded, before
                            the walk ended (the end-of-walk re-check) */
+    size_t writer_open;  /* entries flagged writer_open (v4; 0 before) */
+    size_t unguarded;    /* files read and hashed with no answer from the writer
+                            probe (v4; 0 before): test/expect/manifest-v4.md */
     size_t store_failed;  /* capture only, 0 from a trailer: copies the content
                              store failed to keep; those entries are recorded
                              without `stored` */

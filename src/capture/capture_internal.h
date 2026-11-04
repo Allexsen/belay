@@ -70,7 +70,7 @@ struct walk_ctx {
     /* mark's prefilter (previous.h): NULL without one */
     struct prev_index *prev;
     int64_t reference_ns;
-    size_t trusted, racy, excluded;
+    size_t trusted, racy, excluded, unguarded;
     int64_t newest_ctime_ns;
     struct belay_excluded *xs;  /* what was not walked, for the v2 header: `excluded` of them */
     size_t *xlen;               /* strlen of each opts->exclude_paths, once per walk */

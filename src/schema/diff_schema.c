@@ -38,6 +38,10 @@ const struct diff_name_def DIFF_REASONS[DR_COUNT] = {
     [DR_LISTING_INCOMPLETE] = { "listing_incomplete",
         "Absent on a side whose nearest recorded ancestor directory is `unstable`: possibly "
         "present." },
+    [DR_WRITER_OPEN] = { "writer_open",
+        "A concurrent writer: some process had the file open for writing, or mapped "
+        "shared-writable, when it was read, so its hash may be of bytes it never held. Never "
+        "compared." },
     [DR_NOT_CAPTURED] = { "not_captured",
         "Absent on a side whose nearest recorded ancestor directory is `unreadable` or a "
         "`mount`, or that excluded the path or a directory above it (manifest v2's `excluded`): "
@@ -111,6 +115,9 @@ const struct field_change DIFF_FIELDS[F_COUNT] = {
     [F_RACED]  = { CC_FLAG, T_ALL, US_ALL, DR_RACED, C, AM_FLAG,
                    "Everything unknown: the recorded fields may not be the state at the end of "
                    "the walk, so no difference is proof." },
+    [F_WRITER_OPEN] = { CC_FLAG, T_ALL, US_ALL, DR_WRITER_OPEN, C, AM_FLAG,
+                   "Everything unknown: the hash may be torn and is not compared, and a writer was "
+                   "at the file, so no difference is proof (manifest-v4 V4-D1, V4-D2)." },
 };
 #undef C
 #undef NC
@@ -206,4 +213,12 @@ const struct line_field_def DIFF_TRAILER_FIELDS[DT_COUNT] = {
         "The sha256 of the first manifest's bytes as this diff read them: the whole file." },
     [DT_AFTER_SHA256]    = { "after_sha256", NULL, "string",
         "The sha256 of the second manifest's bytes, likewise." },
+    [DT_BEFORE_WRITER_OPEN] = { "before_writer_open", NULL, "int",
+        "The first manifest's `writer_open`: entries a concurrent writer may have torn. `0` before "
+        "manifest v4." },
+    [DT_AFTER_WRITER_OPEN]  = { "after_writer_open", NULL, "int", "The second manifest's `writer_open`." },
+    [DT_BEFORE_UNGUARDED]   = { "before_unguarded", NULL, "int",
+        "The first manifest's `unguarded`: files hashed with no answer from the writer probe. `0` "
+        "before manifest v4." },
+    [DT_AFTER_UNGUARDED]    = { "after_unguarded", NULL, "int", "The second manifest's `unguarded`." },
 };

@@ -88,4 +88,5 @@ void outcome_count(struct belay_manifest_stats *s, const struct belay_entry *e) 
     s->unstable   += e->unstable;
     s->mounts     += e->is_mount;
     s->raced      += e->raced;
+    s->writer_open += e->writer_open;
 }

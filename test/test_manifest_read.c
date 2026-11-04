@@ -1396,7 +1396,7 @@ TEST(v2_header_and_trailer_are_read_and_exposed) {
  * present; the v2 values well formed and agreeing with each other. */
 TEST(v2_is_read_strictly) {
     static const struct { const char *name, *m, *reason; } cases[] = {
-        { "version 4", "{\"belay_manifest\":4,\"created_ns\":0}\n" ROOT_E T2, "format version 4" },
+        { "version 5", "{\"belay_manifest\":5,\"created_ns\":0}\n" ROOT_E T2, "format version 5" },
         { "a v1 header with a v2 key", "{\"belay_manifest\":1,\"created_ns\":0,\"scopes\":[\"/s\"],\"hash\":\"sha256\","
           "\"hash_max_bytes\":67108864,\"store_max_bytes\":65536,\"excluded\":[]}\n" ROOT_E T1 "}\n",
           "unknown key \"excluded\"" },
@@ -1459,6 +1459,40 @@ TEST(v2_is_read_strictly) {
                "\"hash_max_bytes\":67108864,\"store_max_bytes\":65536,\"excluded\":[],\"walk_start_ns\":5"
 #define D64 "4f1c0e8a9b7d6c5e4f3a2b1c0d9e8f7a6b5c4d3e2f1a0b9c8d7e6f5a4b3c2d1e"
 #define IMG "sha256:91ef0af61f39ece4d6710e465df5ed6ca12112358344fd51ae6a3b886634148b"
+/* Manifest v4: test/expect/manifest-v4.md. */
+#define H4 "{\"belay_manifest\":4,\"created_ns\":0,\"scopes\":[\"/s\"],\"hash\":\"sha256\"," \
+           "\"hash_max_bytes\":67108864,\"store_max_bytes\":65536,\"excluded\":[],\"walk_start_ns\":5,\"source\":null}\n"
+#define H3 "{\"belay_manifest\":3,\"created_ns\":0,\"scopes\":[\"/s\"],\"hash\":\"sha256\"," \
+           "\"hash_max_bytes\":67108864,\"store_max_bytes\":65536,\"excluded\":[],\"walk_start_ns\":5,\"source\":null}\n"
+#define HEX "0000000000000000000000000000000000000000000000000000000000000000"
+#define REG "{\"path\":\"f\",\"type\":\"reg\",\"mode\":33188,\"uid\":1,\"gid\":1,\"size\":1,\"mtime_ns\":1,\"ctime_ns\":1,\"ino\":2,\"dev\":1,\"nlink\":1"
+#define T2N "{\"belay_manifest_end\":2,\"vanished\":0,\"unreadable\":0,\"unstable\":0,\"mounts\":0,\"raced\":0," \
+            "\"trusted\":0,\"reference\":\"none\",\"read_all\":\"check\""
+#define MARKED REG ",\"sha256\":\"" HEX "\",\"writer_open\":true}\n"
+#define T4(w, u) T2N ",\"writer_open\":" #w ",\"unguarded\":" #u "}\n"
+
+TEST(v4_is_read_strictly) {
+    static const struct { const char *name, *m, *reason; } cases[] = {
+        { "a v3 entry with writer_open", H3 ROOT_E MARKED T2N "}\n", "unknown key \"writer_open\"" },
+        { "a v3 trailer with writer_open", H3 ROOT_E REG ",\"sha256\":\"" HEX "\"}\n" T4(0, 0), "unknown key \"writer_open\"" },
+        { "a v4 trailer without its keys", H4 ROOT_E MARKED T2N "}\n", "missing writer_open" },
+        { "a v4 trailer without unguarded", H4 ROOT_E MARKED T2N ",\"writer_open\":1}\n", "missing unguarded" },
+        { "a count too low", H4 ROOT_E MARKED T4(0, 0), "writer_open" },
+        { "a count too high", H4 ROOT_E REG ",\"sha256\":\"" HEX "\"}\n" T4(1, 0), "writer_open" },
+        { "more unguarded than entries", H4 ROOT_E MARKED T4(1, 3), "unguarded" },
+        { "writer_open false", H4 ROOT_E REG ",\"sha256\":\"" HEX "\",\"writer_open\":false}\n" T4(0, 0), "" },
+        { "writer_open without a hash", H4 ROOT_E REG ",\"unverified\":true,\"writer_open\":true}\n" T4(1, 0), "writer_open without sha256" },
+        { "writer_open with stored", H4 ROOT_E REG ",\"sha256\":\"" HEX "\",\"stored\":\"" HEX "\",\"writer_open\":true}\n" T4(1, 0), "writer_open with stored" },
+        { "writer_open on a directory", H4 ROOT_E "{\"path\":\"f\",\"type\":\"dir\",\"mode\":16877,\"uid\":1,\"gid\":1,\"size\":1,\"mtime_ns\":1,\"ctime_ns\":1,\"ino\":2,\"dev\":1,\"nlink\":2,\"writer_open\":true}\n" T4(1, 0), "writer_open on a non-regular" },
+    };
+    for (size_t i = 0; i < sizeof cases / sizeof cases[0]; i++) {
+        EXPECT_REJECT(cases[i].name, read_raw(cases[i].m), cases[i].reason);
+        belay_err_clear();
+    }
+    ASSERT_EQ_INT(0, read_raw(H4 ROOT_E MARKED T4(1, 1)));              /* as the writer writes it */
+    ASSERT_EQ_INT(0, read_raw(H3 ROOT_E REG ",\"sha256\":\"" HEX "\"}\n" T2N "}\n"));    /* v3 stays readable */
+}
+
 TEST(v3_is_read_strictly) {
     static const struct { const char *name, *m, *reason; } cases[] = {
         { "no source", H3_PRE "}\n" ROOT_E T2, "missing source" },
@@ -1553,6 +1587,7 @@ int main(void) {
     RUN(v2_header_and_trailer_are_read_and_exposed);
     RUN(v2_is_read_strictly);
     RUN(v3_is_read_strictly);
+    RUN(v4_is_read_strictly);
 
     unlink(g_path);
     return belay_test_report();

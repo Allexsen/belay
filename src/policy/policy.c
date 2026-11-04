@@ -448,6 +448,7 @@ static const char *entry_flag_names(const struct belay_entry *e, const char **ou
     if (e->unreadable) out[(*n)++] = "unreadable";
     if (e->raced) out[(*n)++] = "raced";
     if (e->is_mount) out[(*n)++] = "mount";
+    if (e->writer_open) out[(*n)++] = "writer_open";
     return NULL;
 }
 
@@ -543,7 +544,8 @@ static void protected(struct state *s, const char *p, size_t n, const struct bel
     /* in decision 176's order (the model author's P2); a name it does not
      * list after them, as it came */
     static const char *const ORDER[] = { "unverified", "unstable", "unreadable", "raced", "mount",
-                                         "xattrs_unknown", "iflags_unknown", "not_captured", "listing_incomplete" };
+                                         "xattrs_unknown", "iflags_unknown", "not_captured", "listing_incomplete",
+                                         "writer_open" };
     const char *sorted[16];
     size_t ns = 0;
     for (size_t o = 0; o < sizeof ORDER / sizeof ORDER[0]; o++)
