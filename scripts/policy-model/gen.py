@@ -910,13 +910,13 @@ def writer_scenarios():
     add(S("wo-one-side-after-no-write", BASE, [("file", NEW, b"x = 1\n")], GW, writers=([], [NEW]), tags=["P50"]))
     add(S("wo-one-side-after-no-delete", BASE, [("file", NEW, b"x = 1\n")], ND, writers=([], [NEW]), tags=["P50"]))
     add(S("wo-one-side-after-all", BASE, [("file", NEW, b"x = 1\n")], ALL, writers=([], [NEW])))
-    # the same question with no `writer_open` at all: whether "a side its modes read" holds for `unknown`
-    add(S("p6-raced-one-side-before-no-create", BASE + [("file", "grader/blob.bin", BLOB)], [("rm", "grader/blob.bin")], NC,
-          verify={"manifest": "flags", "flags": {b"grader/blob.bin": ["raced"]}}, tags=["P6"]))
-    add(S("p6-raced-one-side-after-no-write", BASE, [("file", "grader/blob.bin", BLOB)], GW,
-          verify={"to": "check", "after_flags": {b"grader/blob.bin": ["raced"]}}, tags=["P6"]))
-    add(S("p6-not-captured-no-create", BASE + [("file", "grader/sub/x.bin", BLOB)], [("chmod", "grader/sub", 0o000)], NC,
-          tags=["P6", "P25"]))
+    # V4-S2 with no `writer_open` at all
+    add(S("s2-raced-one-side-before-no-create", BASE + [("file", "grader/blob.bin", BLOB)], [("rm", "grader/blob.bin")], NC,
+          verify={"manifest": "flags", "flags": {b"grader/blob.bin": ["raced"]}}, tags=["P50"]))
+    add(S("s2-raced-one-side-after-no-write", BASE, [("file", "grader/blob.bin", BLOB)], GW,
+          verify={"to": "check", "after_flags": {b"grader/blob.bin": ["raced"]}}, tags=["P50"]))
+    add(S("s2-not-captured-no-create", BASE + [("file", "grader/sub/x.bin", BLOB)], [("chmod", "grader/sub", 0o000)], NC,
+          tags=["P50", "P25"]))
     add(S("wo-one-side-before-excluded-after", BASE, [("write", "README.md", b"x\n")], None, writers=(["tests/test_api.py"], []),
           verify={"excludes_add": ["tests"], "to": "check"}, tags=["P13", "P45"]))
 
@@ -945,7 +945,7 @@ def writer_scenarios():
     add(S("wo-raced-one-side-after", BASE, [("file", "grader/blob.bin", BLOB)], NC,
           verify={"to": "check", "after_flags": {B_: ["raced", "writer_open"]}}, tags=["P45"]))
 
-    # -- expected_sha256: the marked hash decides nothing (P42); `absent` and the type do not rest on it
+    # -- expected_sha256: a marked entry has no hash (V4-D8); `absent`, the type and an unmarked after do not rest on one
     add(S("wo-hash-right-after", BASE, [], GH(sha(GRADER)), writers=([], [G])))
     add(S("wo-hash-wrong-after", BASE, [("write", G, OTHER)], GH(sha(GRADER)), writers=([], [G]), tags=["P42"]))
     add(S("wo-hash-wrong-after-with-no-write", BASE, [("write", G, OTHER)], GH(sha(GRADER), "no_write"), writers=([], [G]), tags=["P42"]))
@@ -964,6 +964,9 @@ def writer_scenarios():
     add(S("wo-tests-added-skip", BASE, [("file", "tests/test_new.py", b"import pytest\n\n@pytest.mark.skip\ndef test_x():\n    assert 0\n")],
           writers=([], ["tests/test_new.py"]), tags=["P13", "P47"]))
     add(S("wo-tests-emptied-after", BASE, [("write", T, b"")], writers=([], [T]), tags=["P13", "P46"]))
+    add(S("s3-empty-unreadable-after", BASE, [("write", T, b""), ("chmod", T, 0o000)], tags=["P13", "P25", "P46"]))
+    add(S("wo-tests-emptied-before-marked", BASE + [("file", "tests/test_e.py", b"")], [("rm", "tests/test_e.py")],
+          writers=(["tests/test_e.py"], []), tags=["P13", "P46", "P52"]))
     add(S("wo-tests-empty-before-filled", BASE + [("file", "tests/test_e.py", b"")], [("write", "tests/test_e.py", TEST_API)],
           writers=(["tests/test_e.py"], []), tags=["P13", "P46"]))
     add(S("wo-tests-marked-protected", BASE, [("write", T, WEAK)], spec_of(rule("tests/**", "no_write")), writers=([], [T]), tags=["P47"]))
@@ -976,6 +979,8 @@ def writer_scenarios():
     add(S("wo-ci-one-side", BASE, [("file", CI, CI_YML)], writers=([], [CI]), tags=["P47"]))
     add(S("wo-pytest-ini", BASE + [("file", "pytest.ini", PYTEST_INI)], [("write", "pytest.ini", PYTEST_INI + b"xfail_strict = false\n")],
           writers=([], ["pytest.ini"]), tags=["P15"]))
+    add(S("wo-pytest-ini-emptied", BASE + [("file", "pytest.ini", PYTEST_INI)], [("write", "pytest.ini", b"")],
+          writers=([], ["pytest.ini"]), tags=["P15", "P46"]))
     add(S("wo-pyproject-before", BASE, [("write", "pyproject.toml", PYPROJECT.replace(b'addopts = "-q"', b'addopts = "-x"'))],
           writers=(["pyproject.toml"], []), tags=["P15"]))
 
@@ -985,6 +990,27 @@ def writer_scenarios():
           writers=([], ["bin/tool"]), tags=["P18", "P47"]))
     add(S("wo-path-replaced", BASE + [("dir", "bin/tool")], [("rmtree", "bin/tool"), ("file", "bin/tool", b"#!/bin/sh\n", 0o755)],
           writers=([], ["bin/tool"]), tags=["P47"]))
+    add(S("wo-path-added-not-executable", BASE + [("dir", "bin")], [("file", "bin/data", b"x\n", 0o644)], writers=([], ["bin/data"])))
+    add(S("wo-path-exec-bits-before-marked", BASE + [("file", "bin/tool", b"#!/bin/sh\n", 0o644)], [("chmod", "bin/tool", 0o755)],
+          writers=(["bin/tool"], []), tags=["P47"]))
+    add(S("wo-path-exec-bits-both", BASE + [("file", "bin/tool", b"#!/bin/sh\n", 0o644)], [("chmod", "bin/tool", 0o755)],
+          writers=(["bin/tool"], ["bin/tool"]), tags=["P47"]))
+    add(S("wo-path-exec-already", BASE + [("file", "bin/tool", b"#!/bin/sh\n", 0o755)], [("write", "bin/tool", b"#!/bin/sh\nexit\n")],
+          writers=([], ["bin/tool"]), tags=["P47"]))
+    add(S("wo-path-before-to-symlink", BASE + [("file", "bin/tool", b"data\n")], [("rm", "bin/tool"), ("symlink", "bin/tool", "/usr/bin/true")],
+          writers=(["bin/tool"], []), tags=["P47"]))
+    add(S("wo-path-earlier-rule", BASE + [("dir", "bin", 0o000)], [("chmod", "bin", 0o755), ("file", "bin/tool", b"#!/bin/sh\n", 0o755)],
+          writers=([], ["bin/tool"]), tags=["P47"]))
+    TOOLB = b"bin/tool"
+    add(S("wo-path-raced-too-one-side", BASE + [("dir", "bin")], [("file", "bin/tool", b"\x00\n", 0o755)],
+          verify={"to": "check", "after_flags": {TOOLB: ["raced", "writer_open"]}}, tags=["P47"]))
+    add(S("wo-path-raced-too-exec-bits", BASE + [("file", "bin/tool", b"\x00\n", 0o644)], [("chmod", "bin/tool", 0o755)],
+          verify={"to": "check", "after_flags": {TOOLB: ["raced", "writer_open"]}}, tags=["P47"]))
+    add(S("d9-raced-one-side", BASE + [("dir", "bin")], [("file", "bin/tool", b"\x00\n", 0o755)],
+          verify={"to": "check", "after_flags": {TOOLB: ["raced"]}}, tags=["P47"]))
+    add(S("d9-raced-exec-bits", BASE + [("file", "bin/tool", b"\x00\n", 0o644)], [("chmod", "bin/tool", 0o755)],
+          verify={"to": "check", "after_flags": {TOOLB: ["raced"]}}, tags=["P47"]))
+    add(S("d9-unreadable-exec-bits", BASE + [("file", "bin/tool", b"#!/bin/sh\n", 0o644)], [("chmod", "bin/tool", 0o111)], tags=["P25", "P47"]))
     add(S("wo-priv-setuid", BASE + [("file", "tools/run", b"#!/bin/sh\n", 0o755)], [("chmod", "tools/run", 0o4755)],
           writers=([], ["tools/run"])))
     add(S("wo-priv-one-side", BASE, [("file", "tools/new", b"#!/bin/sh\n", 0o2755)], writers=([], ["tools/new"]), tags=["P32"]))
@@ -1004,6 +1030,9 @@ def writer_scenarios():
     add(S("wo-git-hook-exec", Gt, [("chmod", ".git/hooks/post-merge", 0o755)], writers=([], [".git/hooks/post-merge"]), tags=["P16"]))
 
     # -- packages: the file, the database, on either side; frozen or not
+    PYCF_EARLY = SITE + "/pycpkg/__pycache__/core.cpython-312.pyc"
+    PYC_TREE_EARLY = (pip_ops("pycpkg", "1.0", {"pycpkg/core.py": (b"def run():\n    return 1\n", 0o644)},
+                              extra_rows=["pycpkg/__pycache__/core.cpython-312.pyc,,"]) + [("file", PYCF_EARLY, b"\xcb\x0d\x0d\x0a core")])
     FOO = pip_ops("foo", "1.0", FOO_FILES)
     CORE = SITE + "/foo/core.py"
     REC = SITE + "/foo-1.0.dist-info/RECORD"
@@ -1016,24 +1045,27 @@ def writer_scenarios():
         PS = spec_of(frozen=frozen)
         add(S("wo-pip-file-after" + f, BASE + FOO, [], PS, writers=([], [CORE])))
         add(S("wo-pip-file-before-removed" + f, BASE + FOO, [("rm", CORE)], PS, writers=([CORE], [])))
-        add(S("wo-pip-record-after" + f, BASE + FOO, [], PS, writers=([], [REC])))
+        add(S("wo-pip-record-after" + f, BASE + FOO, [], PS, writers=([], [REC]), tags=["P51"], refusal="verify:writer-held-database"))
         add(S("wo-dpkg-file-after" + f, BASE + D, [("write", TOOLF, b"#!/bin/sh\necho owned\n")], PS, writers=([], [TOOLF])))
-        add(S("wo-pip-install-record" + f, BASE + FOO, bar, PS, writers=([], [BAR_REC]), tags=["P10", "P43"]))
-    add(S("wo-pip-record-before", BASE + FOO, [], spec_of(), writers=([REC], [])))
+        add(S("wo-pip-install-record" + f, BASE + FOO, bar, PS, writers=([], [BAR_REC]), tags=["P51"], refusal="verify:writer-held-database"))
+    add(S("wo-pip-record-before", BASE + FOO, [], spec_of(), writers=([REC], []), tags=["P51"], refusal="export:writer-held-database"))
     add(S("wo-pip-record-forged", BASE + FOO,
           [op for op in pip_ops("foo", "1.0", dict(FOO_FILES, **{"foo/core.py": (b"def run():\n    return 9\n", 0o644)}))
-           if op[1] in (CORE, REC)], spec_of(), writers=([], [REC]), tags=["P8"]))
+           if op[1] in (CORE, REC)], spec_of(), writers=([], [REC]), tags=["P51"], refusal="verify:writer-held-database"))
     add(S("wo-pip-removed-record", BASE + FOO, [("rmtree", SITE + "/foo-1.0.dist-info"), ("rmtree", SITE + "/foo")], spec_of(),
-          writers=([REC], []), tags=["P10"]))
+          writers=([REC], []), tags=["P51"], refusal="export:writer-held-database"))
     add(S("wo-pip-install-file", BASE + FOO, bar, spec_of(), writers=([], [SITE + "/bar/__init__.py"]), tags=["P43"]))
     up = ([("rmtree", SITE + "/foo-1.0.dist-info")] + pip_ops("foo", "2.0", FOO_FILES, write=False))
-    add(S("wo-pip-upgrade-record", BASE + FOO, up, spec_of(), writers=([], [SITE + "/foo-2.0.dist-info/RECORD"]), tags=["P10", "P43"]))
+    add(S("wo-pip-upgrade-record", BASE + FOO, up, spec_of(), writers=([], [SITE + "/foo-2.0.dist-info/RECORD"]), tags=["P51"], refusal="verify:writer-held-database"))
     add(S("wo-pip-at-reset-match", BASE + FOO, [], spec_of(), writers=([CORE], []), tags=["P44"]))
     add(S("wo-pip-at-reset-mismatch", BASE + pip_ops("baz", "0.1", {"baz.py": (b"B = 1\n", 0o644)}, bad={"baz.py"}), [], spec_of(),
           writers=([SITE + "/baz.py"], []), tags=["P44"]))
     add(S("wo-pip-pth-in-marked-record", BASE + pip_ops("pthpkg", "1.0", {"pthpkg.pth": (b"import pthpkg\n", 0o644)}),
           [("write", SITE + "/pthpkg.pth", b"import os\n")], spec_of(),
-          writers=([], [SITE + "/pthpkg-1.0.dist-info/RECORD"]), tags=["P48"]))
+          writers=([], [SITE + "/pthpkg-1.0.dist-info/RECORD"]), tags=["P51"], refusal="verify:writer-held-database"))
+    add(S("wo-dpkg-at-reset-mismatch", BASE + dpkg_ops([dict(TOOL, md5_override={"usr/share/doc/tool/README": "f" * 32})]), [], spec_of(),
+          writers=(["usr/share/doc/tool/README"], []), tags=["P44"]))
+    add(S("wo-pyc-at-reset-no-hash", BASE + PYC_TREE_EARLY, [], spec_of(), writers=([PYCF_EARLY], []), tags=["P44"]))
     add(S("wo-pip-pth-marked", BASE + FOO, [("file", SITE + "/evil.pth", b"import os\n")], writers=([], [SITE + "/evil.pth"]), tags=["P47"]))
     PYCF = SITE + "/pycpkg/__pycache__/core.cpython-312.pyc"
     PYC_TREE = (pip_ops("pycpkg", "1.0", {"pycpkg/core.py": (b"def run():\n    return 1\n", 0o644)},
@@ -1041,24 +1073,35 @@ def writer_scenarios():
     add(S("wo-pyc-marked", BASE + PYC_TREE, [("write", PYCF, b"\xcb\x0d\x0d\x0a PATCHED")], spec_of(), writers=([], [PYCF]), tags=["P36"]))
     add(S("wo-dpkg-conffile", BASE + D, [("write", CONF, b"verbose = true\n")], spec_of(), writers=([], [CONF]), tags=["P47"]))
     add(S("wo-dpkg-at-reset", BASE + D, [], spec_of(), writers=([TOOLF], []), tags=["P44"]))
-    add(S("wo-dpkg-status-before", BASE + D, [], spec_of(), writers=([STATUS], []), tags=["P44"]))
-    add(S("wo-dpkg-status-after", BASE + D, [], spec_of(), writers=([], [STATUS])))
-    add(S("wo-dpkg-md5sums-before", BASE + D, [], spec_of(), writers=(["var/lib/dpkg/info/tool.md5sums"], []), tags=["P44"]))
+    add(S("wo-dpkg-status-before", BASE + D, [], spec_of(), writers=([STATUS], []), tags=["P51"], refusal="export:writer-held-database"))
+    add(S("wo-dpkg-status-to-checkpoint", BASE + D, [], spec_of(), writers=([], [STATUS]), verify={"to": "check"}, tags=["P51"],
+          refusal="verify:writer-held-database"))
+    add(S("wo-dpkg-status-nospec", BASE + D, [], None, writers=([], [STATUS]), tags=["P51"], refusal="verify:writer-held-database"))
+    add(S("wo-dpkg-list-not-refused", BASE + D, [], spec_of(), writers=(["var/lib/dpkg/info/tool.list"], ["var/lib/dpkg/info/tool.list"]),
+          tags=["P51"]))
+    add(S("wo-pip-metadata-not-refused", BASE + FOO, [], spec_of(), writers=([SITE + "/foo-1.0.dist-info/METADATA"], []), tags=["P51"]))
+    add(S("wo-dpkg-md5sums-stray", BASE + D + [("file", "var/lib/dpkg/info/gone.md5sums", b"")], [], spec_of(),
+          writers=(["var/lib/dpkg/info/gone.md5sums"], []), tags=["P51"], refusal="export:writer-held-database"))
+    add(S("wo-dpkg-status-after", BASE + D, [], spec_of(), writers=([], [STATUS]), tags=["P51"], refusal="verify:writer-held-database"))
+    add(S("wo-dpkg-md5sums-before", BASE + D, [], spec_of(), writers=(["var/lib/dpkg/info/tool.md5sums"], []), tags=["P51"], refusal="export:writer-held-database"))
     tool2 = dict(TOOL, version="1.1-1", files=dict(TOOL["files"], **{TOOLF: (TOOL_V2, 0o755)}))
     upg = [op for op in dpkg_ops([tool2, LIBX]) if op[1] != CONF]
-    add(S("wo-dpkg-upgrade-status", BASE + D, upg, spec_of(), writers=([], [STATUS]), tags=["P10"]))
+    add(S("wo-dpkg-upgrade-status", BASE + D, upg, spec_of(), writers=([], [STATUS]), tags=["P51"], refusal="verify:writer-held-database"))
     add(S("wo-dpkg-upgrade-file", BASE + D, upg, spec_of(), writers=([], [TOOLF]), tags=["P10", "P43"]))
 
     # -- V4-R6: mark never trusts a marked entry; a writer gone is read again, one still there marked
     add(S("wo-mark-writer-gone", BASE, [], None, writers=([], ["README.md"]), verify={"to": "trusted", "mark_writers": "first"}))
+    add(S("wo-mark-hardlink-writer-gone", BASE + [("hardlink", "elsewhere/readme", "README.md")], [], None,
+          writers=([], ["elsewhere/readme"]), verify={"to": "trusted", "mark_writers": "first"}))
     add(S("wo-mark-writer-stays", BASE, [], None, writers=([], ["README.md"]), verify={"to": "trusted", "mark_writers": "both"}))
 
     # -- V4-R2, V4-R4: earlier manifests read as unmarked, and a strict reader's refusals
     add(S("verify-v3-bundle", BASE, [("write", "tests/test_api.py", TEST_API.replace(b"        assert True\n", b""))],
           spec_of(rule("tests/**", "no_write")), verify={"manifest": "v3"}, tags=["P41"]))
     add(S("verify-v3-bundle-packages", BASE + FOO, [("write", CORE, b"x = 1\n")], spec_of(frozen=True), verify={"manifest": "v3"}, tags=["P41"]))
+    add(S("verify-v4-unguarded-at-its-bound", BASE, [], None, verify={"manifest": "unguarded-max"}))
     for how in ("trailer-missing-writer-open", "trailer-missing-unguarded", "v3-with-trailer-key", "v3-with-entry-key",
-                "count-too-low", "count-too-high", "false", "not-a-bool", "on-stored", "on-dir", "on-unverified", "no-hash"):
+                "count-too-low", "count-too-high", "unguarded-too-large", "false", "not-a-bool", "on-stored", "on-dir", "on-unverified", "no-hash"):
         tree = BASE + [("file", "data/blob.bin", BLOB)] + ([("sparse", "data/big.bin", 67108865)] if how == "on-unverified" else [])
         add(S("verify-v4-refused-" + how, tree, [], None, verify={"manifest": "break:" + how}, refusal="verify:v4-" + how))
     return out
