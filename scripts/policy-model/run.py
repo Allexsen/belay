@@ -523,6 +523,8 @@ def _run(sc, rep, cov, vstate, tmp, answered, holds):
         rep.disagree(sc, "export's exit code", str(ecode) + (" (%s)" % exp if ecode else ""),
                      "%d %s" % (rc, se.strip()))
         return
+    if spec_raw is not None and model.version_refused(spec_raw) and model.NOT_VERSION_2 not in se:
+        rep.disagree(sc, "PV2-1: export's words", model.NOT_VERSION_2, se.strip()[:400])
     if ecode == 4 and model.NO_COPY not in se:
         rep.disagree(sc, "V4-S1: export's words", model.NO_COPY, se.strip()[:400])
     if ecode != 0:
@@ -676,6 +678,8 @@ def _run(sc, rep, cov, vstate, tmp, answered, holds):
         cov.saw("refusal " + sc["refusal"])
     if rc != ecode_v:
         rep.disagree(sc, "verify's exit code", str(ecode_v), "%d %s" % (rc, se.strip()[:400]))
+    if vspec_raw is not None and model.version_refused(vspec_raw) and model.NOT_VERSION_2 not in se:
+        rep.disagree(sc, "PV2-1: verify's words", model.NOT_VERSION_2, se.strip()[:400])
     if refusal == 4 and model.database_without_copy(A) is not None and model.NO_COPY not in se:
         rep.disagree(sc, "V4-S1: verify's words", model.NO_COPY, se.strip()[:400])
     if lines is None:

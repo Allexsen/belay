@@ -85,7 +85,7 @@ def verify(spec_raw, before, after, lines=(), outside=0, wb=frozenset(), wa=froz
 
 
 def fixture_protected_write():
-    spec = b'{"belay_protect":1,"protect":[{"path":"tests/**","mode":["no_write"]}]}'
+    spec = b'{"belay_protect":2,"protect":[{"path":"tests/**","mode":["no_write"]}]}'
     before = {b".": raw("dir", D, ino=2), b"tests": raw("dir", D, ino=3),
               b"tests/test_api.py": raw("reg", F, TEST_API, ino=4)}
     after = dict(before)
@@ -205,7 +205,7 @@ def fixture_dpkg_bundle_and_tamper():
          b"var": raw("dir", D), b"var/lib": raw("dir", D), b"var/lib/dpkg": raw("dir", D),
          b"var/lib/dpkg/status": raw("reg", F, status), b"var/lib/dpkg/info": raw("dir", D),
          b"var/lib/dpkg/info/tool.md5sums": raw("reg", F, sums)}
-    code, exp = model.export_expect("/w", "/out/b.bundle", b'{"belay_protect":1,"protect":[],"frozen_packages":true}', [], B)
+    code, exp = model.export_expect("/w", "/out/b.bundle", b'{"belay_protect":2,"protect":[],"frozen_packages":true}', [], B)
     check("dpkg packages member", model.packages_member(exp["lines"]).decode().split("\n"), [
         '{"db":"dpkg","package":"tool:amd64","version":"1.0-1","path":"etc/tool.conf","conffile":true,"at_reset":"match"}',
         '{"db":"dpkg","package":"tool:amd64","version":"1.0-1","path":"usr/bin/tool","at_reset":"match"}', ""])
@@ -231,7 +231,7 @@ def fixture_pip_reinstall_judged():
         return ("pkg/core.py,sha256=%s,%d\npkg-1.0.dist-info/RECORD,,\n" % (b64sha(core), len(core))).encode()
     B = {b".": raw("dir", D), b"pkg": raw("dir", D), b"pkg/core.py": raw("reg", F, core1, ino=5),
          b"pkg-1.0.dist-info": raw("dir", D), b"pkg-1.0.dist-info/RECORD": raw("reg", F, rec(core1), ino=6)}
-    code, exp = model.export_expect("/w", "/out/b.bundle", b'{"belay_protect":1,"protect":[]}', [], B)
+    code, exp = model.export_expect("/w", "/out/b.bundle", b'{"belay_protect":2,"protect":[]}', [], B)
     A = dict(B)
     A[b"pkg/core.py"] = raw("reg", F, core2, ino=5, mtime=200)
     A[b"pkg-1.0.dist-info/RECORD"] = raw("reg", F, rec(core2), ino=6, mtime=200)
@@ -254,7 +254,7 @@ def fixture_pyc_decision_186():
     B = {b".": raw("dir", D), b"pkg": raw("dir", D), b"pkg/core.py": raw("reg", F, core, ino=5),
          b"pkg/__pycache__": raw("dir", D), b"pkg/__pycache__/core.cpython-312.pyc": raw("reg", F, pyc, ino=6),
          b"pkg-1.0.dist-info": raw("dir", D), b"pkg-1.0.dist-info/RECORD": raw("reg", F, record, ino=7)}
-    code, exp = model.export_expect("/w", "/out/b.bundle", b'{"belay_protect":1,"protect":[]}', [], B)
+    code, exp = model.export_expect("/w", "/out/b.bundle", b'{"belay_protect":2,"protect":[]}', [], B)
 
     def judge(A):
         ctx = {"scope": "/w", "bundle_sha256": "b" * 64, "spec": exp["spec"],
@@ -312,7 +312,7 @@ def fixture_git_reset():
 
 def fixture_writer_open():
     """Manifest v4: the example of the pin, then V4-D1..D4 and V4-D7 by hand."""
-    spec = b'{"belay_protect":1,"protect":[{"path":"g/**","mode":["no_write"]}]}'
+    spec = b'{"belay_protect":2,"protect":[{"path":"g/**","mode":["no_write"]}]}'
     H = {(10, 4)}                                      # the inode a writer held
     base = {b".": raw("dir", D, ino=2), b"g": raw("dir", D, ino=3)}
     x = raw("reg", F, b"one\n", ino=4)
@@ -370,7 +370,7 @@ def fixture_writer_open():
         '"text":"g/x: protected by g/**, cannot be verified: writer_open","paths":["g/x"]}'])
     check("the trailer: unknown 1, provisional false (V4-D6)", (json.loads(got[-1])["unknown"], json.loads(got[-1])["provisional"]), (1, False))
     check("and a violation fails the run", model.verify_exit(flags, True), 1)
-    got, _f = verify(b'{"belay_protect":1,"protect":[{"path":"g/x","expected_sha256":"%s"}]}'
+    got, _f = verify(b'{"belay_protect":2,"protect":[{"path":"g/x","expected_sha256":"%s"}]}'
                      % model.sha256(b"one\n").encode(), B, {**base, b"g/x": other}, wa=H)
     check("a marked hash against expected_sha256 stops at unverifiable (V4-D8)",
           [json.loads(ln)["flag"] for ln in got[1:-1]], ["protected_path_unverifiable"])
@@ -379,7 +379,7 @@ def fixture_writer_open():
     # V4-S2: one side, unknown, no mark: `raced`, under a rule that reads the other side
     hdr = model.view({**base, b"g/x": x}, model.HASH_BOUND_SPEC)
     hdr[b"g/x"]["raced"] = True
-    ctx = {"scope": "/w", "bundle_sha256": "b" * 64, "spec": model.parse_spec(b'{"belay_protect":1,"protect":[{"path":"g/**","mode":["no_create"]}]}'),
+    ctx = {"scope": "/w", "bundle_sha256": "b" * 64, "spec": model.parse_spec(b'{"belay_protect":2,"protect":[{"path":"g/**","mode":["no_create"]}]}'),
            "before": model.Side(hdr, 10, []), "after": model.Side(model.view(base, model.HASH_BOUND_SPEC), 10, []),
            "bundle_lines": [], "outside_scope": 0, "before_sha256": "1" * 64, "after_sha256": "2" * 64}
     check("one side, unknown, whichever side the rule reads (V4-S2)", [f.kind for f in model.verify_lines(ctx)[1]],
@@ -465,14 +465,14 @@ def tables():
           ("a/b", "a", True), ("tests/**", "tests/.cache", False), ("**", "x", True)]
     for pat, ex, want in Cv:
         check("covers %s %s" % (pat, ex), model.covers(pat.encode().split(b"/"), ex.encode()), want)
-    for raw_ in (b'{"belay_protect":1,"protect":[]}',
-                 b' {"belay_protect":1,"protect":[{"path":"a/*","mode":["no_create","no_write"]}],"path_dirs":[]} \n'):
+    for raw_ in (b'{"belay_protect":2,"protect":[]}',
+                 b' {"belay_protect":2,"protect":[{"path":"a/*","mode":["no_create","no_write"]}],"path_dirs":[]} \n'):
         try:
             model.parse_spec(raw_)
         except model.Refused as r:
             check("spec accepted: %r" % raw_, r.why, None)
-    for raw_ in (b'{"belay_protect":1,"protect":[],"protect":[]}', b'{"belay_protect":1}', b'{"belay_protect":1,"protect":[]} 1',
-                 b'{"belay_protect":1,"protect":[{"path":"a"}]}', b'{"belay_protect":1,"protect":[{"path":"a/","mode":["no_write"]}]}'):
+    for raw_ in (b'{"belay_protect":2,"protect":[],"protect":[]}', b'{"belay_protect":2}', b'{"belay_protect":2,"protect":[]} 1',
+                 b'{"belay_protect":2,"protect":[{"path":"a"}]}', b'{"belay_protect":2,"protect":[{"path":"a/","mode":["no_write"]}]}'):
         try:
             model.parse_spec(raw_)
             check("spec refused: %r" % raw_, "accepted", "refused")
