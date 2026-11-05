@@ -7,6 +7,8 @@ list, and make it reversible.
 that may still change, and the latest pre-release is v0.1.0-alpha.4. Nothing that changes your files
 exists yet.
 
+Tested against 2,115 published agent runs: [results](bench/replay/RESULTS.md).
+
 > **Pre-alpha. The most useful contribution right now is real-world
 > use.** Run belay around something you actually do (an agent session,
 > a build, an install) and compare its report with what really
