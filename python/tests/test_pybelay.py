@@ -82,7 +82,7 @@ class Reward(Base):
     def spec(self):
         p = os.path.join(self.t, "spec.json")
         with open(p, "w") as f:
-            json.dump({"belay_protect": 1, "protect": [{"path": "tests/**", "mode": ["no_write"]}]}, f)
+            json.dump({"belay_protect": 2, "protect": [{"path": "tests/**", "mode": ["no_write"]}]}, f)
         return p
 
     def test_clean_keeps_the_reward_and_says_why(self):
