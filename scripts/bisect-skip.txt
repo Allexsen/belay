@@ -179,3 +179,13 @@
 2026-11-03T16:55:54+04:00	oracle: a reflog record's findings in the kinds table's order; an operation of any length read (88454c8)
 # Decision 213 (G25, G26): the pin fails make oracle until its author follows (the start-up quote of E12).
 2026-11-03T18:01:45+04:00	pins: E12 -- ids lowercased as git prints them; a symbolic loose branch is an alias (decision 213)
+# Manifest v4: the code fails make oracle and make policy-model until their authors follow; the models fail until the last of their commits.
+2026-11-05T00:51:23+04:00	manifest v4: a hash a concurrent writer may have torn is marked, and never diffed
+2026-11-05T01:00:13+04:00	test: the mmap writer really writes; the probe's tests reach a file too large to store
+2026-11-05T01:12:42+04:00	manifest v4: what the review and the policy model's author found
+2026-11-05T01:29:44+04:00	manifest v4: a marked hash is no hash anywhere; a mode still speaks
+2026-11-05T10:23:23+04:00	test: the lease tests' skips declared: macOS has no leases, overlayfs hides a closed mapping
+2026-11-05T01:20:29+04:00	oracle: manifest v4 -- writer_open, its trailer counts, versions 3 and 4
+2026-11-05T01:06:55+04:00	policy-model: manifest v4 -- writer_open, read and judged from the pins
+2026-11-05T10:25:51+04:00	policy-model: the author's ruling on manifest v4 -- V4-D8, D9, the V4-S rows
+2026-11-05T10:39:44+04:00	policy-model: V4-S3, V4-D9, V4-D8 and V4-S1 as the author reworded them
