@@ -7,6 +7,13 @@ list, and make it reversible.
 that may still change, and the latest pre-release is v0.1.0-alpha.2. Nothing that changes your files
 exists yet.
 
+> **Pre-alpha. The most useful contribution right now is real-world
+> use.** Run belay around something you actually do (an agent session,
+> a build, an install) and compare its report with what really
+> happened. If it missed a change, invented one, or buried the real
+> change in noise, open an issue with the receipt. That's the data
+> belay needs most.
+
 ## What exists today
 
 - `belay check`, `mark`, `diff` and `log` (see [docs/cli.md](docs/cli.md)): record a directory as a
