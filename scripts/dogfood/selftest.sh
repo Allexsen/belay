@@ -537,6 +537,8 @@ printf 'n\n' > "$G/aaa.txt"; printf 'z2\n' >> "$G/src/z.c"; printf 'y2\n' >> "$G
 printf 'B=2\n' >> "$G/.env"; printf '\000bin2' > "$G/out/c.bin"
 gk post t40
 gk pre t41 "stash and pop"; gg stash -q && gg stash pop -q; gk post t41
+gk pre t43 "hold"; printf 'h\n' > "$G/out/h.o"; printf 't\n' > "$G/held.txt"; exec 8>>"$G/out/h.o" 9>>"$G/held.txt"; gk post t43
+exec 8>&- 9>&-; gk pre t44 "let go"; gk post t44
 gk pre t42 "undo y"; printf 'y\n' > "$G/src/y.c"; gk post t42
 out=$(gk stop)
 RG=$(ls -t "$T/git-state/dogfood"/g1.turn-*.txt | head -1)
@@ -550,6 +552,12 @@ grep -A8 '^Bash: stash and pop$' "$RG" | grep -q '^  git bookkeeping: [0-9]* cha
 grep -q '^  edited     1: src/z\.c +1 -0; 1 more touched and restored$' "$RG" \
     || fail "the summary is not the turn's net result: $(sed -n '/^summary$/,/^$/p' "$RG")"
 grep -A3 '^Bash: undo y$' "$RG" | grep -q '^  M src/y\.c' || fail "a call's own change no longer listed: $(cat "$RG")"
+grep -A8 '^Bash: hold$' "$RG" | grep -q '^  git-ignored: 1 unknown under out/ (writer_open 1)$' \
+    || fail "an unknown row under an ignored directory not folded with its reason: $(cat "$RG")"
+grep -A8 '^Bash: hold$' "$RG" | grep -q '^  ? held\.txt   unknown: writer_open' && ! grep -q '^  ? out/h\.o' "$RG" \
+    || fail "an unknown row on an untracked path not named, or an ignored one named: $(cat "$RG")"
+grep -q '^  unknown    .*1 git-ignored under out/ (writer_open 1)' "$RG" \
+    || fail "the summary does not fold an ignored unknown row: $(sed -n '/^summary$/,/^$/p' "$RG")"
 grep -q '^  ignored    1 edited: \.env +1 -0; [0-9]* under out/$' "$RG" \
     || fail "an ignored file's edit not named in the summary, or a binary not folded: $(sed -n '/^summary$/,/^$/p' "$RG")"
 grep -A8 '^Bash: make$' "$RG" | grep -q '^  M \.env   (git-ignored)   +1 -0 lines' && ! grep -q 'c\.bin' "$RG" \

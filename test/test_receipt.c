@@ -453,6 +453,33 @@ TEST(ignored_text_edits_are_named_and_the_rest_ignored_folds) {
     g_class = NULL;
 }
 
+/* Unknown rows under an ignored directory fold, counted by reason, most first;
+ * on tracked and untracked paths, and at the top, they stay named (2026-11-05). */
+TEST(ignored_unknown_rows_fold_by_directory_and_reason) {
+    static const char diff[] = HEAD
+        "{\"path\":\"a.txt\",\"outcome\":\"unknown\",\"type\":\"reg\",\"unknown\":[\"unstable\"]}\n"
+        "{\"path\":\"out\",\"outcome\":\"unknown\",\"type\":\"dir\",\"unknown\":[\"listing_incomplete\"]}\n"
+        "{\"path\":\"out/a.o\",\"outcome\":\"unknown\",\"type\":\"reg\",\"unknown\":[\"listing_incomplete\"]}\n"
+        "{\"path\":\"out/b.o\",\"outcome\":\"unknown\",\"type\":\"reg\",\"unknown\":[\"raced\",\"unverified\"]}\n"
+        "{\"path\":\"out/c.o\",\"outcome\":\"added\",\"type\":\"reg\"}\n"
+        "{\"path\":\"src/m.c\",\"outcome\":\"unknown\",\"type\":\"reg\",\"unknown\":[\"raced\"]}\n"
+        "{\"path\":\"x.log\",\"outcome\":\"unknown\",\"type\":\"reg\",\"unknown\":[\"writer_open\"]}\n"
+        TRAIL("0", "1", "0", "6", "0", "0", "0");
+    g_class = fake_class;
+    g_class_fails = false;
+    ASSERT_EQ_INT(0, render(diff, false));
+    ASSERT_TRUE(strstr(g_text, "  ? src/m.c   unknown: raced\n") != NULL);
+    ASSERT_TRUE(strstr(g_text, "  ? a.txt   unknown: unstable\n") != NULL);
+    ASSERT_TRUE(strstr(g_text, "  ? x.log   unknown: writer_open\n") != NULL);
+    ASSERT_TRUE(strstr(g_text, "  git-ignored: 1 change under out/\n") != NULL);
+    ASSERT_TRUE(strstr(g_text, "  git-ignored: 3 unknown under out/ (listing_incomplete 2, raced 1)\n") != NULL);
+    ASSERT_TRUE(strstr(g_text, "out/a.o") == NULL);
+    ASSERT_EQ_INT(0, render(diff, true));                           /* --all: every row */
+    ASSERT_TRUE(strstr(g_text, "  ? out/a.o   unknown: listing_incomplete\n") != NULL);
+    ASSERT_TRUE(strstr(g_text, "git-ignored:") == NULL);
+    g_class = NULL;
+}
+
 /* Manifest v4: what the writer probe could not ask, on one line, only when
  * there is something to say. */
 TEST(files_hashed_unguarded_are_said_on_one_line) {
@@ -488,6 +515,7 @@ int main(void) {
     RUN(git_bookkeeping_folds_and_counts_moves_in_place);
     RUN(ignored_text_edits_are_named_and_the_rest_ignored_folds);
     RUN(files_hashed_unguarded_are_said_on_one_line);
+    RUN(ignored_unknown_rows_fold_by_directory_and_reason);
     free(g_text);
     return belay_test_report();
 }
