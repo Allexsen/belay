@@ -229,19 +229,18 @@ P43 SETTLED (V4-D8). `self_consistent` "follows from it": a file marked after ha
     does not match its database, as an `unverified` one does not; dpkg's MD5 is a hash of the same
     read, so the same.
 
-P44 SETTLED (V4-D8), with one reading of this model's. "A package row's `at_reset` (B-P6) is
-    `unverified`" for a file marked at export. A row whose database gives no hash stays `no_hash`
-    (P22: decided before the manifest is consulted): V4-D8 speaks of the entry's hash, and such a
-    row never reads it, so P-T6 counts it as before.
+P44 SETTLED (V4-D8). "A package row with a database hash to compare has `at_reset` (B-P6)
+    `unverified` ...; a row without one stays `no_hash`".
 
 P45 SETTLED (V4-D3). A one-sided entry: an earlier rule of diff-v1 gives its one reason; else
     "the reasons are the entry's own: `writer_open`, after `raced` when it carries both". An
     ancestor carrying `writer_open` decides nothing: V4-D3 names "a raced ancestor".
 
-P46 SETTLED the other way (V4-S3). "`tests_weakened`: a file of size 0 counts as held, and empty,
-    with or without a copy". Read as written: of any entry of size 0, one belay could not open
-    included, and of that row alone. pytest_config_changed reads "both sides' copies", and a
-    marked file has none, an empty one included.
+P46 SETTLED the other way (V4-S3). "`tests_weakened` alone: a file of size 0 with a hash counts as
+    held, and empty, with or without a copy ... A file belay could not read has no hash and is not
+    held." "With a hash" is the entry's `sha256`, a marked entry's included (V4-D8 says it has none
+    for any consumer, but "with or without a copy" is there for it: no other file of size 0 lacks
+    one). pytest_config_changed reads "both sides' copies": a marked file has none.
 
 P47 New with manifest v4, narrowed by V4-D9. A marked path is never `added`, `removed`, `modified`
     or `type_changed` (V4-D1, V4-D3): touches_tests, python_startup_hook_changed, conffile_changed
@@ -249,15 +248,16 @@ P47 New with manifest v4, narrowed by V4-D9. A marked path is never `added`, `re
     (edits_ci_config, conftest_changed, privilege_changed) gives its record, provisional (P-F3).
     new_executable_on_path is V4-D9's: "the outcome the entry would otherwise have had" is the
     diff with no `writer_open` on either side (the marked hashes then compare, which only tells
-    `modified` from `metadata_only`, and the row treats those alike); if that is `unknown`, by a
-    `raced` or an earlier rule's reason, it gives nothing. "Only `writer_open` does this" is read
-    of every other `unknown` too, so "a file whose execute bits were added" needs an outcome that
-    is not `unknown`. An entry carrying both `raced` and `writer_open` is therefore silent: with
-    the mark gone it is still `unknown`. The other reading, "a marked entry", fires.
+    `modified` from `metadata_only`, and the row treats those alike) and, since "An entry carrying
+    `raced` as well fires too: the mark decides", no `raced` on that path, on either side; a raced
+    ancestor stays (V4-D3's earlier rule). If that is still `unknown`, by an earlier rule or the
+    other side's being unreadable, it gives nothing. "Only `writer_open` does this" is read of every
+    other `unknown` too, so "a file whose execute bits were added" needs an outcome that is not
+    `unknown`.
 
-P52 New with manifest v4. tests_weakened's "removed" is the outcome, as in touches_tests's row, and
-    V4-D3 says a marked path is "never `added` or `removed`": a marked file gone after gives no
-    record, even when it was empty and so held (V4-S3), and nothing fell.
+P52 SETTLED the other way (V4-S3). tests_weakened's "removed": "one that was a regular file before
+    and is not after, whatever the diff's outcome". A type change counts, and an `unknown`; a side
+    not captured stays not held (P13).
 
 P48 Withdrawn. A RECORD marked after no longer reaches a judgement (V4-S1).
 
@@ -267,11 +267,10 @@ P50 SETTLED (V4-D7, V4-S2). A path on one side only whose outcome is `unknown`, 
     protected_path_unverifiable under any rule that matches it, "whichever side the rule's modes
     read". P6 now decides nothing for an `unknown`: on both sides, every rule reads one of them.
 
-P51 New with V4-S1. "A package database file (`RECORD`, dpkg's `status`, `info/*.md5sums`)" is read
-    as a closed list, and of any file of those names, whether or not an installed package's
-    stanza leads to it: METADATA and `*.list`, also interpreters' files, are not refused. Where the
-    refusal comes: after every other, since it needs a capture, so after the source's in verify
-    (B-R6), with `--to` of the checkpoint's manifest too.
+P51 SETTLED (V4-S1), "these by name": METADATA and `*.list` are not refused, and an `info/*.md5sums`
+    no installed stanza leads to is. Where the refusal comes is this model's: after every other,
+    since it needs a capture, so after the source's in verify (B-R6), with `--to` of the checkpoint's
+    manifest too.
 """
 
 import base64
@@ -649,7 +648,7 @@ def held(e):
 
 def test_side(e):
     """tests_weakened's copy of a side (V4-S3, P46)."""
-    if e is not None and e["type"] == "reg" and e["size"] == 0:
+    if e is not None and e["type"] == "reg" and e["size"] == 0 and e["sha256"] is not None:
         return b""
     return side_bytes(e)
 
@@ -1895,7 +1894,9 @@ def other_flags(ctx, recs, B, A, events):
                 mk = markers_added(xb, xa)
                 emptied = (a is not None and a["type"] == "reg" and a["size"] == 0
                            and b is not None and b["type"] == "reg" and b["size"] > 0)
-                if o == "removed" or emptied or aa < ab or ta < tb or mk:
+                gone = (b is not None and b["type"] == "reg"                          # V4-S3
+                        and (a is None or a["type"] != "reg"))
+                if gone or emptied or aa < ab or ta < tb or mk:
                     flags.append(Flag("tests_weakened", "signal",
                                       [("path", p), ("language", "python"), ("assertions_before", ab),
                                        ("assertions_after", aa), ("tests_before", tb), ("tests_after", ta),
@@ -2007,8 +2008,11 @@ def verify_lines(ctx):
     B, A = bs.entries, as_.entries
     recs = diff(bs, as_)
 
-    def unmarked(side):
-        return Side({p: dict(e, writer_open=False) for p, e in side.entries.items()}, side.root_dev, side.excluded)
+    marked = {p for side in (B, A) for p, e in side.items() if e["writer_open"]}
+
+    def unmarked(side):                                                              # P47
+        return Side({p: dict(e, writer_open=False, raced=e["raced"] and p not in marked)
+                     for p, e in side.entries.items()}, side.root_dev, side.excluded)
     ctx["unmarked"] = diff(unmarked(bs), unmarked(as_))                              # V4-D9
     events = pip_events(recs, B, A) + dpkg_events(recs, B, A) + git_events(recs, B, A)
     flags = protected_flags(spec, recs, B, A)
