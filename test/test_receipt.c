@@ -462,18 +462,20 @@ TEST(ignored_unknown_rows_fold_by_directory_and_reason) {
         "{\"path\":\"out/a.o\",\"outcome\":\"unknown\",\"type\":\"reg\",\"unknown\":[\"listing_incomplete\"]}\n"
         "{\"path\":\"out/b.o\",\"outcome\":\"unknown\",\"type\":\"reg\",\"unknown\":[\"raced\",\"unverified\"]}\n"
         "{\"path\":\"out/c.o\",\"outcome\":\"added\",\"type\":\"reg\"}\n"
+        "{\"path\":\"out/held\",\"outcome\":\"unknown\",\"type\":\"reg\",\"unknown\":[\"raced\",\"writer_open\"]}\n"
         "{\"path\":\"src/m.c\",\"outcome\":\"unknown\",\"type\":\"reg\",\"unknown\":[\"raced\"]}\n"
         "{\"path\":\"x.log\",\"outcome\":\"unknown\",\"type\":\"reg\",\"unknown\":[\"writer_open\"]}\n"
-        TRAIL("0", "1", "0", "6", "0", "0", "0");
+        TRAIL("0", "1", "0", "7", "0", "0", "0");
     g_class = fake_class;
     g_class_fails = false;
     ASSERT_EQ_INT(0, render(diff, false));
     ASSERT_TRUE(strstr(g_text, "  ? src/m.c   unknown: raced\n") != NULL);
     ASSERT_TRUE(strstr(g_text, "  ? a.txt   unknown: unstable\n") != NULL);
-    ASSERT_TRUE(strstr(g_text, "  ? x.log   unknown: writer_open\n") != NULL);
+    ASSERT_TRUE(strstr(g_text, "  ? x.log   (git-ignored)   unknown: writer_open\n") != NULL);
     ASSERT_TRUE(strstr(g_text, "  git-ignored: 1 change under out/\n") != NULL);
     ASSERT_TRUE(strstr(g_text, "  git-ignored: 3 unknown under out/ (listing_incomplete 2, raced 1)\n") != NULL);
     ASSERT_TRUE(strstr(g_text, "out/a.o") == NULL);
+    ASSERT_TRUE(strstr(g_text, "  ? out/held   (git-ignored)   unknown: raced, writer_open\n") != NULL);   /* never folded */
     ASSERT_EQ_INT(0, render(diff, true));                           /* --all: every row */
     ASSERT_TRUE(strstr(g_text, "  ? out/a.o   unknown: listing_incomplete\n") != NULL);
     ASSERT_TRUE(strstr(g_text, "git-ignored:") == NULL);

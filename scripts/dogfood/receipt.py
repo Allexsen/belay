@@ -281,10 +281,11 @@ def ignored_edit(r):
 def ignored_unknown(cls, r):
     """An unknown row under a git-ignored directory: it folds like a change
     (2026-11-05). A file at the top is under none and stays named, as privilege
-    changes do."""
+    changes and entries marked writer_open do."""
     p = path_of(r)
     return (cls is not None and "event" not in r and r.get("outcome") == "unknown"
-            and cls.get(p) == "ignored" and ("/" in p or r.get("type") == "dir") and not privilege_change(r))
+            and cls.get(p) == "ignored" and ("/" in p or r.get("type") == "dir") and not privilege_change(r)
+            and "writer_open" not in (r.get("unknown") or []))
 
 
 def unknown_fold(recs):
