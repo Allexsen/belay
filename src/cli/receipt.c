@@ -279,6 +279,13 @@ static bool only_in_place(const struct jval *f) {
 
 /* A finding of git's that keeps a .git path on its own line: any but the
  * index's "index changed", which folds with the rest (2026-11-04). */
+/* Whether a record's `unknown` names this reason. */
+static bool has_reason(const struct jval *u, const char *why) {
+    for (size_t i = 0; u != NULL && u->t == J_ARR && i < u->n; i++)
+        if (u->kids[i].t == J_STR && strcmp(u->kids[i].s, why) == 0) return true;
+    return false;
+}
+
 /* A text edit among a record's findings. */
 static bool text_edit(const struct jval *f) {
     for (size_t i = 0; f != NULL && f->t == J_ARR && i < f->n; i++) {
@@ -322,9 +329,12 @@ static int record(const struct jval *r, struct ctx *x, const struct receipt_opts
      * directory's -- is named, never folded: it is often .env or local
      * configuration (2026-11-04). A binary rewritten (build output) folds,
      * as added and removed entries do. */
-    const bool ign_edit = x->cls != NULL && c == GC_IGNORED && !is_dir &&
-                          (strcmp(outcome, "type_changed") == 0 ||
-                           (strcmp(outcome, "modified") == 0 && text_edit(jget(r, "findings"))));
+    /* So is an entry marked writer_open, whatever else: a writer at an ignored
+     * file is as much worth naming as an edit to one (2026-11-05). */
+    const bool ign_edit = x->cls != NULL && c == GC_IGNORED &&
+                          (has_reason(jget(r, "unknown"), "writer_open") ||
+                           (!is_dir && (strcmp(outcome, "type_changed") == 0 ||
+                                        (strcmp(outcome, "modified") == 0 && text_edit(jget(r, "findings"))))));
     struct sb b = { 0 };
     sbf(&b, "  %s ", sym(outcome));
     if (have_path) esc(&b, path, plen);
