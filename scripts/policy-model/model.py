@@ -1,6 +1,7 @@
 """policy-model: an independent model of policy.v1, from the pins alone (decision 150, Q9).
 
-Written only from test/expect/policy-v1.md, protect-spec.md and baseline-bundle.md, diff.v1's
+Written only from test/expect/policy-v1.md, protect-spec.md, protect-spec-v2.md and
+baseline-bundle.md, diff.v1's
 pins (diff-fields.md, diff-values.md, finding-kinds.md, diff-events.md), the manifest pins,
 docs/spec prose outside its generated blocks, and docs/cli.md -- never from belay's code, the
 oracle, the reference, or a generated table. Where it and belay disagree, one of them misreads a
@@ -266,6 +267,18 @@ P51 SETTLED (V4-S1), "these by name": METADATA and `*.list` are not refused, and
     no installed stanza leads to is. Where the refusal comes is this model's: after every other,
     since it needs a capture, so after the source's in verify (B-R6), with `--to` of the checkpoint's
     manifest too.
+
+P53 New with protect spec 2. PV2-1's "any other value" takes its message wherever the key has a
+    value, of another type included (`"2"`, `2.0`, `true`, read as PS-R2's "a value of another
+    type"). A spec with no `belay_protect` has no value: refused (2), its words not compared. A
+    spec that also breaks another row is refused (2) with whichever comes first: only the exit
+    code is compared.
+
+P54 New with protect spec 2. PV2-2's "a path matched before whose outcome is `removed`" and PS-M5,
+    which PV2-5 says reads before for deletion too: a path flagged at reset (`unverified`,
+    `unreadable`) and removed is both protected_path_deleted and protected_path_unverifiable, as
+    under no_delete, PS-M5's "whose entry there" being before's. protected_path_written is
+    unchanged: its `rule` is still the first with `no_write` (policy-v1, "the mode concerned").
 """
 
 import base64
@@ -352,6 +365,7 @@ def sha256(b):
 # ---------------------------------------------------------------------------------------------
 # The protect spec (protect-spec.md)
 
+NOT_VERSION_2 = "belay_protect is not 2 (version 1 specs are refused: no_write now forbids deleting; say 2)"
 SPEC_KEYS = ("belay_protect", "protect", "frozen_packages", "path_dirs")
 RULE_KEYS = ("path", "mode", "expected_sha256")
 MODES = ("no_write", "no_delete", "no_create")
@@ -388,6 +402,16 @@ def _pattern(s, what):
     return b.split(b"/")
 
 
+def version_refused(raw):
+    """PV2-1: `raw` is one JSON object whose `belay_protect` is a value other than 2, and nothing
+    else is wrong with it that comes first: the refusal is the pin's message."""
+    try:
+        parse_spec(raw)
+    except Refused as r:
+        return r.why == NOT_VERSION_2 and b"belay_protect" in raw
+    return False
+
+
 def parse_spec(raw):
     """PS-R1, PS-R2: the spec, or Refused(2)."""
     if len(raw) > 1 << 20:
@@ -418,8 +442,8 @@ def parse_spec(raw):
     for k in obj:
         if k not in SPEC_KEYS:
             raise Refused(2, "unknown key " + k)
-    if "belay_protect" not in obj or type(obj["belay_protect"]) is not int or obj["belay_protect"] != 1:
-        raise Refused(2, "belay_protect is not 1")
+    if "belay_protect" not in obj or type(obj["belay_protect"]) is not int or obj["belay_protect"] != 2:
+        raise Refused(2, NOT_VERSION_2)                                              # PV2-1
     if "protect" not in obj or type(obj["protect"]) is not list:
         raise Refused(2, "protect is not an array")
     if len(obj["protect"]) > 4096:
@@ -1675,12 +1699,12 @@ def protected_flags(spec, recs, B, A):
                                       "%s: protected by %s (no_write), %s" % (show(p), r.pattern, outcome),
                                       [p], prov))
             break
-        # PS-M2 no_delete
+        # PS-M2 no_delete, PV2-2 no_write: one flag, whichever modes ask for it (PV2-3, PV2-4)
         for r in matching:
-            if "no_delete" in r.modes:
+            if "no_delete" in r.modes or "no_write" in r.modes:
                 if b is not None and outcome == "removed":
                     flags.append(Flag("protected_path_deleted", "violation", [("path", p), ("rule", r.pattern)],
-                                      "%s: protected by %s (no_delete), removed" % (show(p), r.pattern),
+                                      "%s: protected by %s, removed" % (show(p), r.pattern),
                                       [p], prov))
                 break
         # PS-M3 no_create

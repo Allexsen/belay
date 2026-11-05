@@ -244,7 +244,7 @@ BASE = [
 
 
 def spec_of(*rules, frozen=None, path_dirs=None):
-    s = {"belay_protect": 1, "protect": list(rules)}
+    s = {"belay_protect": 2, "protect": list(rules)}
     if frozen is not None:
         s["frozen_packages"] = frozen
     if path_dirs is not None:
@@ -792,7 +792,7 @@ def scenarios():
           spec_of(rule("a", "no_write")), excludes=["a/b"]))
     add(S("spec-accepted-shapes", BASE,
           [("write", "tests/test_api.py", TEST_API + b"#\n")],
-          b' \n{"protect": [{"mode": ["no_delete", "no_write"], "path": "tests/**"}], "path_dirs": [], "belay_protect": 1,'
+          b' \n{"protect": [{"mode": ["no_delete", "no_write"], "path": "tests/**"}], "path_dirs": [], "belay_protect": 2,'
           b' "frozen_packages": false}\n\t '))
     add(S("verify-to-check", BASE, [("write", "grader/check.py", GRADER + b"#\n")], GW, verify={"to": "check"}))
 
@@ -812,7 +812,7 @@ def scenarios():
     add(S("verify-other-spec", BASE, [], TW, verify={"spec": spec_of(rule("tests/**", "no_delete"))}, refusal="verify:other-spec"))
     add(S("verify-spec-dropped", BASE, [], TW, verify={"spec": None}, tags=["P30"], refusal="verify:spec-dropped"))
     add(S("verify-spec-added", BASE, [], None, verify={"spec": TW}, tags=["P30"], refusal="verify:spec-added"))
-    add(S("verify-spec-refused", BASE, [], TW, verify={"spec": b'{"belay_protect":1,"protect":[],"x":1}'},
+    add(S("verify-spec-refused", BASE, [], TW, verify={"spec": b'{"belay_protect":2,"protect":[],"x":1}'},
           tags=["P24"], refusal="verify:spec-refused"))
     add(S("verify-to-trusted", BASE, [("write", "README.md", b"# app 2\n")], TW, verify={"to": "trusted"},
           refusal="verify:to-trusted"))
@@ -848,7 +848,7 @@ def scenarios():
           verify={"corrupt": "trailing", "spec": spec_of(rule("tests/**", "no_delete"))},
           tags=["P40"], refusal="verify:order-corrupt-before-spec-digest"))
     add(S("verify-order-spec-refused-before-corrupt", BASE, [], TW,
-          verify={"corrupt": "trailing", "spec": b'{"belay_protect":1,"protect":[],"x":1}'},
+          verify={"corrupt": "trailing", "spec": b'{"belay_protect":2,"protect":[],"x":1}'},
           tags=["P40"], refusal="verify:order-spec-refused-before-corrupt"))
     for c in ("trailing", "unknown-key", "short"):
         add(S("verify-corrupt-" + c, BASE, [], TW, verify={"corrupt": c}, refusal="verify:corrupt-" + c))
@@ -1122,27 +1122,30 @@ def _j(s):
     return s.encode()
 
 
-V = '{"belay_protect":1,"protect":[%s]}'
+V = '{"belay_protect":2,"protect":[%s]}'
 R = '{"path":"tests/**","mode":["no_write"]}'
 SPEC_REFUSALS = [
     ("not-json", b"{", []),
     ("trailing-bytes", _j(V % R + " x"), []),
     ("two-objects", _j(V % R + V % R), []),
     ("not-object", b"[]", []),
-    ("not-utf8", b'{"belay_protect":1,"protect":[{"path":"t\xff","mode":["no_write"]}]}', []),
-    ("over-1mib", _j('{"belay_protect":1,"protect":[]%s}' % (" " * (1 << 20))), []),
+    ("not-utf8", b'{"belay_protect":2,"protect":[{"path":"t\xff","mode":["no_write"]}]}', []),
+    ("over-1mib", _j('{"belay_protect":2,"protect":[]%s}' % (" " * (1 << 20))), []),
     ("nan", b'{"belay_protect":NaN,"protect":[]}', []),
-    ("unknown-key", _j('{"belay_protect":1,"protect":[],"frozen":true}'), []),
+    ("unknown-key", _j('{"belay_protect":2,"protect":[],"frozen":true}'), []),
     ("unknown-rule-key", _j(V % '{"path":"a","mode":["no_write"],"modes":[]}'), []),
-    ("dup-key", _j('{"belay_protect":1,"protect":[],"protect":[]}'), []),
+    ("dup-key", _j('{"belay_protect":2,"protect":[],"protect":[]}'), []),
     ("dup-rule-key", _j(V % '{"path":"a","path":"b","mode":["no_write"]}'), []),
-    ("version-2", _j('{"belay_protect":2,"protect":[]}'), []),
-    ("version-string", _j('{"belay_protect":"1","protect":[]}'), []),
-    ("version-float", _j('{"belay_protect":1.0,"protect":[]}'), ["P27"]),
-    ("version-true", _j('{"belay_protect":true,"protect":[]}'), []),
+    ("version-1", _j('{"belay_protect":1,"protect":[]}'), []),
+    ("version-1-with-rules", _j('{"belay_protect":1,"protect":[{"path":"tests/**","mode":["no_write"]}]}'), []),
+    ("version-3", _j('{"belay_protect":3,"protect":[]}'), []),
+    ("version-0", _j('{"belay_protect":0,"protect":[]}'), []),
+    ("version-string", _j('{"belay_protect":"2","protect":[]}'), ["P53"]),
+    ("version-float", _j('{"belay_protect":2.0,"protect":[]}'), ["P27", "P53"]),
+    ("version-true", _j('{"belay_protect":true,"protect":[]}'), ["P53"]),
     ("version-missing", _j('{"protect":[]}'), []),
-    ("protect-missing", _j('{"belay_protect":1}'), []),
-    ("protect-object", _j('{"belay_protect":1,"protect":{}}'), []),
+    ("protect-missing", _j('{"belay_protect":2}'), []),
+    ("protect-object", _j('{"belay_protect":2,"protect":{}}'), []),
     ("protect-over-4096", _j(V % ",".join(['{"path":"a","mode":["no_write"]}'] * 4097)), []),
     ("rule-not-object", _j(V % '"tests/**"'), []),
     ("path-missing", _j(V % '{"mode":["no_write"]}'), []),
@@ -1164,10 +1167,10 @@ SPEC_REFUSALS = [
     ("hash-short", _j(V % ('{"path":"a","expected_sha256":"%s"}' % ("a" * 63))), []),
     ("hash-null", _j(V % '{"path":"a","mode":["no_write"],"expected_sha256":null}'), []),
     ("hash-with-star", _j(V % ('{"path":"a/*.py","expected_sha256":"%s"}' % ("a" * 64))), []),
-    ("frozen-string", _j('{"belay_protect":1,"protect":[],"frozen_packages":"yes"}'), []),
-    ("frozen-null", _j('{"belay_protect":1,"protect":[],"frozen_packages":null}'), []),
-    ("path-dirs-string", _j('{"belay_protect":1,"protect":[],"path_dirs":"bin"}'), []),
-    ("path-dirs-bad-pattern", _j('{"belay_protect":1,"protect":[],"path_dirs":["/bin"]}'), []),
-    ("path-dirs-number", _j('{"belay_protect":1,"protect":[],"path_dirs":[1]}'), []),
-    ("path-dirs-over-256", _j('{"belay_protect":1,"protect":[],"path_dirs":[%s]}' % ",".join(['"bin"'] * 257)), []),
+    ("frozen-string", _j('{"belay_protect":2,"protect":[],"frozen_packages":"yes"}'), []),
+    ("frozen-null", _j('{"belay_protect":2,"protect":[],"frozen_packages":null}'), []),
+    ("path-dirs-string", _j('{"belay_protect":2,"protect":[],"path_dirs":"bin"}'), []),
+    ("path-dirs-bad-pattern", _j('{"belay_protect":2,"protect":[],"path_dirs":["/bin"]}'), []),
+    ("path-dirs-number", _j('{"belay_protect":2,"protect":[],"path_dirs":[1]}'), []),
+    ("path-dirs-over-256", _j('{"belay_protect":2,"protect":[],"path_dirs":[%s]}' % ",".join(['"bin"'] * 257)), []),
 ]
