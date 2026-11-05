@@ -254,7 +254,8 @@ def contradicts_itself(g):
     ["type"] when the types differ; `unknown` only on an `unknown` outcome;
     `changed` and `unknown` never on a path present on one side only;
     `type_before` exactly where the types differ, "whatever the outcome --
-    `type_changed`, or `unknown` when `raced` is on either side")."""
+    `type_changed`, or `unknown` when `raced` or `writer_open` is on either
+    side")."""
     o, ch, un = g.get('outcome'), g.get('changed', []), g.get('unknown', [])
     if o not in ref.OUTCOMES or o == 'unchanged':
         return 'outcome %r' % o

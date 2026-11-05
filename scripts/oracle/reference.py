@@ -66,10 +66,9 @@ Its only sources:
     one side only: `unknown`), V4-D4 (the reason, last), V4-D5 (four trailer
     keys, at the end, `0` before v4), V4-D6 (`provisional` is unchanged) and
     V4-R4 (an earlier version reads as absent and `0`); with diff-v1's rule 1,
-    which says the same (checked too). V4-D3 gives a one-sided entry carrying
-    both flags two reasons, where the prose's `unknown` sentence still says
-    "its one reason": the pin, the later, is followed. V4-D7 to D9 and V4-S1 to
-    S3 are outside the diff.
+    and the prose's sentences on v4 (the trailer's keys, `type_before`, a
+    one-sided path's reasons), which say the same (SPEC_V4_WORDS, checked too).
+    V4-D7 to D9 and V4-S1 to S3 are outside the diff.
 Never the generated blocks of the spec, never src/ or include/: every check
 that quotes a spec reads it through spec_prose(), which withholds them
 (decision 119); a check that quotes a pin reads that pin.
@@ -282,24 +281,21 @@ DIR_TIMESTAMPS_ONLY = 'dir_timestamps_only'
 # ... "`before_vanished`, `before_unstable` and `before_raced` are the first
 # manifest's `vanished`, `unstable` and `raced` counts, and `after_vanished`,
 # `after_unstable` and `after_raced` the second's. `provisional` is `true`
-# exactly when any of those six is not 0 ... Last, `before_sha256` and
+# exactly when any of those six is not 0 ... Then `before_sha256` and
 # `after_sha256` are the sha256 of each manifest file's bytes, all of them".
 INPUT_COUNTS = ['vanished', 'unstable', 'raced']
 # ... "and `events` the event records (`belay_diff_end` counts path records
 # only)" ...
 EVENTS = 'events'
-TRAILER_KEYS_SHAPE = (['belay_diff_end'] + OUTCOMES + [DIR_TIMESTAMPS_ONLY, EVENTS]
-                      + ['before_' + c for c in INPUT_COUNTS]
-                      + ['after_' + c for c in INPUT_COUNTS]
-                      + ['provisional', 'before_sha256', 'after_sha256'])
-# V4-D5: "`before_writer_open`, `after_writer_open`, `before_unguarded`,
-# `after_unguarded`, ints, each that manifest's trailer count (`0` for a
-# manifest before v4), in that order, after every key it has." The "### Trailer"
-# paragraph and the "Shape" example predate the pin and do not show them
-# (ambiguity X2's form: the pin is followed; the example is accepted either way).
+# ... "Last, `before_writer_open`, `after_writer_open`, `before_unguarded` and
+# `after_unguarded` are each manifest's own trailer counts (manifest v4; `0` for
+# a manifest before it). None of the four is in `provisional`"; V4-D5 says the
+# same, "in that order, after every key it has".
 V4_COUNTS = ['writer_open', 'unguarded']
 V4_TRAILER_KEYS = [w + c for c in V4_COUNTS for w in ('before_', 'after_')]
-TRAILER_KEYS = TRAILER_KEYS_SHAPE + V4_TRAILER_KEYS
+TRAILER_KEYS = (['belay_diff_end'] + OUTCOMES + [DIR_TIMESTAMPS_ONLY, EVENTS]
+                + ['before_' + c for c in INPUT_COUNTS] + ['after_' + c for c in INPUT_COUNTS]
+                + ['provisional', 'before_sha256', 'after_sha256'] + V4_TRAILER_KEYS)
 # One-sided reasons, from "Present on one side only".
 NOT_CAPTURED, LISTING_INCOMPLETE, RACED = 'not_captured', 'listing_incomplete', 'raced'
 WRITER_OPEN = 'writer_open'
@@ -343,7 +339,7 @@ def shape_example_keys():
 
 _shape_header, _shape_trailer = shape_example_keys()
 if _shape_header not in (HEADER_KEYS_SHAPE, HEADER_KEYS) or \
-        _shape_trailer not in (TRAILER_KEYS_SHAPE, TRAILER_KEYS):
+        _shape_trailer != TRAILER_KEYS:
     raise SystemExit('spec: the "Shape" example\'s header or trailer keys are not the ones '
                      'reference.py writes: %r' % (shape_example_keys(),))
 
@@ -397,8 +393,24 @@ V4_WORDS = {
               '`unstable`, `raced`, per side.'],
     'V4-R4': ['reads as `writer_open` absent on every entry and both trailer counts `0`'],
 }
-RULE_1_V4 = ('`writer_open` (manifest v4) is treated the same way, with its own reason, and the '
-             'entry\'s hash is not compared at all')
+# docs/spec/diff-v1.md's prose on v4, the words this file relies on: rule 1, the
+# "### Trailer" paragraph (diff()'s trailer), the `type_before` sentence (diff()),
+# and the one-sided end of the `unknown` sentence (one_sided()).
+SPEC_V4_WORDS = [
+    '`writer_open` (manifest v4) is treated the same way, with its own reason, and the entry\'s '
+    'hash is not compared at all',
+    'Then `before_sha256` and `after_sha256` are the sha256 of each manifest file\'s bytes, all '
+    'of them',
+    'Last, `before_writer_open`, `after_writer_open`, `before_unguarded` and `after_unguarded` '
+    'are each manifest\'s own trailer counts (manifest v4; `0` for a manifest before it). None '
+    'of the four is in `provisional`.',
+    '`type_before`, for a path present on both sides whose types differ: the type before, '
+    'whatever the outcome -- `type_changed`, or `unknown` when `raced` or `writer_open` is on '
+    'either side.',
+    'for the one-sided case, the reason of the rule that decided it, or, where no earlier rule '
+    'applies to an entry carrying `writer_open`, the entry\'s own: `writer_open`, after `raced` '
+    'when it carries both.',
+]
 
 
 def v4_pin():
@@ -414,8 +426,11 @@ def v4_pin():
             if w not in rows.get(r, ''):
                 raise SystemExit('pin: manifest-v4.md %s no longer says what reference.py '
                                  'assumes: %r' % (r, w))
-    if RULE_1_V4 not in ' '.join(spec_prose(SPEC).split()):
-        raise SystemExit('spec: rule 1 no longer says what reference.py assumes of `writer_open`')
+    prose = ' '.join(spec_prose(SPEC).split())
+    for w in SPEC_V4_WORDS:
+        if w not in prose:
+            raise SystemExit('spec: docs/spec/diff-v1.md no longer says what reference.py '
+                             'assumes: %r' % w)
     m = re.search(r"in `diff-fields.md`'s columns: `writer_open` \\\| (.*?) \\\| (.*?) \\\| "
                   r'(.*?) \\\| (.*?) \\\| (.*?)\.', rows['V4-D1'])
     if not m:
@@ -3045,7 +3060,7 @@ def diff(before, after, store=None):
         rec = {'path': p, 'outcome': out, 'type': e['type']}
         # "`type_before`, for a path present on both sides whose types differ:
         # the type before, whatever the outcome -- `type_changed`, or `unknown`
-        # when `raced` is on either side."
+        # when `raced` or `writer_open` is on either side."
         if b is not None and a is not None and b['type'] != a['type']:
             rec['type_before'] = b['type']
         if changed:
