@@ -832,7 +832,8 @@ static int pytest_config(struct state *s, const char *p, size_t n, const struct 
             free(bb);
             return -1;
         }
-        if (rb == 1 && ra == 1)                     /* from both sides' copies */
+        /* from both sides' copies; a marked empty file has none (V4-S3 is tests_weakened's alone) */
+        if (rb == 1 && ra == 1 && !(b != NULL && b->writer_open) && !(a != NULL && a->writer_open))
             differs = pyc_differs(k, b != NULL && b->type == BELAY_T_REG ? (char *)(bb ? bb : (unsigned char *)"") : NULL, bl,
                                   a != NULL && a->type == BELAY_T_REG ? (char *)(ab ? ab : (unsigned char *)"") : NULL, al,
                                   sec, sizeof sec);

@@ -404,41 +404,53 @@ TEST(a_marked_entry_is_never_trusted_by_a_mark) {
     ASSERT_EQ_INT(0, (int)st.writer_open);
 }
 
-/* A hard link's unmarked name does not speak for the inode (V4-R6): the first
- * read of it saw a writer, the second did not. */
+/* A hard link's unmarked name does not speak for the inode (V4-R6), whichever
+ * name was read first, nor when the marked name is raced as well. */
 static ino_t g_watch_ino;
-static int g_watch_calls;
-static int first_read_of_ino(void *ctx, int fd) {
+static int g_watch_calls, g_watch_from;
+static int nth_read_of_ino(void *ctx, int fd) {
     (void)ctx;
     struct stat s;
-    return fstat(fd, &s) == 0 && s.st_ino == g_watch_ino && g_watch_calls++ < 2;
+    if (fstat(fd, &s) != 0 || s.st_ino != g_watch_ino) return 0;
+    const int k = g_watch_calls++;
+    return k >= g_watch_from && k < g_watch_from + 2;
 }
 TEST(a_hard_link_of_a_marked_entry_is_not_trusted_either) {
-    g_round_ns = 0;
-    fresh_tree();
-    static char big[8192];
-    memset(big, 'x', sizeof big);
-    writef("d0/big", big, sizeof big);
-    char a[500], b[500], prev[400], next[400];
-    snprintf(a, sizeof a, "%s/d0/big", g_tree);
-    snprintf(b, sizeof b, "%s/d1/big", g_tree);
-    REQUIRE(link(a, b) == 0);
-    usleep(30000);
-    struct stat s;
-    REQUIRE(stat(a, &s) == 0);
-    snprintf(prev, sizeof prev, "%s/p.ndjson", g_dir);
-    snprintf(next, sizeof next, "%s/n.ndjson", g_dir);
-    struct belay_manifest_stats st;
-    g_watch_ino = s.st_ino;
-    g_watch_calls = 0;
-    g_ops.writer_present = first_read_of_ino;
-    const int r = capture(prev, NULL, &st);
-    g_ops.writer_present = g_real->writer_present;
-    REQUIRE(r == 0);
-    ASSERT_EQ_INT(1, (int)st.writer_open);
-    usleep(30000);
-    REQUIRE(capture(next, prev, &st) == 0);
-    ASSERT_EQ_INT(12, (int)st.trusted);             /* the small files; neither name of the inode */
+    static const struct { int from; bool raced; } cases[] = { { 0, false }, { 2, false }, { 0, true }, { 2, true } };
+    for (size_t i = 0; i < sizeof cases / sizeof cases[0]; i++) {
+        g_round_ns = 0;
+        fresh_tree();
+        static char big[8192];
+        memset(big, 'x', sizeof big);
+        writef("d0/big", big, sizeof big);
+        char a[500], b[500], prev[400], next[400], cmd[1400];
+        snprintf(a, sizeof a, "%s/d0/big", g_tree);
+        snprintf(b, sizeof b, "%s/d1/big", g_tree);
+        REQUIRE(link(a, b) == 0);
+        usleep(30000);
+        struct stat s;
+        REQUIRE(stat(a, &s) == 0);
+        snprintf(prev, sizeof prev, "%s/p.ndjson", g_dir);
+        snprintf(next, sizeof next, "%s/n.ndjson", g_dir);
+        struct belay_manifest_stats st;
+        g_watch_ino = s.st_ino;
+        g_watch_calls = 0;
+        g_watch_from = cases[i].from;
+        g_ops.writer_present = nth_read_of_ino;
+        const int r = capture(prev, NULL, &st);
+        g_ops.writer_present = g_real->writer_present;
+        REQUIRE(r == 0);
+        ASSERT_EQ_INT(1, (int)st.writer_open);
+        if (cases[i].raced) {           /* no real writer makes this: the format allows it */
+            snprintf(cmd, sizeof cmd, "sed -e 's/\"writer_open\":true/\"raced\":true,\"writer_open\":true/' "
+                     "-e 's/\"raced\":0,\"trusted\"/\"raced\":1,\"trusted\"/' '%s' > '%s.new' && mv '%s.new' '%s'",
+                     prev, prev, prev, prev);
+            REQUIRE(system(cmd) == 0);
+        }
+        usleep(30000);
+        REQUIRE(capture(next, prev, &st) == 0);
+        ASSERT_EQ_INT(12, (int)st.trusted);         /* the small files; neither name of the inode */
+    }
 }
 
 TEST(a_mark_keeps_the_copies_a_full_capture_would) {
