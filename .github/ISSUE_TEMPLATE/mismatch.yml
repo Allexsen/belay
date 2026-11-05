@@ -1,0 +1,58 @@
+name: Mismatch
+description: belay's report and what really happened disagree
+title: "mismatch: "
+labels: ["mismatch"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        belay missed a change, invented one, or buried the real change in noise.
+        Receipts name paths and can quote file contents: remove anything private before posting.
+  - type: input
+    id: version
+    attributes:
+      label: belay version
+      description: The output of `belay --version`.
+    validations:
+      required: true
+  - type: input
+    id: system
+    attributes:
+      label: OS, kernel and filesystem
+      description: For example Ubuntu 24.04, Linux 6.8, ext4. `uname -r` and `stat -f -c %T .` say the last two.
+    validations:
+      required: true
+  - type: textarea
+    id: commands
+    attributes:
+      label: Commands
+      description: The exact commands you ran, in order.
+      render: shell
+    validations:
+      required: true
+  - type: textarea
+    id: receipt
+    attributes:
+      label: Receipt or diff
+      description: What belay said.
+      render: text
+    validations:
+      required: true
+  - type: textarea
+    id: actual
+    attributes:
+      label: What actually happened
+      description: What really changed, and how you know.
+    validations:
+      required: true
+  - type: dropdown
+    id: reproduces
+    attributes:
+      label: Does it reproduce?
+      options:
+        - "Yes, every time"
+        - "Sometimes"
+        - "It happened once"
+        - "Not tried"
+    validations:
+      required: false

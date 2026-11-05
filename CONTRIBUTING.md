@@ -2,6 +2,21 @@
 
 belay is pre-alpha and changing shape quickly. Open an issue before starting anything substantial.
 
+## Reporting a mismatch
+
+The most useful report right now is a case where belay's output and what really happened disagree:
+it missed a change, invented one, or buried the real change in noise. [Open a mismatch
+issue](https://github.com/Allexsen/belay/issues/new?template=mismatch.yml) with:
+
+- the `belay --version` output;
+- OS, kernel and filesystem;
+- the exact commands you ran;
+- the receipt or diff;
+- what actually happened, and how you know;
+- whether it reproduces.
+
+Receipts name paths and can quote file contents. Remove anything private before posting.
+
 ## Sign-off is required
 
 Every commit other than a merge needs a Developer Certificate of Origin sign-off:
