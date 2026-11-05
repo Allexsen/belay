@@ -362,6 +362,15 @@ def rewrite_manifest(data, how, flags=None):
     return b"".join(out), msha, source
 
 
+def set_protect_digest(data, digest):
+    """The bundle with its header's `protect_sha256` this one: PV2-6's bundle, which no export of
+    this release can write."""
+    nl = data.index(b"\n")
+    hdr = json.loads(data[:nl])
+    hdr["protect_sha256"] = digest
+    return model.enc(hdr).encode() + data[nl:]
+
+
 def spec_bytes(spec):
     if spec is None:
         return None
@@ -589,6 +598,9 @@ def _run(sc, rep, cov, vstate, tmp, answered, holds):
         cdata, before_sha, before_source = rewrite_manifest(cdata, v["manifest"], v.get("flags"))
     if v.get("flags"):
         model.apply_flags(exp["B"], v["flags"])
+    if v.get("bundle_spec"):
+        cdata = set_protect_digest(cdata, hashlib.sha256(v["bundle_spec"]).hexdigest())
+        exp["protect_sha256"] = hashlib.sha256(v["bundle_spec"]).hexdigest()
     if v.get("corrupt"):
         cdata = corrupt_bundle(cdata, v["corrupt"])
     if cdata is not bundle:
