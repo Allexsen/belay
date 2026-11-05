@@ -236,24 +236,19 @@ P45 SETTLED (V4-D3). A one-sided entry: an earlier rule of diff-v1 gives its one
     "the reasons are the entry's own: `writer_open`, after `raced` when it carries both". An
     ancestor carrying `writer_open` decides nothing: V4-D3 names "a raced ancestor".
 
-P46 SETTLED the other way (V4-S3). "`tests_weakened` alone: a file of size 0 with a hash counts as
-    held, and empty, with or without a copy ... A file belay could not read has no hash and is not
-    held." "With a hash" is the entry's `sha256`, a marked entry's included (V4-D8 says it has none
-    for any consumer, but "with or without a copy" is there for it: no other file of size 0 lacks
-    one). pytest_config_changed reads "both sides' copies": a marked file has none.
+P46 SETTLED the other way (V4-S3). "`tests_weakened` alone: a file of size 0 with a `sha256` in its
+    entry, a marked entry's included ..., counts as held, and empty, with or without a copy ... A
+    file belay could not read has no hash and is not held." pytest_config_changed reads "both
+    sides' copies": a marked file has none.
 
 P47 New with manifest v4, narrowed by V4-D9. A marked path is never `added`, `removed`, `modified`
     or `type_changed` (V4-D1, V4-D3): touches_tests, python_startup_hook_changed, conffile_changed
     and PS-M1..M3, whose rows name those outcomes, give nothing; a row reading "any outcome"
     (edits_ci_config, conftest_changed, privilege_changed) gives its record, provisional (P-F3).
-    new_executable_on_path is V4-D9's: "the outcome the entry would otherwise have had" is the
-    diff with no `writer_open` on either side (the marked hashes then compare, which only tells
-    `modified` from `metadata_only`, and the row treats those alike) and, since "An entry carrying
-    `raced` as well fires too: the mark decides", no `raced` on that path, on either side; a raced
-    ancestor stays (V4-D3's earlier rule). If that is still `unknown`, by an earlier rule or the
-    other side's being unreadable, it gives nothing. "Only `writer_open` does this" is read of every
-    other `unknown` too, so "a file whose execute bits were added" needs an outcome that is not
-    `unknown`.
+    new_executable_on_path is V4-D9's: on a path whose reasons include `writer_open`, its mode and
+    type are read from the two entries, whatever other reason stands beside it ("The mark
+    decides"). "A path whose reasons do not include `writer_open` stays as it is" is read as this
+    model has it: "a file whose execute bits were added" needs an outcome that is not `unknown`.
 
 P52 SETTLED the other way (V4-S3). tests_weakened's "removed": "one that was a regular file before
     and is not after, whatever the diff's outcome". A type change counts, and an `unknown`; a side
@@ -1929,9 +1924,9 @@ def other_flags(ctx, recs, B, A, events):
                               "%s: git hook %s %s" % (show(p), hook, change), [p], False))
         if a is not None and in_path_dir(p, A, spec):
             new_x = False
-            w = o                                                                     # V4-D9, P47
-            if a["writer_open"] or (b is not None and b["writer_open"]):
-                w = ctx["unmarked"].get(p, {"outcome": "unchanged"})["outcome"]
+            w = o
+            if "writer_open" in rec.get("unknown", ()):                               # V4-D9, P47
+                w = "added" if b is None or b["type"] != a["type"] else "modified"
             if w in ("added", "type_changed"):
                 new_x = a["type"] == "lnk" or (a["type"] == "reg" and a["mode"] & 0o111)
             elif w != "unknown" and b is not None and b["type"] == "reg" and a["type"] == "reg":
@@ -2007,13 +2002,6 @@ def verify_lines(ctx):
     bs, as_ = ctx["before"], ctx["after"]
     B, A = bs.entries, as_.entries
     recs = diff(bs, as_)
-
-    marked = {p for side in (B, A) for p, e in side.items() if e["writer_open"]}
-
-    def unmarked(side):                                                              # P47
-        return Side({p: dict(e, writer_open=False, raced=e["raced"] and p not in marked)
-                     for p, e in side.entries.items()}, side.root_dev, side.excluded)
-    ctx["unmarked"] = diff(unmarked(bs), unmarked(as_))                              # V4-D9
     events = pip_events(recs, B, A) + dpkg_events(recs, B, A) + git_events(recs, B, A)
     flags = protected_flags(spec, recs, B, A)
     flags += package_flags(ctx, recs, B, A, events)
