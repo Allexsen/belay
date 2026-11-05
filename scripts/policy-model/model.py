@@ -41,7 +41,7 @@ P5  protected_path_unverifiable's `rule`, "the first that matches it": the first
     spec whose pattern matches the path, whatever its modes, even when only a later rule's
     side makes the path unverifiable.
 
-P6  "On a side its modes read" (PS-M5): no_write reads before, and after when the path is
+P6  (For an `unknown`, see P50.) "On a side its modes read" (PS-M5): no_write reads before, and after when the path is
     there too ("matched before, on both sides"); no_delete reads before; no_create reads after,
     whenever the path is there (unchanged included); expected_sha256 reads after.
 
@@ -217,64 +217,61 @@ P38 New with decision 186. packages_no_hash still counts every line without a ha
     included: the row's subject is "Files a database lists without a hash", and "never checked
     -- a `.pyc` aside" says what becomes of them, not what is counted.
 
-P41 New with manifest v4. B-4 still says a bundle holds "manifest v3"; V4-R4 says "belay writes
-    v4 only, from the release that adds it" and V4-R2 that a reader accepts `1` to `4`. Read: a
-    bundle export writes holds v4; one holding v2 or v3 stays accepted, as earlier versions
-    with `writer_open` absent and both counts `0`.
+P41 SETTLED (V4-R7). "baseline-bundle's B-4 reads manifest v4 where it says v3". A bundle holding
+    v2 or v3 stays accepted, read with `writer_open` absent and both counts `0` (V4-R4).
 
-P42 New with manifest v4. What reads a marked `sha256` outside the diff. V4-2 says it "is kept for
-    debugging; it may be bytes the file never held", yet V4-D2 stops only the diff's comparison,
-    under "The diff", and the rows that compare a manifest's hash with another value are not
-    amended. Read as written, then, as a `raced` entry's hash is (V4-D1: "As with `raced`"):
-    PS-M4 against an after entry marked gives protected_hash_mismatch `other bytes`, with
-    `actual`, and P-F3's `provisional` says it may not hold, beside the
-    protected_path_unverifiable V4-D7 gives. The other reading, that a hash kept for debugging
-    decides nothing, gives only the latter; a violation stands either way.
+P42 SETTLED (V4-D8). A marked hash outside the diff: "a marked entry has no hash: no consumer
+    compares or reports it". PS-M4 against an after entry marked "stops at
+    `protected_path_unverifiable`". PS-M4 reads only the after entry, so one marked before only,
+    whose after entry holds other bytes, is `other bytes` as ever, provisional by P-F3.
 
-P43 New with manifest v4. `self_consistent`, the same way: P11's "a regular file after with that
-    sha256" reads a marked entry's hash as written. A marked RECORD has no copy, so its rows
-    cannot be read: `false`, as for any RECORD not held.
+P43 SETTLED (V4-D8). `self_consistent` "follows from it": a file marked after has no hash, so it
+    does not match its database, as an `unverified` one does not; dpkg's MD5 is a hash of the same
+    read, so the same.
 
-P44 New with manifest v4. `at_reset` of a file marked at export: V4 changes no row of B-P6, whose
-    words are "pip compares its RECORD's sha256 with the manifest's own" and for dpkg the MD5 of
-    the same read: `match` or `mismatch` as written. Nothing else in its enumeration fits (the
-    entry has a hash, so it is not `unverified`). A database file marked at export is still read
-    for its package lines: B-6's "one line per file a package database in the baseline lists"
-    has no exception, and V4 adds none.
+P44 SETTLED (V4-D8), with one reading of this model's. "A package row's `at_reset` (B-P6) is
+    `unverified`" for a file marked at export. A row whose database gives no hash stays `no_hash`
+    (P22: decided before the manifest is consulted): V4-D8 speaks of the entry's hash, and such a
+    row never reads it, so P-T6 counts it as before.
 
-P45 New with manifest v4. A one-sided entry carrying both `raced` and `writer_open`: diff-v1 says
-    "for the one-sided case, its one reason" and "reason `raced`"; V4-D3 says "reason
-    `writer_open`"; V4-D4 says "last in `unknown` when others are present". Read: both, in the
-    reasons' order. The earlier bullets of diff-v1's "first of these that applies decides" keep
-    their place, since V4-D3 reads "as a one-sided `raced` entry": a marked path the other side
-    excluded is `not_captured` alone, and E11 applies. An ancestor carrying `writer_open` decides
-    nothing: diff-v1's ancestor bullet names `raced`, and neither V4-D1 nor V4-D3 extends it.
+P45 SETTLED (V4-D3). A one-sided entry: an earlier rule of diff-v1 gives its one reason; else
+    "the reasons are the entry's own: `writer_open`, after `raced` when it carries both". An
+    ancestor carrying `writer_open` decides nothing: V4-D3 names "a raced ancestor".
 
-P46 New with manifest v4. P13's "a regular file of size 0 (its content is known)" does not hold
-    for a marked entry: V4-2 gives it no `stored`, and a writer had the file, so a marked empty
-    file is not held and nothing is counted from it.
+P46 SETTLED the other way (V4-S3). "`tests_weakened`: a file of size 0 counts as held, and empty,
+    with or without a copy". Read as written: of any entry of size 0, one belay could not open
+    included, and of that row alone. pytest_config_changed reads "both sides' copies", and a
+    marked file has none, an empty one included.
 
-P47 New with manifest v4. What a rule whose subject is an outcome does with a marked path, which
-    is never `added`, `removed`, `modified` or `type_changed` (V4-D1, V4-D3): touches_tests,
-    python_startup_hook_changed, conffile_changed, PS-M1..M3 give nothing, as their rows name
-    those outcomes; a row reading "any outcome" (edits_ci_config, conftest_changed,
-    privilege_changed) gives its record, provisional (P-F3). new_executable_on_path: "added" and
-    "replaced" are outcomes too, so a marked file there gives a record only through "a file whose
-    execute bits were added", read from both manifests.
+P47 New with manifest v4, narrowed by V4-D9. A marked path is never `added`, `removed`, `modified`
+    or `type_changed` (V4-D1, V4-D3): touches_tests, python_startup_hook_changed, conffile_changed
+    and PS-M1..M3, whose rows name those outcomes, give nothing; a row reading "any outcome"
+    (edits_ci_config, conftest_changed, privilege_changed) gives its record, provisional (P-F3).
+    new_executable_on_path is V4-D9's: "the outcome the entry would otherwise have had" is the
+    diff with no `writer_open` on either side (the marked hashes then compare, which only tells
+    `modified` from `metadata_only`, and the row treats those alike); if that is `unknown`, by a
+    `raced` or an earlier rule's reason, it gives nothing. "Only `writer_open` does this" is read
+    of every other `unknown` too, so "a file whose execute bits were added" needs an outcome that
+    is not `unknown`. An entry carrying both `raced` and `writer_open` is therefore silent: with
+    the mark gone it is still `unknown`. The other reading, "a marked entry", fires.
 
-P48 New with manifest v4. A `.pth` beside a RECORD that lists it but is marked after: that RECORD
-    has no copy, so "in no RECORD after" is decided without it, as for any RECORD not held.
+P52 New with manifest v4. tests_weakened's "removed" is the outcome, as in touches_tests's row, and
+    V4-D3 says a marked path is "never `added` or `removed`": a marked file gone after gives no
+    record, even when it was empty and so held (V4-S3), and nothing fell.
 
-P49 New with manifest v4. V4-D7 says "policy-v1's PS-M5", a row of protect-spec.md: read as that
-    row, and policy-v1's order of `reasons`, with `writer_open` last in both.
+P48 Withdrawn. A RECORD marked after no longer reaches a judgement (V4-S1).
 
-P50 New with manifest v4. V4-D7 adds a flag to PS-M5's list, which reads "whose entry there", on
-    "a side its modes read" (P6); then it says, with no side, "a protected path that carries it
-    is `protected_path_unverifiable`". Read as written, the later and narrower sentence: a path a
-    rule matches, whatever the rule's modes, whose entry carries it on either side. So P6 does
-    not apply to a marked path, and a new file a writer holds, under a `no_write`-only rule, is a
-    violation, though no_write reads before and the file was not there. P6 stands for every
-    other `unknown`.
+P49 SETTLED (V4-D7): "protect-spec's PS-M5".
+
+P50 SETTLED (V4-D7, V4-S2). A path on one side only whose outcome is `unknown`, marked or not, is
+    protected_path_unverifiable under any rule that matches it, "whichever side the rule's modes
+    read". P6 now decides nothing for an `unknown`: on both sides, every rule reads one of them.
+
+P51 New with V4-S1. "A package database file (`RECORD`, dpkg's `status`, `info/*.md5sums`)" is read
+    as a closed list, and of any file of those names, whether or not an installed package's
+    stanza leads to it: METADATA and `*.list`, also interpreters' files, are not refused. Where the
+    refusal comes: after every other, since it needs a capture, so after the source's in verify
+    (B-R6), with `--to` of the checkpoint's manifest too.
 """
 
 import base64
@@ -636,13 +633,25 @@ def view(raw, hash_max, writers=frozenset()):
     return out
 
 
+def has_hash(e):
+    """V4-D8: "a marked entry has no hash: no consumer compares or reports it"."""
+    return e["sha256"] is not None and not e["writer_open"]
+
+
 def held(e):
     """A regular file's content, when a copy of it is held (P13), else None."""
     if e is None or e["type"] != "reg":
         return None
-    if e["stored"] or (e["size"] == 0 and e["sha256"] is not None and not e["writer_open"]):  # P46
+    if e["stored"] or (e["size"] == 0 and has_hash(e)):
         return e["data"]
     return None
+
+
+def test_side(e):
+    """tests_weakened's copy of a side (V4-S3, P46)."""
+    if e is not None and e["type"] == "reg" and e["size"] == 0:
+        return b""
+    return side_bytes(e)
 
 
 def side_bytes(e):
@@ -1081,8 +1090,8 @@ def _at_reset(B, path, check):
         return "missing"
     if f["type"] != "reg":
         return "not_a_file"
-    if f["sha256"] is None:
-        return "unverified"
+    if not has_hash(f):
+        return "unverified"                                                          # V4-D8
     return "match" if check(f) else "mismatch"
 
 
@@ -1699,8 +1708,7 @@ def protected_flags(spec, recs, B, A):
             if ("no_create" in r.modes or r.expected is not None) and a is not None:
                 sides.add("after")
             hit_sides |= sides
-        marked = any(e is not None and e["writer_open"] for e in (b, a))              # P50
-        if hit_sides or marked:
+        if hit_sides or unknown:                                                      # V4-S2, P50
             ents = [e for s, e in (("before", b), ("after", a)) if s in hit_sides]
             flagged = [f for f in ENTRY_FLAGS if any(e[f] for e in ents)]
             if unknown or flagged:
@@ -1725,7 +1733,7 @@ def protected_flags(spec, recs, B, A):
             why = "absent"
         elif a["type"] != "reg":
             why = "not a regular file"
-        elif a["sha256"] is not None and a["sha256"] != r.expected:                  # P42
+        elif has_hash(a) and a["sha256"] != r.expected:                              # P42
             why, actual = "other bytes", a["sha256"]
         if why is None:
             continue
@@ -1839,7 +1847,7 @@ def self_consistent(ev, recs, A, scope):
             if q is None:
                 continue
             e = A.get(q)
-            if e is None or e["type"] != "reg" or e["sha256"] != hx:                  # P43
+            if e is None or e["type"] != "reg" or not has_hash(e) or e["sha256"] != hx:   # P43
                 return False
         return True
     status = ev.paths[0]
@@ -1856,7 +1864,8 @@ def self_consistent(ev, recs, A, scope):
     root = dpkg_root(status)
     for rel, md5 in rows:
         e = A.get(root + rel)
-        if e is None or e["type"] != "reg" or e["data"] is None or hashlib.md5(e["data"]).hexdigest() != md5:
+        if (e is None or e["type"] != "reg" or e["writer_open"] or e["data"] is None     # P43
+                or hashlib.md5(e["data"]).hexdigest() != md5):
             return False
     return True
 
@@ -1873,13 +1882,13 @@ def other_flags(ctx, recs, B, A, events):
         name = _name(p)
         nc = not_captured_only(rec)           # a side not looked at is not held, never "absent" (P13)
 
-        def copy_of(e):
-            return None if nc and e is None else side_bytes(e)
+        def copy_of(e, read=side_bytes):
+            return None if nc and e is None else read(e)
         if is_test_file(p) and o in ("added", "removed", "modified", "type_changed"):
             flags.append(Flag("touches_tests", "signal", [("path", p), ("outcome", o)],
                               "%s: test file %s" % (show(p), o), [p], prov))
         if is_counted(p) and o in ("added", "removed", "modified", "type_changed", "unknown"):
-            xb, xa = copy_of(b), copy_of(a)
+            xb, xa = copy_of(b, test_side), copy_of(a, test_side)
             if xb is not None and xa is not None:
                 ab, tb = count_python(xb)
                 aa, ta = count_python(xa)
@@ -1919,9 +1928,12 @@ def other_flags(ctx, recs, B, A, events):
                               "%s: git hook %s %s" % (show(p), hook, change), [p], False))
         if a is not None and in_path_dir(p, A, spec):
             new_x = False
-            if o in ("added", "type_changed"):
+            w = o                                                                     # V4-D9, P47
+            if a["writer_open"] or (b is not None and b["writer_open"]):
+                w = ctx["unmarked"].get(p, {"outcome": "unchanged"})["outcome"]
+            if w in ("added", "type_changed"):
                 new_x = a["type"] == "lnk" or (a["type"] == "reg" and a["mode"] & 0o111)
-            elif b is not None and b["type"] == "reg" and a["type"] == "reg":
+            elif w != "unknown" and b is not None and b["type"] == "reg" and a["type"] == "reg":
                 new_x = bool(a["mode"] & 0o111 & ~b["mode"])
             if new_x:
                 flags.append(Flag("new_executable_on_path", "signal",
@@ -1994,6 +2006,10 @@ def verify_lines(ctx):
     bs, as_ = ctx["before"], ctx["after"]
     B, A = bs.entries, as_.entries
     recs = diff(bs, as_)
+
+    def unmarked(side):
+        return Side({p: dict(e, writer_open=False) for p, e in side.entries.items()}, side.root_dev, side.excluded)
+    ctx["unmarked"] = diff(unmarked(bs), unmarked(as_))                              # V4-D9
     events = pip_events(recs, B, A) + dpkg_events(recs, B, A) + git_events(recs, B, A)
     flags = protected_flags(spec, recs, B, A)
     flags += package_flags(ctx, recs, B, A, events)
@@ -2046,6 +2062,24 @@ def verify_exit(flags, exit_code_flag):
 # ---------------------------------------------------------------------------------------------
 # export and verify, end to end (refusals included)
 
+NO_COPY = "no stored copy (a writer held it open?): capture again"                    # V4-S1
+
+
+def is_database(p):
+    """V4-S1's list (P51)."""
+    par = _parent(p)
+    return is_record(p) or is_status(p) or (
+        p.endswith(b".md5sums") and (par == b"var/lib/dpkg/info" or par.endswith(b"/var/lib/dpkg/info")))
+
+
+def database_without_copy(entries):
+    """V4-S1: what `baseline export` and `verify` refuse with, or None."""
+    for p in sorted(entries):
+        if entries[p]["writer_open"] and is_database(p):
+            return "%s: %s" % (p.decode("utf-8", errors="replace"), NO_COPY)
+    return None
+
+
 def inside(path, scope):
     return path == scope or path.startswith(scope.rstrip("/") + "/")
 
@@ -2067,6 +2101,9 @@ def export_expect(scope, out_real, spec_raw, excluded, B_raw, writers=frozenset(
                     return 3, "an exclusion covers %s" % r.pattern
     hash_max = HASH_BOUND_SPEC if spec is not None else HASH_DEFAULT
     B = view(B_raw, hash_max, writers)
+    held_db = database_without_copy(B)
+    if held_db is not None:
+        return 4, held_db                                                            # V4-S1
     lines, outside = bundle_packages(B, scope)
     integrity = []
     for l in lines:
@@ -2081,7 +2118,7 @@ def export_expect(scope, out_real, spec_raw, excluded, B_raw, writers=frozenset(
 
 
 def verify_refusal(exported, spec_raw, digest_given, digest_true, excluded_after, to_trusted,
-                   before_source=None, corrupt=False, other_scope=False):
+                   before_source=None, corrupt=False, other_scope=False, after=None):
     """The refusal verify gives before judging, or None. baseline-bundle B-R6 (decision 214):
     "verify refuses in this order, and the first refusal is the one said: no --baseline-sha256
     (exit 3); bytes that do not hash to it (B-R2, exit 3 ...); a row the bundle breaks (B-R3,
@@ -2112,6 +2149,8 @@ def verify_refusal(exported, spec_raw, digest_given, digest_true, excluded_after
                     return 3                                                  # PS-C2
     if before_source is not None:
         return 3                                                              # B-R6, V3-R4
+    if after is not None and database_without_copy(after) is not None:
+        return 4                                                              # V4-S1, P51
     return None
 
 
@@ -2225,6 +2264,14 @@ def flag_manifest(content, flags):
     return b"".join(enc(o).encode("utf-8") + b"\n" for o in [mh] + out + [mt])
 
 
+def unguarded_at_most(content):
+    """V4-R3's bound, met exactly: as many `unguarded` as the trailer has entries, which a reader
+    takes."""
+    mh, entries, mt = read_manifest(content)
+    mt["unguarded"] = mt["belay_manifest_end"]
+    return b"".join(enc(o).encode("utf-8") + b"\n" for o in [mh] + entries + [mt])
+
+
 def apply_flags(entries, flags):
     """`flag_manifest`, on the model's own entries."""
     for p, names in flags.items():
@@ -2269,6 +2316,8 @@ def break_manifest(content, how):
         o = next(x for x in entries if "unverified" in x)
         o["writer_open"] = True
         mt["writer_open"] = 1
+    elif how == "unguarded-too-large":
+        mt["unguarded"] = mt["belay_manifest_end"] + 1
     elif how == "no-hash":
         del plain["sha256"]
         plain["writer_open"] = True

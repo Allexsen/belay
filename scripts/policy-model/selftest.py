@@ -355,8 +355,10 @@ def fixture_writer_open():
     check("held: marked, no copy, every name of the inode", [(e["writer_open"], e["stored"]) for e in v.values()],
           [(True, False), (True, False)])
     check("over the hash limit: unverified, not marked", model.view({b"f": x}, 1, H)[b"f"]["writer_open"], False)
-    check("a marked side is not held, an empty one included (P46)", model.held(
-        model.view({b"f": raw("reg", F, b"", ino=4)}, model.HASH_DEFAULT, H)[b"f"]), None)
+    check("a marked side is not held", model.held(model.view({b"f": x}, model.HASH_DEFAULT, H)[b"f"]), None)
+    empty = model.view({b"f": raw("reg", F, b"", ino=4)}, model.HASH_DEFAULT, H)[b"f"]
+    check("size 0 counts as held, for tests_weakened, with no copy (V4-S3)", model.test_side(empty), b"")
+    check("and only for it (P46)", model.held(empty), None)
     # V4-D7 in policy.v1, and what stays quiet
     B = {**base, b"g/x": x}
     got, flags = verify(spec, B, {**base, b"g/x": other}, wa=H)
@@ -367,11 +369,47 @@ def fixture_writer_open():
     check("and a violation fails the run", model.verify_exit(flags, True), 1)
     got, _f = verify(b'{"belay_protect":1,"protect":[{"path":"g/x","expected_sha256":"%s"}]}'
                      % model.sha256(b"one\n").encode(), B, {**base, b"g/x": other}, wa=H)
-    check("a marked hash against expected_sha256 (P42): provisional, and unverifiable",
-          [json.loads(ln)["flag"] for ln in got[1:-1]], ["protected_hash_mismatch", "protected_path_unverifiable"])
-    check("that mismatch is provisional", json.loads(got[1])["provisional"], True)
+    check("a marked hash against expected_sha256 stops at unverifiable (V4-D8)",
+          [json.loads(ln)["flag"] for ln in got[1:-1]], ["protected_path_unverifiable"])
     got, _f = verify(spec, base, {**base, b"g/x": x}, wa=H)
-    check("a new file a writer holds, under no_write only (P50)", json.loads(got[1])["reasons"], ["writer_open"])
+    check("a new file a writer holds, under no_write only (V4-D7)", json.loads(got[1])["reasons"], ["writer_open"])
+    # V4-S2: one side, unknown, no mark: `raced`, under a rule that reads the other side
+    hdr = model.view({**base, b"g/x": x}, model.HASH_BOUND_SPEC)
+    hdr[b"g/x"]["raced"] = True
+    ctx = {"scope": "/w", "bundle_sha256": "b" * 64, "spec": model.parse_spec(b'{"belay_protect":1,"protect":[{"path":"g/**","mode":["no_create"]}]}'),
+           "before": model.Side(hdr, 10, []), "after": model.Side(model.view(base, model.HASH_BOUND_SPEC), 10, []),
+           "bundle_lines": [], "outside_scope": 0, "before_sha256": "1" * 64, "after_sha256": "2" * 64}
+    check("one side, unknown, whichever side the rule reads (V4-S2)", [f.kind for f in model.verify_lines(ctx)[1]],
+          ["protected_path_unverifiable"])
+    # V4-D9: the mode speaks
+    pb = {b".": raw("dir", D, ino=2), b"bin": raw("dir", D, ino=3)}
+    tool = raw("reg", 0o100755, b"#!/bin/sh\n", ino=4)
+    got, _f = verify(None, pb, {**pb, b"bin/t": tool}, wa=H)
+    check("added, if not for the mark (V4-D9)", got[1:-1], [
+        '{"flag":"new_executable_on_path","level":"signal","path":"bin/t","outcome":"unknown","mode":33261,'
+        '"text":"bin/t: executable on PATH, unknown","provisional":true,"paths":["bin/t"]}'])
+    plain = raw("reg", 0o100644, b"#!/bin/sh\n", ino=4)
+    got, _f = verify(None, {**pb, b"bin/t": plain}, {**pb, b"bin/t": tool}, wb=H)
+    check("execute bits added, marked before (V4-D9)", [json.loads(ln)["outcome"] for ln in got[1:-1]], ["unknown"])
+    got, _f = verify(None, pb, {**pb, b"bin/t": plain}, wa=H)
+    check("added without an execute bit: nothing", got[1:-1], [])
+    # V4-D8: at_reset, self_consistent; V4-S1
+    body = b"x = 1\n"
+    record = ("pkg.py,sha256=%s,%d\nz.pyc,,\n" % (b64sha(body), len(body))).encode()
+    Bp = {b".": raw("dir", D, ino=2), b"pkg-1.0.dist-info": raw("dir", D, ino=3),
+          b"pkg-1.0.dist-info/RECORD": raw("reg", F, record, ino=5), b"pkg.py": raw("reg", F, body, ino=4),
+          b"z.pyc": raw("reg", F, b"\x00", ino=6)}
+    _c, exp = model.export_expect("/w", "/o/b", None, [], Bp, H | {(10, 6)})
+    check("at_reset of a marked file, and a row with no hash (V4-D8, P44)", [l["at_reset"] for l in exp["lines"]],
+          ["unverified", "no_hash"])
+    check("a marked RECORD refuses the export (V4-S1)", model.export_expect("/w", "/o/b", None, [], Bp, {(10, 5)})[0], 4)
+    check("V4-S1's list", [model.is_database(p) for p in (b"a-1.dist-info/RECORD", b"a-1.dist-info/METADATA", b"var/lib/dpkg/status",
+                                                          b"var/lib/dpkg/info/a.md5sums", b"var/lib/dpkg/info/a.list", b"x.md5sums")],
+          [True, False, True, True, False, False])
+    ev = model.Event("pip", "pip_installed", {"name": "pkg", "version": "1.0"}, "", [b"pkg-1.0.dist-info/RECORD"], False)
+    Ap = model.view(Bp, model.HASH_DEFAULT, H)
+    check("self_consistent follows (V4-D8)", model.self_consistent(ev, {}, Ap, "/w"), False)
+    check("and holds with no writer", model.self_consistent(ev, {}, model.view(Bp, model.HASH_DEFAULT), "/w"), True)
     tests = {b".": raw("dir", D, ino=2), b"tests": raw("dir", D, ino=3), b"tests/test_api.py": raw("reg", F, TEST_API, ino=4)}
     weak = {**tests, b"tests/test_api.py": raw("reg", F, b"\n", ino=4, mtime=200)}
     got, _f = verify(None, tests, weak, wa=H)

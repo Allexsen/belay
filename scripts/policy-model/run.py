@@ -328,7 +328,7 @@ def rewrite_manifest(data, how, flags=None):
     """The bundle with its manifest member rewritten: "v2" or "v3" (as an earlier release wrote
     it), "container" (a host reader's source), "other-scope" (the bundle's and its manifest's
     scopes another path), "flags" (these entries flagged, `flags` as model.flag_manifest takes it)
-    or "break:<how>" (model.break_manifest). -> (bytes, its manifest's sha256, its source)."""
+    "unguarded-max" (model.unguarded_at_most) or "break:<how>" (model.break_manifest). -> (bytes, its manifest's sha256, its source)."""
     out = []
     pos = 0
     msha = source = None
@@ -344,6 +344,8 @@ def rewrite_manifest(data, how, flags=None):
             mh = json.loads(first)
             if how in ("v2", "v3"):
                 content = model.downgrade_manifest(content, int(how[1]))
+            elif how == "unguarded-max":
+                content = model.unguarded_at_most(content)
             elif how == "flags":
                 content = model.flag_manifest(content, flags)
             elif how.startswith("break:"):
@@ -432,6 +434,8 @@ def check_diff(rep, sc, env, scope, since, to, recs, B, A, unguarded):
             for side in ("before", "after"):
                 if "sha256" in d.get(side, {}):
                     rep.disagree(sc, "diff: V4-D2, a %s value carries sha256 at %r" % (side, p), None, canon(d))
+                if "type_before" not in m and not set(d.get(side, {})) <= set(m.get("changed", ())):
+                    rep.disagree(sc, "diff: a %s value `changed` does not name at %r" % (side, p), None, canon(d))
     tr = lines[-1]
     want = [("before_writer_open", sum(1 for e in B.values() if e["writer_open"])),
             ("after_writer_open", sum(1 for e in A.values() if e["writer_open"])),
@@ -519,6 +523,8 @@ def _run(sc, rep, cov, vstate, tmp, answered, holds):
         rep.disagree(sc, "export's exit code", str(ecode) + (" (%s)" % exp if ecode else ""),
                      "%d %s" % (rc, se.strip()))
         return
+    if ecode == 4 and model.NO_COPY not in se:
+        rep.disagree(sc, "V4-S1: export's words", model.NO_COPY, se.strip()[:400])
     if ecode != 0:
         if so:
             rep.disagree(sc, "export refused, yet wrote standard output", "", so.strip())
@@ -612,15 +618,15 @@ def _run(sc, rep, cov, vstate, tmp, answered, holds):
                             "dev": 0, "ino": 0}]
 
     # the model's expectation, built whether verify exists or not
+    A = model.view(raw_a, hash_after, hold_a.inodes)
+    model.apply_flags(A, v.get("after_flags", {}))
     refusal = model.verify_refusal(exp, vspec_raw, vdigest, vdigest_true, excl_a, to == "trusted",
                                    before_source,
                                    corrupt=bool(v.get("corrupt")) or str(v.get("manifest")).startswith("break:"),
-                                   other_scope=v.get("manifest") == "other-scope")
+                                   other_scope=v.get("manifest") == "other-scope", after=A)
     lines = flags = None
     wkeys = {}
     if refusal is None:
-        A = model.view(raw_a, hash_after, hold_a.inodes)
-        model.apply_flags(A, v.get("after_flags", {}))
         ctx = {"scope": scope_real, "bundle_sha256": vdigest_true, "spec": exp["spec"],
                "before": model.Side(exp["B"], raw_b[b"."]["dev"], excl_b),
                "after": model.Side(A, raw_a[b"."]["dev"], excl_a),
@@ -670,6 +676,8 @@ def _run(sc, rep, cov, vstate, tmp, answered, holds):
         cov.saw("refusal " + sc["refusal"])
     if rc != ecode_v:
         rep.disagree(sc, "verify's exit code", str(ecode_v), "%d %s" % (rc, se.strip()[:400]))
+    if refusal == 4 and model.database_without_copy(A) is not None and model.NO_COPY not in se:
+        rep.disagree(sc, "V4-S1: verify's words", model.NO_COPY, se.strip()[:400])
     if lines is None:
         if so:
             rep.disagree(sc, "verify refused, yet wrote standard output", "", so.strip()[:400])
