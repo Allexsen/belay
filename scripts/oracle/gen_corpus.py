@@ -2502,8 +2502,8 @@ def mount_raced_type_changes(w, rng):
     it), `raced` on the mount side only, on the other side only, or on both,
     and no other flag. Rule 1 before rule 2: `unknown`; `changed` is ["type"]
     ("when the types differ, `["type"]`"); `type_before` is the type before
-    ("whatever the outcome -- ... or `unknown` when `raced` is on either
-    side"); the reasons are "the reasons of every flag on either side --
+    ("whatever the outcome -- ... or `unknown` when `raced` or `writer_open`
+    is on either side"); the reasons are "the reasons of every flag on either side --
     except `unverified` on a side that also carries `mount`" (diff-v1.md, the
     `unknown` sentence; pins O7 and O8): `mount` and `raced`, never
     `unverified`. The other side carries no `mount`. It is a directory only
