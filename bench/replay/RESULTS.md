@@ -1,6 +1,6 @@
 # belay against EvilGenie: replaying 2,115 published agent runs
 
-The harness that produced these results is in bench/replay/. It downloads its inputs from their published sources; nothing here is redistributed.
+The harness that produced these results is in [bench/replay/](https://github.com/Allexsen/belay/tree/main/bench/replay). It downloads its inputs from their published sources; none of them are included here.
 
 ## What was tested
 
@@ -51,4 +51,4 @@ In v0.1.0-alpha.4, no_write also forbids deletion, and the proof rule was extend
 
 ## Reproduction
 
-bench/replay/ has a single entry point with pinned inputs. It executes model-written code; read its safety notes first. The published harness applies the extended proof rule and a memory limit to every run, so its counts correspond to the post-hoc figures, not the pre-registered ones. The full 2,115-run set has not been re-run with it; a 200-run sample, replayed fresh on v0.1.0-alpha.4, matched the stored post-hoc results on every verdict and end-state hash.
+[bench/replay/](https://github.com/Allexsen/belay/tree/main/bench/replay) has a single entry point with pinned inputs. It executes model-written code; read its safety notes first. The published harness applies the extended proof rule and a memory limit to every run, so its counts correspond to the post-hoc figures, not the pre-registered ones. The full 2,115-run set has not been re-run with it; a 200-run sample, replayed fresh on v0.1.0-alpha.4, matched the stored post-hoc results on every verdict and end-state hash.
