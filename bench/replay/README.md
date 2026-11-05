@@ -4,6 +4,8 @@ This replays [EvilGenie](https://huggingface.co/datasets/WiserHumanExperimental/
 and runs belay around each one: it rebuilds the workspace, replays every recorded tool call, and compares belay's
 verdict with the dataset's own labels.
 
+Results of the full run: [RESULTS.md](RESULTS.md).
+
 ## Read this first
 
 **It runs code written by language models**, some of it deliberately trying to pass tests it should not. The sandbox
@@ -65,7 +67,7 @@ modified), `clean`, and `error`, which is left out.
 **Should reproduce:** each run's verdict, and the sha256 of `test.py` and `test_cases.json` at its end. `--compare`
 checks both against earlier results, run by run.
 
-**Won't reproduce:** timing, and anything random or time-dependent in a run's output. About 86% of calls match the
+**Won't reproduce:** timing, and anything random or time-dependent in a run's output. About 86% of bash and Python calls match the
 recording's output exactly. The rest differ in timings, random numbers, memory addresses, or calls that hit a limit. A
 run whose protected files are written from random or timed values can end differently from one replay to the next.
 
