@@ -450,6 +450,46 @@ def fixture_manifest_v4():
     check("V4-2's when, a good entry", model.marked_entry_problem(entry), None)
 
 
+def fixture_protect_v2():
+    """protect-spec-v2.md by hand."""
+    for raw_ in (b'{"belay_protect":1,"protect":[]}', b'{"belay_protect":3,"protect":[]}', b'{"belay_protect":"2","protect":[]}'):
+        try:
+            model.parse_spec(raw_)
+            check("PV2-1 refused: %r" % raw_, "accepted", "refused")
+        except model.Refused as r:
+            check("PV2-1 its code: %r" % raw_, r.code, 2)
+            check("PV2-1 its words: %r" % raw_, r.why,
+                  "belay_protect is not 2 (version 1 specs are refused: no_write now forbids deleting; say 2)")
+    check("PV2-1 is seen", model.version_refused(b'{"belay_protect":1,"protect":[]}'), True)
+    check("PV2-1 not for version 2", model.version_refused(b'{"belay_protect":2,"protect":[]}'), False)
+    check("PV2-1 not with no key", model.version_refused(b'{"protect":[]}'), False)
+    base = {b".": raw("dir", D, ino=2), b"g": raw("dir", D, ino=3)}
+    x = {**base, b"g/x": raw("reg", F, b"one\n", ino=4)}
+
+    def gone(*rules, after=base):
+        spec = ('{"belay_protect":2,"protect":[%s]}' % ",".join(rules)).encode()
+        got, _f = verify(spec, x, after)
+        return got[1:-1]
+    deleted = ('{"flag":"protected_path_deleted","level":"violation","path":"g/x","rule":"%s",'
+               '"text":"g/x: protected by %s, removed","paths":["g/x"]}')
+    nw = '{"path":"%s","mode":["no_write"]}'
+    nd = '{"path":"%s","mode":["no_delete"]}'
+    check("no_write, deleted (PV2-2)", gone(nw % "g/**"), [deleted % ("g/**", "g/**")])
+    check("no_delete, deleted (PV2-3)", gone(nd % "g/**"), [deleted % ("g/**", "g/**")])
+    check("both modes, one flag (PV2-3)", gone('{"path":"g/**","mode":["no_write","no_delete"]}'), [deleted % ("g/**", "g/**")])
+    check("two rules, one flag, the first's name (PV2-3, PV2-4)", gone(nd % "g/*", nw % "g/**"), [deleted % ("g/*", "g/*")])
+    check("the first with either mode (PV2-4)", gone('{"path":"g/x","mode":["no_create"]}', nw % "g/*"), [deleted % ("g/*", "g/*")])
+    check("no_create alone: nothing", gone('{"path":"g/x","mode":["no_create"]}'), [])
+    hsh = model.sha256(b"one\n")
+    check("no_write and expected_sha256: both say theirs", gone('{"path":"g/x","mode":["no_write"],"expected_sha256":"%s"}' % hsh), [
+        deleted % ("g/x", "g/x"),
+        '{"flag":"protected_hash_mismatch","level":"violation","path":"g/x","expected":"%s","why":"absent",'
+        '"text":"g/x: absent, expected sha256 %s","paths":["g/x"]}' % (hsh, hsh)])
+    other = {**base, b"g/x": raw("reg", F, b"three\n", ino=4, mtime=200)}
+    check("no_delete allows writing (PV2-3)", gone(nd % "g/**", after=other), [])
+    check("no_write writing stays written (PV2-2)", json.loads(gone(nw % "g/**", after=other)[0])["flag"], "protected_path_written")
+
+
 def tables():
     P = [("tests/**", "tests", True), ("tests/**", "tests/a/b", True), ("tests/**", "tests/.cache/x", False),
          (".github/workflows/**", ".github/workflows/ci.yml", True), ("tests/.cache/**", "tests/.cache/x", True),
@@ -511,7 +551,7 @@ def run():
     del FAILS[:]
     for f in (tables, fixture_protected_write, fixture_privilege_path, fixture_iflags_decision_163, fixture_text_cut,
               fixture_pip_reinstall_judged, fixture_pyc_decision_186, fixture_pip_bundle,
-              fixture_dpkg_bundle_and_tamper, fixture_git_reset, fixture_writer_open, fixture_manifest_v4):
+              fixture_dpkg_bundle_and_tamper, fixture_git_reset, fixture_writer_open, fixture_manifest_v4, fixture_protect_v2):
         try:
             f()
         except Exception as e:  # a crash is a failure, named

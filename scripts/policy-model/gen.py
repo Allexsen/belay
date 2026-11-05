@@ -17,6 +17,8 @@ A scenario is a dict:
              reader's source; "v3": as v2, keeping `source`; "flags": the entries `flags` names
              given those flags; "break:<how>": a manifest V4-R2 or V4-R3 refuses), flags (path ->
              flag names), after_flags (the same, on a `to: check` checkpoint's manifest),
+             bundle_spec (raw bytes: the bundle's header given that spec's digest, as a release
+             that took a version 1 spec wrote it),
              mark_writers ("first": with `to: trusted`, the hold ends before the second mark;
              "both": it does not), tmpdir ("inside": verify's $TMPDIR, where it makes its own
              state directory, is the scope's `tmp`)
@@ -853,8 +855,91 @@ def scenarios():
     for c in ("trailing", "unknown-key", "short"):
         add(S("verify-corrupt-" + c, BASE, [], TW, verify={"corrupt": c}, refusal="verify:corrupt-" + c))
     out.extend(writer_scenarios())
+    out.extend(version2_scenarios())
     names = [s["name"] for s in out]
     assert len(names) == len(set(names)), "duplicate scenario names"
+    return out
+
+
+V1_SPEC = b'{"belay_protect":1,"protect":[{"path":"tests/**","mode":["no_write"]}]}'
+
+
+def version2_scenarios():
+    """protect-spec-v2.md, row by row."""
+    out = []
+    add = out.append
+    G = "grader/check.py"
+    T = "tests/test_api.py"
+    W = lambda p: spec_of(rule(p, "no_write"))
+    H = sha(GRADER)
+    DATA = BASE + [("file", "tests/data/a.txt", b"a\n"), ("file", "tests/data/deep/b.txt", b"b\n")]
+
+    # PV2-2: no_write and a deletion
+    add(S("pv2-2-file", BASE, [("rm", G)], W("grader/check.py")))
+    add(S("pv2-2-glob-double-star", BASE, [("rm", T)], W("tests/**")))
+    add(S("pv2-2-glob-star", BASE + [("file", "tests/test_b.py", b"x = 1\n"), ("file", "tests/other.py", b"y\n")],
+          [("rm", T), ("rm", "tests/test_b.py"), ("rm", "tests/other.py")], W("tests/test_*.py")))
+    add(S("pv2-2-glob-any-depth", BASE + [("file", "vendor/conftest.py", CONFTEST)], [("rm", "vendor/conftest.py"), ("rm", "tests/conftest.py")],
+          W("**/conftest.py")))
+    add(S("pv2-2-directory", DATA, [("rmtree", "tests/data")], W("tests/**")))
+    add(S("pv2-2-whole-tree", DATA, [("rmtree", "tests")], W("tests/**")))
+    add(S("pv2-2-directory-became-file", DATA, [("rmtree", "tests/data"), ("file", "tests/data", b"now a file\n")], W("tests/**")))
+    add(S("pv2-2-symlink", BASE + [("symlink", "tests/link", "test_api.py")], [("rm", "tests/link")], W("tests/**")))
+    add(S("pv2-2-not-utf8", BASE + [("file", b"tests/\xff.txt", b"x\n")], [("rm", b"tests/\xff.txt")], W("tests/**")))
+    add(S("pv2-2-dot-name-not-matched", BASE + [("file", "tests/.cache/x", b"1\n"), ("file", ".env", b"A=1\n")],
+          [("rm", "tests/.cache/x"), ("rm", ".env")], spec_of(rule("tests/**", "no_write"), rule("*", "no_write"))))
+    add(S("pv2-2-dot-name-matched", BASE + [("file", ".env", b"A=1\n")], [("rm", ".env")], W(".*")))
+    add(S("pv2-2-write-stays-written", BASE, [("write", G, GRADER + b"#\n")], W("grader/**")))
+    add(S("pv2-2-type-change-stays-written", BASE, [("rm", T), ("symlink", T, "/etc/hostname")], W("tests/**")))
+    add(S("pv2-2-renamed-away", BASE, [("rm", G), ("file", "grader/check2.py", GRADER)], W("grader/**")))
+    add(S("pv2-2-other-name-of-a-hard-link", BASE + [("hardlink", "tests/link.py", G)], [("rm", "tests/link.py")], W("grader/**")))
+    add(S("pv2-2-created-is-not-write", BASE, [("file", "tests/new.txt", b"n\n")], W("tests/**")))
+    add(S("pv2-2-all-kinds", BASE + [("file", "tests/gone.txt", b"g\n")],
+          [("rm", "tests/gone.txt"), ("write", "tests/conftest.py", CONFTEST + b"#\n"), ("file", "tests/new.txt", b"n\n")],
+          spec_of(rule("tests/**", "no_write", "no_create"))))
+    # with expected_sha256: the deletion and the hash each say theirs
+    add(S("pv2-2-expected-deleted", BASE, [("rm", G)], spec_of(rule(G, "no_write", expected=H))))
+    add(S("pv2-2-expected-only-deleted", BASE, [("rm", G)], spec_of(rule(G, expected=H))))
+    add(S("pv2-2-expected-under-glob-deleted", BASE, [("rm", G)], spec_of(rule(G, expected=H), rule("grader/**", "no_write"))))
+    add(S("pv2-2-no-create-only-deleted", BASE, [("rm", G)], spec_of(rule("grader/**", "no_create"))))
+
+    # PV2-3: no_delete alone; with no_write it adds nothing
+    add(S("pv2-3-no-delete-allows-writing", BASE, [("write", G, b"x\n"), ("chmod", "tests/conftest.py", 0o600)],
+          spec_of(rule("grader/**", "no_delete"), rule("tests/**", "no_delete"))))
+    add(S("pv2-3-no-delete-forbids-deleting", BASE, [("rm", G)], spec_of(rule("grader/**", "no_delete"))))
+    add(S("pv2-3-both-modes", BASE, [("rm", G)], spec_of(rule("grader/**", "no_write", "no_delete"))))
+    add(S("pv2-3-both-modes-other-order", BASE, [("rm", G)], spec_of(rule("grader/**", "no_delete", "no_write"))))
+    add(S("pv2-3-two-rules", BASE, [("rm", G)], spec_of(rule("grader/**", "no_write"), rule(G, "no_delete"))))
+    add(S("pv2-3-many-rules", DATA, [("rm", "tests/data/a.txt")],
+          spec_of(rule("tests/data/a.txt", "no_delete"), rule("tests/data/*", "no_write"), rule("tests/**", "no_delete", "no_write"))))
+
+    # PV2-4: the rule named, the text
+    add(S("pv2-4-no-write-rule-first", BASE, [("rm", G)], spec_of(rule("grader/*", "no_write"), rule("grader/**", "no_delete"))))
+    add(S("pv2-4-no-delete-rule-first", BASE, [("rm", G)], spec_of(rule("grader/*", "no_delete"), rule("grader/**", "no_write"))))
+    add(S("pv2-4-skips-no-create", BASE, [("rm", G)], spec_of(rule("grader/**", "no_create"), rule("grader/*", "no_write"))))
+    add(S("pv2-4-skips-expected-only", BASE, [("rm", G)], spec_of(rule(G, expected=H), rule("grader/*", "no_delete"))))
+    add(S("pv2-4-written-keeps-its-own-rule", BASE, [("write", G, b"x\n")], spec_of(rule("grader/*", "no_delete"), rule("grader/**", "no_write"))))
+
+    # PV2-5: PS-M5 reads the before side
+    sec = "grader/secret.txt"
+    SEC = BASE + [("file", sec, b"s\n"), ("chmod", sec, 0o000)]
+    add(S("pv2-5-unreadable-at-reset-no-write", SEC, [("rm", sec)], W("grader/**"), tags=["P25", "P54"]))
+    add(S("pv2-5-unreadable-at-reset-no-delete", SEC, [("rm", sec)], spec_of(rule("grader/**", "no_delete")), tags=["P25", "P54"]))
+    add(S("pv2-5-unreadable-at-reset-no-create", SEC, [("rm", sec)], spec_of(rule("grader/**", "no_create")), tags=["P25", "P6"]))
+    add(S("pv2-5-too-big-at-reset", BASE + [("sparse", "grader/big.bin", 4294967296 + 1)], [("rm", "grader/big.bin")],
+          W("grader/**"), tags=["P54"]))
+    add(S("pv2-5-gone-below-unreadable", BASE + [("file", "grader/sub/x.txt", b"x\n")], [("chmod", "grader/sub", 0o000)],
+          W("grader/**"), tags=["P25", "P50"]))
+    add(S("pv2-5-marked-then-removed", BASE, [("rm", G)], W("grader/**"), writers=([G], [])))
+
+    # PV2-6: a bundle holds a digest. One holding a version 1 spec's: only that spec, which is refused
+    add(S("pv2-6-v1-bundle-v1-spec", BASE, [], W("tests/**"), verify={"bundle_spec": V1_SPEC, "spec": V1_SPEC}, tags=["P24"],
+          refusal="verify:v1-bundle-v1-spec"))
+    add(S("pv2-6-v1-bundle-v2-spec", BASE, [], W("tests/**"), verify={"bundle_spec": V1_SPEC}, refusal="verify:v1-bundle-v2-spec"))
+    add(S("pv2-6-v1-bundle-no-spec", BASE, [], W("tests/**"), verify={"bundle_spec": V1_SPEC, "spec": None}, tags=["P30"],
+          refusal="verify:v1-bundle-no-spec"))
+    add(S("pv2-6-no-spec-bundle-judged", BASE, [("rm", T)], None))
+    add(S("pv2-6-no-spec-bundle-v1-spec", BASE, [], None, verify={"spec": V1_SPEC}, tags=["P24"], refusal="verify:no-spec-bundle-v1-spec"))
     return out
 
 
