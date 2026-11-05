@@ -15,6 +15,6 @@
 #define BELAY_VERSION_MAJOR 0
 #define BELAY_VERSION_MINOR 1
 #define BELAY_VERSION_PATCH 0
-#define BELAY_VERSION_STRING "0.1.0-alpha.2"
+#define BELAY_VERSION_STRING "0.1.0-alpha.3"
 
 #endif /* BELAY_BELAY_H */

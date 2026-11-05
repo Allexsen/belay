@@ -4,7 +4,7 @@
 list, and make it reversible.
 
 **Status: pre-alpha.** The checkpoint and diff engine runs (below); the formats it writes are drafts
-that may still change, and the latest pre-release is v0.1.0-alpha.2. Nothing that changes your files
+that may still change, and the latest pre-release is v0.1.0-alpha.3. Nothing that changes your files
 exists yet.
 
 > **Pre-alpha. The most useful contribution right now is real-world
@@ -23,9 +23,13 @@ exists yet.
 - Interpreters that explain changes to pip installs, dpkg's package database, git refs, hooks,
   reflogs (kept and read in full up to 16 MiB each) and small text files
   ([docs/spec/diff-v1.md](docs/spec/diff-v1.md)).
-- The manifest format, version 2 ([docs/spec/manifest-v2.md](docs/spec/manifest-v2.md), built on
-  [version 1](docs/spec/manifest-v1.md), which belay still reads) and the diff format (diff.v1, a
-  draft).
+- `belay baseline export` and `belay verify`: a checkpoint kept as a bundle, and a directory compared
+  with it and judged against a protect spec.
+- `--docker`: a container's layers read from the host.
+- pybelay, Python bindings around the binary, with a reward helper.
+- The manifest format, version 4 ([test/expect/manifest-v4.md](test/expect/manifest-v4.md), built on
+  [version 2](docs/spec/manifest-v2.md) and [version 1](docs/spec/manifest-v1.md), all of which belay
+  still reads) and the diff format (diff.v1, a draft).
 - Tests on Linux (x86_64, arm64), on macOS, and inside a Docker container as an unprivileged user,
   in CI on every change.
 
@@ -33,7 +37,7 @@ exists yet.
 
 No `commit`, `discard`, restore or undo: belay records and explains, and changes nothing. The
 session engine under `src/session/` (namespaces and overlays) is not part of the `belay` binary.
-No integrity checking against a baseline, no policy layer, no Python package, no stable release.
+No stable release.
 
 ## Deliberate limits
 
@@ -45,7 +49,9 @@ What a checkpoint does not see: anything outside the scope, anything below a mou
 belay's own state directory and the paths you exclude (left out, and named in every manifest), and
 network effects (pushes, API calls, emails).
 On filesystems with coarse timestamps some same-size rewrites can be missed; the limits are in
-[docs/spec/manifest-v1.md](docs/spec/manifest-v1.md).
+[docs/spec/manifest-v1.md](docs/spec/manifest-v1.md). A file being written while it is read is
+marked and reported unknown where the kernel can say so, and counted where it can't
+([docs/cli.md](docs/cli.md#a-file-being-written-while-it-is-read)).
 
 ## Build
 
