@@ -14,7 +14,7 @@ Tested against 2,115 published agent runs: [results](bench/replay/RESULTS.md).
 > a build, an install) and compare its report with what really
 > happened. If it missed a change, invented one, or buried the real
 > change in noise, open an issue with the receipt. That's the data
-> belay needs most.
+> I need the most.
 
 ## What exists today
 
