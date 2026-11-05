@@ -967,6 +967,13 @@ def writer_scenarios():
     add(S("s3-empty-unreadable-after", BASE, [("write", T, b""), ("chmod", T, 0o000)], tags=["P13", "P25", "P46"]))
     add(S("wo-tests-emptied-before-marked", BASE + [("file", "tests/test_e.py", b"")], [("rm", "tests/test_e.py")],
           writers=(["tests/test_e.py"], []), tags=["P13", "P46", "P52"]))
+    add(S("s3-empty-to-symlink", BASE + [("file", "tests/test_e.py", b"")], [("rm", "tests/test_e.py"), ("symlink", "tests/test_e.py", "x")],
+          tags=["P13", "P52"]))
+    add(S("s3-no-asserts-to-dir", BASE + [("file", "tests/test_n.py", b"x = 1\n")], [("rm", "tests/test_n.py"), ("dir", "tests/test_n.py")],
+          tags=["P13", "P52"]))
+    add(S("wo-tests-empty-before-marked-to-symlink", BASE + [("file", "tests/test_e.py", b"")],
+          [("rm", "tests/test_e.py"), ("symlink", "tests/test_e.py", "x")], writers=(["tests/test_e.py"], []), tags=["P13", "P52"]))
+    add(S("wo-tests-empty-after-added", BASE, [("file", "tests/test_e.py", b"")], writers=([], ["tests/test_e.py"]), tags=["P13", "P52"]))
     add(S("wo-tests-empty-before-filled", BASE + [("file", "tests/test_e.py", b"")], [("write", "tests/test_e.py", TEST_API)],
           writers=(["tests/test_e.py"], []), tags=["P13", "P46"]))
     add(S("wo-tests-marked-protected", BASE, [("write", T, WEAK)], spec_of(rule("tests/**", "no_write")), writers=([], [T]), tags=["P47"]))
@@ -1011,6 +1018,10 @@ def writer_scenarios():
     add(S("d9-raced-exec-bits", BASE + [("file", "bin/tool", b"\x00\n", 0o644)], [("chmod", "bin/tool", 0o755)],
           verify={"to": "check", "after_flags": {TOOLB: ["raced"]}}, tags=["P47"]))
     add(S("d9-unreadable-exec-bits", BASE + [("file", "bin/tool", b"#!/bin/sh\n", 0o644)], [("chmod", "bin/tool", 0o111)], tags=["P25", "P47"]))
+    add(S("d9-raced-before-marked-after", BASE + [("file", "bin/tool", b"\x00\n", 0o644)], [("chmod", "bin/tool", 0o755)],
+          verify={"manifest": "flags", "flags": {TOOLB: ["raced"]}, "to": "check", "after_flags": {TOOLB: ["writer_open"]}}, tags=["P47"]))
+    add(S("wo-path-exec-unreadable-after", BASE + [("file", "bin/tool", b"#!/bin/sh\n", 0o644)], [("chmod", "bin/tool", 0o111)],
+          writers=(["bin/tool"], []), tags=["P25", "P47"]))
     add(S("wo-priv-setuid", BASE + [("file", "tools/run", b"#!/bin/sh\n", 0o755)], [("chmod", "tools/run", 0o4755)],
           writers=([], ["tools/run"])))
     add(S("wo-priv-one-side", BASE, [("file", "tools/new", b"#!/bin/sh\n", 0o2755)], writers=([], ["tools/new"]), tags=["P32"]))

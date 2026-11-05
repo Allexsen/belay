@@ -359,6 +359,9 @@ def fixture_writer_open():
     empty = model.view({b"f": raw("reg", F, b"", ino=4)}, model.HASH_DEFAULT, H)[b"f"]
     check("size 0 counts as held, for tests_weakened, with no copy (V4-S3)", model.test_side(empty), b"")
     check("and only for it (P46)", model.held(empty), None)
+    locked0 = raw("reg", 0o100000, b"", ino=4)
+    locked0["readable"] = False
+    check("a file belay could not read is not held (V4-S3)", model.test_side(model.view({b"f": locked0}, model.HASH_DEFAULT)[b"f"]), None)
     # V4-D7 in policy.v1, and what stays quiet
     B = {**base, b"g/x": x}
     got, flags = verify(spec, B, {**base, b"g/x": other}, wa=H)
