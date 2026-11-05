@@ -20,7 +20,7 @@ consumers MUST handle lines of any length.
 {"belay_diff":1,"scopes":["/home/u/proj"],"before_created_ns":1761000000000000000,"after_created_ns":1761000600000000000,"before_hash_max_bytes":67108864,"after_hash_max_bytes":67108864,"scope_remounted":false,"identity_compared":true,"before_manifest_version":2,"after_manifest_version":2,"before_excluded":[{"path":"node_modules","reason":"user","dev":2049,"ino":131990}],"after_excluded":[{"path":"node_modules","reason":"user","dev":2049,"ino":131990}]}
 {"path":"src/main.c","outcome":"modified","type":"reg","changed":["size","mtime_ns","sha256"]}
 {"path":"build","outcome":"unknown","type":"dir","unknown":["unstable"]}
-{"belay_diff_end":2,"unchanged":1840,"added":0,"removed":0,"modified":1,"type_changed":0,"metadata_only":0,"unknown":1,"dir_timestamps_only":0,"events":0,"before_vanished":0,"before_unstable":0,"before_raced":0,"after_vanished":0,"after_unstable":1,"after_raced":0,"provisional":true,"before_sha256":"9f2c...","after_sha256":"41ab..."}
+{"belay_diff_end":2,"unchanged":1840,"added":0,"removed":0,"modified":1,"type_changed":0,"metadata_only":0,"unknown":1,"dir_timestamps_only":0,"events":0,"before_vanished":0,"before_unstable":0,"before_raced":0,"after_vanished":0,"after_unstable":1,"after_raced":0,"provisional":true,"before_sha256":"9f2c...","after_sha256":"41ab...","before_writer_open":0,"after_writer_open":0,"before_unguarded":0,"after_unguarded":0}
 ```
 
 `before` is the first manifest given and `after` the second, whatever their `created_ns` say.
@@ -76,10 +76,12 @@ manifest's own trailer said about its walk: `before_vanished`, `before_unstable`
 are the first manifest's `vanished`, `unstable` and `raced` counts, and `after_vanished`,
 `after_unstable` and `after_raced` the second's. `provisional` is `true` exactly when any of those
 six is not 0: a tree changed while it was walked, so the whole result is provisional (manifest-v1,
-obligations on a consumer), and a `vanished` path has no record that could say so. Last,
+obligations on a consumer), and a `vanished` path has no record that could say so. Then
 `before_sha256` and `after_sha256` are the sha256 of each manifest file's bytes, all of them, as
 this diff read them; a reader accepts nothing after a manifest's trailer, so that is the whole
-file.
+file. Last, `before_writer_open`, `after_writer_open`, `before_unguarded` and `after_unguarded` are
+each manifest's own trailer counts (manifest v4; `0` for a manifest before it). None of the four
+is in `provisional`.
 
 <!-- BEGIN GENERATED: diff-trailer -->
 <!-- From src/schema/diff_schema.c by tools/gen_schema.c. Edit there, then `make gen`. -->
@@ -205,7 +207,7 @@ attribute when belay does not run as root) that changes on a directory is seen o
 count.
 
 `type_before`, for a path present on both sides whose types differ: the type before, whatever the
-outcome -- `type_changed`, or `unknown` when `raced` is on either side.
+outcome -- `type_changed`, or `unknown` when `raced` or `writer_open` is on either side.
 
 `changed`, for a path present on both sides: when the types differ, `["type"]`; otherwise every
 compared field that differs (by its class for that type), whatever the outcome, and `ctime_ns` only
@@ -217,7 +219,8 @@ attributes were read on both sides (neither carries `xattrs_unknown` -- an absen
 `unverified` on a side that also carries `mount`, since a mounted regular file is never read and
 `mount` is that reason -- and, when the types are the same, of every field unknown under rule 4
 (across a type change no field is compared), in the order of the reasons table; for the
-one-sided case, its one reason.
+one-sided case, the reason of the rule that decided it, or, where no earlier rule applies to an
+entry carrying `writer_open`, the entry's own: `writer_open`, after `raced` when it carries both.
 
 **An absent record means `unchanged`** -- for a directory, possibly with its own timestamps
 changed, which the trailer counts in `dir_timestamps_only`. That holds only because every other
