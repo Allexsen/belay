@@ -228,6 +228,12 @@ static int count_op(struct tally *x, const char *name) {
     return 0;
 }
 
+/* Most first; a tie by name. */
+static int by_count(const void *a, const void *b) {
+    const struct op *x = a, *y = b;
+    return x->n != y->n ? (x->n < y->n ? 1 : -1) : strcmp(x->name, y->name);
+}
+
 static void tallies_free(struct tallies *t) {
     for (size_t i = 0; i < t->n; i++) {
         for (size_t k = 0; k < t->v[i].nops; k++) free(t->v[i].ops[k].name);
@@ -293,7 +299,7 @@ static bool any_git(const struct jval *f) {
 /* What the changes section is built from. */
 struct ctx {
     struct lines priv, tracked, other, ignedit, ignored, gitvis;
-    struct tallies ign, git;
+    struct tallies ign, ignu, git;      /* ignored changes; ignored unknown rows, by reason; .git */
     const unsigned char *cls;   /* each classified path's class, in order; NULL: path order */
     size_t ci;
     bool git_events;            /* git's events say what its findings did (decision 126) */
@@ -392,19 +398,28 @@ static int record(const struct jval *r, struct ctx *x, const struct receipt_opts
     }
     if (ign_edit) return keep(&x->ignedit, b.p, false, o->all);
     if (x->cls != NULL && c == GC_IGNORED) {      /* what git ignores: by top-level directory */
-        if (o->all || unknown) return keep(&x->ignored, b.p, false, o->all);
-        free(b.p);
         /* the key: "build/" for build and everything below it, "" at the top */
         const char *sl = memchr(path, '/', plen);
         const size_t kl = sl != NULL ? (size_t)(sl - path) : is_dir ? plen : 0;
+        /* an unknown row folds under its directory, counted by reason; a
+         * file at the top is under none, and stays named */
+        if (o->all || (unknown && kl == 0)) return keep(&x->ignored, b.p, false, o->all);
+        free(b.p);
         char *key = malloc(kl + 2);
         if (key == NULL) { belay_err_set(BELAY_ERR_NOMEM, 0, "receipt: out of memory"); return -1; }
         memcpy(key, path, kl);
         if (kl) key[kl] = '/';
-        struct tally *t = tally(&x->ign, key, kl ? kl + 1 : 0);
+        struct tally *t = tally(unknown ? &x->ignu : &x->ign, key, kl ? kl + 1 : 0);
         free(key);
         if (t == NULL) { belay_err_set(BELAY_ERR_NOMEM, 0, "receipt: out of memory"); return -1; }
         t->n++;
+        if (unknown) {                  /* its first reason: the counts add up to the rows */
+            const struct jval *u = jget(r, "unknown");
+            if (count_op(t, u != NULL && u->t == J_ARR && u->n > 0 && u->kids[0].t == J_STR ? u->kids[0].s : "unknown") == -1) {
+                belay_err_set(BELAY_ERR_NOMEM, 0, "receipt: out of memory");
+                return -1;
+            }
+        }
         return 0;
     }
     if (x->cls != NULL && c == GC_TRACKED) return keep(&x->tracked, b.p, false, o->all);
@@ -616,7 +631,7 @@ int receipt_render(FILE *diff, FILE *out, const struct receipt_opts *o) {
     }
     /* Changes: tracked, untracked (the only ones cut), ignored edits by
      * name, the rest ignored, then .git (2026-11-04). */
-    if (x.tracked.n || x.other.n || x.other.more || x.ignedit.n || x.ignored.n || x.ign.n || x.gitvis.n || x.git.n) {
+    if (x.tracked.n || x.other.n || x.other.more || x.ignedit.n || x.ignored.n || x.ign.n || x.ignu.n || x.gitvis.n || x.git.n) {
         fputs("\nchanges\n", out);
         for (size_t i = 0; i < x.tracked.n; i++) fprintf(out, "%s\n", x.tracked.v[i]);
         for (size_t i = 0; i < x.other.n; i++) fprintf(out, "%s\n", x.other.v[i]);
@@ -631,6 +646,18 @@ int receipt_render(FILE *diff, FILE *out, const struct receipt_opts *o) {
                 if (top) fputs("in the top directory\n", out);
                 else { fputs("under ", out); receipt_fputs(out, t->key); fputc('\n', out); }
             }
+        for (size_t i = 0; i < x.ignu.n; i++) {
+            struct tally *t = &x.ignu.v[i];
+            qsort(t->ops, t->nops, sizeof *t->ops, by_count);
+            fprintf(out, "  git-ignored: %zu unknown under ", t->n);
+            receipt_fputs(out, t->key);
+            for (size_t k = 0; k < t->nops; k++) {
+                fputs(k ? ", " : " (", out);
+                receipt_fputs(out, t->ops[k].name);
+                fprintf(out, " %zu", t->ops[k].n);
+            }
+            fputs(")\n", out);
+        }
         for (size_t i = 0; i < x.gitvis.n; i++) fprintf(out, "%s\n", x.gitvis.v[i]);
         for (size_t i = 0; i < x.git.n; i++) {
             const struct tally *t = &x.git.v[i];
@@ -663,6 +690,7 @@ out:
     drop(&x.ignored);
     drop(&x.gitvis);
     tallies_free(&x.ign);
+    tallies_free(&x.ignu);
     tallies_free(&x.git);
     for (size_t i = 0; i < col.n; i++) free(col.p[i]);
     free(col.p);

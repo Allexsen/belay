@@ -278,6 +278,28 @@ def ignored_edit(r):
         f.get("kind") in ("text_changed", "text_rewritten") for f in r.get("findings") or [])
 
 
+def ignored_unknown(cls, r):
+    """An unknown row under a git-ignored directory: it folds like a change
+    (2026-11-05). A file at the top is under none and stays named, as privilege
+    changes do."""
+    p = path_of(r)
+    return (cls is not None and "event" not in r and r.get("outcome") == "unknown"
+            and cls.get(p) == "ignored" and ("/" in p or r.get("type") == "dir") and not privilege_change(r))
+
+
+def unknown_fold(recs):
+    """Unknown rows by top-level directory, each with its rows' first reasons,
+    most first: [("build/", 214, "listing_incomplete 212, unstable 2")]."""
+    n = {}
+    for r in recs:
+        k = path_of(r).split("/", 1)[0] + "/"
+        why = (r.get("unknown") or ["unknown"])[0]
+        n.setdefault(k, {}).setdefault(why, 0)
+        n[k][why] += 1
+    return [(k, sum(v.values()), ", ".join(f"{w} {c:,}" for w, c in sorted(v.items(), key=lambda x: (-x[1], x[0]))))
+            for k, v in sorted(n.items())]
+
+
 def in_place(recs):
     """Reflog moves that left their ref where it was (from == to: a reset
     or a stash in place, which can discard uncommitted work), counted by
@@ -600,6 +622,7 @@ def summary(secs, net=None, cls=None):
     ign_named = []
     added_dirs = set()
     unknown, priv, build, pyc = [], [], [], 0
+    folded_unknown = []
     for p, rs in per.items():
         if any(privilege_change(r) for r in rs):
             priv.append(f"{SYM.get(rs[-1]['outcome'], '?')} {printable(p)}")
@@ -611,7 +634,9 @@ def summary(secs, net=None, cls=None):
             continue
         if GIT.match(p):
             continue
-        if rs[-1]["outcome"] == "unknown":
+        if ignored_unknown(cls, rs[-1]):
+            folded_unknown.append(rs[-1])
+        elif rs[-1]["outcome"] == "unknown":
             unknown.append(f"{printable(p)} ({', '.join(rs[-1].get('unknown', []))})")
     eligible = {p for p, rs in per.items() if not folds(p, rs[-1]) and not compiled(p) and not GIT.match(p)
                 and rs[-1]["outcome"] != "unknown"}
@@ -685,8 +710,10 @@ def summary(secs, net=None, cls=None):
         if pyc:
             parts.append(f"{pyc:,} compiled Python")
         lines.append(f"  {'build  ' if cls is None else 'ignored'}    {'; '.join(parts)}")
-    if unknown:
-        lines.append(f"  unknown    {len(unknown):,}: {listed(sorted(unknown))}")
+    if unknown or folded_unknown:
+        parts = [f"{len(unknown):,}: {listed(sorted(unknown))}"] if unknown else []
+        parts += [f"{k:,} git-ignored under {printable(d)} ({why})" for d, k, why in unknown_fold(folded_unknown)]
+        lines.append(f"  unknown    {'; '.join(parts)}")
     return ["", "summary"] + lines if lines else []
 
 
@@ -729,12 +756,13 @@ def render(scope, belay, secs, errors, net=None):
         else:               # git-ignored paths fold by top-level directory; privilege and unknown stay
             build = [r for r in recs if "event" not in r and cls.get(path_of(r)) == "ignored"
                      and not privilege_change(r) and r.get("outcome") != "unknown" and not ignored_edit(r)]
-        pyc = [r for r in recs if "event" not in r and r not in build and compiled(path_of(r))]
+        folded = [r for r in recs if ignored_unknown(cls, r)]
+        pyc = [r for r in recs if "event" not in r and r not in build and r not in folded and compiled(path_of(r))]
         events = any("event" in r and r.get("interp") == "git" for r in recs)
         git = {}
         shown = []
         for r in recs:
-            if r in build or r in pyc:
+            if r in build or r in pyc or r in folded:
                 continue
             repo = folded_git(r, events)
             if repo is not None:
@@ -769,6 +797,8 @@ def render(scope, belay, secs, errors, net=None):
             for d, k in ignored_dirs(build):
                 lines.append(f"  git-ignored: {k:,} change{'s' if k != 1 else ''} "
                              + (f"under {printable(d)}" if d else "in the top directory"))
+        for d, k, why in unknown_fold(folded):
+            lines.append(f"  git-ignored: {k:,} unknown under {printable(d)} ({why})")
         if pyc:
             lines.append(f"  compiled Python: {len(pyc)} change{'s' if len(pyc) != 1 else ''} (__pycache__/, *.pyc)")
         for repo, rs in git.items():

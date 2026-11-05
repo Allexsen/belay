@@ -268,7 +268,9 @@ changes. When the scope is in a git repository, belay asks git (`git ls-files`, 
 tracked changes first and in full, then untracked ones, then each git-ignored file whose text or
 type changed, by name (`M .env   (git-ignored)`: an ignored file edited is often local
 configuration), then the rest of what git ignores -- added, removed, binaries rewritten -- as one
-line per top-level directory (`git-ignored: 210 changes under build/`). That is git's word on the repository
+line per top-level directory (`git-ignored: 210 changes under build/`), and what cannot be told
+there likewise, counted by reason (`git-ignored: 214 unknown under build/ (listing_incomplete 212,
+unstable 2)`). That is git's word on the repository
 as it is now: a diff ending at an earlier checkpoint says so in one line. Without git or a
 repository, the changes are listed by path. A repository's own `.git` folds to one line
 (`git bookkeeping: 12 changes under .git/`), the index's "index changed" with it; what else git
