@@ -400,9 +400,10 @@ TEST(a_marked_hash_is_no_hash_and_a_mode_still_speaks) {
 #else
     fresh("{\"belay_protect\":1,\"protect\":[{\"path\":\"t\",\"mode\":[\"no_write\"],"
           "\"expected_sha256\":\"dc51b8c96c2d745df3bd5590d990230a482fd247123599548e0632fdbf97fc22\"}]}");
-    sh("mkdir bin && printf 'x\\n' > bin/old && chmod 644 bin/old && printf 'y\\n' > t");
+    sh("mkdir bin && printf 'x\\n' > bin/old && chmod 644 bin/old && printf 'y\\n' > t && "
+       "printf '[tool.pytest.ini_options]\\naddopts = \"-q\"\\n' > pyproject.toml");
     REQUIRE_MSG(export_(true) == EXIT_DONE, "%s", g_err);
-    sh("chmod 755 bin/old && printf '#!/bin/sh\\n' > bin/new && chmod 755 bin/new");
+    sh("chmod 755 bin/old && printf '#!/bin/sh\\n' > bin/new && chmod 755 bin/new && : > pyproject.toml");
     char p[600];
     snprintf(p, sizeof p, "%s/t", g_scope);
     const int w1 = open(p, O_WRONLY);
@@ -410,16 +411,20 @@ TEST(a_marked_hash_is_no_hash_and_a_mode_still_speaks) {
     const int w2 = open(p, O_WRONLY);
     snprintf(p, sizeof p, "%s/bin/new", g_scope);
     const int w3 = open(p, O_WRONLY);
-    REQUIRE(w1 >= 0 && w2 >= 0 && w3 >= 0);
+    snprintf(p, sizeof p, "%s/pyproject.toml", g_scope);
+    const int w4 = open(p, O_WRONLY);
+    REQUIRE(w1 >= 0 && w2 >= 0 && w3 >= 0 && w4 >= 0);
     const int rc = verify_(true);
     close(w1);
     close(w2);
     close(w3);
+    close(w4);
     ASSERT_EQ_INT(EXIT_CHANGES, rc);
     HAS("protected_path_unverifiable", "t", ",\"reasons\":[\"writer_open\"],");
     ASSERT_EQ_INT(0, count("protected_hash_mismatch"));
     HAS("new_executable_on_path", "bin/old", ",\"outcome\":\"unknown\",");
     HAS("new_executable_on_path", "bin/new", ",\"outcome\":\"unknown\",");
+    NONE("pytest_config_changed", "pyproject.toml");            /* a marked empty file is held for tests_weakened alone */
 #endif
 }
 
