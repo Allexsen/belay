@@ -105,7 +105,7 @@ static bool has(const char *flag, const char *path, const char *frag) {
 #define VIOLATION(flag, path, frag) do { if (!has(flag, path, frag)) \
     BELAY_FAIL("no %s violation for %s%s%s in:\n%s", flag, path, frag ? " with " : "", frag ? (const char *)frag : "", g_out ? g_out : ""); } while (0)
 
-static const char *FROZEN = "{\"belay_protect\":1,\"protect\":[{\"path\":\"grader/**\",\"mode\":[\"no_write\",\"no_delete\"]}],"
+static const char *FROZEN = "{\"belay_protect\":2,\"protect\":[{\"path\":\"grader/**\",\"mode\":[\"no_write\",\"no_delete\"]}],"
                             "\"frozen_packages\":true}";
 
 static void packages(void) {
@@ -142,7 +142,7 @@ TEST(databases_rewritten_to_match_a_tampered_file_still_tampered) {
 /* Decision 173: without frozen packages too, a patched library hidden by
  * a RECORD rewritten to match is named as tampering. */
 TEST(a_forged_record_is_named_as_tampering_unfrozen) {
-    fresh("{\"belay_protect\":1,\"protect\":[]}");
+    fresh("{\"belay_protect\":2,\"protect\":[]}");
     packages();
     sh("printf 'pkg-1.0.dist-info/RECORD,,\\n' >> lib/site-packages/pkg-1.0.dist-info/RECORD");   /* as pip writes it: the RECORD lists itself, no hash */
     REQUIRE_MSG(export_() == EXIT_DONE, "%s", g_err);
@@ -163,7 +163,7 @@ TEST(a_forged_record_is_named_as_tampering_unfrozen) {
  * changed source, or removed: not flagged. */
 TEST(a_pyc_patched_under_an_unchanged_source_is_tampering) {
     for (int frozen = 0; frozen < 2; frozen++) {
-        fresh(frozen ? FROZEN : "{\"belay_protect\":1,\"protect\":[]}");
+        fresh(frozen ? FROZEN : "{\"belay_protect\":2,\"protect\":[]}");
         packages();
         sh("mkdir -p lib/site-packages/pkg/__pycache__ && printf 'bytecode\\n' > lib/site-packages/pkg/__pycache__/core.cpython-312.pyc && "
            "printf 'two\\n' > lib/site-packages/pkg/two.py && printf 'bc2\\n' > lib/site-packages/pkg/__pycache__/two.cpython-312.pyc && "
@@ -216,7 +216,7 @@ TEST(a_state_directory_prepared_by_the_policy_is_never_read) {
 
 /* The diff's identity and content rules, under a protected path. */
 TEST(a_symlink_swapped_in_a_rename_over_and_a_hard_link_write_are_writes) {
-    fresh("{\"belay_protect\":1,\"protect\":[{\"path\":\"grader/**\",\"mode\":[\"no_write\",\"no_delete\"]}]}");
+    fresh("{\"belay_protect\":2,\"protect\":[{\"path\":\"grader/**\",\"mode\":[\"no_write\",\"no_delete\"]}]}");
     sh("mkdir -p grader elsewhere && printf 'a\\n' > grader/a.py && printf 'b\\n' > grader/b.py && printf 'c\\n' > grader/c.py");
     REQUIRE_MSG(export_() == EXIT_DONE, "%s", g_err);
     sh("printf 'pass\\n' > elsewhere/fake.py && rm grader/a.py && ln -s ../elsewhere/fake.py grader/a.py && "
@@ -246,7 +246,7 @@ TEST(a_bundle_rewritten_by_the_policy_is_never_read) {
  * it keeps rewriting is a violation -- written, or not verifiable -- every
  * run. */
 TEST(a_writer_still_running_is_never_a_silent_pass) {
-    fresh("{\"belay_protect\":1,\"protect\":[{\"path\":\"grader/**\",\"mode\":[\"no_write\"]}]}");
+    fresh("{\"belay_protect\":2,\"protect\":[{\"path\":\"grader/**\",\"mode\":[\"no_write\"]}]}");
     sh("mkdir -p grader && printf 'g\\n' > grader/check.py");
     REQUIRE_MSG(export_() == EXIT_DONE, "%s", g_err);
     char path[600];

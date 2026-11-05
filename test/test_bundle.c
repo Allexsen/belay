@@ -542,12 +542,12 @@ TEST(export_refuses_what_its_rows_do_not_allow) {
     ASSERT_EQ_INT(EXIT_USAGE, belay("baseline", "export", "--scope", g_scope, "--out", g_out_path, "--out", g_out_path, NULL));
     /* a spec refused: exit 2 (PS-R2) */
     snprintf(bad, sizeof bad, "%s/bad.json", g_dir);
-    sh("printf '{\"belay_protect\":1,\"protect\":[],\"frozen_package\":true}' > '%s'", bad);
+    sh("printf '{\"belay_protect\":2,\"protect\":[],\"frozen_package\":true}' > '%s'", bad);
     ASSERT_EQ_INT(EXIT_USAGE, belay("baseline", "export", "--scope", g_scope, "--out", g_out_path, "--protect", bad, NULL));
     ASSERT_TRUE(strstr(g_err, "protect spec: a key unknown or given twice") != NULL);
     /* an exclude covering a protected pattern: exit 3 (PS-C2) */
     snprintf(spec, sizeof spec, "%s/spec.json", g_dir);
-    sh("printf '{\"belay_protect\":1,\"protect\":[{\"path\":\"etc/**\",\"mode\":[\"no_write\"]}]}' > '%s'", spec);
+    sh("printf '{\"belay_protect\":2,\"protect\":[{\"path\":\"etc/**\",\"mode\":[\"no_write\"]}]}' > '%s'", spec);
     ASSERT_EQ_INT(EXIT_DONE, belay("exclude", "--scope", g_scope, "--add", "etc", NULL));
     ASSERT_EQ_INT(EXIT_REFUSED, belay("baseline", "export", "--scope", g_scope, "--out", g_out_path, "--protect", spec, NULL));
     ASSERT_TRUE(strstr(g_err, "etc is excluded") != NULL && strstr(g_err, "etc/**") != NULL);
@@ -558,7 +558,7 @@ TEST(export_refuses_what_its_rows_do_not_allow) {
     snprintf(st, sizeof st, "%s/state", g_scope);
     sh("mkdir -p '%s' && chmod 700 '%s'", st, st);
     setenv("BELAY_STATE_DIR", st, 1);
-    sh("printf '{\"belay_protect\":1,\"protect\":[{\"path\":\"**/x\",\"mode\":[\"no_create\"]}]}' > '%s'", spec);
+    sh("printf '{\"belay_protect\":2,\"protect\":[{\"path\":\"**/x\",\"mode\":[\"no_create\"]}]}' > '%s'", spec);
     ASSERT_EQ_INT(EXIT_REFUSED, belay("baseline", "export", "--scope", g_scope, "--out", g_out_path, "--protect", spec, NULL));
     ASSERT_TRUE(strstr(g_err, "is belay's state directory") != NULL);
     setenv("BELAY_STATE_DIR", g_state, 1);
@@ -576,7 +576,7 @@ TEST(a_spec_raises_the_hash_limit_to_4_gib) {
     close(bfd);
     char spec[600];
     snprintf(spec, sizeof spec, "%s/spec.json", g_dir);
-    sh("printf '{\"belay_protect\":1,\"protect\":[{\"path\":\"big\",\"mode\":[\"no_write\"]}]}' > '%s'", spec);
+    sh("printf '{\"belay_protect\":2,\"protect\":[{\"path\":\"big\",\"mode\":[\"no_write\"]}]}' > '%s'", spec);
     for (int with = 0; with < 2; with++) {
         sh("rm -f '%s'", g_out_path);
         const int rc = with ? belay("baseline", "export", "--scope", g_scope, "--out", g_out_path, "--protect", spec, NULL)

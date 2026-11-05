@@ -32,7 +32,7 @@ static const char *parse(const char *json) {
 #define REFUSED(json) do { char w_[8192]; snprintf(w_, sizeof w_, "%s: refused", json); ASSERT_EQ_STR(w_, parse(json)); } while (0)
 
 TEST(a_spec_reads_every_key_of_its_rows) {
-    const char *j = "{\"belay_protect\": 1,\n"
+    const char *j = "{\"belay_protect\": 2,\n"
                     " \"protect\": [{\"path\": \"tests/**\", \"mode\": [\"no_write\", \"no_delete\", \"no_create\"]},\n"
                     "             {\"path\": \"grader/check.py\", \"mode\": [\"no_write\"],\n"
                     "              \"expected_sha256\": \"9f86d081884c7d659a2feaa0c55ad015a3bf4f1b2b0b822cd15d6c15b0f00a08\"},\n"
@@ -56,7 +56,7 @@ TEST(a_spec_reads_every_key_of_its_rows) {
     ASSERT_EQ_INT(64, (int)strlen(s.sha256));
     protect_free(&s);
     /* the defaults: frozen_packages false, path_dirs not given */
-    const char *m = "{\"belay_protect\":1,\"protect\":[]}";
+    const char *m = "{\"belay_protect\":2,\"protect\":[]}";
     REQUIRE(protect_parse(m, strlen(m), &s) == 0);
     ASSERT_FALSE(s.frozen_packages);
     ASSERT_FALSE(s.has_path_dirs);
@@ -66,42 +66,43 @@ TEST(a_spec_reads_every_key_of_its_rows) {
 
 /* PS-R2: whatever a row does not allow refuses the whole spec. */
 TEST(a_spec_is_refused_for_anything_its_rows_do_not_allow) {
-    OK("{\"belay_protect\":1,\"protect\":[{\"path\":\"a\",\"mode\":[\"no_write\"]}]}");
-    REFUSED("{\"belay_protect\":1,\"protect\":[],\"frozen_package\":true}");     /* a misspelt key */
-    REFUSED("{\"belay_protect\":1,\"protect\":[],\"protect\":[]}");               /* given twice */
+    OK("{\"belay_protect\":2,\"protect\":[{\"path\":\"a\",\"mode\":[\"no_write\"]}]}");
+    REFUSED("{\"belay_protect\":2,\"protect\":[],\"frozen_package\":true}");     /* a misspelt key */
+    REFUSED("{\"belay_protect\":2,\"protect\":[],\"protect\":[]}");               /* given twice */
     REFUSED("{\"protect\":[]}");                                                  /* no version */
-    REFUSED("{\"belay_protect\":2,\"protect\":[]}");
-    REFUSED("{\"belay_protect\":1.0,\"protect\":[]}");
+    REFUSED("{\"belay_protect\":1,\"protect\":[]}");       /* version 1 is dropped (PV2-1) */
+    REFUSED("{\"belay_protect\":3,\"protect\":[]}");
+    REFUSED("{\"belay_protect\":2.0,\"protect\":[]}");
     REFUSED("{\"belay_protect\":\"1\",\"protect\":[]}");
-    REFUSED("{\"belay_protect\":1}");                                             /* no protect */
-    REFUSED("{\"belay_protect\":1,\"protect\":{}}");
-    REFUSED("{\"belay_protect\":1,\"protect\":[],\"frozen_packages\":1}");
-    REFUSED("{\"belay_protect\":1,\"protect\":[],\"path_dirs\":\"bin\"}");
-    REFUSED("{\"belay_protect\":1,\"protect\":[],\"path_dirs\":[\"/bin\"]}");
-    REFUSED("{\"belay_protect\":1,\"protect\":[{\"path\":\"a\"}]}");              /* neither mode nor sha */
-    REFUSED("{\"belay_protect\":1,\"protect\":[{\"path\":\"a\",\"mode\":[]}]}");
-    REFUSED("{\"belay_protect\":1,\"protect\":[{\"path\":\"a\",\"mode\":[\"no_read\"]}]}");
-    REFUSED("{\"belay_protect\":1,\"protect\":[{\"path\":\"a\",\"mode\":[\"no_writes\"]}]}");
-    REFUSED("{\"belay_protect\":1,\"protect\":[{\"path\":\"a\",\"mode\":[\"no_write\",\"no_write\"]}]}");
-    REFUSED("{\"belay_protect\":1,\"protect\":[{\"path\":\"a\",\"mode\":\"no_write\"}]}");
-    REFUSED("{\"belay_protect\":1,\"protect\":[{\"path\":\"a\",\"mode\":[\"no_write\"],\"why\":\"x\"}]}");
-    REFUSED("{\"belay_protect\":1,\"protect\":[{\"path\":\"a\",\"path\":\"b\",\"mode\":[\"no_write\"]}]}");
-    REFUSED("{\"belay_protect\":1,\"protect\":[{\"path\":\"a*\",\"expected_sha256\":"
+    REFUSED("{\"belay_protect\":2}");                                             /* no protect */
+    REFUSED("{\"belay_protect\":2,\"protect\":{}}");
+    REFUSED("{\"belay_protect\":2,\"protect\":[],\"frozen_packages\":1}");
+    REFUSED("{\"belay_protect\":2,\"protect\":[],\"path_dirs\":\"bin\"}");
+    REFUSED("{\"belay_protect\":2,\"protect\":[],\"path_dirs\":[\"/bin\"]}");
+    REFUSED("{\"belay_protect\":2,\"protect\":[{\"path\":\"a\"}]}");              /* neither mode nor sha */
+    REFUSED("{\"belay_protect\":2,\"protect\":[{\"path\":\"a\",\"mode\":[]}]}");
+    REFUSED("{\"belay_protect\":2,\"protect\":[{\"path\":\"a\",\"mode\":[\"no_read\"]}]}");
+    REFUSED("{\"belay_protect\":2,\"protect\":[{\"path\":\"a\",\"mode\":[\"no_writes\"]}]}");
+    REFUSED("{\"belay_protect\":2,\"protect\":[{\"path\":\"a\",\"mode\":[\"no_write\",\"no_write\"]}]}");
+    REFUSED("{\"belay_protect\":2,\"protect\":[{\"path\":\"a\",\"mode\":\"no_write\"}]}");
+    REFUSED("{\"belay_protect\":2,\"protect\":[{\"path\":\"a\",\"mode\":[\"no_write\"],\"why\":\"x\"}]}");
+    REFUSED("{\"belay_protect\":2,\"protect\":[{\"path\":\"a\",\"path\":\"b\",\"mode\":[\"no_write\"]}]}");
+    REFUSED("{\"belay_protect\":2,\"protect\":[{\"path\":\"a*\",\"expected_sha256\":"
             "\"e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855\"}]}");   /* sha with a '*' */
-    REFUSED("{\"belay_protect\":1,\"protect\":[{\"path\":\"a\",\"expected_sha256\":"
+    REFUSED("{\"belay_protect\":2,\"protect\":[{\"path\":\"a\",\"expected_sha256\":"
             "\"E3B0C44298FC1C149AFBF4C8996FB92427AE41E4649B934CA495991B7852B855\"}]}");   /* not lowercase */
-    REFUSED("{\"belay_protect\":1,\"protect\":[{\"path\":\"a\",\"expected_sha256\":\"e3b0\"}]}");
-    REFUSED("{\"belay_protect\":1,\"protect\":[{\"path\":\"/a\",\"mode\":[\"no_write\"]}]}");
-    REFUSED("{\"belay_protect\":1,\"protect\":[{\"path\":\"a/\",\"mode\":[\"no_write\"]}]}");
-    REFUSED("{\"belay_protect\":1,\"protect\":[{\"path\":\"a//b\",\"mode\":[\"no_write\"]}]}");
-    REFUSED("{\"belay_protect\":1,\"protect\":[{\"path\":\"a/./b\",\"mode\":[\"no_write\"]}]}");
-    REFUSED("{\"belay_protect\":1,\"protect\":[{\"path\":\"../a\",\"mode\":[\"no_write\"]}]}");
-    REFUSED("{\"belay_protect\":1,\"protect\":[{\"path\":\"\",\"mode\":[\"no_write\"]}]}");
-    REFUSED("{\"belay_protect\":1,\"protect\":[{\"path\":\"a\\u0000b\",\"mode\":[\"no_write\"]}]}");
-    REFUSED("{\"belay_protect\":1,\"protect\":[{\"path\\u0000\":\"a\",\"mode\":[\"no_write\"]}]}");
-    REFUSED("{\"belay_protect\":1,\"protect\":[]} x");                             /* after it */
-    REFUSED("[{\"belay_protect\":1,\"protect\":[]}]");
-    REFUSED("{\"belay_protect\":1,\"protect\":[{\"path\":\"\xff\",\"mode\":[\"no_write\"]}]}");   /* not UTF-8 */
+    REFUSED("{\"belay_protect\":2,\"protect\":[{\"path\":\"a\",\"expected_sha256\":\"e3b0\"}]}");
+    REFUSED("{\"belay_protect\":2,\"protect\":[{\"path\":\"/a\",\"mode\":[\"no_write\"]}]}");
+    REFUSED("{\"belay_protect\":2,\"protect\":[{\"path\":\"a/\",\"mode\":[\"no_write\"]}]}");
+    REFUSED("{\"belay_protect\":2,\"protect\":[{\"path\":\"a//b\",\"mode\":[\"no_write\"]}]}");
+    REFUSED("{\"belay_protect\":2,\"protect\":[{\"path\":\"a/./b\",\"mode\":[\"no_write\"]}]}");
+    REFUSED("{\"belay_protect\":2,\"protect\":[{\"path\":\"../a\",\"mode\":[\"no_write\"]}]}");
+    REFUSED("{\"belay_protect\":2,\"protect\":[{\"path\":\"\",\"mode\":[\"no_write\"]}]}");
+    REFUSED("{\"belay_protect\":2,\"protect\":[{\"path\":\"a\\u0000b\",\"mode\":[\"no_write\"]}]}");
+    REFUSED("{\"belay_protect\":2,\"protect\":[{\"path\\u0000\":\"a\",\"mode\":[\"no_write\"]}]}");
+    REFUSED("{\"belay_protect\":2,\"protect\":[]} x");                             /* after it */
+    REFUSED("[{\"belay_protect\":2,\"protect\":[]}]");
+    REFUSED("{\"belay_protect\":2,\"protect\":[{\"path\":\"\xff\",\"mode\":[\"no_write\"]}]}");   /* not UTF-8 */
 }
 
 TEST(a_spec_is_bounded_by_its_rows) {
@@ -111,7 +112,7 @@ TEST(a_spec_is_bounded_by_its_rows) {
     char *j = malloc(64 + (PROTECT_RULES_MAX + 1) * rl);
     REQUIRE(j != NULL);
     for (int extra = 0; extra < 2; extra++) {
-        size_t n = (size_t)sprintf(j, "{\"belay_protect\":1,\"protect\":[");
+        size_t n = (size_t)sprintf(j, "{\"belay_protect\":2,\"protect\":[");
         for (size_t i = 0; i < PROTECT_RULES_MAX + (size_t)extra; i++) n += (size_t)sprintf(j + n, "%s", rule);
         sprintf(j + n - 1, "]}");
         struct protect_spec s;
@@ -121,7 +122,7 @@ TEST(a_spec_is_bounded_by_its_rows) {
     }
     /* 256 path_dirs read, 257 refused (PS-7) */
     for (int extra = 0; extra < 2; extra++) {
-        size_t n = (size_t)sprintf(j, "{\"belay_protect\":1,\"protect\":[],\"path_dirs\":[");
+        size_t n = (size_t)sprintf(j, "{\"belay_protect\":2,\"protect\":[],\"path_dirs\":[");
         for (size_t i = 0; i < PROTECT_DIRS_MAX + (size_t)extra; i++) n += (size_t)sprintf(j + n, "\"bin\",");
         sprintf(j + n - 1, "]}");
         struct protect_spec s;
@@ -140,7 +141,7 @@ TEST(a_spec_is_bounded_by_its_rows) {
     char *big = malloc(PROTECT_SPEC_MAX + 2);
     REQUIRE(big != NULL);
     memset(big, ' ', PROTECT_SPEC_MAX + 1);
-    const char *small = "{\"belay_protect\":1,\"protect\":[]}";
+    const char *small = "{\"belay_protect\":2,\"protect\":[]}";
     memcpy(big, small, strlen(small));
     struct protect_spec s;
     ASSERT_EQ_INT(-1, protect_parse(big, PROTECT_SPEC_MAX + 1, &s));
@@ -232,13 +233,13 @@ TEST(a_spec_file_is_read_and_its_digest_is_its_bytes) {
     char path[] = "/tmp/belay-protect-XXXXXX";
     const int fd = mkstemp(path);
     REQUIRE(fd >= 0);
-    const char *j = "{\"belay_protect\":1,\"protect\":[{\"path\":\"a\",\"mode\":[\"no_delete\"]}]}\n";
+    const char *j = "{\"belay_protect\":2,\"protect\":[{\"path\":\"a\",\"mode\":[\"no_delete\"]}]}\n";
     REQUIRE(write(fd, j, strlen(j)) == (ssize_t)strlen(j));
     close(fd);
     struct protect_spec s;
     REQUIRE_MSG(protect_load(path, &s) == 0, "%s", belay_err_msg());
     /* sha256sum of those bytes, computed apart */
-    ASSERT_EQ_STR("259f5493730e122ae2b41bd5a8d9ab1adda66cda27fdeb72d4cd7f230a16006c", s.sha256);
+    ASSERT_EQ_STR("822b7ceb02463658160357f67d7edfc9f081eb0ca23f658864b941dea2a4583e", s.sha256);
     protect_free(&s);
     unlink(path);
     ASSERT_EQ_INT(-1, protect_load("/nonexistent/belay-protect", &s));

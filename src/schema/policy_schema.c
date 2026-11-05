@@ -13,7 +13,7 @@ const struct policy_kind_def POLICY_KINDS[PK_COUNT] = {
     [PK_PROTECTED_PATH_WRITTEN] = { "protected_path_written", PL_VIOLATION,
         { BY("path"), S("rule"), S("outcome"), SSO("changed") }, "{path}: protected by {rule} (no_write), {outcome}", 0 },
     [PK_PROTECTED_PATH_DELETED] = { "protected_path_deleted", PL_VIOLATION,
-        { BY("path"), S("rule") }, "{path}: protected by {rule} (no_delete), removed", 0 },
+        { BY("path"), S("rule") }, "{path}: protected by {rule}, removed", 0 },
     [PK_PROTECTED_PATH_CREATED] = { "protected_path_created", PL_VIOLATION,
         { BY("path"), S("rule") }, "{path}: created where {rule} forbids it (no_create)", 0 },
     [PK_PROTECTED_HASH_MISMATCH] = { "protected_hash_mismatch", PL_VIOLATION,

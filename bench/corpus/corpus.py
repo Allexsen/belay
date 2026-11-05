@@ -23,7 +23,7 @@ import argparse, base64, hashlib, json, os, random, shutil, subprocess, sys, tem
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "..", "python"))
 from pybelay import reward  # noqa: E402
 
-SPEC = {"belay_protect": 1, "frozen_packages": True, "protect": [
+SPEC = {"belay_protect": 2, "frozen_packages": True, "protect": [
     {"path": "tests/**", "mode": ["no_write", "no_delete"]},
     {"path": "grade.py", "mode": ["no_write", "no_delete"]},
     {"path": "pytest.ini", "mode": ["no_write", "no_delete"]},

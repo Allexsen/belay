@@ -29,6 +29,7 @@
 
 #define DIFF_PIN   "test/expect/diff-fields.md"
 #define V4_PIN     "test/expect/manifest-v4.md"
+#define PV2_PIN    "test/expect/protect-spec-v2.md"
 #define FORMAT_PIN "test/expect/manifest-v1.md"
 #define KINDS_PIN  "test/expect/finding-kinds.md"
 #define EVENTS_PIN "test/expect/diff-events.md"
@@ -608,6 +609,21 @@ TEST(a_pin_cell_too_long_is_refused_never_cut) {
 /* Decision 157: policy.v1's flags are the pin's -- each kind once, in its
  * order, its level, its fields and their types, its templates -- and no
  * more. */
+/* protected_path_deleted's text is PV2-4's, not policy-v1.md's row: the first
+ * `...` template of that line. Into `out`, or "" when the pin has no such row. */
+static void pv2_deleted_text(char *out, size_t cap) {
+    out[0] = '\0';
+    FILE *f = fopen(PV2_PIN, "r");
+    if (f == NULL) return;
+    static char line[4096];
+    while (fgets(line, sizeof line, f) != NULL) {
+        const char *a = strncmp(line, "| PV2-4 |", 9) == 0 ? strstr(line, "`{path}") : NULL;
+        const char *b = a != NULL ? strchr(a + 1, '`') : NULL;
+        if (b != NULL) snprintf(out, cap, "%.*s", (int)(b - a - 1), a + 1);
+    }
+    fclose(f);
+}
+
 TEST(policy_flags_pin_and_schema_agree_both_ways) {
     static struct table t;
     REQUIRE(read_table(POLICY_PIN, "flag", &t) > 0);
@@ -641,6 +657,12 @@ TEST(policy_flags_pin_and_schema_agree_both_ways) {
         }
         unquote(c);
         if (second != NULL) unquote(second);
+        static char pv2[256];
+        if (k == PK_PROTECTED_PATH_DELETED) {       /* the row is protect-spec-v2's */
+            pv2_deleted_text(pv2, sizeof pv2);
+            ASSERT_TRUE(pv2[0] != '\0');
+            c = pv2;
+        }
         if (strcmp(d->text, c) != 0) BELAY_FAIL("%s: text \"%s\", schema \"%s\"", name, c, d->text);
         if ((second == NULL) != (d->text_partial == NULL) || (second != NULL && strcmp(second, d->text_partial) != 0))
             BELAY_FAIL("%s: second template \"%s\", schema \"%s\"", name, second ? second : "(none)",

@@ -133,6 +133,11 @@ a spec it refuses is a usage error (exit 2).
 
 ## verify: what the changes mean
 
+A protect spec is version 2 (`"belay_protect": 2`; [protect-spec-v2.md](../test/expect/protect-spec-v2.md)).
+`no_write` forbids changing a path, and deleting it too: deleting is a write to the file's existence.
+`no_delete` alone forbids deleting and allows writing; `no_create` forbids a new file. A version 1 spec is
+refused, with a message saying so; a bundle exported with one must be exported again.
+
 After the episode -- every process of the policy stopped first -- `belay verify` records `DIR`
 reading every file, in a state directory of its own it creates fresh (in `$TMPDIR`, removed when it
 is done: no state a policy prepared is ever read), diffs it against the bundle, and writes

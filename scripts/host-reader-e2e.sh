@@ -82,7 +82,7 @@ sys.exit(1 if bad else 0)
 EOF
 
 # ---- the protocol: export and verify read a paused container (H-C4) ----
-echo '{"belay_protect":1,"protect":[{"path":"tests/**","mode":["no_write","no_delete"]}]}' > "$T/spec.json"
+echo '{"belay_protect":2,"protect":[{"path":"tests/**","mode":["no_write","no_delete"]}]}' > "$T/spec.json"
 if B baseline export --docker "$C" --scope /workspace --out "$T/b" --protect "$T/spec.json" 2>"$T/err"; then fail "a running container exported"; fi
 grep -q "not paused" "$T/err" || fail "the refusal does not say why: $(cat "$T/err")"
 docker pause "$C" >/dev/null

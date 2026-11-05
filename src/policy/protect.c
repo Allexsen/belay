@@ -168,8 +168,9 @@ int protect_parse(const char *buf, size_t len, struct protect_spec *out) {
     static const char *const top[] = { "belay_protect", "protect", "frozen_packages", "path_dirs", NULL };
     if (!keys_ok(&v, top)) return refuse(out, &v, "a key unknown or given twice", (size_t)-1);
     const struct jval *ver = jget(&v, "belay_protect");
-    if (ver == NULL || ver->t != J_NUM || !ver->integer || ver->i != 1)
-        return refuse(out, &v, "belay_protect is not 1", (size_t)-1);
+    if (ver == NULL || ver->t != J_NUM || !ver->integer || ver->i != 2)
+        return refuse(out, &v, "belay_protect is not 2 (version 1 specs are refused: no_write now forbids deleting; say 2)",
+                      (size_t)-1);
 
     const struct jval *fp = jget(&v, "frozen_packages");
     if (fp != NULL && fp->t != J_BOOL) return refuse(out, &v, "frozen_packages is not a bool", (size_t)-1);
