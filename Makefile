@@ -64,7 +64,7 @@ SAN_FLAGS	= -fsanitize=address,undefined -fno-omit-frame-pointer -g -O1
 SAN_BUILD	= $(BUILD)/san
 SAN_TEST_BIN	= $(TEST_SRC:test/%.c=$(SAN_BUILD)/test/%)
 
-.PHONY: version-test dogfood-test e2e all clean test check check-san fuzz bench platform fs-scenarios gen gen-check measure oracle reference lib lint ci-check
+.PHONY: replay-test version-test dogfood-test e2e all clean test check check-san fuzz bench platform fs-scenarios gen gen-check measure oracle reference lib lint ci-check
 
 all: $(BIN) $(SESSION_OBJ)
 
@@ -155,7 +155,7 @@ lint:
 ci-check:
 	@python3 scripts/check-ci.py
 
-check: all lint ci-check gen-check measure test e2e version-test
+check: all lint ci-check gen-check measure test e2e version-test replay-test
 
 # The version a build reports (scripts/version.sh), against real repositories,
 # and its PEP 440 spelling for pybelay (PY-D2).
@@ -269,6 +269,10 @@ union-model: $(UNION_DRIVER)
 pybelay-test: $(BIN)
 	python3 -I python/build_keys.py $(BIN)
 	python3 -I -B python/tests/test_pybelay.py
+
+# The replay's rules (bench/replay/README.md): no downloads, nothing run from a transcript.
+replay-test:
+	python3 -I -B bench/replay/test_rules.py
 
 # `baseline export` and `verify` against an independent model of policy.v1 written
 # from the pins alone (scripts/policy-model/, decision 150). Exits 3 while verify is

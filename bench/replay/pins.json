@@ -1,0 +1,7 @@
+{
+  "dataset": {"repo": "WiserHumanExperimental/evilgenie-escalation", "revision": "1bb777b666b0f76801f9b5b9a28eb3f7786ea70f"},
+  "livecodebench": {"repo": "livecodebench/code_generation_lite", "revision": "0fe84c3912ea0c4d4a78037083943e8f0c4dd505", "files": ["test5.jsonl", "test6.jsonl"]},
+  "code": {"repo": "wiser-human-experimental/evilgenie-escalation", "commit": "f2a0f9e386182452476b54608be6ff4390482324"},
+  "image": {"repo": "library/python", "digest": "sha256:6d10e720318bd84cc3d88af92bb5a47189222e17620a2fd214da6445e4afb679", "note": "python:3.11-slim, linux/amd64, built 2026-10-28: after the recorded runs, which used the tag as it was then"},
+  "jinja2": "3.1.6"
+}
