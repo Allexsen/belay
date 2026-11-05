@@ -504,7 +504,8 @@ static void protected(struct state *s, const char *p, size_t n, const struct bel
             fpath(c, f, p, n);
             wrote = true;
         }
-        if ((r->modes & PROTECT_NO_DELETE) && mb && strcmp(outcome, "removed") == 0 && !deleted) {
+        /* no_write forbids deleting too (protect-spec-v2 PV2-2). */
+        if ((r->modes & (PROTECT_NO_DELETE | PROTECT_NO_WRITE)) && mb && strcmp(outcome, "removed") == 0 && !deleted) {
             struct flag *f = add(c, PK_PROTECTED_PATH_DELETED, false);
             fs(c, f, "path", p, n);
             fstr(c, f, "rule", r->path);

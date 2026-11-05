@@ -131,7 +131,7 @@ static const char *why_not(const char *flag, const char *path, const char *frag)
 /* ---- the format ---- */
 
 TEST(header_records_and_trailer_are_the_pins) {
-    fresh("{\"belay_protect\":1,\"protect\":[{\"path\":\"keep\",\"mode\":[\"no_delete\"]}]}");
+    fresh("{\"belay_protect\":2,\"protect\":[{\"path\":\"keep\",\"mode\":[\"no_delete\"]}]}");
     sh("printf 'k\\n' > keep && mkdir tests && printf 'def test_a():\\n    assert 1\\n' > tests/test_a.py");
     REQUIRE_MSG(export_(true) == EXIT_DONE, "%s", g_err);
     sh("rm keep && printf 'def test_a():\\n    pass\\n' > tests/test_a.py");
@@ -147,7 +147,7 @@ TEST(header_records_and_trailer_are_the_pins) {
                               "\"tests_counted\":[\"python\"]}\n") != NULL);
     /* P-F1 to P-F4 */
     HAS("protected_path_deleted", "keep", ",\"level\":\"violation\",\"path\":\"keep\",\"rule\":\"keep\","
-        "\"text\":\"keep: protected by keep (no_delete), removed\",\"paths\":[\"keep\"]}");
+        "\"text\":\"keep: protected by keep, removed\",\"paths\":[\"keep\"]}");
     HAS("tests_weakened", "tests/test_a.py", ",\"level\":\"signal\",\"path\":\"tests/test_a.py\",\"language\":\"python\","
         "\"assertions_before\":1,\"assertions_after\":0,\"tests_before\":1,\"tests_after\":1,\"markers_added\":[],"
         "\"text\":\"tests/test_a.py: assertions 1 -> 0, tests 1 -> 1, markers added: none\"");
@@ -174,7 +174,7 @@ TEST(header_records_and_trailer_are_the_pins) {
 /* ---- protected paths (PS-M1 to PS-M5) ---- */
 
 TEST(protected_paths_written_deleted_created) {
-    fresh("{\"belay_protect\":1,\"protect\":["
+    fresh("{\"belay_protect\":2,\"protect\":["
           "{\"path\":\"tests/**\",\"mode\":[\"no_write\",\"no_delete\",\"no_create\"]},"
           "{\"path\":\".github/workflows/**\",\"mode\":[\"no_write\"]},"
           "{\"path\":\"tests/a.py\",\"mode\":[\"no_write\"]}]}");
@@ -199,7 +199,7 @@ TEST(protected_paths_written_deleted_created) {
 
 TEST(expected_sha256_holds_or_says_why_not) {
     /* sha256 of "ok\n", from sha256sum */
-    fresh("{\"belay_protect\":1,\"protect\":["
+    fresh("{\"belay_protect\":2,\"protect\":["
           "{\"path\":\"g0\",\"expected_sha256\":\"dc51b8c96c2d745df3bd5590d990230a482fd247123599548e0632fdbf97fc22\"},"
           "{\"path\":\"g1\",\"expected_sha256\":\"dc51b8c96c2d745df3bd5590d990230a482fd247123599548e0632fdbf97fc22\"},"
           "{\"path\":\"g2\",\"expected_sha256\":\"dc51b8c96c2d745df3bd5590d990230a482fd247123599548e0632fdbf97fc22\"},"
@@ -219,7 +219,7 @@ TEST(expected_sha256_holds_or_says_why_not) {
 /* PS-M5, decision 147: what cannot be shown intact is a violation. A
  * protected file past the 4 GiB bound is `unverified` (decision 159). */
 TEST(a_protected_path_that_cannot_be_verified_is_a_violation) {
-    fresh("{\"belay_protect\":1,\"protect\":[{\"path\":\"big\",\"mode\":[\"no_write\"]}]}");
+    fresh("{\"belay_protect\":2,\"protect\":[{\"path\":\"big\",\"mode\":[\"no_write\"]}]}");
     char big[600];
     snprintf(big, sizeof big, "%s/big", g_scope);
     const int fd = open(big, O_WRONLY | O_CREAT, 0644);
@@ -231,7 +231,7 @@ TEST(a_protected_path_that_cannot_be_verified_is_a_violation) {
     ASSERT_EQ_INT(0, count("protected_path_written"));
     /* hashed at reset, past the bound after: its size proves the write, its
      * after entry cannot be verified -- both said */
-    fresh("{\"belay_protect\":1,\"protect\":[{\"path\":\"grow\",\"mode\":[\"no_write\"]}]}");
+    fresh("{\"belay_protect\":2,\"protect\":[{\"path\":\"grow\",\"mode\":[\"no_write\"]}]}");
     sh("printf 'small\\n' > grow");
     REQUIRE_MSG(export_(true) == EXIT_DONE, "%s", g_err);
     snprintf(big, sizeof big, "%s/grow", g_scope);
@@ -246,7 +246,7 @@ TEST(a_protected_path_that_cannot_be_verified_is_a_violation) {
 /* verify captures at the bundle's hash limit: a protected file past the
  * default 64 MiB, within 4 GiB, unchanged, is verified (PS-C3). */
 TEST(verify_hashes_at_the_bundles_limit) {
-    fresh("{\"belay_protect\":1,\"protect\":[{\"path\":\"mid\",\"mode\":[\"no_write\"]}]}");
+    fresh("{\"belay_protect\":2,\"protect\":[{\"path\":\"mid\",\"mode\":[\"no_write\"]}]}");
     char mid[600];
     snprintf(mid, sizeof mid, "%s/mid", g_scope);
     const int fd = open(mid, O_WRONLY | O_CREAT, 0644);
@@ -288,7 +288,7 @@ static void dpkg_fixture(void) {
 
 TEST(packages_frozen_or_not) {
     for (int frozen = 0; frozen < 2; frozen++) {
-        fresh(frozen ? "{\"belay_protect\":1,\"protect\":[],\"frozen_packages\":true}" : NULL);
+        fresh(frozen ? "{\"belay_protect\":2,\"protect\":[],\"frozen_packages\":true}" : NULL);
         dpkg_fixture();
         REQUIRE_MSG(export_(frozen) == EXIT_DONE, "%s", g_err);
         /* tool tampered with; tool.conf edited; other upgraded (its file replaced by the installer) */
@@ -394,11 +394,47 @@ TEST(startup_hooks_git_hooks_and_history) {
 
 /* A held writer on a protected file and on one on PATH (manifest-v4 V4-D8,
  * V4-D9): a marked hash asserts nothing; a mode added still speaks. */
+/* Version 2 of the spec (test/expect/protect-spec-v2.md). */
+TEST(no_write_forbids_deleting_and_no_delete_alone_allows_writing) {
+    fresh("{\"belay_protect\":2,\"protect\":[{\"path\":\"nw\",\"mode\":[\"no_write\"]},"
+          "{\"path\":\"nd\",\"mode\":[\"no_delete\"]},{\"path\":\"both\",\"mode\":[\"no_write\",\"no_delete\"]},"
+          "{\"path\":\"nc\",\"mode\":[\"no_create\"]}]}");
+    sh("printf 'a\\n' > nw && printf 'b\\n' > nd && printf 'c\\n' > both && printf 'd\\n' > nc");
+    REQUIRE_MSG(export_(true) == EXIT_DONE, "%s", g_err);
+    sh("rm nw both nc && printf 'B\\n' > nd");
+    ASSERT_EQ_INT(EXIT_CHANGES, verify_(true));
+    HAS("protected_path_deleted", "nw", ",\"rule\":\"nw\",\"text\":\"nw: protected by nw, removed\",");     /* PV2-2, PV2-4 */
+    HAS("protected_path_deleted", "both", ",\"rule\":\"both\",");
+    ASSERT_EQ_INT(2, count("protected_path_deleted"));                                                  /* PV2-3: one each */
+    ASSERT_EQ_INT(0, count("protected_path_written"));                                                  /* nd may be written */
+    NONE("protected_path_deleted", "nc");                                                               /* no_create says nothing */
+    /* the first rule with either mode names it (PV2-4) */
+    fresh("{\"belay_protect\":2,\"protect\":[{\"path\":\"x/**\",\"mode\":[\"no_create\"]},{\"path\":\"x/*\",\"mode\":[\"no_write\"]},"
+          "{\"path\":\"x/f\",\"mode\":[\"no_delete\"]}]}");
+    sh("mkdir x && printf 'a\\n' > x/f");
+    REQUIRE_MSG(export_(true) == EXIT_DONE, "%s", g_err);
+    sh("rm x/f");
+    ASSERT_EQ_INT(EXIT_CHANGES, verify_(true));
+    HAS("protected_path_deleted", "x/f", ",\"rule\":\"x/*\",");
+    ASSERT_EQ_INT(1, count("protected_path_deleted"));
+}
+
+/* PV2-1: a version 1 spec is refused and says what to do; a bundle made with no
+ * spec is unaffected (PV2-6). */
+TEST(a_version_1_spec_is_refused_and_says_why) {
+    fresh("{\"belay_protect\":1,\"protect\":[{\"path\":\"k\",\"mode\":[\"no_write\"]}]}");
+    sh("printf 'a\\n' > k");
+    ASSERT_EQ_INT(2, export_(true));
+    ASSERT_TRUE(strstr(g_err, "belay_protect is not 2 (version 1 specs are refused: no_write now forbids deleting; say 2)") != NULL);
+    REQUIRE_MSG(export_(false) == EXIT_DONE, "%s", g_err);
+    ASSERT_EQ_INT(EXIT_DONE, verify_(false));
+}
+
 TEST(a_marked_hash_is_no_hash_and_a_mode_still_speaks) {
 #ifndef __linux__
     SKIP("no lease facility here");
 #else
-    fresh("{\"belay_protect\":1,\"protect\":[{\"path\":\"t\",\"mode\":[\"no_write\"],"
+    fresh("{\"belay_protect\":2,\"protect\":[{\"path\":\"t\",\"mode\":[\"no_write\"],"
           "\"expected_sha256\":\"dc51b8c96c2d745df3bd5590d990230a482fd247123599548e0632fdbf97fc22\"}]}");
     sh("mkdir bin && printf 'x\\n' > bin/old && chmod 644 bin/old && printf 'y\\n' > t && "
        "printf '[tool.pytest.ini_options]\\naddopts = \"-q\"\\n' > pyproject.toml");
@@ -445,7 +481,7 @@ TEST(executables_on_path_and_privilege) {
     NONE("new_executable_on_path", "opt/tools/t");                                     /* not a PATH dir */
     HAS("privilege_changed", "data/s", ",\"what\":\"setuid\",\"before\":\"off\",\"after\":\"on\",");
     /* path_dirs replaces the default (PS-7) */
-    fresh("{\"belay_protect\":1,\"protect\":[],\"path_dirs\":[\"opt/*\"]}");
+    fresh("{\"belay_protect\":2,\"protect\":[],\"path_dirs\":[\"opt/*\"]}");
     sh("mkdir -p bin opt/tools");
     REQUIRE(export_(true) == EXIT_DONE);
     sh("printf '#!/bin/sh\\n' > bin/new && chmod 755 bin/new && printf '#!/bin/sh\\n' > opt/tools/t && chmod 755 opt/tools/t");
@@ -566,7 +602,7 @@ TEST(events_carry_their_provisional_how_and_sorted_paths) {
  * cover a protected pattern too (PS-C2: "a manifest header's excluded,
  * any reason") -- verify --to refuses it. */
 TEST(verify_to_a_checkpoint_that_left_a_protected_path_out_is_refused) {
-    fresh("{\"belay_protect\":1,\"protect\":[{\"path\":\"tests/**\",\"mode\":[\"no_write\"]}]}");
+    fresh("{\"belay_protect\":2,\"protect\":[{\"path\":\"tests/**\",\"mode\":[\"no_write\"]}]}");
     sh("mkdir -p tests && printf 't\\n' > tests/t.py");
     REQUIRE_MSG(export_(true) == EXIT_DONE, "%s", g_err);
     ASSERT_EQ_INT(EXIT_DONE, belay("exclude", "--scope", g_scope, "--add", "tests", NULL));
@@ -581,7 +617,7 @@ TEST(verify_to_a_checkpoint_that_left_a_protected_path_out_is_refused) {
  * it carries (an unreadable file is unverified too, manifest-v1 rule 6). */
 TEST(an_unverifiable_entry_names_every_flag_it_carries) {
     if (geteuid() == 0) SKIP("root reads anything");
-    fresh("{\"belay_protect\":1,\"protect\":[{\"path\":\"tests/**\",\"mode\":[\"no_create\"]}]}");
+    fresh("{\"belay_protect\":2,\"protect\":[{\"path\":\"tests/**\",\"mode\":[\"no_create\"]}]}");
     sh("mkdir -p tests");
     REQUIRE_MSG(export_(true) == EXIT_DONE, "%s", g_err);
     sh("printf 'n\\n' > tests/new.py && chmod 000 tests/new.py");
@@ -657,7 +693,7 @@ TEST(an_added_file_s_own_iflags_are_no_privilege) {
 /* Decision 176 (P2): protected_path_unverifiable's reasons in a fixed
  * order -- here the diff's own (raced before unverified) is reordered. */
 TEST(unverifiable_reasons_come_in_the_pinned_order) {
-    fresh("{\"belay_protect\":1,\"protect\":[{\"path\":\"x\",\"mode\":[\"no_write\"]}]}");
+    fresh("{\"belay_protect\":2,\"protect\":[{\"path\":\"x\",\"mode\":[\"no_write\"]}]}");
     char dir[600], m1[600], d[600], dd[600], st[600], cmd[8192];
     snprintf(dir, sizeof dir, "%s/one", g_dir);
     snprintf(m1, sizeof m1, "%s/m1", g_dir);
@@ -689,7 +725,7 @@ TEST(unverifiable_reasons_come_in_the_pinned_order) {
 /* ---- refusals ---- */
 
 TEST(verify_refuses_what_it_must_never_judge) {
-    fresh("{\"belay_protect\":1,\"protect\":[{\"path\":\"keep\",\"mode\":[\"no_write\"]}]}");
+    fresh("{\"belay_protect\":2,\"protect\":[{\"path\":\"keep\",\"mode\":[\"no_write\"]}]}");
     sh("printf 'k\\n' > keep");
     REQUIRE(export_(true) == EXIT_DONE);
     /* no digest; another digest (B-R2) */
@@ -705,12 +741,12 @@ TEST(verify_refuses_what_it_must_never_judge) {
     char other[600];
     snprintf(other, sizeof other, "%s/other.json", g_dir);
     FILE *f = fopen(other, "w");
-    fputs("{\"belay_protect\":1,\"protect\":[{\"path\":\"keep\",\"mode\":[\"no_delete\"]}]}", f);
+    fputs("{\"belay_protect\":2,\"protect\":[{\"path\":\"keep\",\"mode\":[\"no_delete\"]}]}", f);
     fclose(f);
     ASSERT_EQ_INT(EXIT_REFUSED, belay("verify", "--scope", g_scope, "--baseline", g_bundle, "--baseline-sha256", g_sha,
                                       "--protect", other, NULL));
     f = fopen(other, "w");
-    fputs("{\"belay_protect\":1,\"protect\":[],\"frozen\":true}", f);
+    fputs("{\"belay_protect\":2,\"protect\":[],\"frozen\":true}", f);
     fclose(f);
     ASSERT_EQ_INT(EXIT_USAGE, belay("verify", "--scope", g_scope, "--baseline", g_bundle, "--baseline-sha256", g_sha,
                                     "--protect", other, NULL));
@@ -767,6 +803,8 @@ int main(void) {
     RUN(test_files_touched_and_weakened);
     RUN(ci_pytest_config_and_conftest);
     RUN(startup_hooks_git_hooks_and_history);
+    RUN(no_write_forbids_deleting_and_no_delete_alone_allows_writing);
+    RUN(a_version_1_spec_is_refused_and_says_why);
     RUN(a_marked_hash_is_no_hash_and_a_mode_still_speaks);
     RUN(executables_on_path_and_privilege);
     RUN(a_long_text_is_cut_at_1024_bytes);
