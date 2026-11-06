@@ -12,11 +12,11 @@ violation zeroes the episode's reward, signals go to its metadata. See the repos
 sandbox before the agent acts and judge it afterwards, beside the eval's own scorers.
 
 **Install.** The extra is in the wheels on [belay's releases](https://github.com/Allexsen/belay/releases),
-from v0.1.0-alpha.5, not on PyPI. It needs Python 3.10 or later. This is the Linux x86_64 wheel; the
+from v0.1.0-alpha.5 on, not on PyPI. It needs Python 3.10 or later. This is the Linux x86_64 wheel; the
 release has one for Linux arm64 and one for macOS arm64:
 
 ```sh
-pip install "pybelay[inspect] @ https://github.com/Allexsen/belay/releases/download/v0.1.0-alpha.5/pybelay-0.1.0a5-py3-none-manylinux_2_17_x86_64.musllinux_1_1_x86_64.whl"
+pip install "pybelay[inspect] @ https://github.com/Allexsen/belay/releases/download/v0.1.0-alpha.6/pybelay-0.1.0a6-py3-none-manylinux_2_17_x86_64.musllinux_1_1_x86_64.whl"
 ```
 
 Nothing is needed in the sandbox image or on the Docker host: pybelay copies its own binary in.
