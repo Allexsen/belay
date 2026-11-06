@@ -80,6 +80,6 @@ only its sha256 goes in the log.
 - With several epochs and a reducer, a sample with both judged and unjudged epochs counts as a
   violation, not an error: a reduced score keeps an answer only if all its epochs agree.
 - The bundle holds a copy of what the scope contains. Inspect reads at most 100 MiB from a sandbox by
-  default: a larger one is refused, with what to do. Bundles stay in a temporary directory on the host
-  until the eval's process ends.
+  default: a larger one is refused, with what to do. A sample's bundle is removed from the host when
+  it is scored.
 - `inspect score` on a finished log can't judge: the sandbox is gone.
