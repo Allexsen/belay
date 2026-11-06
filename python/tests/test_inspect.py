@@ -230,7 +230,15 @@ class Selection(Layout, unittest.TestCase):
         self.lay(ARM)
         self.assertEqual(self.picked("Linux", "aarch64"), "belay")
 
-    def test_a_linux_wheel_refuses_another_architecture_and_says_what_to_do(self):
+    def test_a_linux_wheel_serves_the_other_architecture_from_what_it_carries(self):
+        self.lay(X86, arm=ARM)
+        self.assertEqual(self.picked("Linux", "x86_64"), "belay")
+        self.assertEqual(self.picked("Linux", "aarch64"), "linux-arm64")
+        self.lay(ARM, x86=X86)
+        self.assertEqual(self.picked("Linux", "aarch64"), "belay")
+        self.assertEqual(self.picked("Linux", "x86_64"), "linux-x86_64")
+
+    def test_a_wheel_carrying_nothing_refuses_another_architecture_and_says_what_to_do(self):
         self.lay(X86)
         with self.assertRaises(UsageError) as e:
             self.picked("Linux", "aarch64")

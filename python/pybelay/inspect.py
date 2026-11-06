@@ -86,8 +86,9 @@ def _built_for(head: bytes) -> Optional[str]:
 
 def _pick_binary(given: Optional[str], system: str, machine: str) -> str:
     """The path of the binary to copy into a sandbox that says it is `system`
-    `machine` (PY-I5). A wheel's own binary is the host's; a macOS wheel also
-    carries Linux ones, so a Mac's Linux containers are served either way."""
+    `machine` (PY-I5). A wheel's own binary is the host's; it also carries the
+    Linux ones it doesn't have, so Linux containers of either architecture are
+    served from any host."""
     machine = _ARCH_NAMES.get(machine, machine)
     asset = _ASSET_NAMES.get(machine, machine)
     get = "Download belay-<version>-linux-%s from belay's release and pass its path as binary=." % asset
@@ -177,8 +178,8 @@ def belay_record(protect: Union[str, "os.PathLike[str]", Dict[str, Any]], *, sco
         sandbox: The sandbox's name, when a sample has several. By default the default one.
         user: The sandbox user to run as. By default the sandbox's own.
         binary: A static Linux belay on this machine, for a sandbox no binary in the
-            wheel suits. By default the wheel's own, or on a Mac the Linux one the
-            wheel carries for the sandbox's architecture.
+            wheel suits. By default the wheel's own, or the Linux one it carries
+            for the sandbox's architecture.
         timeout: Seconds for each sandbox command.
     """
     spec = _spec_text(protect)
