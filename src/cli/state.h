@@ -135,6 +135,10 @@ int state_keep(const struct state *st, long id);
  * it does not fit. */
 int state_json_member(char *buf, size_t cap, const char *key, const char *s);
 
+/* `data` as `name` in the directory `dfd`, whole or not at all. 0, or -1 with
+ * belay_err; `shown` names it in the error. */
+int state_write_whole(int dfd, const char *name, const char *data, size_t len, const char *shown);
+
 /* The path of checkpoint `id`'s manifest into buf. */
 void state_manifest(const struct state *st, long id, char *buf, size_t cap);
 

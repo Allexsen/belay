@@ -1,6 +1,6 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "$id": "belay/checkpoint.v1",
+  "$id": "belay/checkpoint.v2",
   "title": "A checkpoint, as `belay check --json`, `belay mark --json` and `belay log --json` print it",
   "type": "object",
   "additionalProperties": false,
@@ -16,7 +16,9 @@
     "excluded",
     "excluded_paths",
     "prefilter",
-    "source"
+    "source",
+    "stored",
+    "kept"
   ],
   "properties": {
     "id": {
@@ -41,7 +43,14 @@
       "description": "the scope's path in base64, when it is not UTF-8"
     },
     "manifest": {
-      "type": "string"
+      "oneOf": [
+        {
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ]
     },
     "manifest_b64": {
       "type": "string",
@@ -167,6 +176,16 @@
           }
         }
       ]
+    },
+    "stored": {
+      "type": "string",
+      "enum": [
+        "whole",
+        "delta"
+      ]
+    },
+    "kept": {
+      "type": "boolean"
     }
   },
   "allOf": [

@@ -31,6 +31,7 @@
 #include "belay/manifest.h"
 #include "cli.h"
 #include "cli_internal.h"
+#include "delta.h"
 #include "state.h"
 
 #define NS_PER_DAY 86400000000000LL
@@ -51,6 +52,9 @@ struct plan {
     uint64_t swept_bytes;
     long *stale;                /* directories without a meta.json, below the newest id */
     size_t n_stale;
+    long *rewrite;              /* deltas that stay, whose base goes (PR-4) */
+    size_t n_rewrite;
+    uint64_t grows;             /* what those whole files will take */
 };
 
 static int by_hex(const void *a, const void *b) {
@@ -132,7 +136,8 @@ static int mark_entry(const struct belay_entry *e, void *ctx) {
 /* What belay writes in a checkpoint's directory, a killed capture's leftovers
  * included (manifest_write.c). Anything else is not belay's to remove. */
 static bool ours(const char *n) {
-    return !strcmp(n, "manifest.ndjson") || !strcmp(n, "meta.json") || !strcmp(n, "meta.json.tmp") ||
+    return !strcmp(n, "manifest.ndjson") || !strcmp(n, "manifest.delta") || !strcmp(n, "manifest.delta.tmp") ||
+           !strcmp(n, "meta.json") || !strcmp(n, "meta.json.tmp") ||
            !strncmp(n, "diff-from-", 10) || !strncmp(n, "manifest.ndjson.tmp.", 20) || !strncmp(n, "manifest.ndjson.run.", 20);
 }
 
@@ -338,7 +343,8 @@ static int prune(struct state *st, long days, long last, long from, const long *
     }
     p.goes = calloc(n, sizeof *p.goes);
     kept = calloc(n, sizeof *kept);
-    if (p.goes == NULL || kept == NULL) {
+    p.rewrite = calloc(n, sizeof *p.rewrite);
+    if (p.goes == NULL || kept == NULL || p.rewrite == NULL) {
         belay_err_set(BELAY_ERR_NOMEM, 0, "out of memory");
         rc = cli_failed(err);
         goto out;
@@ -396,11 +402,31 @@ static int prune(struct state *st, long days, long last, long from, const long *
         if (!p.goes[i] && orphan_diffs(st, list[i].id, list, p.goes, n, false, &p.bytes) == -1) { rc = cli_failed(err); goto out; }
     for (size_t i = 0; i < n; i++) {
         if (p.goes[i] || list[i].id <= m->upto) continue;
-        char path[PATH_MAX + 200];
-        if (state_check_manifest(st, list[i].id) == -1) { rc = cli_failed(err); goto out; }
-        state_manifest(st, list[i].id, path, sizeof path);
-        if (belay_manifest_read(path, mark_entry, &p) == -1) { rc = cli_failed(err); goto out; }
+        struct manifest_file mf;
+        if (manifest_acquire(st, list[i].id, &mf) == -1) { rc = cli_failed(err); goto out; }
+        const int read = belay_manifest_read(mf.path, mark_entry, &p);
+        manifest_release(&mf);
+        if (read == -1) { rc = cli_failed(err); goto out; }
     }
+    /* A delta that stays and whose base goes (PR-4). */
+    for (size_t i = 0; i < n; i++) {
+        long base;
+        uint64_t size, stored;
+        if (p.goes[i]) continue;
+        if (manifest_delta_base(st, list[i].id, &base, &size, &stored) == -1) { rc = cli_failed(err); goto out; }
+        if (base == 0) continue;
+        bool gone = true;
+        for (size_t lo = 0, hi = n; lo < hi;) {
+            const size_t mid = lo + (hi - lo) / 2;
+            if (list[mid].id == base) { gone = p.goes[mid]; break; }
+            if (list[mid].id < base) lo = mid + 1; else hi = mid;
+        }
+        if (!gone) continue;
+        p.rewrite[p.n_rewrite++] = list[i].id;
+        p.bytes += stored;
+        p.grows += size;
+    }
+    p.bytes = p.bytes > p.grows ? p.bytes - p.grows : 0;
     m->upto = list[n - 1].id;
     for (size_t i = 0; i < p.n_objects; i++)
         if (!p.objects[i].marked) {
@@ -410,6 +436,8 @@ static int prune(struct state *st, long days, long last, long from, const long *
     if (!dry) {
         for (size_t i = 0; i < n; i++)
             if (kept[i] && !list[i].kept && state_keep(st, list[i].id) == -1) { rc = cli_failed(err); goto out; }
+        for (size_t i = 0; i < p.n_rewrite; i++)
+            if (manifest_make_whole(st, p.rewrite[i]) == -1) { rc = cli_failed(err); goto out; }
         for (size_t i = 0; i < n; i++)
             if (p.goes[i] && remove_checkpoint(st, list[i].id) == -1) { rc = cli_failed(err); goto out; }
         for (size_t i = 0; i < p.n_stale; i++)
@@ -464,6 +492,7 @@ out:
     free(kept);
     free(p.goes);
     free(p.stale);
+    free(p.rewrite);
     return rc;
 }
 
@@ -544,5 +573,51 @@ int cmd_prune(int argc, char **argv, FILE *out, FILE *err) {
 done:
     free(m.objects);
     free(ids);
+    return rc;
+}
+
+/* belay manifest (ST-8): for whatever needs a manifest, rather than reading the
+ * state directory. */
+int cmd_manifest(int argc, char **argv, FILE *out, FILE *err) {
+    const char *scope = NULL, *docker = NULL, *id_text = NULL;
+    for (int i = 2; i < argc; i++) {
+        const char **val = !strcmp(argv[i], "--scope") ? &scope : !strcmp(argv[i], "--docker") ? &docker
+                         : !strcmp(argv[i], "--id") ? &id_text : NULL;
+        char why[256];
+        if (val == NULL || i + 1 >= argc || *val != NULL) {
+            snprintf(why, sizeof why, "%s: unknown, given twice, or missing its value", argv[i]);
+            return cli_usage(err, why);
+        }
+        *val = argv[++i];
+    }
+    const long id = state_id_parse(id_text);
+    if (scope == NULL) return cli_usage(err, "--scope DIR is required");
+    if (id == 0) return cli_usage(err, "--id needs a checkpoint id");
+    struct state st;
+    int rc = cli_open_scope(scope, docker, false, &st, err);
+    if (rc) return rc;
+    struct manifest_file mf;
+    const int exists = state_checkpoint_exists(&st, id);
+    if (exists != 1) {
+        char why[64];
+        belay_err_clear();
+        snprintf(why, sizeof why, "no checkpoint %ld", id);
+        rc = cli_usage(err, why);
+    } else if (manifest_acquire(&st, id, &mf) == -1) {
+        rc = cli_failed(err);
+    } else {
+        FILE *f = fopen(mf.path, "r");
+        char buf[65536];
+        size_t k;
+        if (f == NULL) {
+            belay_err_set(BELAY_ERR_IO, errno, "cannot read %s", mf.path);
+            rc = cli_failed(err);
+        } else {
+            while ((k = fread(buf, 1, sizeof buf, f)) > 0) fwrite(buf, 1, k, out);
+            fclose(f);
+        }
+        manifest_release(&mf);
+    }
+    state_close(&st);
     return rc;
 }

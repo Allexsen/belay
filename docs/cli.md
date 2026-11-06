@@ -3,6 +3,7 @@
 ```
 belay check --scope DIR [--json]
 belay mark  --scope DIR [--full] [--full-every N] [--keep] [--json]
+belay manifest --scope DIR --id ID
 belay prune --scope DIR [--keep-days N] [--keep-last N] [--keep-id ID]... [--keep-from ID] [--dry-run] [--json]
 belay diff  --scope DIR --since ID [--to ID] [--full-every N] [--json] [--exit-code] [--all]
 belay log   --scope DIR [--json]
@@ -80,7 +81,8 @@ writes is corrupt state (exit 4). Protected paths (a later milestone) will never
     scope                       the scope's resolved path
     store/                      copies of small text files and of files an interpreter needs,
                                 shared by every checkpoint of the scope
-    checkpoints/<id>/manifest.ndjson
+    checkpoints/<id>/manifest.ndjson    the manifest, whole: the newest checkpoint, and every 256th
+    checkpoints/<id>/manifest.delta     or what turns its predecessor's into it (state-retention.md)
     checkpoints/<id>/diff-from-<since>.ndjson   what diff --since computed for this checkpoint
     checkpoints/<id>/meta.json  written last: a checkpoint exists once it does
     excludes                    the scope's excludes, one a line (belay exclude)
@@ -113,6 +115,14 @@ belay deletes from it only when `belay prune` runs ([test/expect/state-retention
 or when a hook you installed runs it. Until pruned, the store keeps one copy of every version of
 every file it copies -- small text files, and up to 16 MiB for each git reflog -- so a busy
 repository's reflogs, changing between marks, grow it by up to their size each time.
+
+## manifest: a checkpoint's manifest
+
+`belay manifest --scope DIR --id ID` prints a checkpoint's manifest. Only the newest checkpoint and
+every 256th are kept whole; the others are deltas, rebuilt here, and every rebuild is checked byte
+for byte against the sha256 recorded when it was written: one that doesn't match is corrupt state
+(exit 4), and nothing of it is printed. checkpoint.v2's `manifest` is null for a delta, so use this,
+not the state directory.
 
 ## prune: what to keep
 
@@ -313,5 +323,5 @@ as `\xNN`, a backslash as `\\`. A type change that is also a privilege change sa
 ## --json
 
 `check`, `mark` and `log` print checkpoints as JSON objects, one a line, described by
-[schema/checkpoint.v1.json](../schema/checkpoint.v1.json). A path that is not UTF-8 is given in
+[schema/checkpoint.v2.json](../schema/checkpoint.v2.json). A path that is not UTF-8 is given in
 base64 as `scope_b64` or `manifest_b64` in place of `scope` or `manifest`.

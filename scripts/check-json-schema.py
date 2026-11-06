@@ -3,7 +3,7 @@
 schemas use: type, enum, required, properties, additionalProperties,
 minimum, items, allOf, oneOf). Stdlib only: CI images need no extra package.
 
-    check-json-schema.py schema/checkpoint.v1.json < output.ndjson
+    check-json-schema.py schema/checkpoint.v2.json < output.ndjson
 """
 import json
 import sys

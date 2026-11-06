@@ -4,7 +4,7 @@
 # real binary, unprivileged, in a plain directory -- run by `make check`, so
 # by every CI job that runs it: linux (x86_64, arm64), docker (a non-root
 # user in ubuntu:24.04) and macos-portable. Fixtures for the text, pip, dpkg
-# and git interpreters; --json validated against schema/checkpoint.v1.json;
+# and git interpreters; --json validated against schema/checkpoint.v2.json;
 # exit codes checked. Fails on the first broken expectation, naming it.
 #
 #   scripts/e2e.sh [path/to/belay]
@@ -13,7 +13,7 @@ set -eu
 
 BELAY=${1:-bin/belay}
 case $BELAY in /*) ;; *) BELAY=$PWD/$BELAY ;; esac
-VALIDATE="python3 $PWD/scripts/check-json-schema.py $PWD/schema/checkpoint.v1.json"
+VALIDATE="python3 $PWD/scripts/check-json-schema.py $PWD/schema/checkpoint.v2.json"
 T=$(mktemp -d "${TMPDIR:-/tmp}/belay-e2e.XXXXXX")
 trap 'chmod -R u+rwx "${T:?}" 2>/dev/null; rm -rf "${T:?}"' EXIT
 S=$T/scope

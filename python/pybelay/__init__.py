@@ -101,12 +101,12 @@ class Prefilter:
 
 @dataclasses.dataclass(frozen=True)
 class Checkpoint:
-    """checkpoint.v1 (PY-R1)."""
+    """checkpoint.v2 (PY-R1)."""
     id: int
     kind: str
     created_ns: int
     scope: str
-    manifest: str
+    manifest: Optional[str]         # None for a checkpoint stored as a delta (C2-2)
     entries: int
     raced: int
     unstable: int
@@ -115,6 +115,8 @@ class Checkpoint:
     excluded: int
     excluded_paths: Tuple[dict, ...]
     prefilter: Prefilter
+    stored: str                     # "whole" or "delta" (C2-3)
+    kept: bool                      # C2-4
     source: Optional[dict]          # checkpoint.v1 CK-16: None, or {"docker": ..., "image": ...}
 
 

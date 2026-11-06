@@ -4,6 +4,7 @@
 
 #include "gitclass.h"
 #include "receipt.h"
+#include "delta.h"
 #include "state.h"
 
 #include "belay/belay.h"
@@ -43,6 +44,7 @@ static const char USAGE[] =
     "  verify --scope DIR --baseline FILE --baseline-sha256 HEX [--protect SPEC] [--to ID] [--exit-code]\n"
     "                                        what the changes since the baseline mean: policy.v1\n"
 
+    "  manifest --scope DIR --id ID          a checkpoint's manifest, on standard output\n"
     "  prune --scope DIR [--keep-days N] [--keep-last N] [--keep-id ID]... [--keep-from ID] [--dry-run] [--json]\n"
     "                                        remove old checkpoints, and stored copies nothing refers to\n"
     "  help [command]                        this, or one command's options\n"
@@ -55,7 +57,7 @@ static const char USAGE[] =
 static const struct { const char *cmd, *text; } HELP[] = {
     { "check", "usage: belay check --scope DIR [--json]\n"
                "  Records DIR as a new checkpoint in the state directory, reading every file.\n"
-               "  --json  print the checkpoint as one JSON object (schema/checkpoint.v1.json)\n" },
+               "  --json  print the checkpoint as one JSON object (schema/checkpoint.v2.json)\n" },
     { "mark",  "usage: belay mark --scope DIR [--full] [--full-every N] [--keep] [--json]\n"
                "  A checkpoint after the scope's latest: a file that cannot have changed since --\n"
                "  same inode, mode, size, mtime and ctime, ctime before the reference point -- is\n"
@@ -63,7 +65,7 @@ static const struct { const char *cmd, *text; } HELP[] = {
                "  --full, every N marks (default 50; 0: never), when ctime is seen going\n"
                "  backwards, or when the previous checkpoint cannot be used; the output says why.\n"
                "  --keep  a kept checkpoint is never pruned\n"
-               "  --json  print the checkpoint as one JSON object (schema/checkpoint.v1.json)\n" },
+               "  --json  print the checkpoint as one JSON object (schema/checkpoint.v2.json)\n" },
     { "diff",  "usage: belay diff --scope DIR --since ID [--to ID] [--full-every N] [--json] [--exit-code] [--all]\n"
                "  What changed from checkpoint ID: to checkpoint --to, or to the scope now, which\n"
                "  is kept as a new checkpoint.\n"
@@ -93,6 +95,8 @@ static const struct { const char *cmd, *text; } HELP[] = {
                "  --to ID      judge checkpoint ID of the scope's own state instead (with a spec,\n"
                "               only one that read every file)\n"
                "  --exit-code  exit 1 when any record is a violation (signals never)\n" },
+    { "manifest", "usage: belay manifest --scope DIR --id ID\n"
+               "  Prints checkpoint ID's manifest, rebuilt and checked when it is stored as a delta.\n" },
     { "prune", "usage: belay prune --scope DIR [--keep-days N] [--keep-last N] [--keep-id ID]... [--keep-from ID] [--dry-run] [--json]\n"
                "  Removes the checkpoints outside the limits given, at least one of them required:\n"
                "  older than N days, and not among the last N. Then the stored copies no remaining\n"
@@ -103,7 +107,7 @@ static const struct { const char *cmd, *text; } HELP[] = {
                "  --json       one JSON line\n" },
     { "log",   "usage: belay log --scope DIR [--json]\n"
                "  The scope's checkpoints: id, kind, time, entries.\n"
-               "  --json  one checkpoint a line (schema/checkpoint.v1.json)\n" },
+               "  --json  one checkpoint a line (schema/checkpoint.v2.json)\n" },
 };
 
 /* belay_err's message as one line: it may name a path, escaped as the
@@ -212,8 +216,10 @@ static void iso(int64_t ns, char *buf, size_t cap) {
 static void json_checkpoint(FILE *out, const struct state *st, const struct checkpoint *c) {
     static char esc[6 * PATH_MAX + 32], why[6 * 160 + 8], man[PATH_MAX + 160], mesc[6 * (PATH_MAX + 160) + 32];
     state_manifest(st, c->id, man, sizeof man);
+    const bool delta = manifest_is_delta(st, c->id);
+    if (delta) snprintf(mesc, sizeof mesc, "\"manifest\":null");     /* C2-2 */
     if (state_json_member(esc, sizeof esc, "scope", st->scope.path) == -1 ||
-        state_json_member(mesc, sizeof mesc, "manifest", man) == -1 ||
+        (!delta && state_json_member(mesc, sizeof mesc, "manifest", man) == -1) ||
         belay_json_escape(why, sizeof why, c->full_reason, strlen(c->full_reason)) == -1) {
         belay_err_clear();
         why[0] = '\0';                 /* cannot happen: the buffers hold a PATH_MAX path escaped */
@@ -224,7 +230,9 @@ static void json_checkpoint(FILE *out, const struct state *st, const struct chec
     size_t xw = (size_t)snprintf(xs, sizeof xs, "[");
     struct belay_manifest_reader *r = NULL;
     char src[200] = "null";             /* CK-16: the manifest's source (manifest-v3 V3-2) */
-    if (state_check_manifest(st, c->id) == 0 && belay_manifest_open(man, &r) == 0) {
+    struct manifest_file mf;
+    const bool have = manifest_acquire_header(st, c->id, &mf) == 0;
+    if (have && belay_manifest_open(mf.path, &r) == 0) {
         const struct belay_manifest_header *h = belay_manifest_header(r);
         if (h->source_docker[0] != '\0')
             snprintf(src, sizeof src, "{\"docker\":\"%s\",\"image\":\"%s\"}", h->source_docker, h->source_image);
@@ -236,16 +244,18 @@ static void json_checkpoint(FILE *out, const struct state *st, const struct chec
         }
         belay_manifest_close(r);
     }
+    if (have) manifest_release(&mf);
     belay_err_clear();
     snprintf(xs + xw, sizeof xs - xw, "]");
     fprintf(out, "{\"id\":%ld,\"kind\":\"%s\",\"created_ns\":%lld,%s,%s,"
                  "\"entries\":%llu,\"raced\":%llu,\"unstable\":%llu,\"vanished\":%llu,\"provisional\":%s,"
                  "\"excluded\":%llu,\"excluded_paths\":%s,\"prefilter\":{\"used\":%s,\"reference\":\"%s\",\"trusted\":%llu,"
-                 "\"racy\":%llu,\"full_reason\":\"%s\"},\"source\":%s}\n",
+                 "\"racy\":%llu,\"full_reason\":\"%s\"},\"source\":%s,\"stored\":\"%s\",\"kept\":%s}\n",
             c->id, c->kind, (long long)c->created_ns, esc, mesc, (unsigned long long)c->entries,
             (unsigned long long)c->raced, (unsigned long long)c->unstable, (unsigned long long)c->vanished,
             c->provisional ? "true" : "false", (unsigned long long)c->excluded, xs, c->full ? "false" : "true",
-            state_reference(c), (unsigned long long)c->trusted, (unsigned long long)c->racy, why, src);
+            state_reference(c), (unsigned long long)c->trusted, (unsigned long long)c->racy, why, src,
+            delta ? "delta" : "whole", c->kept ? "true" : "false");
 }
 
 /* What a manifest's header says was not walked, one line each (Q6;
@@ -268,13 +278,15 @@ static void capture_notes(FILE *out, const struct state *st, const struct checkp
                 (unsigned long long)c->raced, (unsigned long long)c->unstable, (unsigned long long)c->vanished);
     if (!c->excluded) return;
     /* The names, from the manifest's own header: it is what was recorded. */
-    char man[PATH_MAX + 160];
     struct belay_manifest_reader *r = NULL;
-    state_manifest(st, c->id, man, sizeof man);
-    if (state_check_manifest(st, c->id) == 0 && belay_manifest_open(man, &r) == 0) {
+    struct manifest_file mf;
+    const bool have = manifest_acquire_header(st, c->id, &mf) == 0;
+    if (have && belay_manifest_open(mf.path, &r) == 0) {
         excluded_notes(out, belay_manifest_header(r), "not recorded");
         belay_manifest_close(r);
+        manifest_release(&mf);
     } else {
+        if (have) manifest_release(&mf);
         belay_err_clear();
         fprintf(out, "  not recorded: %llu excluded paths (the manifest cannot be read to name them)\n",
                 (unsigned long long)c->excluded);
@@ -501,7 +513,8 @@ static int cmd_diff(const struct opts *o, FILE *out, FILE *err) {
     if (rc) return rc;
     struct checkpoint *list = NULL, now = { 0 };
     size_t n = 0;
-    char a[PATH_MAX + 160], b[PATH_MAX + 160], d[PATH_MAX + 200], label_a[64], label_b[64];
+    struct manifest_file mf_a = { .temporary = false }, mf_b = { .temporary = false };
+    char a[PATH_MAX + 200], b[PATH_MAX + 200], d[PATH_MAX + 200], label_a[64], label_b[64];
     char work[PATH_MAX] = "";                   /* a stored diff's pair: computed here, not in the state */
     struct modes m = { 0 };
     FILE *in = NULL;
@@ -550,8 +563,12 @@ static int cmd_diff(const struct opts *o, FILE *out, FILE *err) {
         snprintf(label_b, sizeof label_b, "checkpoint %ld", to);
     }
     snprintf(label_a, sizeof label_a, "checkpoint %ld", from);
-    state_manifest(&st, from, a, sizeof a);
-    state_manifest(&st, to, b, sizeof b);
+    if (manifest_acquire(&st, from, &mf_a) == -1 || manifest_acquire(&st, to, &mf_b) == -1) {
+        rc = failed(err);
+        goto done;
+    }
+    snprintf(a, sizeof a, "%s", mf_a.path);
+    snprintf(b, sizeof b, "%s", mf_b.path);
     if (stored) {
         const char *tmp = getenv("TMPDIR");
         snprintf(work, sizeof work, "%s/belay-diff.XXXXXX", tmp != NULL && tmp[0] == '/' ? tmp : "/tmp");
@@ -620,6 +637,8 @@ static int cmd_diff(const struct opts *o, FILE *out, FILE *err) {
     }
     if (o->exit_code && ds.records > 0) rc = EXIT_CHANGES;
 done:
+    manifest_release(&mf_a);
+    manifest_release(&mf_b);
     if (in != NULL) fclose(in);
     if (work[0] != '\0') { unlink(d); rmdir(work); }
     belay_manifest_close(m.side[0].r);
@@ -653,6 +672,7 @@ static int run(int argc, char **argv, FILE *out, FILE *err) {
     if (!strcmp(cmd, "baseline")) return cmd_baseline(argc, argv, out, err);
     if (!strcmp(cmd, "verify")) return cmd_verify(argc, argv, out, err);
     if (!strcmp(cmd, "prune")) return cmd_prune(argc, argv, out, err);
+    if (!strcmp(cmd, "manifest")) return cmd_manifest(argc, argv, out, err);
     struct opts o;
     const bool known = !strcmp(cmd, "check") || !strcmp(cmd, "mark") || !strcmp(cmd, "diff") || !strcmp(cmd, "log") ||
                        !strcmp(cmd, "exclude");

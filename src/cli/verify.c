@@ -8,6 +8,7 @@
 #include "cli.h"
 #include "cli_internal.h"
 #include "receipt.h"
+#include "delta.h"
 #include "state.h"
 
 #include "belay/belay.h"
@@ -235,6 +236,8 @@ static int bundle_excludes(const char *manifest, struct excludes *ex, const stru
 
 /* `--to ID`: the scope's own checkpoint, its copies brought into verify's
  * store. With a spec, only one that trusted nothing (PS-C1). */
+static struct manifest_file after_file;
+
 static int checkpoint_after(const struct scope *sc, long id, const struct protect_spec *spec, const char *store,
                             char *manifest, size_t cap, FILE *err) {
     const char *saved = state_root_override;
@@ -251,7 +254,19 @@ static int checkpoint_after(const struct scope *sc, long id, const struct protec
         belay_err_clear();
         return EXIT_USAGE;
     }
-    state_manifest(&own, id, manifest, cap);
+    /* A delta's rebuild lives until verify is done with it (cmd_verify). */
+    if (manifest_acquire(&own, id, &after_file) == -1) {
+        rc = cli_failed(err);
+        state_close(&own);
+        return rc;
+    }
+    if (snprintf(manifest, cap, "%s", after_file.path) >= (int)cap) {
+        manifest_release(&after_file);
+        belay_err_set(BELAY_ERR_RANGE, 0, "the path of a rebuilt manifest is too long");
+        rc = cli_failed(err);
+        state_close(&own);
+        return rc;
+    }
     struct belay_manifest_reader *r = NULL;
     struct belay_content *c = NULL;
     struct belay_store *st = NULL;
@@ -400,6 +415,7 @@ int cmd_verify(int argc, char **argv, FILE *out, FILE *err) {
     if (policy_run(&pin, out, &ps) == -1) { rc = cli_failed(err); goto done; }
     rc = exit_code && ps.violations > 0 ? EXIT_CHANGES : EXIT_DONE;
 done:
+    manifest_release(&after_file);
     state_root_override = NULL;
     if (opened) state_close(&st);
     bundle_free(&bd);
