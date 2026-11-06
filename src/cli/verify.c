@@ -244,7 +244,7 @@ static int checkpoint_after(const struct scope *sc, long id, const struct protec
                                     : cli_open_scope(sc->path, NULL, false, &own, err);
     state_root_override = saved;
     if (rc) return rc;
-    if (state_check_manifest(&own, id) == -1) {
+    if (state_checkpoint_exists(&own, id) != 1 || state_check_manifest(&own, id) == -1) {
         belay_err_set(BELAY_ERR_INVALID, 0, "checkpoint %ld does not exist", id);
         state_close(&own);
         cli_err_line(err);
