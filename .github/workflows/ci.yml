@@ -67,6 +67,13 @@ jobs:
         run: sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
       - name: build + test
         run: make check
+      - name: pybelay.inspect on arm64 (real evals; the binary picked for this architecture)
+        run: |
+          make clean
+          make CFLAGS='-O2 -static' all
+          python3 -m venv /tmp/inspect
+          /tmp/inspect/bin/pip install -q 'inspect-ai==0.3.287'
+          make inspect-test PYTHON=/tmp/inspect/bin/python CFLAGS='-O2 -static'
 
   test-macos:
     name: macos-portable

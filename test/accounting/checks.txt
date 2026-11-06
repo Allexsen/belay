@@ -17,6 +17,7 @@ linux-arm64 | uname -m | setup
 linux-arm64 | platform summary | setup
 linux-arm64 | enable unprivileged user namespaces | setup
 linux-arm64 | build + test | check
+linux-arm64 | pybelay.inspect on arm64 (real evals; the binary picked for this architecture) | check
 macos-portable | actions/checkout@v5 | setup
 macos-portable | uname -m | setup
 macos-portable | platform summary | setup

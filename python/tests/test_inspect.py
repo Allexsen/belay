@@ -1,6 +1,6 @@
 """pybelay.inspect in real Inspect evals, with its mock model: no API calls.
 Docker and a static belay are needed: make inspect-test."""
-import json, os, sys, tempfile, unittest
+import hashlib, json, os, platform, shutil, sys, tempfile, unittest
 
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), ".."))
 from inspect_ai import Epochs, Task, eval as inspect_eval  # noqa: E402
@@ -10,7 +10,8 @@ from inspect_ai.solver import solver  # noqa: E402
 from inspect_ai.util import sandbox  # noqa: E402
 
 from pybelay import inspect as pi  # noqa: E402
-from pybelay._errors import UsageError  # noqa: E402
+from pybelay import _binary  # noqa: E402
+from pybelay._errors import BinaryMismatch, UsageError  # noqa: E402
 
 SPEC = {"belay_protect": 2, "protect": [{"path": "test.py", "mode": ["no_write"]},
                                         {"path": "cases.json", "mode": ["no_write"]}]}
@@ -138,11 +139,13 @@ class Scenarios:
         self.assertIn("add setup=belay_record", str(log.samples[0].error))
 
     def test_a_lost_baseline_fails_closed_and_the_other_scorers_run(self):
-        _, s = self.run_task([lose_bundle()], scorers=[pi.belay_verify(), changes_the_sandbox()])
+        log, s = self.run_task([lose_bundle()], scorers=[pi.belay_verify(), changes_the_sandbox()])
         v = self.verdict(s)
         self.assertEqual((v.value, v.answer), (INCORRECT, "error"))
         self.assertEqual(v.metadata["error"]["type"], "FileNotFoundError")
         self.assertEqual(s.scores["changes_the_sandbox"].value, 1.0)
+        m = {k: x.value for k, x in log.results.scores[0].metrics.items()}
+        self.assertEqual((m["pass_rate"], m["violations"], m["errors"]), (0.0, 0, 1))
 
     def test_on_error_raise_fails_the_sample(self):
         _, s = self.run_task([lose_bundle()], scorers=pi.belay_verify(on_error="raise"))
@@ -178,25 +181,113 @@ def elf(machine):
     return b"\x7fELF" + bytes(14) + machine.to_bytes(2, "little")
 
 
-class Architecture(unittest.TestCase):
-    def test_a_match_passes(self):
-        pi._check_architecture(elf(62), "Linux", "x86_64", False)
-        pi._check_architecture(elf(183), "Linux", "aarch64", False)
-        pi._check_architecture(elf(183), "Linux", "arm64", False)
+MACHO = b"\xcf\xfa\xed\xfe" + bytes(16)
+X86, ARM = elf(62), elf(183)
 
-    def test_another_architecture_is_refused_and_says_what_to_do(self):
+
+class Layout:
+    """A wheel's _bin: its own binary, and the Linux ones a macOS wheel carries."""
+
+    def lay(self, own, x86=None, arm=None):
+        d = tempfile.mkdtemp(prefix="pybelay-bin-")
+        self.addCleanup(shutil.rmtree, d, ignore_errors=True)
+
+        def put(name, data):
+            with open(os.path.join(d, name), "wb") as f:
+                f.write(data)
+            return hashlib.sha256(data).hexdigest()
+
+        with open(os.path.join(d, "SHA256"), "w") as f:
+            f.write(put("belay", own) + "\n")
+        for arch, data in (("x86_64", x86), ("arm64", arm)):
+            if data is not None:
+                with open(os.path.join(d, "linux-%s.sha256" % arch), "w") as f:
+                    f.write(put("linux-" + arch, data) + "\n")
+        saved = _binary._HERE, _binary._checked
+        _binary._HERE, _binary._checked = d, None
+        self.addCleanup(lambda: (setattr(_binary, "_HERE", saved[0]), setattr(_binary, "_checked", saved[1])))
+        return d
+
+
+class Selection(Layout, unittest.TestCase):
+    def picked(self, system, machine):
+        return os.path.basename(pi._pick_binary(None, system, machine))
+
+    def test_a_mac_picks_the_carried_binary_of_the_sandboxs_architecture(self):
+        self.lay(MACHO, X86, ARM)
+        self.assertEqual(self.picked("Linux", "aarch64"), "linux-arm64")
+        self.assertEqual(self.picked("Linux", "arm64"), "linux-arm64")
+        self.assertEqual(self.picked("Linux", "x86_64"), "linux-x86_64")
+        self.assertEqual(self.picked("Linux", "amd64"), "linux-x86_64")
+
+    def test_a_macs_own_binary_serves_a_macos_sandbox(self):
+        self.lay(MACHO, X86, ARM)
+        self.assertEqual(self.picked("Darwin", "arm64"), "belay")
+
+    def test_a_linux_wheel_uses_its_own_for_its_own_architecture(self):
+        self.lay(X86)
+        self.assertEqual(self.picked("Linux", "x86_64"), "belay")
+        self.lay(ARM)
+        self.assertEqual(self.picked("Linux", "aarch64"), "belay")
+
+    def test_a_linux_wheel_refuses_another_architecture_and_says_what_to_do(self):
+        self.lay(X86)
         with self.assertRaises(UsageError) as e:
-            pi._check_architecture(elf(62), "Linux", "aarch64", False)
+            self.picked("Linux", "aarch64")
         self.assertIn("linux-arm64", str(e.exception))
         self.assertIn("binary=", str(e.exception))
-
-    def test_a_macos_binary_is_refused_for_a_linux_sandbox(self):
+        self.lay(ARM)
         with self.assertRaises(UsageError) as e:
-            pi._check_architecture(b"\xcf\xfa\xed\xfe" + bytes(16), "Linux", "aarch64", False)
-        self.assertIn("another system", str(e.exception))
+            self.picked("Linux", "x86_64")
+        self.assertIn("linux-x86_64", str(e.exception))
 
-    def test_only_linux_sandboxes_are_checked(self):
-        pi._check_architecture(b"\xcf\xfa\xed\xfe" + bytes(16), "Darwin", "arm64", False)
+    def test_an_unknown_architecture_is_refused(self):
+        self.lay(MACHO, X86, ARM)
+        with self.assertRaises(UsageError):
+            self.picked("Linux", "riscv64")
+
+    def test_a_carried_binary_that_doesnt_hash_is_refused(self):
+        d = self.lay(MACHO, X86, ARM)
+        with open(os.path.join(d, "linux-arm64"), "ab") as f:
+            f.write(b"x")
+        with self.assertRaises(BinaryMismatch):
+            self.picked("Linux", "aarch64")
+
+    def test_binary_is_checked_against_the_sandbox(self):
+        d = self.lay(MACHO, X86, ARM)
+        given = os.path.join(d, "linux-x86_64")
+        self.assertEqual(pi._pick_binary(given, "Linux", "x86_64"), given)
+        with self.assertRaises(UsageError) as e:
+            pi._pick_binary(given, "Linux", "aarch64")
+        self.assertIn("binary=", str(e.exception))
+
+
+class MacWheelInDocker(Layout, Evals):
+    """A macOS wheel's layout against a real container of this machine's own
+    architecture: the Mach-O and the other architecture's binary can't run, so
+    a verdict at all means the right one was picked."""
+
+    @classmethod
+    def setUpClass(cls):
+        Docker.setUpClass()
+        cls.sandbox_spec = Docker.sandbox_spec
+
+    def test_the_binary_of_the_containers_architecture_is_picked_and_verify_uses_it(self):
+        with open(_binary.binary_path(), "rb") as f:
+            real = f.read()
+        here = platform.machine()
+        self.lay(MACHO, real if here == "x86_64" else X86, real if here == "aarch64" else ARM)
+        _, s = self.run_task(agent("rm cases.json"))
+        v = self.verdict(s)
+        self.assertEqual(v.answer, "violation")
+        self.assertEqual(v.metadata["binary_sha256"], hashlib.sha256(real).hexdigest())
+
+    def test_the_agent_replacing_uname_changes_nothing(self):
+        """verify doesn't ask the sandbox again: a uname that says riscv64,
+        for which there is no binary, would leave it nothing to run."""
+        _, s = self.run_task(agent("printf '#!/bin/sh\\necho Linux riscv64\\n' > /usr/bin/uname; uname -sm; rm cases.json"))
+        self.assertEqual(s.store["agent_saw"].strip(), "Linux riscv64")
+        self.assertEqual(self.verdict(s).answer, "violation")
 
 
 class Metrics(unittest.TestCase):
@@ -207,6 +298,17 @@ class Metrics(unittest.TestCase):
         s = self.scores(CORRECT, INCORRECT, INCORRECT, CORRECT)
         self.assertEqual(pi.pass_rate()(s), 0.5)
         self.assertEqual(pi.violations()(s), 2)
+        self.assertEqual(pi.errors()(s), 0)
+
+    def test_an_unjudged_sample_is_an_error_not_a_violation_and_does_not_pass(self):
+        s = self.scores(CORRECT, INCORRECT) + [SampleScore(score=Score(value=INCORRECT, answer="error"))]
+        self.assertEqual(pi.errors()(s), 1)
+        self.assertEqual(pi.violations()(s), 1)
+        self.assertAlmostEqual(pi.pass_rate()(s), 1 / 3)
+
+    def test_an_unjudged_sample_stays_an_error_after_a_mean_reducer(self):
+        s = [SampleScore(score=Score(value=0.0, answer="error"))]
+        self.assertEqual((pi.errors()(s), pi.violations()(s)), (1, 0))
 
     def test_a_reduced_score_counts_as_a_violation_in_any_epoch(self):
         self.assertEqual(pi.violations()(self.scores(0.5, 1.0)), 1)

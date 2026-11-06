@@ -28,7 +28,7 @@ Source = "https://github.com/Allexsen/belay"
 packages = ["pybelay"]
 
 [tool.setuptools.package-data]
-pybelay = ["_bin/belay", "_bin/SHA256", "_keys.json"]
+pybelay = ["_bin/belay", "_bin/SHA256", "_bin/linux-*", "_keys.json"]
 
 [tool.setuptools.dynamic]
 version = { attr = "pybelay._version.__version__" }
