@@ -35,6 +35,7 @@
 #   BELAY                the binary (default ~/.local/bin/belay)
 #   BELAY_DOGFOOD_SCOPE  the repository to watch; other projects are ignored
 #   BELAY_STATE_DIR      belay's state directory (default as belay's)
+#   BELAY_DOGFOOD_KEEP_DAYS  the days of checkpoints a daily prune keeps (default 7)
 #   BELAY_DOGFOOD_NOTES  where interesting receipts are copied (default
 #                        $BELAY_DOGFOOD_SCOPE/NOTES/dogfood)
 #   BELAY_DOGFOOD_TASKS  where Claude Code writes background commands' output
@@ -217,7 +218,26 @@ stop)
         fail "the turn's receipt failed (see $D/$sid.err)"
     fi
     rm -f "$M"
-    say "$line" ;;
+    say "$line"
+    # Once a day at most, detached (HK-1): the state stays within a week. A
+    # binary with no prune is skipped: the pinned one may be older than this.
+    P=$D/last-prune
+    if "$BELAY" help prune >/dev/null 2>&1 && [ -z "$(find "$P" -mmin -1440 2>/dev/null)" ]; then
+        : > "$P"
+        detach=; command -v setsid >/dev/null 2>&1 && detach=setsid
+        $detach sh -c "$clock"'
+            # No answer is not "nothing to protect": no prune, and said (none is that).
+            from=$(python3 -I "$1/receipt.py" keep-from "$2" 2>>"$2/prune.err")
+            case $from in
+            none) from= ;;
+            ""|*[!0-9]*)
+                printf "%s\tstop: no prune: what open sessions need is unknown (see %s)\n" "$(now_ns)" "$2/prune.err" >> "$2/failing"
+                exit 0 ;;
+            esac
+            if ! "$3" prune --scope "$4" --keep-days "$5" ${from:+--keep-from "$from"} >/dev/null 2>>"$2/prune.err"; then
+                printf "%s\tstop: belay prune failed (see %s)\n" "$(now_ns)" "$2/prune.err" >> "$2/failing"
+            fi' sh "$HERE" "$D" "$BELAY" "$SCOPE" "${BELAY_DOGFOOD_KEEP_DAYS:-7}" </dev/null >/dev/null 2>&1 &
+    fi ;;
 end)
     # Detached, so the hook's timeout (10 s) cannot kill a long session's
     # receipt: the hook returns at once, the job clears its mark when done.

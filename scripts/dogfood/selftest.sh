@@ -677,4 +677,48 @@ grep -q '  D side-only\.txt' "$RC" || fail "a removed file with uncommitted work
 ch pre c9 "git checkout side, then chmod"; cg checkout -q side 2>/dev/null; chmod +x "$C/eol.crlf"; ch post c9
 RC=$(coreceipt)
 grep -q '  M eol\.crlf' "$RC" || fail "a file whose mode the switch didn't set left the list: $(cat "$RC")"
+# The daily prune (HK-1, HK-2): detached, at most once a day, never reaching
+# what a session not yet ended needs, and skipped by a binary with no prune.
+K=$T/kp; KS=$T/kp-state; mkdir -p "$K" "$KS" && chmod 700 "$KS"
+kh() {  # kh EVENT [TID COMMAND]
+    jq -cn --arg tid "${2:-}" --arg s "${3:-}" '{session_id:"k1", tool_use_id:$tid, tool_name:"Bash", tool_input:{command:$s}}' \
+        | BELAY_DOGFOOD_SCOPE="$K" BELAY_STATE_DIR="$KS" CLAUDE_PROJECT_DIR="$K" BELAY_DOGFOOD_KEEP_DAYS=0 "$HOOK" "$1"
+}
+kbelay() { BELAY_STATE_DIR="$KS" "$BELAY" "$@"; }
+pruned() { i=0; while [ $i -lt 50 ] && [ -e "$KS/scopes"/*/checkpoints/"$1" ]; do sleep 0.1; i=$((i + 1)); done; }
+printf 'x\n' > "$K/f"
+for n in 1 2 3; do kbelay mark --scope "$K" >/dev/null; done      # before the session: no hook names them
+kh start >/dev/null 2>&1 || :
+kh pre p1 "write"; printf 'y\n' > "$K/f"; kh post p1
+first=$(python3 -I scripts/dogfood/receipt.py keep-from "$KS/dogfood")
+[ "$first" -gt 3 ] || fail "keep-from isn't the session's first checkpoint: $first"
+kh stop >/dev/null; pruned 1
+[ ! -e "$KS/scopes"/*/checkpoints/1 ] || fail "the daily prune removed nothing"
+[ -e "$KS/scopes"/*/checkpoints/"$first" ] || fail "the daily prune reached what an open session needs"
+[ -e "$KS/dogfood/last-prune" ] || fail "the daily prune left no stamp"
+kh stop >/dev/null; sleep 1
+[ -e "$KS/scopes"/*/checkpoints/"$first" ] || fail "a second prune ran within the day"
+# keep-from: an end counts only if nothing came after it.
+KF=$T/kf; mkdir -p "$KF"
+printf '{"event":"pre","cp":5}\n{"event":"end","cp":6}\n{"event":"pre","cp":9}\n' > "$KF/a.jsonl"
+printf '{"event":"pre","cp":2}\n{"event":"end","cp":3}\n' > "$KF/b.jsonl"
+[ "$(python3 -I scripts/dogfood/receipt.py keep-from "$KF")" = 9 ] || fail "keep-from: a resumed session or an ended one is wrong"
+rm "$KF/a.jsonl"; [ "$(python3 -I scripts/dogfood/receipt.py keep-from "$KF")" = none ] || fail "keep-from: no open session isn't said"
+# No answer: no prune, and said at the next Stop.
+mkdir -p "$T/kb"; cp "$HOOK" "$T/kb/belay-dogfood"
+sed 's/^    if mode == "keep-from":$/    if mode == "keep-from":\n        sys.exit(1)/' scripts/dogfood/receipt.py > "$T/kb/receipt.py"
+rm -f "$KS/dogfood/last-prune" "$KS/dogfood/failing"
+before=$(ls "$KS/scopes"/*/checkpoints | wc -l)
+ks=$(jq -cn '{session_id:"k1", tool_use_id:"", tool_name:"Bash", tool_input:{command:""}}')
+printf '%s' "$ks" | BELAY_DOGFOOD_SCOPE="$K" BELAY_STATE_DIR="$KS" CLAUDE_PROJECT_DIR="$K" BELAY_DOGFOOD_KEEP_DAYS=0 "$T/kb/belay-dogfood" stop >/dev/null
+i=0; while [ $i -lt 50 ] && [ ! -s "$KS/dogfood/failing" ]; do sleep 0.1; i=$((i + 1)); done
+grep -q 'no prune: what open sessions need is unknown' "$KS/dogfood/failing" || fail "a failed keep-from wasn't said"
+[ "$(ls "$KS/scopes"/*/checkpoints | wc -l)" -ge "$before" ] && [ -e "$KS/scopes"/*/checkpoints/"$first" ] \
+    || fail "a prune ran without knowing what open sessions need"
+# A binary with no prune: skipped, and nothing said.
+ks=$(jq -cn '{session_id:"k1", tool_use_id:"", tool_name:"Bash", tool_input:{command:""}}')
+OLD=$T/old-belay; printf '#!/bin/sh\n[ "$1" = help ] && [ "$2" = prune ] && exit 2\nexec "%s" "$@"\n' "$BELAY" > "$OLD"; chmod +x "$OLD"
+rm -f "$KS/dogfood/last-prune" "$KS/dogfood/failing"
+printf '%s' "$ks" | BELAY="$OLD" BELAY_DOGFOOD_SCOPE="$K" BELAY_STATE_DIR="$KS" CLAUDE_PROJECT_DIR="$K" "$HOOK" stop >/dev/null; sleep 1
+[ ! -e "$KS/dogfood/last-prune" ] && [ ! -s "$KS/dogfood/failing" ] || fail "a binary with no prune wasn't skipped in silence"
 echo "dogfood selftest: sequential, concurrent, background, cancelled, quiet turn said, other project, symlinked project, git folded, labels cut, background commands, directories folded, paths counted, failures said, inactive gaps unattributed, summary, touched folded, identical replacements folded, a watcher noted, long commands, git events, compiled Python, lost receipts, install, a BSD date, a symlinked TMPDIR, a real repository, denied and interrupted calls: ok"
