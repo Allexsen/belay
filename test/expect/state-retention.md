@@ -32,6 +32,7 @@ awaits the author's OK.
 | PR-4 | A delta that stays and whose base would go is first rewritten, and checked by ST-4, before anything is removed. |
 | PR-5 | A removed checkpoint's cached diffs go with it, as does a cached diff from a removed checkpoint held by one that stays. |
 | PR-6 | The store is swept in the same run: mark and sweep from every manifest that stays, each rebuilt. An object none refers to is removed, and only such an object. |
+| PR-11 | The same run also removes `store/.tmp-*` files older than a day that no running capture holds: what a killed capture left. It holds the lock while it does, so no capture is running. |
 | PR-7 | `--dry-run` writes nothing, and says what a real run would remove and free: checkpoints by id, their bytes, the store's objects and bytes. |
 | PR-8 | Order: rewrites, then checkpoints (each `meta.json` first, so a half-removed one is no checkpoint), then the sweep. A crash leaves valid state, and running it again finishes. |
 | PR-9 | It holds the scope's lock: a capture waits for it. Nothing else in belay deletes from the state directory. |
