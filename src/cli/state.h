@@ -2,7 +2,7 @@
  *  belay's state directory (NOTES/phase5-structure.md §2; decisions Q1, Q3,
  *  Q6, Q8): one directory per scope under the state root, holding one
  *  content store shared by its checkpoints, the checkpoints in order, and a
- *  lock. Nothing in it is ever deleted (Q1: no retention policy yet).
+ *  lock. Only `belay prune` deletes from it (test/expect/state-retention.md).
  *
  *    <root>/scopes/<16 hex of sha256(scope)>/
  *        scope                   the scope's resolved path
@@ -98,6 +98,8 @@ struct checkpoint {
     uint64_t trusted, racy;
     bool walk_start_reference;  /* prefiltered against the previous walk's start, not its newest ctime */
     bool kept;                  /* never pruned (state-retention KP-1) */
+    bool has_since_full;        /* meta.json says since_full (older ones don't) */
+    long since_full;            /* marks since the last full one: pruning can't reset it */
 };
 
 /* How a checkpoint's prefilter was referenced: "none" (every file read),
@@ -116,6 +118,17 @@ int state_check_manifest(const struct state *st, long id);
  * a regular file, is too large, or does not parse is CORRUPT -- never
  * skipped in silence, never waited on. 0, or -1. */
 int state_list(const struct state *st, struct checkpoint **out, size_t *n);
+
+/* 1 when checkpoint `id` exists (its meta.json is written), 0 when not, -1
+ * with belay_err. */
+int state_checkpoint_exists(const struct state *st, long id);
+
+/* Test hook: called between prune's unlocked pass and the locked one. NULL
+ * in the binary. */
+extern void (*prune_between_passes)(void);
+
+/* Makes checkpoint `id` kept, for good (KP-3). 0, or -1 with belay_err. */
+int state_keep(const struct state *st, long id);
 
 /* `s` as one JSON member into buf: "key":"..." when it is UTF-8, else
  * "key_b64":"..." in base64, as the manifest does for paths. 0, or -1 when

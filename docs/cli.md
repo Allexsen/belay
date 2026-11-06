@@ -3,6 +3,7 @@
 ```
 belay check --scope DIR [--json]
 belay mark  --scope DIR [--full] [--full-every N] [--keep] [--json]
+belay prune --scope DIR [--keep-days N] [--keep-last N] [--keep-id ID]... [--keep-from ID] [--dry-run] [--json]
 belay diff  --scope DIR --since ID [--to ID] [--full-every N] [--json] [--exit-code] [--all]
 belay log   --scope DIR [--json]
 belay exclude --scope DIR [--add PATH | --remove PATH]
@@ -108,9 +109,23 @@ anything you can, belay's state included (where belay scans for others -- inside
 the watched processes are stopped, or as a host reader running as root -- no such process is
 there).
 
-Nothing in it is deleted by belay. The store keeps one copy of every version of every file it
-copies -- small text files, and up to 16 MiB for each git reflog -- so a busy repository's
-reflogs, changing between marks, grow it by up to their size each time.
+belay deletes from it only when `belay prune` runs ([test/expect/state-retention.md](../test/expect/state-retention.md)),
+or when a hook you installed runs it. Until pruned, the store keeps one copy of every version of
+every file it copies -- small text files, and up to 16 MiB for each git reflog -- so a busy
+repository's reflogs, changing between marks, grow it by up to their size each time.
+
+## prune: what to keep
+
+`belay prune --scope DIR --keep-days N` and `--keep-last N` remove the checkpoints outside the limits
+given: older than N days, and not among the last N. At least one is required. Then the stored copies
+no remaining checkpoint refers to go too. Never removed: the newest checkpoint, one marked with
+`belay mark --keep`, and, with `--keep-from ID`, that checkpoint and every later one, which is how a
+pending diff is protected. `--keep-id ID`, repeated for several, makes an existing checkpoint kept
+for good.
+
+`--dry-run` writes nothing and says what a run would remove. A run reads every manifest that stays
+before it removes anything: one that doesn't read stops it with nothing removed (exit 4). A command
+naming a removed checkpoint is refused. A crash leaves valid state, and running it again finishes.
 
 ## baseline export: the bundle a later verify judges against
 

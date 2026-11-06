@@ -43,6 +43,8 @@ static const char USAGE[] =
     "  verify --scope DIR --baseline FILE --baseline-sha256 HEX [--protect SPEC] [--to ID] [--exit-code]\n"
     "                                        what the changes since the baseline mean: policy.v1\n"
 
+    "  prune --scope DIR [--keep-days N] [--keep-last N] [--keep-id ID]... [--keep-from ID] [--dry-run] [--json]\n"
+    "                                        remove old checkpoints, and stored copies nothing refers to\n"
     "  help [command]                        this, or one command's options\n"
     "  --version\n"
     "\n"
@@ -91,6 +93,14 @@ static const struct { const char *cmd, *text; } HELP[] = {
                "  --to ID      judge checkpoint ID of the scope's own state instead (with a spec,\n"
                "               only one that read every file)\n"
                "  --exit-code  exit 1 when any record is a violation (signals never)\n" },
+    { "prune", "usage: belay prune --scope DIR [--keep-days N] [--keep-last N] [--keep-id ID]... [--keep-from ID] [--dry-run] [--json]\n"
+               "  Removes the checkpoints outside the limits given, at least one of them required:\n"
+               "  older than N days, and not among the last N. Then the stored copies no remaining\n"
+               "  checkpoint refers to. The newest checkpoint and a kept one are never removed.\n"
+               "  --keep-id    keep this checkpoint, for good; repeat it for several\n"
+               "  --keep-from  keep this checkpoint and every later one (a pending diff)\n"
+               "  --dry-run    change nothing, and say what a run would remove\n"
+               "  --json       one JSON line\n" },
     { "log",   "usage: belay log --scope DIR [--json]\n"
                "  The scope's checkpoints: id, kind, time, entries.\n"
                "  --json  one checkpoint a line (schema/checkpoint.v1.json)\n" },
@@ -642,6 +652,7 @@ static int run(int argc, char **argv, FILE *out, FILE *err) {
                 if (!strcmp(cmd, HELP[k].cmd)) { fputs(HELP[k].text, out); return EXIT_DONE; }
     if (!strcmp(cmd, "baseline")) return cmd_baseline(argc, argv, out, err);
     if (!strcmp(cmd, "verify")) return cmd_verify(argc, argv, out, err);
+    if (!strcmp(cmd, "prune")) return cmd_prune(argc, argv, out, err);
     struct opts o;
     const bool known = !strcmp(cmd, "check") || !strcmp(cmd, "mark") || !strcmp(cmd, "diff") || !strcmp(cmd, "log") ||
                        !strcmp(cmd, "exclude");

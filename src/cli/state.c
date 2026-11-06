@@ -529,6 +529,9 @@ static int read_meta(const struct state *st, const char *name, long id, struct c
     c->racy = (uint64_t)jint(pf, "racy", 0);
     const struct jval *kept = jget(&v, "kept");
     c->kept = kept != NULL && kept->t == J_BOOL && kept->b;
+    const struct jval *sf = jget(&v, "since_full");
+    c->has_since_full = sf != NULL && sf->t == J_NUM;
+    c->since_full = c->has_since_full ? (long)sf->i : 0;
     jsonr_free(&v);
     if (c->id != id) {
         belay_err_set(BELAY_ERR_CORRUPT, 0, "%s names checkpoint %ld", shown, c->id);
@@ -614,6 +617,33 @@ const char *state_reference(const struct checkpoint *c) {
     return c->full ? "none" : c->walk_start_reference ? "walk_start" : "newest_ctime";
 }
 
+static int write_meta(const struct state *st, int dfd, const struct checkpoint *c);
+
+int state_checkpoint_exists(const struct state *st, long id) {
+    char name[16];
+    struct checkpoint c;
+    if (st->cp_fd == -1) return 0;
+    snprintf(name, sizeof name, "%ld", id);
+    return read_meta(st, name, id, &c);
+}
+
+int state_keep(const struct state *st, long id) {
+    char name[16], shown[PATH_MAX + 160];
+    struct checkpoint c;
+    snprintf(name, sizeof name, "%ld", id);
+    snprintf(shown, sizeof shown, "%s/checkpoints/%ld", st->dir, id);
+    if (read_meta(st, name, id, &c) != 1) {
+        if (belay_err_code() == BELAY_OK) belay_err_set(BELAY_ERR_CORRUPT, 0, "%s has no meta.json", shown);
+        return -1;
+    }
+    const int dfd = dir_at(st->cp_fd, name, false, shown);
+    if (dfd == -1) return -1;
+    c.kept = true;
+    const int rc = write_meta(st, dfd, &c);
+    close(dfd);
+    return rc;
+}
+
 int state_check_manifest(const struct state *st, long id) {
     char name[16], shown[PATH_MAX + 160];
     snprintf(name, sizeof name, "%ld", id);
@@ -650,15 +680,17 @@ static int write_meta(const struct state *st, int dfd, const struct checkpoint *
     if (state_json_member(scope, sizeof scope, "scope", st->scope.path) == -1 ||
         belay_json_escape(why, sizeof why, c->full_reason, strlen(c->full_reason)) == -1)
         return -1;
+    char since[40] = "";
+    if (c->has_since_full) snprintf(since, sizeof since, ",\"since_full\":%ld", c->since_full);
     const int n = snprintf(buf, sizeof buf,
             "{\"id\":%ld,\"kind\":\"%s\",\"created_ns\":%lld,%s,\"entries\":%llu,"
             "\"raced\":%llu,\"unstable\":%llu,\"vanished\":%llu,\"provisional\":%s,\"excluded\":%llu,"
-            "\"prefilter\":{\"used\":%s,\"reference\":\"%s\",\"trusted\":%llu,\"racy\":%llu,\"full_reason\":\"%s\"}%s}\n",
+            "\"prefilter\":{\"used\":%s,\"reference\":\"%s\",\"trusted\":%llu,\"racy\":%llu,\"full_reason\":\"%s\"}%s%s}\n",
             c->id, c->kind, (long long)c->created_ns, scope, (unsigned long long)c->entries,
             (unsigned long long)c->raced, (unsigned long long)c->unstable, (unsigned long long)c->vanished,
             c->provisional ? "true" : "false", (unsigned long long)c->excluded,
             c->full ? "false" : "true", state_reference(c), (unsigned long long)c->trusted,
-            (unsigned long long)c->racy, why, c->kept ? ",\"kept\":true" : "");
+            (unsigned long long)c->racy, why, since, c->kept ? ",\"kept\":true" : "");
     if (n < 0 || (size_t)n >= sizeof buf) {
         belay_err_set(BELAY_ERR_RANGE, 0, "%s: too large", shown);
         return -1;
@@ -799,9 +831,10 @@ int state_capture(struct state *st, const struct capture_req *req, struct checkp
     /* Prefilter against the latest checkpoint unless a full walk is due
      * (Q8): asked for, none before, or N marks since the last full one. */
     const char *previous = NULL;
+    long since_full = 0;
+    if (n > 0 && list[n - 1].has_since_full) since_full = list[n - 1].since_full;
+    else for (size_t i = n; i-- > 0 && !list[i].full;) since_full++;
     if (req->prefilter && n > 0) {
-        long since_full = 0;
-        for (size_t i = n; i-- > 0 && !list[i].full;) since_full++;
         if (req->force_full) snprintf(c.full_reason, sizeof c.full_reason, "asked for (--full)");
         else if (req->full_every > 0 && since_full + 1 >= req->full_every)
             snprintf(c.full_reason, sizeof c.full_reason, "every %ld marks", req->full_every);
@@ -867,6 +900,8 @@ int state_capture(struct state *st, const struct capture_req *req, struct checkp
     c.vanished = s.vanished;
     c.excluded = s.excluded;
     c.provisional = s.raced || s.unstable || s.vanished;
+    c.has_since_full = true;
+    c.since_full = c.full ? 0 : since_full + 1;
     if (write_meta(st, dfd, &c) == -1) goto out;
     *out = c;
     rc = 0;

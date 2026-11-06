@@ -10,6 +10,7 @@
 #include "cli/state.h"
 #include "belay/manifest.h"
 
+#include <sys/file.h>
 #include <errno.h>
 #include <limits.h>
 #include <fcntl.h>
@@ -685,11 +686,411 @@ TEST(mark_keep_is_recorded_and_shown) {
     ASSERT_TRUE(strstr(second, ", kept\n") != NULL && strstr(second, ", kept\n") < third);
     ASSERT_TRUE(strstr(third, "kept") == NULL);
     ASSERT_TRUE(strstr(first, ", kept\n") == strstr(second, ", kept\n"));
-    sh("grep -q '\"kept\":true' '%s'/scopes/*/checkpoints/2/meta.json", g_state);
-    sh("! grep -q kept '%s'/scopes/*/checkpoints/1/meta.json", g_state);
-    sh("! grep -q kept '%s'/scopes/*/checkpoints/3/meta.json", g_state);
+    char c[900];
+    snprintf(c, sizeof c, "d=$(ls -d '%s'/scopes/*) && grep -q '\"kept\":true' \"$d/checkpoints/2/meta.json\" && "
+             "! grep -q kept \"$d/checkpoints/1/meta.json\" && ! grep -q kept \"$d/checkpoints/3/meta.json\"", g_state);
+    ASSERT_EQ_INT(0, system(c));
     ASSERT_EQ_INT(2, belay("check", "--scope", g_scope, "--keep", NULL));
     ASSERT_EQ_INT(2, belay("log", "--scope", g_scope, "--keep", NULL));
+}
+
+/* A shell check that counts, with $d the scope's state directory. */
+static bool holds(const char *fmt, ...) {
+    char body[1536], cmd[2048];
+    va_list ap;
+    va_start(ap, fmt);
+    vsnprintf(body, sizeof body, fmt, ap);
+    va_end(ap);
+    snprintf(cmd, sizeof cmd, "d=$(ls -d '%s'/scopes/*) && %s", g_state, body);
+    return system(cmd) == 0;
+}
+
+/* A scope with checkpoints 1..n, a new text version in each: a.txt holds its
+ * checkpoint's id, so each one stores a copy no other refers to. */
+static void history(int n) {
+    fresh();
+    for (int i = 1; i <= n; i++) {
+        sh("printf 'version %d\n' > '%s/a.txt'", i, g_scope);
+        ASSERT_EQ_INT(0, i == 1 ? belay("check", "--scope", g_scope, NULL) : belay("mark", "--scope", g_scope, "--full", NULL));
+    }
+}
+
+static bool has_checkpoint(int id) {
+    char p[600];
+    snprintf(p, sizeof p, "ls -d '%s'/scopes/*/checkpoints/%d >/dev/null 2>&1", g_state, id);
+    return system(p) == 0;
+}
+
+static int store_objects(void) {
+    char c[600];
+    snprintf(c, sizeof c, "find '%s'/scopes/*/store -type f | wc -l", g_state);
+    FILE *f = popen(c, "r");
+    int n = -1;
+    if (f != NULL) { if (fscanf(f, "%d", &n) != 1) n = -1; pclose(f); }
+    return n;
+}
+
+TEST(prune_needs_a_limit_and_good_values) {
+    history(2);
+    ASSERT_EQ_INT(2, belay("prune", "--scope", g_scope, NULL));
+    ASSERT_EQ_INT(2, belay("prune", "--keep-last", "1", NULL));
+    ASSERT_EQ_INT(2, belay("prune", "--scope", g_scope, "--keep-last", "x", NULL));
+    ASSERT_EQ_INT(2, belay("prune", "--scope", g_scope, "--keep-days", "-1", NULL));
+    ASSERT_EQ_INT(2, belay("prune", "--scope", g_scope, "--keep-last", "1", "--keep-id", "0", NULL));
+    ASSERT_EQ_INT(2, belay("prune", "--scope", g_scope, "--keep-last", "1", "--keep-from", "x", NULL));
+    ASSERT_EQ_INT(2, belay("prune", "--scope", g_scope, "--keep-last", NULL));
+    ASSERT_EQ_INT(2, belay("prune", "--scope", g_scope, "--nope", NULL));
+    ASSERT_EQ_INT(2, belay("prune", "--scope", g_scope, "--keep-last", "1", "--keep-last", "2", NULL));
+    ASSERT_EQ_INT(2, belay("prune", "--scope", g_scope, "--keep-days", "1", "--keep-days", "2", NULL));
+    ASSERT_EQ_INT(2, belay("prune", "--scope", g_scope, "--scope", g_scope, "--keep-last", "1", NULL));
+    ASSERT_EQ_INT(2, belay("prune", "--scope", g_scope, "--keep-last", "1", "--keep-from", "1", "--keep-from", "2", NULL));
+    ASSERT_EQ_INT(2, belay("prune", "--scope", g_scope, "--keep-last", "0", "--keep-from", "99", NULL));
+    static const char *const bad[] = { " 1", "\n1", "+1", "1234567890", "" };
+    for (size_t i = 0; i < sizeof bad / sizeof bad[0]; i++)
+        if (belay("prune", "--scope", g_scope, "--keep-last", bad[i], NULL) != 2) BELAY_FAIL("accepted: \"%s\"", bad[i]);
+    ASSERT_TRUE(has_checkpoint(1) && has_checkpoint(2));
+}
+
+/* PR-2, PR-10: outside the limit goes, and a command naming it is refused. */
+TEST(prune_removes_what_is_outside_the_count) {
+    history(5);
+    ASSERT_EQ_INT(0, belay("prune", "--scope", g_scope, "--keep-last", "2", NULL));
+    ASSERT_TRUE(strstr(g_out, "removed 3 of 5 checkpoints") != NULL && strstr(g_out, ": 1-3\n") != NULL);
+    ASSERT_TRUE(!has_checkpoint(1) && !has_checkpoint(3) && has_checkpoint(4) && has_checkpoint(5));
+    ASSERT_EQ_INT(2, belay("diff", "--scope", g_scope, "--since", "2", "--to", "5", NULL));
+    ASSERT_EQ_INT(0, belay("diff", "--scope", g_scope, "--since", "4", "--to", "5", NULL));
+    ASSERT_EQ_INT(0, belay("mark", "--scope", g_scope, NULL));
+    ASSERT_TRUE(has_checkpoint(6));
+}
+
+/* PR-2: both limits given, a checkpoint within either stays. */
+TEST(prune_keeps_what_is_within_either_limit) {
+    history(4);
+    ASSERT_TRUE(holds("for i in 1 2 3; do sed -i.bak 's/\"created_ns\":[0-9]*/\"created_ns\":1000/' \"$d/checkpoints/$i/meta.json\" && "
+                      "rm \"$d/checkpoints/$i/meta.json.bak\"; done"));
+    ASSERT_EQ_INT(0, belay("prune", "--scope", g_scope, "--keep-days", "1", "--keep-last", "2", NULL));
+    ASSERT_TRUE(!has_checkpoint(1) && !has_checkpoint(2) && has_checkpoint(3) && has_checkpoint(4));
+    history(3);
+    ASSERT_EQ_INT(0, belay("prune", "--scope", g_scope, "--keep-days", "1", NULL));
+    ASSERT_TRUE(has_checkpoint(1) && has_checkpoint(2) && has_checkpoint(3));
+}
+
+/* PR-3: the newest and a kept one survive any limit, and --keep-from too. */
+TEST(prune_never_removes_the_newest_a_kept_one_or_a_pending_diff) {
+    history(3);
+    ASSERT_EQ_INT(0, belay("mark", "--scope", g_scope, "--keep", NULL));
+    sh("printf 'more\n' > '%s/a.txt'", g_scope);
+    ASSERT_EQ_INT(0, belay("mark", "--scope", g_scope, NULL));
+    ASSERT_EQ_INT(0, belay("prune", "--scope", g_scope, "--keep-last", "0", "--keep-from", "3", NULL));
+    ASSERT_TRUE(!has_checkpoint(1) && !has_checkpoint(2) && has_checkpoint(3) && has_checkpoint(4) && has_checkpoint(5));
+    ASSERT_EQ_INT(0, belay("prune", "--scope", g_scope, "--keep-last", "0", NULL));
+    ASSERT_TRUE(!has_checkpoint(3) && has_checkpoint(4) && has_checkpoint(5));
+}
+
+/* KP-3: for good; refused for an id that isn't there, with nothing removed;
+ * a dry run records nothing. */
+TEST(prune_keep_id_lasts_and_is_checked) {
+    history(4);
+    ASSERT_EQ_INT(2, belay("prune", "--scope", g_scope, "--keep-last", "0", "--keep-id", "99", NULL));
+    ASSERT_TRUE(has_checkpoint(1));
+    ASSERT_EQ_INT(0, belay("prune", "--scope", g_scope, "--keep-last", "0", "--keep-id", "2", "--dry-run", NULL));
+    ASSERT_TRUE(strstr(g_out, "would remove 2 of 4 checkpoints") != NULL && strstr(g_out, "kept 1: 2\n") != NULL);
+    ASSERT_TRUE(holds("! grep -q kept \"$d/checkpoints/2/meta.json\""));
+    ASSERT_EQ_INT(0, belay("prune", "--scope", g_scope, "--keep-last", "0", "--keep-id", "2", NULL));
+    ASSERT_TRUE(!has_checkpoint(1) && has_checkpoint(2) && !has_checkpoint(3) && has_checkpoint(4));
+    ASSERT_EQ_INT(0, belay("prune", "--scope", g_scope, "--keep-last", "0", NULL));
+    ASSERT_TRUE(has_checkpoint(2));
+    ASSERT_EQ_INT(0, belay("log", "--scope", g_scope, NULL));
+    ASSERT_TRUE(strstr(g_out, ", kept\n") != NULL);
+}
+
+/* PR-7: a dry run changes nothing, byte for byte, and says what a run does. */
+TEST(prune_dry_run_changes_nothing_and_tells_the_truth) {
+    history(4);
+    char before[1024], said[1024];
+    ASSERT_TRUE(holds("cd '%s' && find . -type f | sort | xargs cat | cksum > '%s/before'", g_state, g_dir));
+    ASSERT_EQ_INT(0, belay("prune", "--scope", g_scope, "--keep-last", "1", "--dry-run", "--json", NULL));
+    snprintf(said, sizeof said, "%s", g_out);
+    ASSERT_TRUE(holds("cd '%s' && find . -type f | sort | xargs cat | cksum > '%s/after' && cmp '%s/before' '%s/after'", g_state, g_dir, g_dir, g_dir));
+    ASSERT_TRUE(strstr(said, "\"dry_run\":true,\"removed\":3,\"remaining\":1") != NULL);
+    ASSERT_TRUE(strstr(said, "\"store_objects\":3") != NULL);
+    ASSERT_EQ_INT(0, belay("prune", "--scope", g_scope, "--keep-last", "1", "--json", NULL));
+    snprintf(before, sizeof before, "%s", g_out);
+    ASSERT_TRUE(strstr(before, "\"dry_run\":false,\"removed\":3,\"remaining\":1") != NULL);
+    ASSERT_EQ_STR(strchr(said, ','), strchr(before, ','));
+}
+
+/* PR-6: an object only a removed checkpoint named goes; one that stays is
+ * still read, by a diff that needs its content. */
+TEST(prune_sweeps_the_store_and_what_stays_still_works) {
+    history(4);
+    const int all = store_objects();
+    ASSERT_EQ_INT(0, belay("prune", "--scope", g_scope, "--keep-last", "2", NULL));
+    ASSERT_EQ_INT(all - 2, store_objects());
+    ASSERT_EQ_INT(0, belay("diff", "--scope", g_scope, "--since", "3", "--to", "4", "--json", NULL));
+    ASSERT_TRUE(strstr(g_out, "text_changed") != NULL || strstr(g_out, "text_rewritten") != NULL);
+    ASSERT_TRUE(strstr(g_out, "content_unavailable") == NULL);
+}
+
+/* PR-9: the removing pass holds the lock. A child holds it for a moment, and
+ * prune must wait for it, and say so. */
+static void someone_holds_the_lock(void) {
+    char path[600];
+    snprintf(path, sizeof path, "%s/lockpath", g_dir);
+    sh("ls -d '%s'/scopes/*/lock > '%s'", g_state, path);
+    FILE *f = fopen(path, "r");
+    if (f == NULL || fgets(path, sizeof path, f) == NULL) return;
+    fclose(f);
+    path[strcspn(path, "\n")] = '\0';
+    const int fd = open(path, O_RDWR);
+    if (fd == -1 || flock(fd, LOCK_EX) == -1) return;
+    if (fork() == 0) {
+        usleep(300000);
+        _exit(0);           /* the lock goes with the last descriptor */
+    }
+    close(fd);
+}
+
+TEST(prune_takes_the_lock_to_remove) {
+    history(3);
+    prune_between_passes = someone_holds_the_lock;
+    const int rc = belay("prune", "--scope", g_scope, "--keep-last", "1", NULL);
+    prune_between_passes = NULL;
+    ASSERT_EQ_INT(0, rc);
+    ASSERT_TRUE(strstr(g_err, "waiting") != NULL);
+    while (wait(NULL) > 0) { }
+}
+
+/* Asking to keep more must never keep less: a long limit keeps everything. */
+TEST(prune_a_long_limit_keeps_everything) {
+    history(4);
+    static const char *const days[] = { "213504", "213505", "365000", "1000000", "999999999" };
+    for (size_t i = 0; i < sizeof days / sizeof days[0]; i++) {
+        ASSERT_EQ_INT(0, belay("prune", "--scope", g_scope, "--keep-days", days[i], "--dry-run", NULL));
+        if (strstr(g_out, "would remove 0 of 4") == NULL) BELAY_FAIL("--keep-days %s: %s", days[i], g_out);
+    }
+    ASSERT_EQ_INT(0, belay("prune", "--scope", g_scope, "--keep-days", "365000", NULL));
+    ASSERT_TRUE(has_checkpoint(1) && has_checkpoint(2) && has_checkpoint(3));
+}
+
+/* What stays still reads: a kept checkpoint's copies, and --keep-from's. */
+TEST(prune_keeps_the_copies_of_what_it_keeps) {
+    history(2);
+    ASSERT_EQ_INT(0, belay("mark", "--scope", g_scope, "--keep", NULL));     /* 3: version 2 */
+    sh("printf 'pending\n' > '%s/a.txt'", g_scope);
+    ASSERT_EQ_INT(0, belay("mark", "--scope", g_scope, NULL));               /* 4 */
+    sh("printf 'newest\n' > '%s/a.txt'", g_scope);
+    ASSERT_EQ_INT(0, belay("mark", "--scope", g_scope, NULL));               /* 5 */
+    sh("printf 'last\n' > '%s/a.txt'", g_scope);
+    ASSERT_EQ_INT(0, belay("mark", "--scope", g_scope, NULL));               /* 6 */
+    ASSERT_EQ_INT(0, belay("prune", "--scope", g_scope, "--keep-last", "0", "--keep-from", "5", NULL));
+    ASSERT_TRUE(holds("grep -rqx 'version 2' \"$d/store\" && grep -rqx 'newest' \"$d/store\" && grep -rqx 'last' \"$d/store\""));
+    ASSERT_TRUE(holds("! grep -rqx 'version 1' \"$d/store\" && ! grep -rqx 'pending' \"$d/store\""));
+}
+
+/* PR-7: what it says is what goes, to the byte, unfinished directories and
+ * orphaned diffs included. */
+TEST(prune_reports_exactly_what_it_frees) {
+    history(5);
+    ASSERT_EQ_INT(0, belay("diff", "--scope", g_scope, "--since", "1", "--to", "5", NULL));
+    ASSERT_TRUE(holds("rm \"$d/checkpoints/2/meta.json\" && printf 'left\n' > \"$d/checkpoints/2/manifest.ndjson.tmp.aB3dE5\""));
+    ASSERT_TRUE(holds("find \"$d\" -type f -exec cat {} + | wc -c > '%s/size-before'", g_dir));
+    ASSERT_EQ_INT(0, belay("prune", "--scope", g_scope, "--keep-last", "2", "--dry-run", "--json", NULL));
+    long long bytes = -1, store = -1;
+    const char *b = strstr(g_out, "\"bytes\":"), *o = strstr(g_out, "\"store_bytes\":");
+    ASSERT_TRUE(b != NULL && o != NULL && sscanf(b, "\"bytes\":%lld", &bytes) == 1 && sscanf(o, "\"store_bytes\":%lld", &store) == 1);
+    ASSERT_TRUE(bytes > 0 && store > 0);
+    ASSERT_TRUE(strstr(g_out, "\"kept_ids\":[]") != NULL);
+    ASSERT_EQ_INT(0, belay("prune", "--scope", g_scope, "--keep-last", "2", NULL));
+    ASSERT_TRUE(holds("find \"$d\" -type f -exec cat {} + | wc -c > '%s/size-after'", g_dir));
+    char c[1000];
+    snprintf(c, sizeof c, "[ $(( $(cat '%s/size-before') - $(cat '%s/size-after') )) -eq %lld ]", g_dir, g_dir, bytes + store);
+    ASSERT_EQ_INT(0, system(c));
+}
+
+TEST(prune_json_names_what_it_keeps) {
+    history(3);
+    ASSERT_EQ_INT(0, belay("prune", "--scope", g_scope, "--keep-last", "0", "--keep-id", "2", "--json", NULL));
+    ASSERT_TRUE(strstr(g_out, "\"kept_ids\":[[2,2]]") != NULL && strstr(g_out, "\"ids\":[[1,1]]") != NULL);
+}
+
+/* Fails half way, on a directory that won't let go: the store is untouched,
+ * since no checkpoint that went could have its copies swept first. */
+TEST(prune_sweeps_only_after_the_checkpoints_are_gone) {
+    if (geteuid() == 0) SKIP("root ignores a directory's mode");
+    history(3);
+    const int all = store_objects();
+    ASSERT_TRUE(holds("chmod 500 \"$d/checkpoints/2\""));
+    const int rc = belay("prune", "--scope", g_scope, "--keep-last", "1", NULL);
+    ASSERT_TRUE(holds("chmod 700 \"$d/checkpoints/2\""));
+    ASSERT_TRUE(rc != 0);
+    ASSERT_EQ_INT(all, store_objects());
+    ASSERT_EQ_INT(0, belay("prune", "--scope", g_scope, "--keep-last", "1", NULL));
+    ASSERT_TRUE(store_objects() < all);
+}
+
+/* A link where a manifest should be, on a checkpoint that stays, is corrupt:
+ * nothing goes. */
+TEST(prune_refuses_a_link_for_a_manifest_that_stays) {
+    history(3);
+    ASSERT_TRUE(holds("mv \"$d/checkpoints/2/manifest.ndjson\" \"$d/elsewhere\" && ln -s \"$d/elsewhere\" \"$d/checkpoints/2/manifest.ndjson\""));
+    ASSERT_EQ_INT(4, belay("prune", "--scope", g_scope, "--keep-last", "2", NULL));
+    ASSERT_TRUE(has_checkpoint(1));
+}
+
+/* Only an object, and only a real cached diff: names belay never wrote stay. */
+TEST(prune_touches_only_what_is_belays) {
+    history(3);
+    ASSERT_TRUE(holds("f=$(ls \"$d/store\" | head -1) && touch \"$d/store/$f/notanobject\" && "
+                      "touch \"$d/checkpoints/3/diff-from-notes.txt\" \"$d/checkpoints/3/diff-from-\" && mkdir \"$d/checkpoints/99\""));
+    ASSERT_EQ_INT(0, belay("prune", "--scope", g_scope, "--keep-last", "1", NULL));
+    ASSERT_TRUE(holds("ls \"$d\"/store/*/notanobject \"$d/checkpoints/3/diff-from-notes.txt\" \"$d/checkpoints/3/diff-from-\" >/dev/null"));
+    ASSERT_TRUE(has_checkpoint(99));        /* above the newest: a capture may yet own it */
+}
+
+/* A diff cached from a checkpoint an earlier run removed goes too. */
+TEST(prune_removes_a_cached_diff_whose_since_is_long_gone) {
+    history(3);
+    ASSERT_EQ_INT(0, belay("prune", "--scope", g_scope, "--keep-last", "2", NULL));
+    ASSERT_TRUE(holds("touch \"$d/checkpoints/3/diff-from-1.ndjson\""));
+    ASSERT_EQ_INT(0, belay("prune", "--scope", g_scope, "--keep-last", "2", NULL));
+    ASSERT_TRUE(holds("! ls \"$d/checkpoints/3/diff-from-1.ndjson\" >/dev/null 2>&1"));
+}
+
+/* Pruning must not switch off the periodic full read. */
+TEST(prune_does_not_reset_the_count_to_a_full_mark) {
+    fresh();
+    ASSERT_EQ_INT(0, belay("check", "--scope", g_scope, NULL));
+    bool full = false;
+    for (int i = 0; i < 6 && !full; i++) {
+        ASSERT_EQ_INT(0, belay("mark", "--scope", g_scope, "--full-every", "5", NULL));
+        full = strstr(g_out, "every 5 marks") != NULL;
+        ASSERT_EQ_INT(0, belay("prune", "--scope", g_scope, "--keep-last", "1", NULL));
+    }
+    ASSERT_TRUE(full);
+}
+
+/* PR-10, PR-8: a checkpoint a crash left without its meta.json is no
+ * checkpoint, to verify too. */
+TEST(verify_to_refuses_a_checkpoint_with_no_meta) {
+    history(3);
+    char bundle[500], sha[65];
+    snprintf(bundle, sizeof bundle, "%s/bundle", g_dir);
+    ASSERT_EQ_INT(0, belay("baseline", "export", "--scope", g_scope, "--out", bundle, "--json", NULL));
+    const char *s = strstr(g_out, "\"sha256\":\"");
+    ASSERT_TRUE(s != NULL);
+    snprintf(sha, sizeof sha, "%.64s", s + 10);
+    ASSERT_TRUE(holds("rm \"$d/checkpoints/2/meta.json\""));
+    ASSERT_EQ_INT(2, belay("verify", "--scope", g_scope, "--baseline", bundle, "--baseline-sha256", sha, "--to", "2", NULL));
+}
+
+/* Nothing there: nothing made for it, and one JSON shape. */
+TEST(prune_makes_no_state_for_a_scope_with_none) {
+    fresh();
+    ASSERT_EQ_INT(0, belay("prune", "--scope", g_scope, "--keep-last", "1", "--json", NULL));
+    ASSERT_TRUE(strstr(g_out, "\"dry_run\":false") != NULL && strstr(g_out, "\"kept_ids\":[]") != NULL);
+    char c[600];
+    snprintf(c, sizeof c, "[ -z \"$(ls -A '%s')\" ]", g_state);
+    ASSERT_EQ_INT(0, system(c));
+    ASSERT_EQ_INT(2, belay("prune", "--scope", g_scope, "--keep-last", "1", "--keep-id", "7", NULL));
+}
+
+/* A capture during the long unlocked read names a copy only a checkpoint
+ * going names: it must survive the sweep. */
+static void an_old_version_comes_back(void) {
+    sh("printf 'version 1\n' > '%s/a.txt'", g_scope);
+    /* Inside belay(), whose buffers are in use: streams of its own. */
+    char *argv[] = { "belay", "mark", "--scope", g_scope, "--full", NULL };
+    char *o = NULL, *e = NULL;
+    size_t on, en;
+    FILE *out = open_memstream(&o, &on), *err = open_memstream(&e, &en);
+    (void)cli_main(5, argv, out, err);
+    fclose(out);
+    fclose(err);
+    free(o);
+    free(e);
+}
+
+TEST(prune_keeps_what_a_capture_named_during_its_read) {
+    history(3);
+    prune_between_passes = an_old_version_comes_back;
+    const int rc = belay("prune", "--scope", g_scope, "--keep-last", "1", NULL);
+    prune_between_passes = NULL;
+    ASSERT_EQ_INT(0, rc);
+    ASSERT_TRUE(has_checkpoint(4) && !has_checkpoint(3));
+    /* src/x.txt, tool, version 1, and version 3: the unlocked pass saw
+     * checkpoint 3 as the newest, and a mark isn't taken back. The next run
+     * sweeps it. One copy too many, never one too few. */
+    ASSERT_EQ_INT(4, store_objects());
+    ASSERT_TRUE(holds("grep -rqx 'version 1' \"$d/store\" && grep -rqx 'version 3' \"$d/store\""));
+    ASSERT_EQ_INT(0, belay("prune", "--scope", g_scope, "--keep-last", "1", NULL));
+    ASSERT_EQ_INT(3, store_objects());
+    ASSERT_TRUE(holds("grep -rqx 'version 1' \"$d/store\" && ! grep -rqx 'version 3' \"$d/store\""));
+}
+
+/* PR-5: a diff cached from a checkpoint that went goes too. */
+TEST(prune_removes_cached_diffs_from_what_went) {
+    history(3);
+    ASSERT_EQ_INT(0, belay("diff", "--scope", g_scope, "--since", "1", "--to", "3", NULL));
+    ASSERT_EQ_INT(0, belay("diff", "--scope", g_scope, "--since", "2", "--to", "3", NULL));
+    ASSERT_TRUE(holds("ls \"$d\"/checkpoints/3/diff-from-1* \"$d\"/checkpoints/3/diff-from-2* >/dev/null"));
+    ASSERT_EQ_INT(0, belay("prune", "--scope", g_scope, "--keep-last", "2", NULL));
+    ASSERT_TRUE(holds("! ls \"$d\"/checkpoints/3/diff-from-1* >/dev/null 2>&1"));
+    ASSERT_TRUE(holds("ls \"$d\"/checkpoints/3/diff-from-2* >/dev/null"));
+}
+
+/* Everything that stays is read first: a bad manifest stops the run with
+ * nothing removed. */
+TEST(prune_with_a_corrupt_manifest_removes_nothing) {
+    history(4);
+    const int all = store_objects();
+    ASSERT_TRUE(holds("sed -i.bak '2s/.*/not a manifest/' \"$d/checkpoints/3/manifest.ndjson\" && rm \"$d/checkpoints/3/manifest.ndjson.bak\""));
+    ASSERT_EQ_INT(4, belay("prune", "--scope", g_scope, "--keep-last", "2", NULL));
+    ASSERT_TRUE(has_checkpoint(1) && has_checkpoint(2));
+    ASSERT_EQ_INT(all, store_objects());
+}
+
+/* PR-8: a removal a crash cut short, its meta.json gone: no checkpoint, and
+ * the next run finishes it. */
+TEST(prune_finishes_what_a_crash_left) {
+    history(4);
+    ASSERT_TRUE(holds("rm \"$d/checkpoints/2/meta.json\""));
+    ASSERT_EQ_INT(0, belay("log", "--scope", g_scope, NULL));
+    ASSERT_TRUE(strstr(g_out, "mark 2") == NULL);
+    ASSERT_EQ_INT(0, belay("prune", "--scope", g_scope, "--keep-last", "9", NULL));
+    ASSERT_TRUE(!has_checkpoint(2) && has_checkpoint(1) && has_checkpoint(3));
+}
+
+/* What belay did not write stays, and is said before anything goes: by a dry
+ * run too, and a run never stops half way for it. */
+TEST(prune_leaves_what_belay_did_not_write) {
+    history(3);
+    ASSERT_TRUE(holds("touch \"$d/checkpoints/2/planted\""));
+    ASSERT_EQ_INT(4, belay("prune", "--scope", g_scope, "--keep-last", "1", "--dry-run", NULL));
+    ASSERT_EQ_INT(4, belay("prune", "--scope", g_scope, "--keep-last", "1", NULL));
+    ASSERT_TRUE(has_checkpoint(1) && has_checkpoint(2) && has_checkpoint(3));
+    ASSERT_TRUE(holds("ls \"$d/checkpoints/2/planted\" >/dev/null"));
+    /* In an unfinished directory too: the run stops before checkpoint 1 goes. */
+    ASSERT_TRUE(holds("rm \"$d/checkpoints/2/meta.json\""));
+    ASSERT_EQ_INT(4, belay("prune", "--scope", g_scope, "--keep-last", "1", NULL));
+    ASSERT_TRUE(has_checkpoint(1) && has_checkpoint(2) && has_checkpoint(3));
+}
+
+/* A killed capture's leftovers are belay's, and go. */
+TEST(prune_clears_what_a_killed_capture_left) {
+    history(3);
+    ASSERT_TRUE(holds("rm \"$d/checkpoints/2/meta.json\" && touch \"$d/checkpoints/2/manifest.ndjson.tmp.aB3dE5\" && "
+                      "mkdir \"$d/checkpoints/2/manifest.ndjson.run.xY1zQ9\" && touch \"$d/checkpoints/2/manifest.ndjson.run.xY1zQ9/run0\" && "
+                      "touch \"$d/checkpoints/2/manifest.ndjson.run.fILe01\""));
+    ASSERT_EQ_INT(0, belay("prune", "--scope", g_scope, "--keep-last", "9", NULL));
+    ASSERT_TRUE(!has_checkpoint(2) && has_checkpoint(1) && has_checkpoint(3));
+}
+
+TEST(prune_of_a_scope_with_no_checkpoints) {
+    fresh();
+    ASSERT_EQ_INT(0, belay("prune", "--scope", g_scope, "--keep-last", "1", "--dry-run", NULL));
+    ASSERT_TRUE(strstr(g_out, "no checkpoints") != NULL);
+    ASSERT_EQ_INT(0, belay("prune", "--scope", g_scope, "--keep-last", "1", NULL));
 }
 
 TEST(excludes_are_configured_per_scope) {
@@ -1259,6 +1660,32 @@ int main(void) {
     RUN(nothing_printed_back_forges_a_line);
     RUN(ids_run_out_and_a_failed_diff_leaves_nothing);
     RUN(mark_keep_is_recorded_and_shown);
+    RUN(prune_needs_a_limit_and_good_values);
+    RUN(prune_removes_what_is_outside_the_count);
+    RUN(prune_keeps_what_is_within_either_limit);
+    RUN(prune_never_removes_the_newest_a_kept_one_or_a_pending_diff);
+    RUN(prune_keep_id_lasts_and_is_checked);
+    RUN(prune_dry_run_changes_nothing_and_tells_the_truth);
+    RUN(prune_sweeps_the_store_and_what_stays_still_works);
+    RUN(prune_takes_the_lock_to_remove);
+    RUN(prune_a_long_limit_keeps_everything);
+    RUN(prune_keeps_the_copies_of_what_it_keeps);
+    RUN(prune_reports_exactly_what_it_frees);
+    RUN(prune_json_names_what_it_keeps);
+    RUN(prune_sweeps_only_after_the_checkpoints_are_gone);
+    RUN(prune_refuses_a_link_for_a_manifest_that_stays);
+    RUN(prune_touches_only_what_is_belays);
+    RUN(prune_removes_a_cached_diff_whose_since_is_long_gone);
+    RUN(prune_does_not_reset_the_count_to_a_full_mark);
+    RUN(verify_to_refuses_a_checkpoint_with_no_meta);
+    RUN(prune_makes_no_state_for_a_scope_with_none);
+    RUN(prune_keeps_what_a_capture_named_during_its_read);
+    RUN(prune_removes_cached_diffs_from_what_went);
+    RUN(prune_with_a_corrupt_manifest_removes_nothing);
+    RUN(prune_finishes_what_a_crash_left);
+    RUN(prune_leaves_what_belay_did_not_write);
+    RUN(prune_clears_what_a_killed_capture_left);
+    RUN(prune_of_a_scope_with_no_checkpoints);
     RUN(excludes_are_configured_per_scope);
     RUN(an_exclude_is_named_and_never_reads_as_removed);
     RUN(no_package_event_comes_from_an_excluded_path);
