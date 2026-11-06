@@ -209,6 +209,25 @@ out=$(hook stop)
 R6=$(ls -t "$T/state/dogfood"/s1.turn-*.txt | head -1)
 grep -A2 '^Bash: after$' "$R6" | grep -q '  A src/h.c' && ! grep -q 'background command' "$R6" \
     || fail "a background command whose output cannot be found outlived the stop: $(cat "$R6")"
+# One number per call: a cut background command is named by every section it
+# overlaps, and is one entry in "the calls in full" (since-7412: [3] [5] [7]
+# [9] were one command).
+numbered='"session_id":"s1","tool_use_id":"t90","tool_name":"Bash","tool_input":{"command":"make watch '$(printf '%070d' 0)'","run_in_background":true}'
+raw pre "{$numbered}"
+sleep 60 > "$T/tasks/bgt90.output" & held=$!
+raw post "{$numbered,\"tool_response\":{\"backgroundTaskId\":\"bgt90\"}}"
+hook pre t91 Bash "first"; printf 'i\n' > "$S/src/num1.c"; hook post t91 Bash
+hook pre t92 Bash "second"; printf 'j\n' > "$S/src/num2.c"; hook post t92 Bash
+printf 'k\n' > "$S/src/num3.c"
+kill $held; wait $held 2>/dev/null || :
+out=$(hook stop)
+RN=$(ls -t "$T/state/dogfood"/s1.turn-*.txt | head -1)
+[ "$(grep -c '^Bash: \(first\|second\)   (a background command was also running: Bash: make watch 0*…)   \[1\]$' "$RN")" = 2 ] \
+    || fail "a call beside two others does not keep its number: $(cat "$RN")"
+grep -q '^a background command may have written these: Bash: make watch 0*…   \[1\]$' "$RN" \
+    || fail "a call in its own section does not keep its number: $(cat "$RN")"
+[ "$(grep -c '^  \[[0-9]*\] Bash: make watch' "$RN")" = 1 ] && ! grep -q '^  \[2\]' "$RN" \
+    || fail "a call is listed more than once in full: $(cat "$RN")"
 # A long-running watcher that writes nothing (gh pr checks --watch), and the
 # turn's real edits made while it runs (turn-3803, decision 185): each edit
 # under its own call, the watcher a note; the Stop line names each call once.
