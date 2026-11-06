@@ -44,9 +44,9 @@ def checked_binary():
 
 
 def carried_binary(arch):
-    """A Linux binary a macOS wheel carries for sandboxes (PY-D4), after its
-    digest was checked, or None. `arch` is x86_64 or arm64, as release assets
-    name them. Never run on this machine."""
+    """A Linux binary the wheel carries for sandboxes (PY-D4), after its digest
+    was checked, or None. `arch` is x86_64 or arm64, as release assets name
+    them. Never run on this machine."""
     path = os.path.join(_HERE, "linux-" + arch)
     if not os.path.exists(path):
         return None

@@ -74,9 +74,9 @@ only its sha256 goes in the log.
   way to stop them first, as `belay verify` asks.
 - It sees the end state, within the scope: a file changed and restored is invisible.
 - The sandbox needs a writable, executable `/tmp`, and `uname`, `chmod` and `rm`.
-- The binary must suit the sandbox. A macOS wheel carries Linux x86_64 and arm64 binaries and picks by
-  the sandbox's architecture. A Linux wheel has only its own: for another architecture, belay refuses
-  and says so, and `belay_record(..., binary=path)` takes the release's static binary for it.
+- The binary must suit the sandbox. Wheels carry Linux x86_64 and arm64 binaries and pick by the
+  sandbox's architecture; v0.1.0-alpha.5's Linux wheels have only their own. For anything else, belay
+  refuses and says so, and `belay_record(..., binary=path)` takes a static binary for it.
 - With several epochs and a reducer, a sample with both judged and unjudged epochs counts as a
   violation, not an error: a reduced score keeps an answer only if all its epochs agree.
 - The bundle holds a copy of what the scope contains. Inspect reads at most 100 MiB from a sandbox by
