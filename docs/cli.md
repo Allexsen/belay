@@ -128,7 +128,8 @@ not the state directory.
 
 `belay prune --scope DIR --keep-days N` and `--keep-last N` remove the checkpoints outside the limits
 given: older than N days, and not among the last N. At least one is required. Then the stored copies
-no remaining checkpoint refers to go too. Never removed: the newest checkpoint, one marked with
+no remaining checkpoint refers to go too, and `store/.tmp-*` files older than a day, which only a
+killed capture leaves. Never removed: the newest checkpoint, one marked with
 `belay mark --keep`, and, with `--keep-from ID`, that checkpoint and every later one, which is how a
 pending diff is protected. `--keep-id ID`, repeated for several, makes an existing checkpoint kept
 for good.

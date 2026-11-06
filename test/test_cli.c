@@ -1130,6 +1130,21 @@ TEST(prune_refuses_a_link_for_a_manifest_that_stays) {
     ASSERT_TRUE(has_checkpoint(1));
 }
 
+/* PR-11: a killed capture's temporaries go once old, counted; a recent one
+ * may be a capture's, and stays. */
+TEST(prune_clears_old_store_temporaries) {
+    history(3);
+    ASSERT_TRUE(holds("printf 'partial\n' > \"$d/store/.tmp-1-0\" && touch -t 202001010000 \"$d/store/.tmp-1-0\" && "
+                      "printf 'running\n' > \"$d/store/.tmp-2-0\" && "
+                      "printf 'mine\n' > \"$d/store/.other\" && touch -t 202001010000 \"$d/store/.other\""));
+    ASSERT_EQ_INT(0, belay("prune", "--scope", g_scope, "--keep-last", "9", "--dry-run", "--json", NULL));
+    ASSERT_TRUE(strstr(g_out, "\"store_temps\":1,\"store_bytes\":8,") != NULL);
+    ASSERT_TRUE(holds("[ -f \"$d/store/.tmp-1-0\" ]"));
+    ASSERT_EQ_INT(0, belay("prune", "--scope", g_scope, "--keep-last", "9", NULL));
+    ASSERT_TRUE(strstr(g_out, "1 left by killed captures") != NULL);
+    ASSERT_TRUE(holds("[ ! -f \"$d/store/.tmp-1-0\" ] && [ -f \"$d/store/.tmp-2-0\" ] && [ -f \"$d/store/.other\" ]"));
+}
+
 /* Only an object, and only a real cached diff: names belay never wrote stay. */
 TEST(prune_touches_only_what_is_belays) {
     history(3);
@@ -1879,6 +1894,7 @@ int main(void) {
     RUN(prune_json_names_what_it_keeps);
     RUN(prune_sweeps_only_after_the_checkpoints_are_gone);
     RUN(prune_refuses_a_link_for_a_manifest_that_stays);
+    RUN(prune_clears_old_store_temporaries);
     RUN(prune_touches_only_what_is_belays);
     RUN(prune_removes_a_cached_diff_whose_since_is_long_gone);
     RUN(prune_does_not_reset_the_count_to_a_full_mark);
