@@ -103,7 +103,7 @@ TEST(a_usage_error_is_one_line_and_ids_are_strict) {
     ASSERT_EQ_INT(2, belay("check", "--scope", g_scope, "--full-every", "3", NULL));
     ASSERT_EQ_INT(2, belay("log", "--scope", g_scope, "--full-every", "3", NULL));
     ASSERT_EQ_INT(0, belay("help", "check", NULL));
-    ASSERT_TRUE(strstr(g_out, "schema/checkpoint.v1.json") != NULL);
+    ASSERT_TRUE(strstr(g_out, "schema/checkpoint.v2.json") != NULL);
 }
 
 TEST(help_and_version_exit_0) {
@@ -269,7 +269,7 @@ TEST(mark_says_when_it_reads_every_file) {
     ASSERT_TRUE(strstr(g_out, "\"full_reason\":\"no checkpoint before\"") != NULL);
     /* checkpoint.v1 CK-16 (decision 210): the manifest's source, last; a walk here is null */
     const size_t ol = strlen(g_out);
-    ASSERT_TRUE(ol > 16 && strcmp(g_out + ol - 16, ",\"source\":null}\n") == 0);
+    ASSERT_TRUE(ol > 46 && strcmp(g_out + ol - 46, ",\"source\":null,\"stored\":\"whole\",\"kept\":false}\n") == 0);
     ASSERT_EQ_INT(0, belay("mark", "--scope", g_scope, "--json", NULL));
     ASSERT_TRUE(strstr(g_out, "\"used\":true") != NULL);
     /* The state directory is on the scope's filesystem here: the previous
@@ -832,6 +832,198 @@ TEST(prune_sweeps_the_store_and_what_stays_still_works) {
     ASSERT_TRUE(strstr(g_out, "content_unavailable") == NULL);
 }
 
+/* Keeps a copy of each manifest as it was written: the newest is always whole. */
+static void history_copied(int n) {
+    fresh();
+    sh("mkdir -p '%s/copies'", g_dir);
+    for (int i = 1; i <= n; i++) {
+        sh("printf 'version %d\n' > '%s/a.txt'", i, g_scope);
+        if (i % 7 == 0) sh("printf 'new\n' > '%s/f%d.txt'", g_scope, i);
+        if (i % 11 == 0) sh("rm -f '%s/f%d.txt'", g_scope, i - 4);
+        ASSERT_EQ_INT(0, i == 1 ? belay("check", "--scope", g_scope, NULL) : belay("mark", "--scope", g_scope, "--full", NULL));
+        ASSERT_TRUE(holds("cp \"$d/checkpoints/%d/manifest.ndjson\" '%s/copies/%d'", i, g_dir, i));
+    }
+}
+
+/* What `belay manifest` prints for `id` is what was written, byte for byte. */
+static bool same_as_written(int id) {
+    char n[16], p[600];
+    snprintf(n, sizeof n, "%d", id);
+    if (belay("manifest", "--scope", g_scope, "--id", n, NULL) != 0) return false;
+    snprintf(p, sizeof p, "%s/copies/%d", g_dir, id);
+    FILE *f = fopen(p, "r");
+    if (f == NULL) return false;
+    size_t len = strlen(g_out), got = 0;
+    char *b = malloc(len + 2);
+    if (b != NULL) got = fread(b, 1, len + 1, f);
+    fclose(f);
+    const bool same = b != NULL && got == len && memcmp(b, g_out, len) == 0;
+    free(b);
+    return same;
+}
+
+/* ST-1, ST-2, ST-3, ST-4: only the newest is whole, and every other rebuilds
+ * byte for byte. */
+TEST(delta_rebuilds_every_checkpoint_byte_for_byte) {
+    history_copied(40);
+    for (int i = 1; i <= 40; i++)
+        if (!same_as_written(i)) BELAY_FAIL("checkpoint %d", i);
+    ASSERT_TRUE(holds("[ -f \"$d/checkpoints/40/manifest.ndjson\" ] && [ ! -f \"$d/checkpoints/39/manifest.ndjson\" ] && "
+                      "[ -f \"$d/checkpoints/39/manifest.delta\" ] && [ -f \"$d/checkpoints/1/manifest.ndjson\" ]"));
+}
+
+/* ST-2: a full copy after 255 deltas, and the chain starts again. */
+TEST(delta_keeps_a_full_copy_every_256) {
+    history_copied(262);
+    ASSERT_TRUE(holds("[ -f \"$d/checkpoints/1/manifest.ndjson\" ] && [ -f \"$d/checkpoints/257/manifest.ndjson\" ] && "
+                      "[ ! -f \"$d/checkpoints/256/manifest.ndjson\" ] && [ ! -f \"$d/checkpoints/258/manifest.ndjson\" ] && "
+                      "[ ! -f \"$d/checkpoints/257/manifest.delta\" ]"));
+    ASSERT_TRUE(holds("grep -q '\"chain\":255}' \"$d/checkpoints/256/manifest.delta\" && grep -q '\"chain\":1}' \"$d/checkpoints/258/manifest.delta\""));
+    static const int ids[] = { 2, 128, 255, 256, 257, 258, 261, 262 };
+    for (size_t i = 0; i < sizeof ids / sizeof ids[0]; i++)
+        if (!same_as_written(ids[i])) BELAY_FAIL("checkpoint %d", ids[i]);
+}
+
+/* ST-4: a delta that doesn't hash is corrupt state, and nothing partial shows. */
+TEST(delta_that_does_not_rebuild_is_corrupt) {
+    history_copied(5);
+    ASSERT_TRUE(holds("sed -i.bak 's/version 2/version 9/; s/=1$/=2/' \"$d/checkpoints/3/manifest.delta\" && rm \"$d/checkpoints/3/manifest.delta.bak\""));
+    ASSERT_TRUE(holds("printf '+tampered\n' >> \"$d/checkpoints/3/manifest.delta\""));
+    ASSERT_EQ_INT(4, belay("manifest", "--scope", g_scope, "--id", "3", NULL));
+    ASSERT_EQ_STR("", g_out);
+    ASSERT_EQ_INT(4, belay("manifest", "--scope", g_scope, "--id", "4", NULL));     /* what builds on it too */
+    ASSERT_TRUE(belay("diff", "--scope", g_scope, "--since", "3", "--to", "5", NULL) != 0);
+    ASSERT_EQ_INT(4, belay("prune", "--scope", g_scope, "--keep-last", "4", NULL));
+    ASSERT_TRUE(has_checkpoint(1));
+}
+
+/* ST-4, the hash alone: a delta still well formed, its operations all valid,
+ * that rebuilds to the wrong bytes. Only the check against the recorded sha256
+ * can tell, and nothing of it reaches a reader. */
+TEST(delta_that_rebuilds_wrong_bytes_is_refused_by_its_hash) {
+    history_copied(5);
+    ASSERT_TRUE(holds("sed -i.bak '/^+{\"path\":\"a.txt\"/s/\"uid\":[0-9]*/\"uid\":424242/' \"$d/checkpoints/3/manifest.delta\" && "
+                      "rm \"$d/checkpoints/3/manifest.delta.bak\" && grep -q 424242 \"$d/checkpoints/3/manifest.delta\""));
+    ASSERT_EQ_INT(4, belay("manifest", "--scope", g_scope, "--id", "3", NULL));
+    ASSERT_EQ_STR("", g_out);
+    ASSERT_TRUE(strstr(g_err, "does not match what was recorded") != NULL);
+    ASSERT_TRUE(belay("diff", "--scope", g_scope, "--since", "1", "--to", "3", NULL) != 0);
+    char bundle[500], sha[65];
+    snprintf(bundle, sizeof bundle, "%s/bundle", g_dir);
+    ASSERT_EQ_INT(0, belay("baseline", "export", "--scope", g_scope, "--out", bundle, "--json", NULL));
+    const char *s = strstr(g_out, "\"sha256\":\"");
+    ASSERT_TRUE(s != NULL);
+    snprintf(sha, sizeof sha, "%.64s", s + 10);
+    ASSERT_TRUE(belay("verify", "--scope", g_scope, "--baseline", bundle, "--baseline-sha256", sha, "--to", "3", NULL) != 0);
+}
+
+/* A delta made from another base: refused though its operations apply. */
+TEST(delta_from_another_base_is_refused) {
+    history_copied(5);
+    ASSERT_TRUE(holds("sed -i.bak '1s/\"base_sha256\":\"[0-9a-f]*\"/\"base_sha256\":\"%064d\"/' \"$d/checkpoints/4/manifest.delta\" && "
+                      "rm \"$d/checkpoints/4/manifest.delta.bak\"", 0));
+    ASSERT_EQ_INT(4, belay("manifest", "--scope", g_scope, "--id", "4", NULL));
+    ASSERT_TRUE(strstr(g_err, "not the one it was made from") != NULL);
+}
+
+/* ST-3: a lost base, and a link for a delta, are corrupt too. */
+TEST(delta_with_no_base_or_a_link_is_corrupt) {
+    history_copied(5);
+    ASSERT_TRUE(holds("rm \"$d/checkpoints/2/manifest.delta\""));
+    ASSERT_EQ_INT(4, belay("manifest", "--scope", g_scope, "--id", "3", NULL));
+    history_copied(4);
+    ASSERT_TRUE(holds("mv \"$d/checkpoints/2/manifest.delta\" \"$d/elsewhere\" && ln -s \"$d/elsewhere\" \"$d/checkpoints/2/manifest.delta\""));
+    ASSERT_EQ_INT(4, belay("manifest", "--scope", g_scope, "--id", "2", NULL));
+}
+
+/* ST-5: a crash left both: the whole file is used, and nothing else changes. */
+TEST(delta_beside_a_whole_file_uses_the_whole_file) {
+    history_copied(4);
+    ASSERT_TRUE(holds("cp '%s/copies/3' \"$d/checkpoints/3/manifest.ndjson\"", g_dir));
+    ASSERT_TRUE(holds("printf 'garbage\n' > \"$d/checkpoints/3/manifest.delta\""));
+    ASSERT_TRUE(same_as_written(3));
+}
+
+/* ST-6: checkpoints from before deltas stay whole, and chains start after them. */
+TEST(delta_reads_checkpoints_stored_whole) {
+    history_copied(4);
+    ASSERT_TRUE(holds("for i in 2 3; do cp '%s/copies/'$i \"$d/checkpoints/$i/manifest.ndjson\"; rm \"$d/checkpoints/$i/manifest.delta\"; done; rm \"$d/checkpoints/4/manifest.delta\"", g_dir));
+    for (int i = 1; i <= 4; i++) ASSERT_TRUE(same_as_written(i));
+    sh("printf 'more\n' > '%s/a.txt'", g_scope);
+    ASSERT_EQ_INT(0, belay("mark", "--scope", g_scope, NULL));
+    ASSERT_TRUE(holds("[ -f \"$d/checkpoints/4/manifest.ndjson\" ] && [ -f \"$d/checkpoints/5/manifest.delta\" ]"));
+    ASSERT_TRUE(same_as_written(4));
+}
+
+/* PR-4: pruning through a chain: what stays still rebuilds, the newest's delta
+ * included, and the capture after it. */
+TEST(prune_through_a_chain_leaves_what_stays_readable) {
+    history_copied(12);
+    ASSERT_EQ_INT(0, belay("prune", "--scope", g_scope, "--keep-last", "5", NULL));
+    for (int i = 8; i <= 12; i++) if (!same_as_written(i)) BELAY_FAIL("checkpoint %d", i);
+    ASSERT_TRUE(holds("[ -f \"$d/checkpoints/8/manifest.ndjson\" ] && [ ! -f \"$d/checkpoints/8/manifest.delta\" ]"));
+    ASSERT_EQ_INT(0, belay("prune", "--scope", g_scope, "--keep-last", "0", NULL));
+    ASSERT_TRUE(same_as_written(12));
+    sh("printf 'after\n' > '%s/a.txt'", g_scope);
+    ASSERT_EQ_INT(0, belay("mark", "--scope", g_scope, NULL));
+    ASSERT_TRUE(same_as_written(12));
+    ASSERT_EQ_INT(0, belay("diff", "--scope", g_scope, "--since", "12", "--to", "13", NULL));
+}
+
+/* PR-7 with deltas: the whole files a prune must write count against it. */
+TEST(prune_reports_exactly_what_it_frees_through_a_chain) {
+    history_copied(9);
+    ASSERT_TRUE(holds("find \"$d\" -type f -exec cat {} + | wc -c > '%s/size-before'", g_dir));
+    ASSERT_EQ_INT(0, belay("prune", "--scope", g_scope, "--keep-last", "3", "--dry-run", "--json", NULL));
+    long long bytes = -1, store = -1;
+    ASSERT_TRUE(sscanf(strstr(g_out, "\"bytes\":"), "\"bytes\":%lld", &bytes) == 1 &&
+                sscanf(strstr(g_out, "\"store_bytes\":"), "\"store_bytes\":%lld", &store) == 1);
+    ASSERT_EQ_INT(0, belay("prune", "--scope", g_scope, "--keep-last", "3", NULL));
+    ASSERT_TRUE(holds("find \"$d\" -type f -exec cat {} + | wc -c > '%s/size-after'", g_dir));
+    char c[1000];
+    snprintf(c, sizeof c, "[ $(( $(cat '%s/size-before') - $(cat '%s/size-after') )) -le %lld ]", g_dir, g_dir, bytes + store);
+    ASSERT_EQ_INT(0, system(c));
+}
+
+/* C2-2..C2-4: what log and mark print. */
+TEST(checkpoint_v2_says_how_it_is_stored) {
+    history_copied(3);
+    ASSERT_EQ_INT(0, belay("mark", "--scope", g_scope, "--keep", "--json", NULL));
+    ASSERT_TRUE(strstr(g_out, "\"stored\":\"whole\"") != NULL && strstr(g_out, "\"kept\":true") != NULL && strstr(g_out, "\"manifest\":\"") != NULL);
+    ASSERT_EQ_INT(0, belay("log", "--scope", g_scope, "--json", NULL));
+    const char *two = strstr(g_out, "{\"id\":2,"), *three = strstr(g_out, "{\"id\":3,");
+    ASSERT_TRUE(two != NULL && three != NULL);
+    ASSERT_TRUE(strstr(two, "\"manifest\":null") != NULL && strstr(two, "\"manifest\":null") < three);
+    ASSERT_TRUE(strstr(two, "\"stored\":\"delta\"") < three && strstr(two, "\"kept\":false") < three);
+}
+
+/* log reads a delta's header without a rebuild, and says the same. */
+TEST(log_names_excludes_of_a_delta) {
+    fresh();
+    ASSERT_EQ_INT(0, belay("exclude", "--scope", g_scope, "--add", "src", NULL));
+    ASSERT_EQ_INT(0, belay("check", "--scope", g_scope, NULL));
+    sh("printf 'x\n' > '%s/a.txt'", g_scope);
+    ASSERT_EQ_INT(0, belay("mark", "--scope", g_scope, NULL));
+    sh("printf 'y\n' > '%s/a.txt'", g_scope);
+    ASSERT_EQ_INT(0, belay("mark", "--scope", g_scope, NULL));
+    ASSERT_TRUE(holds("[ ! -f \"$d/checkpoints/2/manifest.ndjson\" ]"));
+    ASSERT_EQ_INT(0, belay("log", "--scope", g_scope, "--json", NULL));
+    const char *two = strstr(g_out, "{\"id\":2,"), *three = strstr(g_out, "{\"id\":3,");
+    ASSERT_TRUE(two != NULL && three != NULL);
+    const char *named = strstr(two, "\"excluded_paths\":[{\"path\":\"src\"");
+    ASSERT_TRUE(named != NULL && named < three);
+    ASSERT_EQ_INT(0, belay("log", "--scope", g_scope, NULL));
+    ASSERT_TRUE(strstr(g_out, "cannot be read") == NULL);
+}
+
+/* ST-8 */
+TEST(manifest_refuses_what_is_not_there) {
+    history_copied(2);
+    ASSERT_EQ_INT(2, belay("manifest", "--scope", g_scope, NULL));
+    ASSERT_EQ_INT(2, belay("manifest", "--scope", g_scope, "--id", "99", NULL));
+    ASSERT_EQ_INT(2, belay("manifest", "--scope", g_scope, "--id", "x", NULL));
+}
+
 /* PR-9: the removing pass holds the lock. A child holds it for a moment, and
  * prune must wait for it, and say so. */
 static void someone_holds_the_lock(void) {
@@ -933,7 +1125,7 @@ TEST(prune_sweeps_only_after_the_checkpoints_are_gone) {
  * nothing goes. */
 TEST(prune_refuses_a_link_for_a_manifest_that_stays) {
     history(3);
-    ASSERT_TRUE(holds("mv \"$d/checkpoints/2/manifest.ndjson\" \"$d/elsewhere\" && ln -s \"$d/elsewhere\" \"$d/checkpoints/2/manifest.ndjson\""));
+    ASSERT_TRUE(holds("mv \"$d/checkpoints/3/manifest.ndjson\" \"$d/elsewhere\" && ln -s \"$d/elsewhere\" \"$d/checkpoints/3/manifest.ndjson\""));
     ASSERT_EQ_INT(4, belay("prune", "--scope", g_scope, "--keep-last", "2", NULL));
     ASSERT_TRUE(has_checkpoint(1));
 }
@@ -1044,7 +1236,7 @@ TEST(prune_removes_cached_diffs_from_what_went) {
 TEST(prune_with_a_corrupt_manifest_removes_nothing) {
     history(4);
     const int all = store_objects();
-    ASSERT_TRUE(holds("sed -i.bak '2s/.*/not a manifest/' \"$d/checkpoints/3/manifest.ndjson\" && rm \"$d/checkpoints/3/manifest.ndjson.bak\""));
+    ASSERT_TRUE(holds("sed -i.bak '3s/.*/not a manifest/' \"$d/checkpoints/4/manifest.ndjson\" && rm \"$d/checkpoints/4/manifest.ndjson.bak\""));
     ASSERT_EQ_INT(4, belay("prune", "--scope", g_scope, "--keep-last", "2", NULL));
     ASSERT_TRUE(has_checkpoint(1) && has_checkpoint(2));
     ASSERT_EQ_INT(all, store_objects());
@@ -1667,6 +1859,19 @@ int main(void) {
     RUN(prune_keep_id_lasts_and_is_checked);
     RUN(prune_dry_run_changes_nothing_and_tells_the_truth);
     RUN(prune_sweeps_the_store_and_what_stays_still_works);
+    RUN(delta_rebuilds_every_checkpoint_byte_for_byte);
+    RUN(delta_keeps_a_full_copy_every_256);
+    RUN(delta_that_does_not_rebuild_is_corrupt);
+    RUN(delta_that_rebuilds_wrong_bytes_is_refused_by_its_hash);
+    RUN(delta_from_another_base_is_refused);
+    RUN(delta_with_no_base_or_a_link_is_corrupt);
+    RUN(delta_beside_a_whole_file_uses_the_whole_file);
+    RUN(delta_reads_checkpoints_stored_whole);
+    RUN(prune_through_a_chain_leaves_what_stays_readable);
+    RUN(prune_reports_exactly_what_it_frees_through_a_chain);
+    RUN(checkpoint_v2_says_how_it_is_stored);
+    RUN(log_names_excludes_of_a_delta);
+    RUN(manifest_refuses_what_is_not_there);
     RUN(prune_takes_the_lock_to_remove);
     RUN(prune_a_long_limit_keeps_everything);
     RUN(prune_keeps_the_copies_of_what_it_keeps);

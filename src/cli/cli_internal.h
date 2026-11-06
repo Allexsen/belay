@@ -19,5 +19,6 @@ int  cli_open_scope(const char *scope, const char *docker, bool create, struct s
 int  cmd_baseline(int argc, char **argv, FILE *out, FILE *err);
 int  cmd_verify(int argc, char **argv, FILE *out, FILE *err);
 int  cmd_prune(int argc, char **argv, FILE *out, FILE *err);
+int  cmd_manifest(int argc, char **argv, FILE *out, FILE *err);
 
 #endif

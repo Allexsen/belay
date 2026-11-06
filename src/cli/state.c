@@ -1,4 +1,5 @@
 #define _GNU_SOURCE
+#include "delta.h"
 #include "state.h"
 #include "docker.h"
 
@@ -619,6 +620,10 @@ const char *state_reference(const struct checkpoint *c) {
 
 static int write_meta(const struct state *st, int dfd, const struct checkpoint *c);
 
+int state_write_whole(int dfd, const char *name, const char *data, size_t len, const char *shown) {
+    return write_whole(dfd, name, data, len, shown);
+}
+
 int state_checkpoint_exists(const struct state *st, long id) {
     char name[16];
     struct checkpoint c;
@@ -658,7 +663,11 @@ int state_check_manifest(const struct state *st, long id) {
         return -1;
     }
     snprintf(shown, sizeof shown, "%s/checkpoints/%ld/manifest.ndjson", st->dir, id);
-    const int fd = openat(dfd, "manifest.ndjson", O_RDONLY | O_NONBLOCK | O_NOFOLLOW | O_CLOEXEC);
+    int fd = openat(dfd, "manifest.ndjson", O_RDONLY | O_NONBLOCK | O_NOFOLLOW | O_CLOEXEC);
+    if (fd == -1 && errno == ENOENT) {      /* stored as a delta (ST-2) */
+        snprintf(shown, sizeof shown, "%s/checkpoints/%ld/manifest.delta", st->dir, id);
+        fd = openat(dfd, "manifest.delta", O_RDONLY | O_NONBLOCK | O_NOFOLLOW | O_CLOEXEC);
+    }
     const int e = errno;
     close(dfd);
     struct stat fs;
@@ -831,6 +840,7 @@ int state_capture(struct state *st, const struct capture_req *req, struct checkp
     /* Prefilter against the latest checkpoint unless a full walk is due
      * (Q8): asked for, none before, or N marks since the last full one. */
     const char *previous = NULL;
+    const long prev_id = n > 0 ? list[n - 1].id : 0;
     long since_full = 0;
     if (n > 0 && list[n - 1].has_since_full) since_full = list[n - 1].since_full;
     else for (size_t i = n; i-- > 0 && !list[i].full;) since_full++;
@@ -903,6 +913,7 @@ int state_capture(struct state *st, const struct capture_req *req, struct checkp
     c.has_since_full = true;
     c.since_full = c.full ? 0 : since_full + 1;
     if (write_meta(st, dfd, &c) == -1) goto out;
+    manifest_store_delta(st, prev_id, id);
     *out = c;
     rc = 0;
 out:

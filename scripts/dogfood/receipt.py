@@ -317,23 +317,30 @@ def in_place(recs):
     return ", ".join(f"{k} {o}{'s' if k != 1 and ' ' not in o else ''} in place" for o, k in sorted(ops.items()))
 
 
-def manifest_hashes(state, scope, cp):
+def manifest_hashes(belay, state, scope, cp):
     """{path: (sha256, mode)} of a checkpoint's regular files: diff.v1 has no
-    hash for an added or removed path. Empty when it can't be read."""
-    name = hashlib.sha256(os.fsencode(scope)).hexdigest()[:16]
+    hash for an added or removed path. `belay manifest` where the binary has it
+    (it reads a delta too), else the file, as v0.1.0-alpha.5 keeps it. Empty when
+    neither can be read: what depends on it then stays listed."""
+    p = subprocess.run([belay, "manifest", "--scope", scope, "--id", str(cp)], capture_output=True)
+    if p.returncode == 0:
+        lines = p.stdout.decode("utf-8", "replace").splitlines()
+    else:
+        name = hashlib.sha256(os.fsencode(scope)).hexdigest()[:16]
+        try:
+            with open(os.path.join(state, "scopes", name, "checkpoints", str(cp), "manifest.ndjson"),
+                      encoding="utf-8", errors="replace") as f:
+                lines = f.read().splitlines()
+        except OSError:
+            return {}
     out = {}
-    try:
-        with open(os.path.join(state, "scopes", name, "checkpoints", str(cp), "manifest.ndjson"),
-                  encoding="utf-8", errors="replace") as f:
-            for line in f:
-                try:
-                    e = json.loads(line)
-                except ValueError:
-                    continue
-                if e.get("type") == "reg" and e.get("sha256") and "path" in e:
-                    out[e["path"]] = (e["sha256"], e.get("mode", 0))
-    except OSError:
-        return {}
+    for line in lines:
+        try:
+            e = json.loads(line)
+        except ValueError:
+            continue
+        if e.get("type") == "reg" and e.get("sha256") and "path" in e:
+            out[e["path"]] = (e["sha256"], e.get("mode", 0))
     return out
 
 
@@ -400,7 +407,7 @@ def checkout_sha(repo, commit, path):
     return hashlib.sha256(p.stdout).hexdigest() if p.returncode == 0 else None
 
 
-def explain_checkout(state, scope, a, b, recs, wa, wb):
+def explain_checkout(belay, state, scope, a, b, recs, wa, wb):
     """A branch switch rewrites the working tree, and every file it wrote reads
     as an edit or a removal. Marks the records of this interval the switch
     explains: a file that now matches the target commit and matched the source
@@ -417,7 +424,7 @@ def explain_checkout(state, scope, a, b, recs, wa, wb):
         old, new = (tree_of(repo, c) for c in ends) if ends else (None, None)
         if old is None or new is None:
             continue
-        before, after = manifest_hashes(state, scope, a), manifest_hashes(state, scope, b)
+        before, after = manifest_hashes(belay, state, scope, a), manifest_hashes(belay, state, scope, b)
         pick = [r for r in recs if "event" not in r and not GIT.match(path_of(r)) and not privilege_change(r)
                 and path_of(r).startswith(prefix + "/" if prefix else "") and "\n" not in path_of(r)]
         rel = {path_of(r): path_of(r)[len(prefix) + 1 if prefix else 0:] for r in pick}
@@ -537,7 +544,7 @@ def sections(events, belay, scope, lo, hi, persistent=None, d=None, sid=None):
                 if "event" not in r and path_of(r) in priv:
                     r["receipt_privilege"] = True
         if d is not None:
-            explain_checkout(os.path.dirname(d), scope, a, b, recs, when.get(a, (None, None))[0],
+            explain_checkout(belay, os.path.dirname(d), scope, a, b, recs, when.get(a, (None, None))[0],
                              when.get(b, (None, None))[1])
         per.append((a, b, recs))
         for r in recs:
