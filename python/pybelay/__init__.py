@@ -35,27 +35,31 @@ def _keys() -> Dict[str, Any]:
 def _run(args: List[str]) -> Tuple[List[dict], int]:
     b = checked_binary()
     r = subprocess.run([b] + args, capture_output=True)
-    err = r.stderr.decode("utf-8", "replace")
-    if r.returncode == 2:
+    return _parsed(r.stdout, r.returncode, r.stderr.decode("utf-8", "replace"))
+
+
+def _parsed(stdout: bytes, code: int, err: str) -> Tuple[List[dict], int]:
+    """A run's result, wherever it ran: its lines, or the error its exit code means."""
+    if code == 2:
         raise UsageError(err.strip() or "usage", 2, err)
-    if r.returncode == 3:
+    if code == 3:
         raise Refused(err.strip() or "refused", 3, err)
-    if r.returncode == 4:
+    if code == 4:
         raise Failed(err.strip() or "failed", 4, err)
-    if r.returncode not in (0, 1):
-        raise FormatError("belay exited %d, which the CLI does not document" % r.returncode, r.returncode, err)
+    if code not in (0, 1):
+        raise FormatError("belay exited %d, which the CLI does not document" % code, code, err)
     lines = []
-    for raw in r.stdout.splitlines():
+    for raw in stdout.splitlines():
         if not raw.strip():
             continue
         try:
             obj = json.loads(raw)
         except ValueError:
-            raise FormatError("a line that is not JSON: %r" % raw[:200], r.returncode, err) from None
+            raise FormatError("a line that is not JSON: %r" % raw[:200], code, err) from None
         if not isinstance(obj, dict):
-            raise FormatError("a line that is not a JSON object", r.returncode, err)
+            raise FormatError("a line that is not a JSON object", code, err)
         lines.append(obj)
-    return lines, r.returncode
+    return lines, code
 
 
 def _p(x) -> str:

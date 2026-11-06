@@ -270,6 +270,14 @@ pybelay-test: $(BIN)
 	python3 -I python/build_keys.py $(BIN)
 	python3 -I -B python/tests/test_pybelay.py
 
+# pybelay.inspect in real Inspect evals: Docker, Inspect and a static $(BIN) needed, so not
+# in `check`. PYTHON is one with Inspect installed.
+.PHONY: inspect-test
+PYTHON ?= python3
+inspect-test: $(BIN)
+	$(PYTHON) -I python/build_keys.py $(BIN)
+	$(PYTHON) -I -B python/tests/test_inspect.py
+
 # The replay's rules (bench/replay/README.md): no downloads, nothing run from a transcript.
 replay-test:
 	python3 -I -B bench/replay/test_rules.py

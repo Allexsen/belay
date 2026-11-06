@@ -13,6 +13,14 @@ requires-python = ">=3.9"
 license = { text = "Apache-2.0" }
 classifiers = ["Programming Language :: Python :: 3", "Operating System :: POSIX :: Linux", "Operating System :: MacOS"]
 
+[project.optional-dependencies]
+# pybelay.inspect: belay in an Inspect eval. Inspect itself needs Python 3.10.
+inspect = ["inspect-ai>=0.3.213"]
+
+# So Inspect can find the solver and scorer by name when it reads a log back.
+[project.entry-points.inspect_ai]
+pybelay = "pybelay.inspect"
+
 [project.urls]
 Source = "https://github.com/Allexsen/belay"
 
