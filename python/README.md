@@ -11,11 +11,12 @@ violation zeroes the episode's reward, signals go to its metadata. See the repos
 [Inspect](https://inspect.aisi.org.uk/) runs an agent in a sandbox per sample. belay can record that
 sandbox before the agent acts and judge it afterwards, beside the eval's own scorers.
 
-**Install.** The extra is in wheels from the release after v0.1.0-alpha.4, on
-[belay's releases](https://github.com/Allexsen/belay/releases), not on PyPI. It needs Python 3.10 or later:
+**Install.** The extra is in the wheels on [belay's releases](https://github.com/Allexsen/belay/releases),
+from v0.1.0-alpha.5, not on PyPI. It needs Python 3.10 or later. This is the Linux x86_64 wheel; the
+release has one for Linux arm64 and one for macOS arm64:
 
 ```sh
-pip install "pybelay[inspect] @ https://github.com/Allexsen/belay/releases/download/<tag>/<wheel for your platform>"
+pip install "pybelay[inspect] @ https://github.com/Allexsen/belay/releases/download/v0.1.0-alpha.5/pybelay-0.1.0a5-py3-none-manylinux_2_17_x86_64.musllinux_1_1_x86_64.whl"
 ```
 
 Nothing is needed in the sandbox image or on the Docker host: pybelay copies its own binary in.
