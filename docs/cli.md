@@ -2,7 +2,7 @@
 
 ```
 belay check --scope DIR [--json]
-belay mark  --scope DIR [--full] [--full-every N] [--json]
+belay mark  --scope DIR [--full] [--full-every N] [--keep] [--json]
 belay diff  --scope DIR --since ID [--to ID] [--full-every N] [--json] [--exit-code] [--all]
 belay log   --scope DIR [--json]
 belay exclude --scope DIR [--add PATH | --remove PATH]
