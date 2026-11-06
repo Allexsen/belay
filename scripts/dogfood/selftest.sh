@@ -614,4 +614,67 @@ for c in "write w:w" "write v:v" "write u:u"; do
 done
 grep -A1 '^Bash: long job   (cancelled)$' "$RD" | grep -q '  A den-q\.c' || fail "the interrupted call lost its change: $(cat "$RD")"
 ! grep -q 'rm -rf build' "$RD" || fail "the denied call, which ran nothing, has changes: $(cat "$RD")"
+# A branch switch, against real git: what it wrote is its line, not edits and
+# removals (since-7412: 7 "edits" and 2 "removals" were one checkout); what
+# it didn't write, or can't be shown to have, stays listed.
+C=$T/co; mkdir -p "$C" "$T/co-state" && chmod 700 "$T/co-state"
+cg() { git -C "$C" -c user.name=t -c user.email=t@t -c commit.gpgSign=false "$@"; }
+ch() {  # ch EVENT TID COMMAND
+    jq -cn --arg tid "${2:-}" --arg s "${3:-}" '{session_id:"c1", tool_use_id:$tid, tool_name:"Bash", tool_input:{command:$s}}' \
+        | BELAY_DOGFOOD_SCOPE="$C" BELAY_STATE_DIR="$T/co-state" CLAUDE_PROJECT_DIR="$C" "$HOOK" "$1"
+}
+coreceipt() { sleep 1; ch stop >/dev/null; ls -t "$T/co-state/dogfood"/c1.turn-*.txt | head -1; }
+cg init -q -b main .
+printf '* text=auto\n*.crlf text eol=crlf\n*.up filter=up\n' > "$C/.gitattributes"
+cg config filter.up.smudge 'tr a-z A-Z'; cg config filter.up.clean 'tr A-Z a-z'
+printf 'a\n' > "$C/same.txt"; printf 'one\n' > "$C/both.txt"; printf 'one\n' > "$C/eol.crlf"; printf 'one\n' > "$C/driven.up"
+ln -s same.txt "$C/link"; cg add -A; cg commit -qm one
+cg checkout -q -b side
+printf 'two\n' >> "$C/both.txt"; printf 'two\n' >> "$C/eol.crlf"; printf 'two\n' >> "$C/driven.up"
+printf 'new\n' > "$C/side-only.txt"; rm "$C/link"; ln -s both.txt "$C/link"; cg add -A; cg commit -qm two
+rm "$C/eol.crlf"; cg checkout -q -- eol.crlf      # as git writes it: CRLF, what printf above did not
+ch start >/dev/null 2>&1 || :
+ch pre c1 "git checkout main"; cg checkout -q main 2>/dev/null; ch post c1
+RC=$(coreceipt)
+grep -q '^  git        switched side -> main: 2 files now match main, 1 exists only on side' "$RC" \
+    || fail "the summary doesn't say what the switch did: $(cat "$RC")"
+grep -q '^  git switched side -> main: 2 files now match main, 1 exists only on side   \[c1\]$' "$RC" \
+    || fail "the call doesn't say what the switch did: $(cat "$RC")"
+! grep -q '  [MD] both\.txt\|  [MD] eol\.crlf\|  D side-only\.txt\|edited .*both\|removed .*side-only' "$RC" \
+    || fail "what the switch wrote is listed as edits: $(cat "$RC")"
+grep -q '^  \[c1\] = both\.txt$' "$RC" && grep -q '^       = eol\.crlf$' "$RC" && grep -q '^       - side-only\.txt$' "$RC" \
+    || fail "the files of the switch aren't named: $(cat "$RC")"
+grep -q '  M driven\.up' "$RC" || fail "a file with a filter driver left the list: $(cat "$RC")"
+grep -q ' link' "$RC" || fail "a symlink left the list: $(cat "$RC")"
+ch pre c2 "git checkout side, then an edit"; cg checkout -q side 2>/dev/null; printf 'mine\n' >> "$C/both.txt"; ch post c2
+RC=$(coreceipt)
+grep -q '  M both\.txt' "$RC" || fail "an edit after a switch left the list: $(cat "$RC")"
+grep -q 'edited .*both\.txt' "$RC" || fail "an edit after a switch left the summary: $(cat "$RC")"
+grep -q 'switched main -> side: 2 files now match side' "$RC" || fail "the rest of the switch isn't said: $(cat "$RC")"
+ch pre c3 "git checkout -f main"; cg checkout -q -f main 2>/dev/null; ch post c3
+RC=$(coreceipt)
+grep -q '  M both\.txt' "$RC" || fail "uncommitted work a forced checkout dropped left the list: $(cat "$RC")"
+ch pre c4 "edit and commit"; printf 'three\n' >> "$C/same.txt"; cg add -A; cg commit -qm three; ch post c4
+RC=$(coreceipt)
+grep -q '  M same\.txt' "$RC" && ! grep -q 'switched' "$RC" || fail "a commit was taken for a switch: $(cat "$RC")"
+# Reflog times are whole seconds: two switches a moment apart are told apart by
+# their ends, and a detached HEAD's ends are commits.
+ch pre c5 "git checkout side"; cg checkout -q side 2>/dev/null; ch post c5
+ch pre c6 "git checkout main"; cg checkout -q main 2>/dev/null; ch post c6
+RC=$(coreceipt)
+grep -q 'switched main -> side: 4 files now match side$\|switched main -> side: 4 files now match side   ' "$RC" \
+    && grep -q 'switched side -> main: 3 files now match main, 1 exists only on side' "$RC" \
+    || fail "two switches a moment apart aren't each explained: $(cat "$RC")"
+ch pre c7 "git checkout --detach side"; cg checkout -q --detach side 2>/dev/null; ch post c7
+RC=$(coreceipt)
+grep -q 'switched main -> [0-9a-f]*: ' "$RC" && ! grep -q '  M both\.txt' "$RC" || fail "a detached HEAD isn't explained: $(cat "$RC")"
+# A file only the source has, with uncommitted work in it, is that work lost: listed.
+cg checkout -q side 2>/dev/null; printf 'unsaved\n' >> "$C/side-only.txt"
+ch pre c8 "git checkout -f main"; cg checkout -q -f main 2>/dev/null; ch post c8
+RC=$(coreceipt)
+grep -q '  D side-only\.txt' "$RC" || fail "a removed file with uncommitted work left the list: $(cat "$RC")"
+# A mode git didn't write is no part of the switch.
+ch pre c9 "git checkout side, then chmod"; cg checkout -q side 2>/dev/null; chmod +x "$C/eol.crlf"; ch post c9
+RC=$(coreceipt)
+grep -q '  M eol\.crlf' "$RC" || fail "a file whose mode the switch didn't set left the list: $(cat "$RC")"
 echo "dogfood selftest: sequential, concurrent, background, cancelled, quiet turn said, other project, symlinked project, git folded, labels cut, background commands, directories folded, paths counted, failures said, inactive gaps unattributed, summary, touched folded, identical replacements folded, a watcher noted, long commands, git events, compiled Python, lost receipts, install, a BSD date, a symlinked TMPDIR, a real repository, denied and interrupted calls: ok"

@@ -21,6 +21,7 @@ nothing. Nor for a call the user interrupted, and no batch either; the next
 prompt (UserPromptSubmit) or stop proves it gone: it closes there
 (2026-11-04, checked against Claude Code 2.1.318).
 """
+import hashlib
 import json
 import os
 import re
@@ -314,9 +315,155 @@ def in_place(recs):
     return ", ".join(f"{k} {o}{'s' if k != 1 and ' ' not in o else ''} in place" for o, k in sorted(ops.items()))
 
 
+def manifest_hashes(state, scope, cp):
+    """{path: (sha256, mode)} of a checkpoint's regular files: diff.v1 has no
+    hash for an added or removed path. Empty when it can't be read."""
+    name = hashlib.sha256(os.fsencode(scope)).hexdigest()[:16]
+    out = {}
+    try:
+        with open(os.path.join(state, "scopes", name, "checkpoints", str(cp), "manifest.ndjson"),
+                  encoding="utf-8", errors="replace") as f:
+            for line in f:
+                try:
+                    e = json.loads(line)
+                except ValueError:
+                    continue
+                if e.get("type") == "reg" and e.get("sha256") and "path" in e:
+                    out[e["path"]] = (e["sha256"], e.get("mode", 0))
+    except OSError:
+        return {}
+    return out
+
+
+def switch_commits(repo, wa, wb, frm, to):
+    """The commits a branch switch went from and to, from the reflog: the event
+    names branches, which can move later. Reflog times are whole seconds, so a
+    time window can hold an earlier or a later switch too: the event's own ends
+    pick the lines, walking back from the one that reaches `to` to the one that
+    leaves `frm` (a detached HEAD's end is a commit id, in the line's ids). None
+    if the reflog doesn't say. `git switch` writes the same line as checkout."""
+    p = _git(["rev-parse", "--git-path", "logs/HEAD"], repo)
+    if p.returncode != 0:
+        return None
+    moves = []
+    try:
+        with open(os.path.join(repo, p.stdout.decode().strip()), encoding="utf-8", errors="replace") as f:
+            for line in f:
+                head, _, msg = line.rstrip("\n").partition("\t")
+                w = head.split()
+                m = re.fullmatch(r"checkout: moving from (.+) to (.+)", msg)
+                if m and len(w) >= 4 and wa // 10**9 <= int(w[-2]) <= wb // 10**9:
+                    moves.append((w[0], w[1], m.group(1), m.group(2)))
+    except (OSError, ValueError):
+        return None
+    reach = [i for i, x in enumerate(moves) if x[3] == to or x[1].startswith(to)]
+    if not reach:
+        return None
+    for i in range(reach[-1], -1, -1):
+        if moves[i][2] == frm or moves[i][0].startswith(frm):
+            return moves[i][0], moves[reach[-1]][1]
+    return None
+
+
+def tree_of(repo, commit):
+    """{path: mode} of a commit's regular files. None if it is gone."""
+    p = _git(["ls-tree", "-r", "-z", commit], repo)
+    if p.returncode != 0:
+        return None
+    out = {}
+    for item in p.stdout.split(b"\0"):
+        meta, _, path = item.partition(b"\t")
+        w = meta.split()
+        if len(w) == 3 and w[1] == b"blob":
+            out[os.fsdecode(path)] = w[0].decode()
+    return out
+
+
+def driven(repo, paths):
+    """The paths with a filter driver. Its smudge is a command from the
+    repository's configuration, which what is being watched can write: such a
+    file is compared by no one's command, so it stays listed."""
+    p = _git(["check-attr", "-z", "--stdin", "filter"], repo, "\0".join(paths).encode() + b"\0")
+    if p.returncode != 0:
+        return set(paths)
+    w = p.stdout.split(b"\0")
+    return {os.fsdecode(w[i]) for i in range(0, len(w) - 2, 3) if w[i + 2] not in (b"unspecified", b"unset")}
+
+
+def checkout_sha(repo, commit, path):
+    """The sha256 of what checking `path` out of `commit` writes: the blob
+    through git's end-of-line conversion, not the raw blob (a CRLF file differs).
+    Checked against git 2.43: `cat-file --filters` matches the working tree."""
+    p = _git(["cat-file", "--filters", f"{commit}:{path}"], repo)
+    return hashlib.sha256(p.stdout).hexdigest() if p.returncode == 0 else None
+
+
+def explain_checkout(state, scope, a, b, recs, wa, wb):
+    """A branch switch rewrites the working tree, and every file it wrote reads
+    as an edit or a removal. Marks the records of this interval the switch
+    explains: a file that now matches the target commit and matched the source
+    before; a file removed that only the source had, unchanged. Anything else
+    stays listed: a further edit, and the uncommitted work a forced checkout
+    drops, are not the checkout's. Symlinks, modes that differ, filter drivers
+    and commits no longer there stay listed too."""
+    for e in recs:
+        if e.get("event") != "git_head_switched" or wa is None or wb is None:
+            continue
+        prefix = os.path.dirname(e.get("repo", ".git"))
+        repo = os.path.join(scope, prefix)
+        ends = switch_commits(repo, wa, wb, e.get("from", ""), e.get("to", ""))
+        old, new = (tree_of(repo, c) for c in ends) if ends else (None, None)
+        if old is None or new is None:
+            continue
+        before, after = manifest_hashes(state, scope, a), manifest_hashes(state, scope, b)
+        pick = [r for r in recs if "event" not in r and not GIT.match(path_of(r)) and not privilege_change(r)
+                and path_of(r).startswith(prefix + "/" if prefix else "") and "\n" not in path_of(r)]
+        rel = {path_of(r): path_of(r)[len(prefix) + 1 if prefix else 0:] for r in pick}
+        skip = driven(repo, [q for q in rel.values() if q in new or q in old]) if rel else set()
+        match, only = [], []
+        for r in pick:
+            p = path_of(r)
+            q = rel[p]
+            if q in skip or r.get("outcome") == "metadata_only":
+                continue
+            was = before.get(p)
+            from_old = q in old and was is not None and old[q] in ("100644", "100755") and \
+                checkout_sha(repo, ends[0], q) == was[0]
+            if r["outcome"] == "removed":
+                if q not in new and from_old:
+                    only.append(r)
+                continue
+            now = after.get(p)
+            if q not in new or now is None or new[q] not in ("100644", "100755"):
+                continue
+            exec_ok = bool(now[1] & 0o100) == (new[q] == "100755")
+            if exec_ok and checkout_sha(repo, ends[1], q) == now[0] and (from_old or q not in old):
+                match.append(r)
+        for r in match + only:
+            r["receipt_checkout"] = True
+        if match or only:
+            e["receipt_checkout"] = {"match": sorted(path_of(r) for r in match),
+                                     "only": sorted(path_of(r) for r in only)}
+
+
+def event_text(r):
+    """An event as a receipt says it: a branch switch, with what it explains."""
+    c = r.get("receipt_checkout")
+    if not c:
+        return r.get("text", "")
+    parts = []
+    if c["match"]:
+        k = len(c["match"])
+        parts.append(f"{k:,} file{'s' if k != 1 else ''} now match{'' if k != 1 else 'es'} {r.get('to', '')}")
+    if c["only"]:
+        k = len(c["only"])
+        parts.append(f"{k:,} exist{'' if k != 1 else 's'} only on {r.get('from', '')}")
+    return f"switched {r.get('from', '')} -> {r.get('to', '')}: " + ", ".join(parts)
+
+
 def line_of(r, outside, ignored=False):
     if "event" in r:
-        return f"  {r.get('interp', '')} {short_ids(printable(r.get('text', '')))}"
+        return f"  {r.get('interp', '')} {short_ids(printable(event_text(r)))}"
     s = f"  {SYM.get(r['outcome'], '?')} {path_of(r)}" + ("   (git-ignored)" if ignored else "")
     if r["outcome"] == "unknown":
         s += "   unknown: " + ", ".join(r.get("unknown", []))
@@ -387,6 +534,9 @@ def sections(events, belay, scope, lo, hi, persistent=None, d=None, sid=None):
             for r in recs:
                 if "event" not in r and path_of(r) in priv:
                     r["receipt_privilege"] = True
+        if d is not None:
+            explain_checkout(os.path.dirname(d), scope, a, b, recs, when.get(a, (None, None))[0],
+                             when.get(b, (None, None))[1])
         per.append((a, b, recs))
         for r in recs:
             if "event" not in r and r["outcome"] == "unknown":
@@ -556,7 +706,7 @@ def git_items(recs):
     out, other = [], 0
     events = [r for r in recs if "event" in r and r.get("interp") == "git"]
     for e in events:
-        out.append(short_ids(printable(e.get("text", ""))))
+        out.append(short_ids(printable(event_text(e))))
     for r in recs:
         if "event" in r:
             continue
@@ -616,6 +766,8 @@ def summary(secs, net=None, cls=None):
 
     per = by_path(recs)
     files = by_path(net) if net is not None else per
+    # What a branch switch wrote is its line under git, not an edit or a removal.
+    switched = {p for p, rs in per.items() if rs[-1].get("receipt_checkout")}
     # A git-ignored file edited in the end is named, never folded (2026-11-04).
     ign_edited = {p for p, rs in files.items() if ign(p) and ignored_edit(rs[-1])
                   and rs[-1].get("outcome") != "unknown" and not compiled(p)}
@@ -642,7 +794,7 @@ def summary(secs, net=None, cls=None):
     eligible = {p for p, rs in per.items() if not folds(p, rs[-1]) and not compiled(p) and not GIT.match(p)
                 and rs[-1]["outcome"] != "unknown"}
     for p, rs in files.items():
-        if (folds(p, rs[-1]) and p not in ign_edited) or compiled(p) or GIT.match(p):
+        if (folds(p, rs[-1]) and p not in ign_edited) or compiled(p) or GIT.match(p) or p in switched:
             continue
         outs = [r["outcome"] for r in rs]
         if outs[-1] == "unknown":
@@ -743,8 +895,9 @@ def render(scope, belay, secs, errors, net=None):
     cls = git_classes(scope, [r for _, recs, _, _ in secs for r in recs] + (net or []))
     lines.extend(summary(secs, net, cls))
     rank = {"tracked": 0, "untracked": 1, "ignored": 2}
-    detail, touches, numbers = [], [], {}
+    detail, touches, numbers, switches = [], [], {}, []
     for head, recs, outside, calls in secs:
+        recs = [r for r in recs if not r.get("receipt_checkout") or "event" in r]
         refs = []
         for c in calls:
             if cut(c):
@@ -788,6 +941,9 @@ def render(scope, belay, secs, errors, net=None):
                              f"entr{'ies' if k != 1 else 'y'} below it")
                 continue
             lines.append(line_of(r, outside, cls is not None and cls.get(path_of(r)) == "ignored"))
+            if r.get("receipt_checkout"):
+                switches.append(r)
+                lines[-1] += f"   [c{len(switches)}]"
         if same:
             touches.append([path_of(r) for r in same])
             lines.append(f"  ~ {len(same):,} file{'s' if len(same) != 1 else ''} touched, content unchanged   "
@@ -820,6 +976,14 @@ def render(scope, belay, secs, errors, net=None):
             if len(text) > CALL_LINES:      # the whole command is in the turn's JSON ("calls")
                 more = len(text) - CALL_LINES
                 lines.append(f"      \u2026 {more:,} more line{'s' if more != 1 else ''}")
+    if switches:
+        lines.append("")
+        lines.append("the files of a branch switch")
+        for k, e in enumerate(switches, 1):
+            c = e["receipt_checkout"]
+            ps = [f"= {p}" for p in c["match"]] + [f"- {p}" for p in c["only"]]
+            lines.append(f"  [c{k}] " + printable(ps[0]))
+            lines.extend("       " + printable(p) for p in ps[1:])
     if touches:
         lines.append("")
         lines.append("the paths with content unchanged")
