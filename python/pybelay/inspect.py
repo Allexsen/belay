@@ -55,8 +55,8 @@ _bundles: Optional[str] = None
 
 
 def _bundle_dir() -> str:
-    """On the host, and gone when the process ends. A bundle outlives its first
-    verify, because Inspect's score() can run the scorers before the end too."""
+    """On the host. belay_verify removes a sample's bundle at its final scoring;
+    this directory goes when the process ends, with any a failed sample left."""
     global _bundles
     if _bundles is None:
         _bundles = tempfile.mkdtemp(prefix="pybelay-inspect-")
@@ -318,5 +318,13 @@ def belay_verify(*, on_error: str = "fail_closed", after_scorers: bool = False) 
                          metadata={"violations": None, "signals": None, "flags": None, "policy": [],
                                    "scope": recorded["scope"], "baseline_sha256": recorded["baseline_sha256"],
                                    "error": {"type": type(e).__name__, "message": str(e)}})
+        finally:
+            # Inspect's score() can run the scorers before the end too, and
+            # they will need it again: only the final scoring is the last.
+            if state.completed:
+                try:
+                    os.unlink(recorded["bundle"])
+                except OSError:
+                    pass
 
     return score

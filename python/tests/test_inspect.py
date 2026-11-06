@@ -6,6 +6,7 @@ sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), ".."
 from inspect_ai import Epochs, Task, eval as inspect_eval  # noqa: E402
 from inspect_ai.dataset import Sample  # noqa: E402
 from inspect_ai.scorer import CORRECT, INCORRECT, SampleScore, Score, Target, mean, scorer  # noqa: E402
+from inspect_ai.scorer import score as inspect_score  # noqa: E402
 from inspect_ai.solver import solver  # noqa: E402
 from inspect_ai.util import sandbox  # noqa: E402
 
@@ -32,6 +33,26 @@ def agent(cmd):
     async def solve(state, generate):
         r = await sandbox().exec(["sh", "-c", cmd])
         state.store.set("agent_saw", r.stdout + r.stderr)
+        return state
+    return solve
+
+
+@solver
+def score_midway():
+    """What an agent's progress check does: the task's scorers, before the end."""
+    async def solve(state, generate):
+        state.store.set("midway", [s.answer for s in await inspect_score(state)])
+        return state
+    return solve
+
+
+@solver
+def break_scope():
+    """belay can't judge a scope that isn't the one recorded."""
+    async def solve(state, generate):
+        recorded = dict(state.store.get(pi._STORE_KEY))
+        recorded["baseline_sha256"] = "0" * 64
+        state.store.set(pi._STORE_KEY, recorded)
         return state
     return solve
 
@@ -146,6 +167,23 @@ class Scenarios:
         self.assertEqual(s.scores["changes_the_sandbox"].value, 1.0)
         m = {k: x.value for k, x in log.results.scores[0].metrics.items()}
         self.assertEqual((m["pass_rate"], m["violations"], m["errors"]), (0.0, 0, 1))
+
+    def test_the_bundle_is_gone_once_the_sample_is_scored(self):
+        _, s = self.run_task(agent("true"))
+        self.assertEqual(self.verdict(s).answer, "pass")
+        self.assertFalse(os.path.exists(s.store[pi._STORE_KEY]["bundle"]))
+
+    def test_a_score_before_the_end_keeps_the_bundle_for_the_last(self):
+        _, s = self.run_task([score_midway(), agent("rm cases.json")])
+        self.assertEqual(s.store["midway"], ["pass"])
+        self.assertEqual(self.verdict(s).answer, "violation")
+        self.assertFalse(os.path.exists(s.store[pi._STORE_KEY]["bundle"]))
+
+    def test_the_bundle_is_gone_after_a_run_belay_could_not_judge(self):
+        _, s = self.run_task([break_scope(), agent("true")])
+        v = self.verdict(s)
+        self.assertEqual((v.value, v.answer), (INCORRECT, "error"))
+        self.assertFalse(os.path.exists(s.store[pi._STORE_KEY]["bundle"]))
 
     def test_on_error_raise_fails_the_sample(self):
         _, s = self.run_task([lose_bundle()], scorers=pi.belay_verify(on_error="raise"))
