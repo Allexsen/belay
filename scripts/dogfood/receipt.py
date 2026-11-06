@@ -9,6 +9,8 @@
                                                     interesting
     receipt.py latency LOG...                       per writing tool call: the
                                                     hooks' time, p50 and p95
+    receipt.py keep-from DIR                        the first checkpoint a session
+                                                    not yet ended needs (HK-1)
 
 Attribution (NOTES design m1.5-structure, section 4): the session's
 checkpoints, in id order, cut time into intervals; each interval's changes go
@@ -1176,10 +1178,46 @@ def since_prompt(events, d, sid, hi, transcript):
     return len(paths), n, len(turns), errors, heads[:3], path
 
 
+def keep_from(d, days=7):
+    """The oldest first checkpoint of a session that has not ended: its
+    receipt reads every interval from there. A session quiet for `days` is
+    taken as gone, so one that crashed can't hold a prune back for ever."""
+    oldest = None
+    for name in os.listdir(d):
+        if not name.endswith(".jsonl"):
+            continue
+        path = os.path.join(d, name)
+        try:
+            if time.time() - os.path.getmtime(path) > days * 86400:
+                continue
+            with open(path, encoding="utf-8", errors="replace") as f:
+                text = f.read()
+        except OSError:
+            continue
+        # An end counts only if nothing came after it: a session can resume.
+        first = None
+        for line in text.splitlines():
+            try:
+                e = json.loads(line)
+            except ValueError:
+                continue
+            if e.get("event") == "end":
+                first = None
+            elif first is None and isinstance(e.get("cp"), int):
+                first = e["cp"]
+        if first is not None and (oldest is None or first < oldest):
+            oldest = first
+    return oldest
+
+
 def main():
     mode = sys.argv[1]
     if mode == "latency":
         latency(sys.argv[2:])
+        return
+    if mode == "keep-from":
+        oldest = keep_from(sys.argv[2])
+        print(oldest if oldest is not None else "none")
         return
     log, belay, scope, d = sys.argv[2:6]
     events = load(log)
