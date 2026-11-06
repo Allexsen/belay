@@ -52,6 +52,8 @@ struct plan {
     uint64_t swept_bytes;
     long *stale;                /* directories without a meta.json, below the newest id */
     size_t n_stale;
+    char (*temps)[64];          /* store/.tmp-* a killed capture left (PR-11) */
+    size_t n_temps;
     long *rewrite;              /* deltas that stay, whose base goes (PR-4) */
     size_t n_rewrite;
     uint64_t grows;             /* what those whole files will take */
@@ -120,6 +122,43 @@ static int store_list(const struct state *st, struct plan *p) {
     }
     closedir(d);
     if (rc == 0 && p->n_objects > 1) qsort(p->objects, p->n_objects, sizeof *p->objects, by_hex);
+    return rc;
+}
+
+/* A killed capture's temporaries: store/.tmp-*, older than a day (PR-11). A
+ * running capture holds the lock, and these are removed only under it; a day
+ * covers a dry run, which holds none. */
+static int store_temps(const struct state *st, int64_t now, struct plan *p) {
+    const int fd = openat(st->dir_fd, "store", O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC);
+    if (fd == -1) return errno == ENOENT ? 0 : (belay_err_set(BELAY_ERR_CORRUPT, errno, "%s is not a store belay made", st->store), -1);
+    DIR *d = fdopendir(fd);
+    if (d == NULL) {
+        close(fd);
+        belay_err_set(BELAY_ERR_IO, errno, "cannot list %s", st->store);
+        return -1;
+    }
+    size_t cap = 0;
+    int rc = 0;
+    struct dirent *e;
+    while ((e = readdir(d)) != NULL) {
+        struct stat s;
+        if (strncmp(e->d_name, ".tmp-", 5) != 0 || strlen(e->d_name) >= sizeof *p->temps) continue;
+        if (fstatat(fd, e->d_name, &s, AT_SYMLINK_NOFOLLOW) == -1 || !S_ISREG(s.st_mode)) continue;
+        if ((int64_t)s.st_mtime * 1000000000LL > now - NS_PER_DAY) continue;
+        if (p->n_temps == cap) {
+            cap = cap ? cap * 2 : 16;
+            char (*q)[64] = realloc(p->temps, cap * sizeof *q);
+            if (q == NULL) {
+                belay_err_set(BELAY_ERR_NOMEM, 0, "out of memory");
+                rc = -1;
+                break;
+            }
+            p->temps = q;
+        }
+        snprintf(p->temps[p->n_temps++], sizeof *p->temps, "%s", e->d_name);
+        p->swept_bytes += (uint64_t)s.st_size;
+    }
+    closedir(d);
     return rc;
 }
 
@@ -337,7 +376,7 @@ static int prune(struct state *st, long days, long last, long from, const long *
             goto out;
         }
         if (json) fprintf(out, "{\"dry_run\":%s,\"removed\":0,\"remaining\":0,\"kept\":0,\"bytes\":0,\"store_objects\":0,"
-                               "\"store_bytes\":0,\"unfinished\":0,\"ids\":[],\"kept_ids\":[]}\n", real ? "false" : "true");
+                               "\"store_temps\":0,\"store_bytes\":0,\"unfinished\":0,\"ids\":[],\"kept_ids\":[]}\n", real ? "false" : "true");
         else fputs("no checkpoints of the scope\n", out);
         goto out;
     }
@@ -428,6 +467,7 @@ static int prune(struct state *st, long days, long last, long from, const long *
     }
     p.bytes = p.bytes > p.grows ? p.bytes - p.grows : 0;
     m->upto = list[n - 1].id;
+    if (store_temps(st, now, &p) == -1) { rc = cli_failed(err); goto out; }
     for (size_t i = 0; i < p.n_objects; i++)
         if (!p.objects[i].marked) {
             p.n_swept++;
@@ -462,12 +502,21 @@ static int prune(struct state *st, long days, long last, long from, const long *
                 goto out;
             }
         }
+        for (size_t i = 0; i < p.n_temps; i++) {
+            char rel[80];
+            snprintf(rel, sizeof rel, "store/%s", p.temps[i]);
+            if (unlinkat(st->dir_fd, rel, 0) == -1 && errno != ENOENT) {
+                belay_err_set(BELAY_ERR_IO, errno, "cannot remove %s/%s", st->dir, rel);
+                rc = cli_failed(err);
+                goto out;
+            }
+        }
     }
     if (quiet) goto out;
     if (json) {
         fprintf(out, "{\"dry_run\":%s,\"removed\":%zu,\"remaining\":%zu,\"kept\":%zu,\"bytes\":%" PRIu64
-                ",\"store_objects\":%zu,\"store_bytes\":%" PRIu64 ",\"unfinished\":%zu,\"ids\":[",
-                dry ? "true" : "false", p.n_goes, n - p.n_goes, p.n_kept, p.bytes, p.n_swept, p.swept_bytes, p.n_stale);
+                ",\"store_objects\":%zu,\"store_temps\":%zu,\"store_bytes\":%" PRIu64 ",\"unfinished\":%zu,\"ids\":[",
+                dry ? "true" : "false", p.n_goes, n - p.n_goes, p.n_kept, p.bytes, p.n_swept, p.n_temps, p.swept_bytes, p.n_stale);
         ranges(out, list, p.goes, n, true);
         fputs("],\"kept_ids\":[", out);
         ranges(out, list, kept, n, true);
@@ -479,7 +528,9 @@ static int prune(struct state *st, long days, long last, long from, const long *
             fputs(": ", out);
             ranges(out, list, p.goes, n, false);
         }
-        fprintf(out, "\n%s %zu store objects, %" PRIu64 " bytes\n", verb, p.n_swept, p.swept_bytes);
+        fprintf(out, "\n%s %zu store objects", verb, p.n_swept);
+        if (p.n_temps) fprintf(out, " and %zu left by killed captures", p.n_temps);
+        fprintf(out, ", %" PRIu64 " bytes\n", p.swept_bytes);
         if (p.n_stale) fprintf(out, "%s %zu unfinished directories\n", verb, p.n_stale);
         if (p.n_kept) {
             fprintf(out, "kept %zu: ", p.n_kept);
@@ -493,6 +544,7 @@ out:
     free(p.goes);
     free(p.stale);
     free(p.rewrite);
+    free(p.temps);
     return rc;
 }
 
