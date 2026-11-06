@@ -743,13 +743,17 @@ def render(scope, belay, secs, errors, net=None):
     cls = git_classes(scope, [r for _, recs, _, _ in secs for r in recs] + (net or []))
     lines.extend(summary(secs, net, cls))
     rank = {"tracked": 0, "untracked": 1, "ignored": 2}
-    detail, touches = [], []
+    detail, touches, numbers = [], [], {}
     for head, recs, outside, calls in secs:
         refs = []
         for c in calls:
             if cut(c):
-                detail.append(c)
-                refs.append(f"[{len(detail)}]")
+                # One number per call: a background command runs beside many
+                # others, and is named in each of their sections.
+                if id(c) not in numbers:
+                    detail.append(c)
+                    numbers[id(c)] = len(detail)
+                refs.append(f"[{numbers[id(c)]}]")
         lines.append("")
         lines.append(head + ("   " + " ".join(refs) if refs else ""))
         if cls is None:     # no git, no repository: build/ and bin/ fold by name, as before
