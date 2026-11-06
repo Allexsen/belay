@@ -169,6 +169,11 @@ jobs:
       # job runs on: a static belay, as released, also walked from inside one.
       - name: host reader, static build
         run: make CFLAGS='-O2 -static' all
+      - name: pybelay.inspect in real Inspect evals (the mock model, a Docker sandbox)
+        run: |
+          python3 -m venv /tmp/inspect
+          /tmp/inspect/bin/pip install -q 'inspect-ai==0.3.287'
+          make inspect-test PYTHON=/tmp/inspect/bin/python CFLAGS='-O2 -static'
       - name: host reader against real containers (overlay2 store)
         run: sudo scripts/host-reader-e2e.sh bin/belay
       - name: measured run on belay's corpus, as root (every class, setuid and immutable included)
