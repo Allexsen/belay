@@ -54,12 +54,13 @@ static const struct { const char *cmd, *text; } HELP[] = {
     { "check", "usage: belay check --scope DIR [--json]\n"
                "  Records DIR as a new checkpoint in the state directory, reading every file.\n"
                "  --json  print the checkpoint as one JSON object (schema/checkpoint.v1.json)\n" },
-    { "mark",  "usage: belay mark --scope DIR [--full] [--full-every N] [--json]\n"
+    { "mark",  "usage: belay mark --scope DIR [--full] [--full-every N] [--keep] [--json]\n"
                "  A checkpoint after the scope's latest: a file that cannot have changed since --\n"
                "  same inode, mode, size, mtime and ctime, ctime before the reference point -- is\n"
                "  not read again. Reads every file when there is no checkpoint before, with\n"
                "  --full, every N marks (default 50; 0: never), when ctime is seen going\n"
                "  backwards, or when the previous checkpoint cannot be used; the output says why.\n"
+               "  --keep  a kept checkpoint is never pruned\n"
                "  --json  print the checkpoint as one JSON object (schema/checkpoint.v1.json)\n" },
     { "diff",  "usage: belay diff --scope DIR --since ID [--to ID] [--full-every N] [--json] [--exit-code] [--all]\n"
                "  What changed from checkpoint ID: to checkpoint --to, or to the scope now, which\n"
@@ -128,7 +129,7 @@ void cli_err_line(FILE *err) { err_line(err); }
 
 struct opts {
     const char *scope, *since, *to, *add, *remove, *docker;
-    bool json, full, exit_code, all, full_every_set;
+    bool json, full, exit_code, all, full_every_set, keep;
     long full_every;
 };
 
@@ -140,6 +141,7 @@ static int parse(int argc, char **argv, struct opts *o, FILE *err) {
         const char **val = NULL;
         if (!strcmp(a, "--json")) o->json = true;
         else if (!strcmp(a, "--full")) o->full = true;
+        else if (!strcmp(a, "--keep")) o->keep = true;
         else if (!strcmp(a, "--exit-code")) o->exit_code = true;
         else if (!strcmp(a, "--all")) o->all = true;
         else if (!strcmp(a, "--scope")) val = &o->scope;
@@ -379,6 +381,7 @@ static void text_checkpoint(FILE *out, const struct state *st, const struct chec
         receipt_fputs(out, c->full_reason);
         fputc(')', out);
     }
+    if (c->kept) fputs(", kept", out);
     fputc('\n', out);
     capture_notes(out, st, c);
 }
@@ -420,7 +423,7 @@ static int cmd_capture(const struct opts *o, const char *kind, FILE *out, FILE *
     struct state st;
     int rc = open_scope(o, true, &st, err);
     if (rc) return rc;
-    const struct capture_req req = { kind, strcmp(kind, "mark") == 0, o->full, o->full_every, 0 };
+    const struct capture_req req = { kind, strcmp(kind, "mark") == 0, o->full, o->full_every, 0, o->keep };
     struct checkpoint c;
     if (state_capture(&st, &req, &c) == -1) {
         rc = failed(err);
@@ -529,7 +532,7 @@ static int cmd_diff(const struct opts *o, FILE *out, FILE *err) {
     }
     if (to == 0) {
         /* Q3: the capture is kept as a checkpoint, prefiltered as a mark. */
-        const struct capture_req req = { "diff", true, false, o->full_every, 0 };
+        const struct capture_req req = { "diff", true, false, o->full_every, 0, false };
         if (state_capture(&st, &req, &now) == -1) { rc = failed(err); goto done; }
         to = now.id;
         snprintf(label_b, sizeof label_b, "now (checkpoint %ld)", to);
@@ -652,6 +655,7 @@ static int run(int argc, char **argv, FILE *out, FILE *err) {
     if (strcmp(cmd, "diff") && (o.since || o.to || o.exit_code || o.all))
         return usage(err, "--since, --to, --exit-code and --all are diff's");
     if (strcmp(cmd, "mark") && o.full) return usage(err, "--full is mark's");
+    if (strcmp(cmd, "mark") && o.keep) return usage(err, "--keep is mark's");
     if ((!strcmp(cmd, "check") || !strcmp(cmd, "log") || !strcmp(cmd, "exclude")) && o.full_every_set)
         return usage(err, "--full-every is mark's and diff's");
     if (strcmp(cmd, "exclude") && (o.add || o.remove)) return usage(err, "--add and --remove are exclude's");

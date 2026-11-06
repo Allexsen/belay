@@ -670,6 +670,28 @@ TEST(ids_run_out_and_a_failed_diff_leaves_nothing) {
 
 /* User excludes (decision 2026-11-01, 3): configured per scope, refused
  * when not a canonical relative path, at most 31. */
+/* KP-1, KP-2: a kept checkpoint says so in meta.json and in the log, and
+ * no other checkpoint's meta.json changes. */
+TEST(mark_keep_is_recorded_and_shown) {
+    fresh();
+    ASSERT_EQ_INT(0, belay("check", "--scope", g_scope, NULL));
+    ASSERT_EQ_INT(0, belay("mark", "--scope", g_scope, "--keep", NULL));
+    ASSERT_TRUE(strstr(g_out, ", kept\n") != NULL);
+    ASSERT_EQ_INT(0, belay("mark", "--scope", g_scope, NULL));
+    ASSERT_TRUE(strstr(g_out, "kept") == NULL);
+    ASSERT_EQ_INT(0, belay("log", "--scope", g_scope, NULL));
+    const char *first = strstr(g_out, "check 1"), *second = strstr(g_out, "mark 2"), *third = strstr(g_out, "mark 3");
+    ASSERT_TRUE(first != NULL && second != NULL && third != NULL);
+    ASSERT_TRUE(strstr(second, ", kept\n") != NULL && strstr(second, ", kept\n") < third);
+    ASSERT_TRUE(strstr(third, "kept") == NULL);
+    ASSERT_TRUE(strstr(first, ", kept\n") == strstr(second, ", kept\n"));
+    sh("grep -q '\"kept\":true' '%s'/scopes/*/checkpoints/2/meta.json", g_state);
+    sh("! grep -q kept '%s'/scopes/*/checkpoints/1/meta.json", g_state);
+    sh("! grep -q kept '%s'/scopes/*/checkpoints/3/meta.json", g_state);
+    ASSERT_EQ_INT(2, belay("check", "--scope", g_scope, "--keep", NULL));
+    ASSERT_EQ_INT(2, belay("log", "--scope", g_scope, "--keep", NULL));
+}
+
 TEST(excludes_are_configured_per_scope) {
     fresh();
     ASSERT_EQ_INT(0, belay("exclude", "--scope", g_scope, NULL));
@@ -1236,6 +1258,7 @@ int main(void) {
     RUN(a_state_root_others_could_swap_is_refused);
     RUN(nothing_printed_back_forges_a_line);
     RUN(ids_run_out_and_a_failed_diff_leaves_nothing);
+    RUN(mark_keep_is_recorded_and_shown);
     RUN(excludes_are_configured_per_scope);
     RUN(an_exclude_is_named_and_never_reads_as_removed);
     RUN(no_package_event_comes_from_an_excluded_path);

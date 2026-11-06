@@ -97,6 +97,7 @@ struct checkpoint {
     char full_reason[160];      /* why a mark read every file */
     uint64_t trusted, racy;
     bool walk_start_reference;  /* prefiltered against the previous walk's start, not its newest ctime */
+    bool kept;                  /* never pruned (state-retention KP-1) */
 };
 
 /* How a checkpoint's prefilter was referenced: "none" (every file read),
@@ -131,6 +132,7 @@ struct capture_req {
     bool force_full;            /* --full */
     long full_every;            /* a full mark every N marks (Q8); 0: never */
     uint64_t hash_max_bytes;    /* 0: the default; raised with a protect spec (protect-spec PS-C3) */
+    bool keep;                  /* mark --keep (KP-1) */
 };
 
 /* The state root's path relative to the scope, when its resolved path is

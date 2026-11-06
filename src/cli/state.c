@@ -527,6 +527,8 @@ static int read_meta(const struct state *st, const char *name, long id, struct c
     snprintf(c->full_reason, sizeof c->full_reason, "%s", jstr(pf, "full_reason"));
     c->trusted = (uint64_t)jint(pf, "trusted", 0);
     c->racy = (uint64_t)jint(pf, "racy", 0);
+    const struct jval *kept = jget(&v, "kept");
+    c->kept = kept != NULL && kept->t == J_BOOL && kept->b;
     jsonr_free(&v);
     if (c->id != id) {
         belay_err_set(BELAY_ERR_CORRUPT, 0, "%s names checkpoint %ld", shown, c->id);
@@ -651,12 +653,12 @@ static int write_meta(const struct state *st, int dfd, const struct checkpoint *
     const int n = snprintf(buf, sizeof buf,
             "{\"id\":%ld,\"kind\":\"%s\",\"created_ns\":%lld,%s,\"entries\":%llu,"
             "\"raced\":%llu,\"unstable\":%llu,\"vanished\":%llu,\"provisional\":%s,\"excluded\":%llu,"
-            "\"prefilter\":{\"used\":%s,\"reference\":\"%s\",\"trusted\":%llu,\"racy\":%llu,\"full_reason\":\"%s\"}}\n",
+            "\"prefilter\":{\"used\":%s,\"reference\":\"%s\",\"trusted\":%llu,\"racy\":%llu,\"full_reason\":\"%s\"}%s}\n",
             c->id, c->kind, (long long)c->created_ns, scope, (unsigned long long)c->entries,
             (unsigned long long)c->raced, (unsigned long long)c->unstable, (unsigned long long)c->vanished,
             c->provisional ? "true" : "false", (unsigned long long)c->excluded,
             c->full ? "false" : "true", state_reference(c), (unsigned long long)c->trusted,
-            (unsigned long long)c->racy, why);
+            (unsigned long long)c->racy, why, c->kept ? ",\"kept\":true" : "");
     if (n < 0 || (size_t)n >= sizeof buf) {
         belay_err_set(BELAY_ERR_RANGE, 0, "%s: too large", shown);
         return -1;
@@ -792,6 +794,7 @@ int state_capture(struct state *st, const struct capture_req *req, struct checkp
     snprintf(c.kind, sizeof c.kind, "%s", req->kind);
     c.created_ns = now_ns();
     c.full = true;
+    c.kept = req->keep;
 
     /* Prefilter against the latest checkpoint unless a full walk is due
      * (Q8): asked for, none before, or N marks since the last full one. */
