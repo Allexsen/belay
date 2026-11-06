@@ -6,11 +6,12 @@ binary once on a small tree. A header or trailer has no optional key, and the
 wheel ships the binary of its own release, so these are the keys pybelay's
 strict parse requires, exactly and in order (PY-F*).
 
-    build_keys.py BELAY_BINARY [VENDORED_BINARY]
+    build_keys.py BELAY_BINARY [VENDORED_BINARY [LINUX_X86_64 LINUX_ARM64]]
 
 The key sets are read from BELAY_BINARY (it must run here); VENDORED_BINARY,
 when given, is the one the wheel carries (another platform's, of the same
-release). The version, from BELAY_BINARY --version, goes to _version.py in
+release). LINUX_X86_64 and LINUX_ARM64, for a macOS wheel, are the static
+binaries it carries for sandboxes (PY-D4). The version, from BELAY_BINARY --version, goes to _version.py in
 PEP 440 (PY-D2: v0.1.0-alpha.3 is 0.1.0a3; a development build's description
 is a local version, 0.1.0-alpha.2+95-ga2054b3-dirty is 0.1.0a2+95.ga2054b3.dirty,
 and +unknown stays +unknown).
@@ -46,6 +47,16 @@ def main():
     ven = os.path.abspath(sys.argv[2]) if len(sys.argv) > 2 else src
     dst = os.path.join(HERE, "pybelay", "_bin")
     os.makedirs(dst, exist_ok=True)
+    for old in os.listdir(dst):             # a Linux wheel built after a macOS one carries none
+        if old.startswith("linux-"):
+            os.unlink(os.path.join(dst, old))
+    if len(sys.argv) > 3:
+        for arch, path in zip(("x86_64", "arm64"), sys.argv[3:5]):
+            to = os.path.join(dst, "linux-" + arch)
+            shutil.copy2(path, to)
+            os.chmod(to, 0o755)
+            with open(path, "rb") as f, open(to + ".sha256", "w") as out:
+                out.write(hashlib.sha256(f.read()).hexdigest() + "\n")
     shutil.copy2(ven, os.path.join(dst, "belay"))
     os.chmod(os.path.join(dst, "belay"), 0o755)
     with open(ven, "rb") as f:

@@ -40,15 +40,16 @@ except ImportError as e:
     raise ImportError('pybelay.inspect needs Inspect: pip install "pybelay[inspect]" (%s)' % e) from None
 
 from . import _parsed, _policy
-from ._binary import checked_binary
+from ._binary import carried_binary, checked_binary
 from ._errors import BelayError, FormatError, UsageError
 from .reward import _NOT_KINDS
 
-__all__ = ["belay_record", "belay_verify", "pass_rate", "violations"]
+__all__ = ["belay_record", "belay_verify", "pass_rate", "violations", "errors"]
 
 _STORE_KEY = "pybelay.inspect"
 _ELF_MACHINES = {62: "x86_64", 183: "aarch64"}
 _ARCH_NAMES = {"arm64": "aarch64", "amd64": "x86_64"}
+_ASSET_NAMES = {"aarch64": "arm64"}
 
 _bundles: Optional[str] = None
 
@@ -71,34 +72,49 @@ def _spec_text(protect: Union[str, "os.PathLike[str]", Dict[str, Any]]) -> str:
         return f.read()
 
 
-def _binary_bytes(path: Optional[str]) -> bytes:
-    with open(path if path is not None else checked_binary(), "rb") as f:
+def _read(path: str) -> bytes:
+    with open(path, "rb") as f:
         return f.read()
 
 
-def _check_architecture(binary: bytes, system: str, machine: str, given: bool) -> None:
-    """A clear refusal for the case a sandbox can't say much about: a binary built
-    for something else. Only Linux sandboxes are checked; the wheel's binary is
-    the host's, and on a Mac a Linux container needs a Linux one."""
-    if system != "Linux":
-        return
+def _built_for(head: bytes) -> Optional[str]:
+    """The architecture of an ELF binary, by its header, or None for anything else."""
+    if head[:4] != b"\x7fELF":
+        return None
+    return _ELF_MACHINES.get(struct.unpack_from("<H", head, 18)[0], "an unknown architecture")
+
+
+def _pick_binary(given: Optional[str], system: str, machine: str) -> str:
+    """The path of the binary to copy into a sandbox that says it is `system`
+    `machine` (PY-I5). A wheel's own binary is the host's; a macOS wheel also
+    carries Linux ones, so a Mac's Linux containers are served either way."""
     machine = _ARCH_NAMES.get(machine, machine)
-    built = None
-    if binary[:4] == b"\x7fELF":
-        built = _ELF_MACHINES.get(struct.unpack_from("<H", binary, 18)[0], "an unknown architecture")
-    if built != machine:
-        what = "the binary given as binary=" if given else "this wheel's belay binary"
-        raise UsageError("%s is built for %s, and the sandbox is Linux %s. Download "
-                         "belay-<version>-linux-%s from belay's release and pass its path as binary=."
-                         % (what, built or "another system", machine, "arm64" if machine == "aarch64" else machine))
+    asset = _ASSET_NAMES.get(machine, machine)
+    get = "Download belay-<version>-linux-%s from belay's release and pass its path as binary=." % asset
+    if given is not None:
+        built = _built_for(_read(given)[:20])
+        if system == "Linux" and built != machine:
+            raise UsageError("the binary given as binary= is built for %s, and the sandbox is Linux %s. %s"
+                             % (built or "another system", machine, get))
+        return given
+    own = checked_binary()
+    if system != "Linux":
+        return own
+    built = _built_for(_read(own)[:20])
+    if built == machine:
+        return own
+    carried = carried_binary(asset)
+    if carried is not None:
+        return carried
+    raise UsageError("this wheel's belay binary is built for %s, and the sandbox is Linux %s. %s"
+                     % (built or "another system", machine, get))
 
 
 class _Scratch:
     """A directory in the sandbox holding the binary for one step, removed after."""
 
-    def __init__(self, env: SandboxEnvironment, binary: bytes, spec: str, user: Optional[str],
-                 timeout: int, given: bool):
-        self.env, self.binary, self.spec, self.user, self.timeout, self.given = env, binary, spec, user, timeout, given
+    def __init__(self, env: SandboxEnvironment, binary: bytes, spec: str, user: Optional[str], timeout: int):
+        self.env, self.binary, self.spec, self.user, self.timeout = env, binary, spec, user, timeout
         self.dir = "/tmp/.belay-" + uuid.uuid4().hex
         self.belay = self.dir + "/belay"
         self.protect = self.dir + "/protect.json"
@@ -112,11 +128,6 @@ class _Scratch:
         await self.env.write_file(path, contents, **({"user": self.user} if self.user else {}))
 
     async def __aenter__(self) -> "_Scratch":
-        u = await self.sh("uname", "-sm")
-        if not u.success:
-            raise UsageError("belay can't run in this sandbox: uname failed: %s" % u.stderr.strip())
-        system, _, machine = u.stdout.strip().partition(" ")
-        _check_architecture(self.binary, system, machine, self.given)
         await self.write(self.belay, self.binary)
         await self.write(self.protect, self.spec)
         r = await self.sh("chmod", "700", self.dir, self.belay)
@@ -138,6 +149,14 @@ class _Scratch:
         return _parsed(r.stdout.encode("utf-8", "surrogateescape"), r.returncode, r.stderr)[0]
 
 
+async def _sandbox_platform(env: SandboxEnvironment, user: Optional[str], timeout: int):
+    u = await env.exec(["uname", "-sm"], user=user, timeout=timeout)
+    if not u.success:
+        raise UsageError("belay can't run in this sandbox: uname failed: %s" % u.stderr.strip())
+    system, _, machine = u.stdout.strip().partition(" ")
+    return system, machine
+
+
 def _env(name: Optional[str]) -> SandboxEnvironment:
     try:
         return inspect_sandbox(name)
@@ -157,16 +176,18 @@ def belay_record(protect: Union[str, "os.PathLike[str]", Dict[str, Any]], *, sco
         scope: The directory to record, in the sandbox. By default its working directory.
         sandbox: The sandbox's name, when a sample has several. By default the default one.
         user: The sandbox user to run as. By default the sandbox's own.
-        binary: A static Linux belay on this machine, when the wheel's can't run in
-            the sandbox: on a Mac, or for another architecture. By default the wheel's.
+        binary: A static Linux belay on this machine, for a sandbox no binary in the
+            wheel suits. By default the wheel's own, or on a Mac the Linux one the
+            wheel carries for the sandbox's architecture.
         timeout: Seconds for each sandbox command.
     """
     spec = _spec_text(protect)
 
     async def solve(state: TaskState, generate: Generate) -> TaskState:
         env = _env(sandbox)
-        data = _binary_bytes(binary)
-        async with _Scratch(env, data, spec, user, timeout, binary is not None) as s:
+        path = _pick_binary(binary, *await _sandbox_platform(env, user, timeout))
+        data = _read(path)
+        async with _Scratch(env, data, spec, user, timeout) as s:
             root = scope
             if root is None:
                 root = (await s.sh("pwd")).stdout.strip()
@@ -183,12 +204,12 @@ def belay_record(protect: Union[str, "os.PathLike[str]", Dict[str, Any]], *, sco
             sha = lines[0]["sha256"]
             if hashlib.sha256(bundle).hexdigest() != sha:
                 raise FormatError("the bundle read from the sandbox doesn't hash to what belay printed")
-            path = os.path.join(_bundle_dir(), uuid.uuid4().hex)
-            with open(path, "wb") as f:
+            kept = os.path.join(_bundle_dir(), uuid.uuid4().hex)
+            with open(kept, "wb") as f:
                 f.write(bundle)
             state.store.set(_STORE_KEY, {
-                "scope": root, "sandbox": sandbox, "user": user, "binary": binary, "timeout": timeout,
-                "spec": spec, "bundle": path, "baseline_sha256": sha, "version": s.version,
+                "scope": root, "sandbox": sandbox, "user": user, "binary": path, "timeout": timeout,
+                "spec": spec, "bundle": kept, "baseline_sha256": sha, "version": s.version,
                 "binary_sha256": hashlib.sha256(data).hexdigest(),
                 "baseline_integrity": lines[0].get("baseline_integrity", []),
             })
@@ -209,11 +230,23 @@ def pass_rate() -> Metric:
     return compute
 
 
+def _unjudged(s: SampleScore) -> bool:
+    return s.score.answer == "error"
+
+
 @metric
 def violations() -> Metric:
-    """How many samples had a violation, or could not be judged."""
+    """How many samples had a violation."""
     def compute(scores: List[SampleScore]) -> int:
-        return sum(1 for s in scores if _to_float(s.score.value) < 1.0)
+        return sum(1 for s in scores if _to_float(s.score.value) < 1.0 and not _unjudged(s))
+    return compute
+
+
+@metric
+def errors() -> Metric:
+    """How many samples belay could not judge. They don't pass, and aren't violations."""
+    def compute(scores: List[SampleScore]) -> int:
+        return sum(1 for s in scores if _unjudged(s))
     return compute
 
 
@@ -232,7 +265,7 @@ def _score(recorded: Dict[str, Any], lines: List[dict], version: str) -> Score:
                   "belay_version": version, "binary_sha256": recorded["binary_sha256"], "error": None})
 
 
-@scorer(metrics=[pass_rate(), violations()])
+@scorer(metrics=[pass_rate(), violations(), errors()])
 def belay_verify(*, on_error: str = "fail_closed", after_scorers: bool = False) -> Scorer:
     """Judges the sandbox against what belay_record recorded, with the same spec.
 
@@ -245,7 +278,8 @@ def belay_verify(*, on_error: str = "fail_closed", after_scorers: bool = False) 
 
     Args:
         on_error: "fail_closed" scores a run belay could not judge as INCORRECT,
-            with the answer "error", so the eval's other scorers still run.
+            with the answer "error", so the eval's other scorers still run. It
+            counts in the errors metric, not in violations.
             "raise" fails the sample instead.
         after_scorers: True if the scorers before this one are known to leave
             the sandbox alone.
@@ -263,13 +297,14 @@ def belay_verify(*, on_error: str = "fail_closed", after_scorers: bool = False) 
                              "or pass after_scorers=True if they leave the sandbox alone." % sorted(state.scores))
         try:
             env = _env(recorded["sandbox"])
-            data = _binary_bytes(recorded["binary"])
+            # The binary belay_record chose: the sandbox isn't asked again, since the
+            # agent has had it since.
+            data = _read(recorded["binary"])
             if hashlib.sha256(data).hexdigest() != recorded["binary_sha256"]:
                 raise UsageError("the belay binary changed between belay_record and belay_verify")
             with open(recorded["bundle"], "rb") as f:
                 bundle = f.read()
-            async with _Scratch(env, data, recorded["spec"], recorded["user"], recorded["timeout"],
-                                recorded["binary"] is not None) as s:
+            async with _Scratch(env, data, recorded["spec"], recorded["user"], recorded["timeout"]) as s:
                 out = s.dir + "/bundle"
                 await s.write(out, bundle)
                 lines = await s.run("verify", "--scope", recorded["scope"], "--baseline", out,

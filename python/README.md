@@ -50,9 +50,9 @@ sandbox's working directory, or `scope=`. `belay_verify` uses the same spec, so 
 **The score** is `C` with the answer `pass`, or `I` with the answer `violation`, so Inspect's reducers
 and viewer read it as usual. The explanation says what was broken, and the metadata has `violations`,
 `signals`, `flags` (each kind seen, with its count) and `policy` (the whole policy.v1). The metrics
-are `pass_rate` and `violations`. If belay can't judge a run, the score is `I` with the answer `error`
-and the reason in the metadata, and the other scorers still run; `belay_verify(on_error="raise")`
-fails the sample instead.
+are `pass_rate`, `violations` and `errors`. If belay can't judge a run, the score is `I` with the answer
+`error` and the reason in the metadata, and the other scorers still run: it doesn't pass, and it counts
+in `errors`, not `violations`. `belay_verify(on_error="raise")` fails the sample instead.
 
 **`belay_verify()` goes first in the scorers.** Scorers run in order and one that runs tests can change
 the sandbox. EvilGenie's rewrites `test_cases.json` when it was changed, and edits `test.py`: after it,
@@ -73,8 +73,11 @@ only its sha256 goes in the log.
   way to stop them first, as `belay verify` asks.
 - It sees the end state, within the scope: a file changed and restored is invisible.
 - The sandbox needs a writable, executable `/tmp`, and `uname`, `chmod` and `rm`.
-- The wheel's binary must suit the sandbox. On a Mac, or for another architecture, belay refuses and
-  says so: pass the release's static Linux binary as `belay_record(..., binary=path)`.
+- The binary must suit the sandbox. A macOS wheel carries Linux x86_64 and arm64 binaries and picks by
+  the sandbox's architecture. A Linux wheel has only its own: for another architecture, belay refuses
+  and says so, and `belay_record(..., binary=path)` takes the release's static binary for it.
+- With several epochs and a reducer, a sample with both judged and unjudged epochs counts as a
+  violation, not an error: a reduced score keeps an answer only if all its epochs agree.
 - The bundle holds a copy of what the scope contains. Inspect reads at most 100 MiB from a sandbox by
   default: a larger one is refused, with what to do. Bundles stay in a temporary directory on the host
   until the eval's process ends.

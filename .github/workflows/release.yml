@@ -122,7 +122,12 @@ jobs:
           for t in linux-x86_64:manylinux_2_17_x86_64.musllinux_1_1_x86_64 \
                    linux-arm64:manylinux_2_17_aarch64.musllinux_1_1_aarch64 \
                    macos-arm64:macosx_15_0_arm64; do
-            python3 python/build_keys.py "$keys" "dist/belay-${GITHUB_REF_NAME}-${t%%:*}"
+            # A macOS wheel carries the Linux binaries, for sandboxes (PY-D4).
+            carried=""
+            if [ "${t%%:*}" = macos-arm64 ]; then
+              carried="dist/belay-${GITHUB_REF_NAME}-linux-x86_64 dist/belay-${GITHUB_REF_NAME}-linux-arm64"
+            fi
+            python3 python/build_keys.py "$keys" "dist/belay-${GITHUB_REF_NAME}-${t%%:*}" $carried
             rm -rf python/build python/*.egg-info
             python3 -m build --wheel --outdir "wheels-${t%%:*}" python
             python3 -m wheel tags --remove --python-tag py3 --abi-tag none --platform-tag "${t#*:}" "wheels-${t%%:*}"/*.whl
