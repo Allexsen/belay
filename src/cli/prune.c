@@ -625,7 +625,7 @@ static int prune(struct state *st, long days, long last, long from, const long *
         kept[i] = kept[i] || list[i].kept;
         if (kept[i]) p.n_kept++;
         /* WR-3: the checkpoint the next watch step diffs against; WR-15: only the watch's own */
-        const bool cursor = w.have && list[i].id == w.l.st.cursor;
+        const bool cursor = w.have && list[i].id == w.l.st.cursor && list[i].created_ns == w.l.st.cursor_ns;
         if (newest || kept[i] || in_age || in_last || from_on || cursor || (watch_only && !list[i].watch)) continue;
         p.goes[i] = true;
         p.n_goes++;

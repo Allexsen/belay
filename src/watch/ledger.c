@@ -116,7 +116,8 @@ static int read_all(const struct ledger *l, const char *name, char **buf, size_t
 /* ---- the state ---- */
 
 static void state_json(struct wsb *b, const struct wstate *s) {
-    wsb_f(b, "\"state\":{\"cursor\":%ld,\"list\":\"%s\",\"list_trouble\":", s->cursor, s->list);
+    wsb_f(b, "\"state\":{\"cursor\":%ld,\"cursor_ns\":%lld,\"list\":\"%s\",\"list_trouble\":", s->cursor,
+          (long long)s->cursor_ns, s->list);
     wsb_json(b, s->list_trouble);
     wsb_f(b, ",\"open\":[");
     for (size_t i = 0; i < s->n_open; i++)
@@ -153,6 +154,7 @@ static bool state_parse(const struct jval *line, struct wstate *s) {
     if (v == NULL || v->t != J_OBJ || jint(line, "belay_watch", 0) != LEDGER_VERSION) return false;
     memset(s, 0, sizeof *s);
     s->cursor = (long)jint(v, "cursor", -1);
+    s->cursor_ns = jint(v, "cursor_ns", 0);
     const char *list = jstr(v, "list");
     if (s->cursor < 0 || s->cursor > 999999999L || (list[0] != '\0' && strlen(list) != 64)) return false;
     for (const char *c = list; *c != '\0'; c++)

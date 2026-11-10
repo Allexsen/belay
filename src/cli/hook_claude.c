@@ -257,19 +257,28 @@ static void prune_daily(const char *scope, int dfd) {
     }
     if (fork() != 0) _exit(0);                  /* the grandchild is no one's to wait for */
     setsid();
-    const int log = openat(dfd, "prune.log", O_WRONLY | O_CREAT | O_TRUNC | O_NOFOLLOW | O_CLOEXEC, 0600);
     const int null = open("/dev/null", O_RDWR | O_CLOEXEC);
-    if (log == -1 || null == -1) _exit(0);
+    if (null == -1) _exit(0);
     dup2(null, 0);
     dup2(null, 1);
     dup2(null, 2);
-    FILE *sink = fdopen(null, "w"), *errs = fdopen(log, "w");
+    char *said = NULL;
+    size_t n = 0;
+    FILE *sink = fdopen(null, "w"), *errs = open_memstream(&said, &n);
     if (sink == NULL || errs == NULL) _exit(0);
     char *argv[] = { "belay", "prune", "--scope", (char *)scope, "--keep-days", "7", "--watch-only", NULL };
     const int rc = cli_main(7, argv, sink, errs);
-    if (rc != 0 && ftell(errs) == 0) fprintf(errs, "belay: prune exited %d\n", rc);
-    fflush(errs);
-    if (rc == 0) unlinkat(dfd, "prune.log", 0);
+    fclose(errs);
+    if (rc != 0) {
+        /* only a prune that failed leaves a log, and only once it has ended: its last line */
+        const char *line = said;
+        for (const char *p = said; p != NULL && *p != '\0'; p++)
+            if (*p == '\n' && p[1] != '\0') line = p + 1;
+        char text[400];
+        if (line == NULL || line[0] == '\0') snprintf(text, sizeof text, "belay: prune exited %d\n", rc);
+        else snprintf(text, sizeof text, "%.380s", line);
+        state_write_whole(dfd, "prune.log", text, strlen(text), "prune.log");
+    }
     _exit(0);
 }
 

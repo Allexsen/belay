@@ -28,8 +28,11 @@
 #define NS_PER_DAY (86400LL * 1000000000LL)
 
 void (*watch_stage_hook)(const char *stage) = NULL;
+int64_t (*watch_clock)(void) = NULL;
+long watch_second_ms = WATCH_SECOND_S * 1000;
 
 static int64_t now_ns(void) {
+    if (watch_clock != NULL) return watch_clock();
     struct timespec t;
     clock_gettime(CLOCK_REALTIME, &t);
     return (int64_t)t.tv_sec * 1000000000LL + t.tv_nsec;
@@ -487,15 +490,26 @@ static int do_step(struct wctx *x, const struct wop *op) {
     if (ledger_append(&x->l, "attempt", q->session, x->now, "", NULL) == -1) return -1;
 
     stage(x, "capturing");
+    /* the cursor's checkpoint, looked for before the capture: once it is
+     * gone its id is free, and the capture below could take it */
+    const long cursor = st->cursor;
+    bool have = false;
+    if (cursor != 0) {
+        struct checkpoint *list = NULL;
+        size_t n = 0;
+        if (state_list(&x->st, &list, &n) == -1) return -1;
+        for (size_t i = 0; i < n; i++)
+            if (list[i].id == cursor) have = list[i].created_ns == st->cursor_ns;
+        free(list);
+        have = have && state_check_manifest(&x->st, cursor) == 0;
+        belay_err_clear();
+    }
     const struct capture_req req = { "mark", true, false, 50, 0, false, true };
     struct checkpoint c;
     if (state_capture(&x->st, &req, &c) == -1) return -1;
     s->to = c.id;
     char at[6];
     hhmm(x->now, at);
-    const long cursor = st->cursor;
-    const bool have = cursor != 0 && state_checkpoint_exists(&x->st, cursor) == 1 && state_check_manifest(&x->st, cursor) == 0;
-    belay_err_clear();
     struct dtlist old = { 0 }, fresh = { 0 };
     bool have_old = list_in_force(&x->l, &old), have_fresh = false;
     int rc = -1;
@@ -535,6 +549,7 @@ static int do_step(struct wctx *x, const struct wop *op) {
     }
     /* the step is made: what it leaves in the state */
     st->cursor = c.id;
+    st->cursor_ns = c.created_ns;
     struct wkill *k = kill_of(st, q->session, false);
     if (k != NULL) k->n = 0;
     if (op->how == WSTEP_FINISH) {
@@ -1040,7 +1055,7 @@ int watch_run(const struct wreq *q, struct wsb *out) {
     snprintf(s.stage, sizeof s.stage, "starting");
     struct timespec t0;
     clock_gettime(CLOCK_MONOTONIC, &t0);
-    const long deadline = q->deadline_s * 1000, second = deadline + WATCH_SECOND_S * 1000;
+    const long deadline = q->deadline_s * 1000, second = deadline + watch_second_ms;
     bool went = false, open = true;
     int rc = 4;
     for (;;) {
