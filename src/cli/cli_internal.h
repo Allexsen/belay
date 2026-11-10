@@ -32,6 +32,17 @@ void cli_not_compared(FILE *out, const struct belay_manifest_header *hb, const s
 int  cmd_baseline(int argc, char **argv, FILE *out, FILE *err);
 int  cmd_watch(int argc, char **argv, FILE *out, FILE *err);
 int  cmd_hook(int argc, char **argv, FILE *out, FILE *err);
+
+/* The Claude Code adapter (hook_claude.c). What it reads of a hook's input:
+ * the top level of one JSON object, however deep its values are. `calls`:
+ * the ids of tool_calls, separated by a space, malloc'd or NULL. */
+struct hook_claude_in {
+    char session[97], call[97], agent[97], source[32], command[64], cwd[PATH_MAX];
+    bool notification;          /* the prompt is a background task's, not the user's */
+    char *calls;
+};
+int hook_claude_parse(const char *buf, size_t len, struct hook_claude_in *out);    /* 0, or -1 when it is not such an object */
+int hook_claude(const char *event, const char *scope, FILE *in, FILE *out);         /* always 0 */
 int  cmd_verify(int argc, char **argv, FILE *out, FILE *err);
 int  cmd_prune(int argc, char **argv, FILE *out, FILE *err);
 int  cmd_manifest(int argc, char **argv, FILE *out, FILE *err);

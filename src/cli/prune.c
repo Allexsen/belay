@@ -27,6 +27,7 @@
 #include <time.h>
 #include <unistd.h>
 
+#include "watch/ledger.h"
 #include "belay/error.h"
 #include "belay/manifest.h"
 #include "cli.h"
@@ -39,6 +40,7 @@
 struct object { char hex[65]; uint64_t size; bool marked; };
 
 void (*prune_between_passes)(void) = NULL;
+void (*prune_between_days)(void) = NULL;
 
 /* The store's objects and what the unlocked pass found. */
 struct marks { struct object *objects; size_t n; long upto; };
@@ -362,13 +364,214 @@ static void ranges(FILE *out, const struct checkpoint *list, const bool *pick, s
     }
 }
 
-static int prune(struct state *st, long days, long last, long from, const long *ids, size_t n_ids, bool dry, bool json,
-                 bool quiet, bool real, struct marks *m, FILE *out, FILE *err) {
+/* ---- the watch record (state-retention-watch.md) ---- */
+
+struct wplan {
+    struct ledger l;
+    bool have;                  /* there is a record that can be read */
+    bool unreadable;            /* WR-9: there is one, and no line of it parses: left whole */
+    char (*days)[11];
+    size_t n_days;
+    bool *day_goes;
+    char (*lists)[65];          /* list files no remaining line names (WR-5) */
+    size_t n_lists;
+    uint64_t bytes;
+    /* while a day is read */
+    const struct checkpoint *cps;
+    const bool *goes;
+    size_t n_cps;
+    bool remains;               /* a checkpoint the day names stays */
+    char (*named)[65];          /* the lists the remaining days' lines name */
+    size_t n_named, cap_named;
+    bool bad;
+};
+
+static bool cp_stays(const struct wplan *w, long id) {
+    for (size_t lo = 0, hi = w->n_cps; lo < hi;) {
+        const size_t mid = lo + (hi - lo) / 2;
+        if (w->cps[mid].id == id) return !w->goes[mid];
+        if (w->cps[mid].id < id) lo = mid + 1; else hi = mid;
+    }
+    return false;
+}
+
+static int wplan_names(void *ctx, const struct jval *line, const char *type) {
+    struct wplan *w = ctx;
+    if (strcmp(type, "step") == 0)
+        w->remains |= cp_stays(w, (long)jint(line, "from", 0)) || cp_stays(w, (long)jint(line, "to", 0));
+    return 0;
+}
+
+static int wplan_lists(void *ctx, const struct jval *line, const char *type) {
+    struct wplan *w = ctx;
+    (void)type;
+    const char *hex = jstr(jget(line, "state"), "list");
+    if (strlen(hex) != 64) return 0;
+    for (size_t i = 0; i < w->n_named; i++)
+        if (strcmp(w->named[i], hex) == 0) return 0;
+    if (w->n_named == w->cap_named) {
+        const size_t c = w->cap_named ? w->cap_named * 2 : 8;
+        char (*q)[65] = realloc(w->named, c * sizeof *q);
+        if (q == NULL) { w->bad = true; return 1; }
+        w->named = q;
+        w->cap_named = c;
+    }
+    memcpy(w->named[w->n_named++], hex, 65);
+    return 0;
+}
+
+static void wplan_size(const struct wplan *w, const char *name, uint64_t *bytes) {
+    struct stat s;
+    if (fstatat(w->l.dfd, name, &s, AT_SYMLINK_NOFOLLOW) == 0 && S_ISREG(s.st_mode)) *bytes += (uint64_t)s.st_size;
+}
+
+/* Which days of the record go with the checkpoints of this run (WR-4), and
+ * which list files then (WR-5). 0, or -1 with belay_err. */
+static int wplan_days(struct wplan *w, const struct checkpoint *cps, const bool *goes, size_t n) {
+    if (!w->have) return 0;
+    w->cps = cps;
+    w->goes = goes;
+    w->n_cps = n;
+    if (ledger_days(&w->l, &w->days, &w->n_days) == -1) return -1;
+    w->day_goes = calloc(w->n_days + 1, sizeof *w->day_goes);
+    if (w->day_goes == NULL) {
+        belay_err_set(BELAY_ERR_NOMEM, 0, "out of memory");
+        return -1;
+    }
+    for (size_t i = 0; i < w->n_days; i++) {
+        char name[40];
+        if (i + 1 == w->n_days) {               /* the newest day's two files are never removed (WR-5) */
+            if (ledger_read(&w->l, w->days[i], 0, wplan_lists, w) != 0) return -1;
+            continue;
+        }
+        w->remains = false;
+        if (ledger_read(&w->l, w->days[i], 0, wplan_names, w) != 0) return -1;
+        if (w->remains) {
+            if (ledger_read(&w->l, w->days[i], 0, wplan_lists, w) != 0) return -1;
+            continue;
+        }
+        w->day_goes[i] = true;
+        snprintf(name, sizeof name, "ledger-%s.ndjson", w->days[i]);
+        wplan_size(w, name, &w->bytes);
+        snprintf(name, sizeof name, "receipt-%s.txt", w->days[i]);
+        wplan_size(w, name, &w->bytes);
+    }
+    if (w->bad) {
+        belay_err_set(BELAY_ERR_NOMEM, 0, "out of memory");
+        return -1;
+    }
+    /* a list file no remaining line names, and that is not the one in force */
+    const int fd = dup(w->l.dfd);
+    DIR *d = fd == -1 ? NULL : fdopendir(fd);
+    if (d == NULL) {
+        if (fd != -1) close(fd);
+        belay_err_set(BELAY_ERR_IO, errno, "cannot list %s", w->l.dir);
+        return -1;
+    }
+    rewinddir(d);
+    struct dirent *e;
+    size_t cap = 0;
+    while ((e = readdir(d)) != NULL) {
+        const char *hex = e->d_name + 5;
+        if (strncmp(e->d_name, "list-", 5) != 0 || strlen(hex) != 64 || !all_hex(hex, 64)) continue;
+        bool named = strcmp(hex, w->l.st.list) == 0;
+        for (size_t i = 0; i < w->n_named && !named; i++) named = strcmp(w->named[i], hex) == 0;
+        if (named) continue;
+        if (w->n_lists == cap) {
+            cap = cap ? cap * 2 : 8;
+            char (*q)[65] = realloc(w->lists, cap * sizeof *q);
+            if (q == NULL) {
+                closedir(d);
+                belay_err_set(BELAY_ERR_NOMEM, 0, "out of memory");
+                return -1;
+            }
+            w->lists = q;
+        }
+        memcpy(w->lists[w->n_lists++], hex, 65);
+        wplan_size(w, e->d_name, &w->bytes);
+    }
+    closedir(d);
+    return 0;
+}
+
+/* WR-7: for each day its ledger file first and its receipt file after, then
+ * the list files. A receipt file whose ledger file is gone is read by
+ * nothing, so a crash between the two leaves valid state. */
+static int wplan_remove(struct wplan *w) {
+    for (size_t i = 0; i < w->n_days; i++) {
+        char name[40];
+        if (!w->day_goes[i]) continue;
+        snprintf(name, sizeof name, "ledger-%s.ndjson", w->days[i]);
+        if (unlinkat(w->l.dfd, name, 0) == -1 && errno != ENOENT) {
+            belay_err_set(BELAY_ERR_IO, errno, "cannot remove %s/%s", w->l.dir, name);
+            return -1;
+        }
+        if (prune_between_days != NULL) prune_between_days();
+        snprintf(name, sizeof name, "receipt-%s.txt", w->days[i]);
+        if (unlinkat(w->l.dfd, name, 0) == -1 && errno != ENOENT) {
+            belay_err_set(BELAY_ERR_IO, errno, "cannot remove %s/%s", w->l.dir, name);
+            return -1;
+        }
+    }
+    for (size_t i = 0; i < w->n_lists; i++) {
+        char name[80];
+        snprintf(name, sizeof name, "list-%s", w->lists[i]);
+        if (unlinkat(w->l.dfd, name, 0) == -1 && errno != ENOENT) {
+            belay_err_set(BELAY_ERR_IO, errno, "cannot remove %s/%s", w->l.dir, name);
+            return -1;
+        }
+    }
+    /* a receipt file a crash left without its ledger file: read by nothing */
+    const int fd = dup(w->l.dfd);
+    DIR *d = fd == -1 ? NULL : fdopendir(fd);
+    if (d == NULL) {
+        if (fd != -1) close(fd);
+        return 0;
+    }
+    rewinddir(d);
+    struct dirent *e;
+    while ((e = readdir(d)) != NULL) {
+        char ledger[40];
+        struct stat fs;
+        if (strlen(e->d_name) != 22 || strncmp(e->d_name, "receipt-", 8) != 0 || strcmp(e->d_name + 18, ".txt") != 0) continue;
+        snprintf(ledger, sizeof ledger, "ledger-%.10s.ndjson", e->d_name + 8);
+        if (fstatat(w->l.dfd, ledger, &fs, AT_SYMLINK_NOFOLLOW) == -1 && errno == ENOENT && strncmp(e->d_name + 8, w->l.day, 10) != 0)
+            unlinkat(w->l.dfd, e->d_name, 0);
+    }
+    closedir(d);
+    return fsync(w->l.dfd) == 0 ? 0 : (belay_err_set(BELAY_ERR_IO, errno, "cannot sync %s", w->l.dir), -1);
+}
+
+static void wplan_days_out(FILE *out, const struct wplan *w, bool json) {
+    bool first = true;
+    for (size_t i = 0; i < w->n_days; i++) {
+        if (!w->day_goes[i]) continue;
+        fprintf(out, json ? "%s\"%s\"" : "%s%s", first ? "" : json ? "," : ", ", w->days[i]);
+        first = false;
+    }
+}
+
+static void wplan_free(struct wplan *w) {
+    free(w->days);
+    free(w->day_goes);
+    free(w->lists);
+    free(w->named);
+    ledger_close(&w->l);
+}
+
+static int prune(struct state *st, long days, long last, long from, const long *ids, size_t n_ids, bool watch_only,
+                 bool dry, bool json, bool quiet, bool real, struct marks *m, FILE *out, FILE *err) {
     struct checkpoint *list = NULL;
     size_t n = 0;
     struct plan p = { 0 };
     int rc = 0;
     bool *kept = NULL;
+    struct wplan w;
+    memset(&w, 0, sizeof w);
+    w.l.dfd = -1;
+    if (ledger_open(st, false, &w.l) == -1) { rc = cli_failed(err); goto out; }
+    w.unreadable = w.l.unreadable;              /* WR-9: said, and left whole */
+    w.have = w.l.dfd != -1 && !w.l.unreadable && w.l.day[0] != '\0';
     if (st->cp_fd == -1 || state_list(st, &list, &n) == -1 || n == 0) {
         if (belay_err_code() != BELAY_OK) { rc = cli_failed(err); goto out; }
         if (n_ids > 0) {
@@ -378,7 +581,8 @@ static int prune(struct state *st, long days, long last, long from, const long *
             goto out;
         }
         if (json) fprintf(out, "{\"dry_run\":%s,\"removed\":0,\"remaining\":0,\"kept\":0,\"bytes\":0,\"store_objects\":0,"
-                               "\"store_temps\":0,\"store_bytes\":0,\"unfinished\":0,\"ids\":[],\"kept_ids\":[]}\n", real ? "false" : "true");
+                               "\"store_temps\":0,\"store_bytes\":0,\"unfinished\":0,\"ids\":[],\"kept_ids\":[],\"watch_days\":[],"
+                               "\"watch_bytes\":0}\n", real ? "false" : "true");
         else fputs("no checkpoints of the scope\n", out);
         goto out;
     }
@@ -420,7 +624,9 @@ static int prune(struct state *st, long days, long last, long from, const long *
         const bool from_on = from > 0 && list[i].id >= from;
         kept[i] = kept[i] || list[i].kept;
         if (kept[i]) p.n_kept++;
-        if (newest || kept[i] || in_age || in_last || from_on) continue;
+        /* WR-3: the checkpoint the next watch step diffs against; WR-15: only the watch's own */
+        const bool cursor = w.have && list[i].id == w.l.st.cursor;
+        if (newest || kept[i] || in_age || in_last || from_on || cursor || (watch_only && !list[i].watch)) continue;
         p.goes[i] = true;
         p.n_goes++;
         if (dir_bytes(st, list[i].id, &p.bytes) == -1) { rc = cli_failed(err); goto out; }
@@ -470,6 +676,7 @@ static int prune(struct state *st, long days, long last, long from, const long *
     p.bytes = p.bytes > p.grows ? p.bytes - p.grows : 0;
     m->upto = list[n - 1].id;
     if (store_temps(st, now, &p) == -1) { rc = cli_failed(err); goto out; }
+    if (wplan_days(&w, list, p.goes, n) == -1) { rc = cli_failed(err); goto out; }
     for (size_t i = 0; i < p.n_objects; i++)
         if (!p.objects[i].marked) {
             p.n_swept++;
@@ -513,6 +720,8 @@ static int prune(struct state *st, long days, long last, long from, const long *
                 goto out;
             }
         }
+        /* the record last (WR-7) */
+        if (w.have && wplan_remove(&w) == -1) { rc = cli_failed(err); goto out; }
     }
     if (quiet) goto out;
     if (json) {
@@ -522,7 +731,9 @@ static int prune(struct state *st, long days, long last, long from, const long *
         ranges(out, list, p.goes, n, true);
         fputs("],\"kept_ids\":[", out);
         ranges(out, list, kept, n, true);
-        fputs("]}\n", out);
+        fputs("],\"watch_days\":[", out);
+        wplan_days_out(out, &w, true);
+        fprintf(out, "],\"watch_bytes\":%" PRIu64 "}\n", w.bytes);
     } else {
         const char *verb = dry ? "would remove" : "removed";
         fprintf(out, "%s %zu of %zu checkpoints, %" PRIu64 " bytes", verb, p.n_goes, n, p.bytes);
@@ -539,8 +750,18 @@ static int prune(struct state *st, long days, long last, long from, const long *
             ranges(out, list, kept, n, false);
             fputc('\n', out);
         }
+        size_t wd = 0;
+        for (size_t i = 0; i < w.n_days; i++) wd += w.day_goes[i];
+        if (wd > 0 || w.n_lists > 0) {
+            fprintf(out, "%s %zu day%s of the watch record, %" PRIu64 " bytes", verb, wd, wd == 1 ? "" : "s", w.bytes);
+            if (wd > 0) fputs(": ", out);
+            wplan_days_out(out, &w, false);
+            fputc('\n', out);
+        }
+        if (w.unreadable) fputs("the watch record cannot be read: it is left whole\n", out);
     }
 out:
+    wplan_free(&w);
     free(list);
     free(kept);
     free(p.goes);
@@ -561,7 +782,7 @@ static bool number(const char *s, long *v) {
 int cmd_prune(int argc, char **argv, FILE *out, FILE *err) {
     const char *scope = NULL, *docker = NULL;
     long days = -1, last = -1, from = 0;
-    bool dry = false, json = false;
+    bool dry = false, json = false, watch_only = false;
     struct marks m = { 0 };
     long *ids = calloc((size_t)argc, sizeof *ids);
     size_t n_ids = 0;
@@ -571,6 +792,7 @@ int cmd_prune(int argc, char **argv, FILE *out, FILE *err) {
         const char *a = argv[i];
         if (!strcmp(a, "--dry-run")) { dry = true; continue; }
         if (!strcmp(a, "--json")) { json = true; continue; }
+        if (!strcmp(a, "--watch-only")) { watch_only = true; continue; }
         const bool known = !strcmp(a, "--scope") || !strcmp(a, "--docker") || !strcmp(a, "--keep-days") ||
                            !strcmp(a, "--keep-last") || !strcmp(a, "--keep-id") || !strcmp(a, "--keep-from");
         char why[256];
@@ -616,13 +838,13 @@ int cmd_prune(int argc, char **argv, FILE *out, FILE *err) {
     /* The long read, with no lock: nothing is written, and captures go on. */
     rc = cli_open_scope(scope, docker, false, &st, err);
     if (rc) goto done;
-    rc = prune(&st, days, last, from, ids, n_ids, true, json, !dry, !dry, &m, out, err);
+    rc = prune(&st, days, last, from, ids, n_ids, watch_only, true, json, !dry, !dry, &m, out, err);
     state_close(&st);
     if (rc || dry || m.upto == 0) goto done;    /* nothing there: no state made for it */
     if (prune_between_passes != NULL) prune_between_passes();
     rc = cli_open_scope(scope, docker, true, &st, err);
     if (rc) goto done;
-    rc = prune(&st, days, last, from, ids, n_ids, false, json, false, true, &m, out, err);
+    rc = prune(&st, days, last, from, ids, n_ids, watch_only, false, json, false, true, &m, out, err);
     state_close(&st);
 done:
     free(m.objects);
