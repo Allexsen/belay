@@ -141,6 +141,10 @@ def run():
     check("a user's pattern has no limits", cls("node_modules/a/x.pem", user=["**/*.pem"]), dt)
     check("a user's pattern flags a directory", cls(".env", "d", user=[".env"]), dt)
 
+    check("the top: ** matches no components", M.classify_top([b"**"]), dt + (None,))
+    check("the top: * needs a name", M.classify_top([b"*", b".*", b"*.", b"**/*", b"x/**"]), None)
+    check("the top is counted by **", M.user_count(b"**", tree_of({"a/b": "f"})), 3)
+
     # DT-2 to DT-4.
     pd = model.parse_donttouch
     check("valid", pd(b"# c\n\nmigrations\n**/*.lock\n"), ("ok", [b"migrations", b"**/*.lock"]))
