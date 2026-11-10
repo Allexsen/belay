@@ -62,5 +62,8 @@ extern void (*watch_stage_hook)(const char *stage);
  * limit in milliseconds past the deadline. */
 extern int64_t (*watch_clock)(void);
 extern long watch_second_ms;
+/* Test hook: the supervisor never answers a request to commit, so the
+ * deadline kills a worker that is waiting for the answer. */
+extern bool watch_withhold_go;
 
 #endif

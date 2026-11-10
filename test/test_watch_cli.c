@@ -115,6 +115,7 @@ static void fresh(void) {
     ledger_before_line = NULL;
     watch_clock = NULL;
     watch_second_ms = WATCH_SECOND_S * 1000;
+    watch_withhold_go = false;
     prune_between_days = NULL;
 }
 
@@ -435,6 +436,39 @@ TEST(a_step_past_its_deadline_is_killed_said_and_backed_off_after_three) {
     ASSERT_EQ_INT(1, (int)count(receipt(), "A d.txt"));
 }
 
+TEST(a_step_that_finishes_ends_the_run_of_kills) {
+    started("s1");
+    sh("echo d > '%s/d.txt'", g_scope);
+    for (int round = 0; round < 2; round++) {
+        watch_stage_hook = stall_capturing;
+        for (int i = 0; i < 2; i++) {
+            ASSERT_EQ_INT(4, step("s1", "--deadline", "1", NULL));
+            ASSERT_EQ_STR("belay: " RED " could not record in 1 s: capturing\n", g_out);
+        }
+        watch_stage_hook = NULL;
+        ASSERT_EQ_INT(0, step("s1", NULL));                             /* four kills in all, never three in a row */
+        HAS_NOT(g_out, "not recording");
+    }
+    ASSERT_EQ_INT(1, (int)count(receipt(), "A d.txt"));
+}
+
+/* TM-2: "go" or a kill, never both. A worker that asked and was killed
+ * instead of answered has written nothing. */
+TEST(a_worker_killed_while_it_waits_for_the_answer_has_recorded_nothing) {
+    started("s1");
+    sh("echo w > '%s/w.txt'", g_scope);
+    watch_withhold_go = true;
+    const size_t steps = count(ledger(), "\"t\":\"step\"");
+    ASSERT_EQ_INT(4, step("s1", "--deadline", "1", NULL));
+    HAS(g_out, "belay: " RED " could not record in 1 s: ");
+    watch_withhold_go = false;
+    ASSERT_EQ_INT((int)steps, (int)count(ledger(), "\"t\":\"step\""));
+    HAS_NOT(receipt(), "A w.txt");
+    ASSERT_EQ_INT(0, step("s1", NULL));                                 /* said lost, and so still there to record */
+    HAS(g_out, "belay: outside tool calls: 1 change: w.txt added\n");
+    ASSERT_EQ_INT(1, (int)count(receipt(), "A w.txt"));
+}
+
 TEST(a_lock_that_is_not_free_by_the_deadline_is_a_line) {
     started("s1");
     sh("echo l > '%s/l.txt'", g_scope);
@@ -687,6 +721,16 @@ TEST(prune_takes_a_days_files_with_its_checkpoints_and_never_the_newest_days) {
     ASSERT_EQ_STR("belay: outside tool calls: 1 change: after added\n", g_out);
     HAS_NOT(receipt(), "A day1");
     HAS(receipt(), "A day2");
+    /* WR-5: the newest day's files stay even when its lines name no checkpoint: they hold the state */
+    two_days();
+    g_now += 86400LL * 1000000000LL;
+    belay("watch", "mark", "--scope", g_scope, "--session", "s1", "--name", "p", NULL);
+    ASSERT_EQ_STR("ledger-2026-11-03.ndjson\n", out_of("ls '%s'/scopes/*/watch | grep '^ledger-' | tail -1", g_state));
+    ASSERT_EQ_INT(0, belay("prune", "--scope", g_scope, "--keep-last", "1", NULL));
+    ASSERT_EQ_STR("ledger-2026-11-02.ndjson\nledger-2026-11-03.ndjson\n", out_of("ls '%s'/scopes/*/watch | grep '^ledger-'", g_state));
+    sh("echo 4 > '%s/later'", g_scope);
+    ASSERT_EQ_INT(0, step("s1", NULL));
+    ASSERT_EQ_STR("belay: outside tool calls: 1 change: later added\n", g_out);
     /* a scope with no record is pruned as before, and says nothing of one */
     fresh();
     belay("mark", "--scope", g_scope, NULL);
@@ -965,6 +1009,8 @@ int main(void) {
     RUN(a_record_that_cannot_be_read_is_said_not_passed_over);
     RUN(a_worker_that_dies_at_any_stage_loses_nothing_and_repeats_nothing);
     RUN(a_step_past_its_deadline_is_killed_said_and_backed_off_after_three);
+    RUN(a_step_that_finishes_ends_the_run_of_kills);
+    RUN(a_worker_killed_while_it_waits_for_the_answer_has_recorded_nothing);
     RUN(a_lock_that_is_not_free_by_the_deadline_is_a_line);
     RUN(no_word_after_go_is_said_and_the_step_is_not_killed);
     RUN(steps_at_the_same_time_count_each_change_once);
