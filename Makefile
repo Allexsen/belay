@@ -201,6 +201,11 @@ $(BUILD)/fuzz/%: test/fuzz/%.c $(CORE_SRC)
 	@mkdir -p $(dir $@)
 	$(CC) -fsanitize=fuzzer,address,undefined -fno-sanitize-recover=undefined -g -O1 $(WARN) $(INC) -o $@ $< $(CORE_SRC)
 
+# The watch record's readers take the CLI's sources too (the ledger sits on the state directory).
+$(BUILD)/fuzz/fuzz_watch: test/fuzz/fuzz_watch.c $(CORE_SRC) $(CLI_SRC) src/utils.c $(VERSION_H)
+	@mkdir -p $(dir $@)
+	$(CC) -fsanitize=fuzzer,address,undefined -fno-sanitize-recover=undefined -g -O1 $(WARN) $(INC) -o $@ $< $(CORE_SRC) $(CLI_SRC) src/utils.c
+
 # Baseline timing (§10: measured, never a target). Not part of `check`.
 BENCH_SRC	= $(wildcard bench/*.c)
 BENCH_BIN	= $(BENCH_SRC:bench/%.c=$(BUILD)/bench/%)

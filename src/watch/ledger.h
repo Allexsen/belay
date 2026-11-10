@@ -98,6 +98,9 @@ int ledger_days(const struct ledger *l, char (**days)[11], size_t *n);
 typedef int (*ledger_line_fn)(void *ctx, const struct jval *line, const char *type);
 int ledger_read(const struct ledger *l, const char *day, long from, ledger_line_fn fn, void *ctx);
 
+/* A line's running state into *s; false when it has none that belay wrote. */
+bool ledger_state(const struct jval *line, struct wstate *s);
+
 /* A step line into *s (wstep_free it). 0, or -1 when it is not one. */
 int ledger_step(const struct jval *line, struct wstep *s);
 
