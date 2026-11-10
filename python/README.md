@@ -16,8 +16,14 @@ from v0.1.0-alpha.5 on, not on PyPI. It needs Python 3.10 or later. This is the 
 release has one for Linux arm64 and one for macOS arm64:
 
 ```sh
-pip install "pybelay[inspect] @ https://github.com/Allexsen/belay/releases/download/v0.1.0-alpha.6/pybelay-0.1.0a6-py3-none-manylinux_2_17_x86_64.musllinux_1_1_x86_64.whl"
+pip install "pybelay[inspect] @ https://github.com/Allexsen/belay/releases/download/v0.1.0-alpha.6/pybelay-0.1.0a6-py3-none-manylinux_2_17_x86_64.musllinux_1_1_x86_64.whl" "agent-client-protocol<1"
 ```
+
+The second argument works around a break in Inspect, not in belay: Inspect needs
+`agent-client-protocol` without an upper bound, and that package's 1.0.0 (9 November 2026) removed a
+module Inspect imports, so every eval fails with `No module named 'acp.helpers'`. If you installed
+without it, `pip install "agent-client-protocol<1"` repairs the environment. Drop it once an Inspect
+release fixes this.
 
 Nothing is needed in the sandbox image or on the Docker host: pybelay copies its own binary in.
 
