@@ -31,6 +31,7 @@ struct wkill { char session[WATCH_ID_MAX + 1]; long n; };
 
 struct wstate {
     long cursor;                        /* WR-2: the checkpoint the next step diffs against; 0: none */
+    int64_t cursor_ns;                  /* when it was made: an id is used again once its checkpoint is gone */
     char list[65];                      /* the don't-touch list in force, by sha256; "": none */
     char list_trouble[200];             /* TL-9 or TL-10 while it lasts; "": none */
     struct wcall open[W_OPEN_MAX];

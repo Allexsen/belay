@@ -54,8 +54,13 @@ int watch_summary(const struct wreq *q, const char *name, struct wsb *out);
 bool watch_too_wide(const char *resolved);
 
 /* Test hooks, NULL in the binary: called in the worker when it reaches a
- * stage ("capturing", "matching", "rendering", "committing"), so a test can
+ * stage ("waiting for the lock", "capturing", "matching", "rendering",
+ * "committing" before it asks, "writing the record" after the answer), so a test can
  * stall or kill it there. */
 extern void (*watch_stage_hook)(const char *stage);
+/* Test hooks: the clock a step reads (NULL: the system's), and the second
+ * limit in milliseconds past the deadline. */
+extern int64_t (*watch_clock)(void);
+extern long watch_second_ms;
 
 #endif
