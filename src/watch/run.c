@@ -262,7 +262,7 @@ static bool list_in_force(const struct ledger *l, struct dtlist *list) {
  * in this step), or the list in force could not be read back; the state takes the new list, or keeps the old one and
  * the trouble. 0, or -1 with belay_err. */
 static int donttouch_step(struct wctx *x, long id, struct wstep *s, bool have_old, struct dtlist *fresh, bool *have_fresh) {
-    char *bytes = NULL, why[160] = "", trouble[200] = "";
+    char *bytes = NULL, why[96] = "", trouble[200] = "";
     size_t len = 0;
     struct wstate *st = &x->l.st;
     *have_fresh = false;

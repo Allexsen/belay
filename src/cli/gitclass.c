@@ -191,7 +191,7 @@ int gitclass(const char *scope, const char *const *paths, const size_t *lens, co
     char *lta[] = { "git", "-c", "core.fsmonitor=false", "-C", top, "ls-tree", "-r", "-z", "--name-only", "HEAD", NULL };
     if (run_git(lta, -1, &lt, err, sizeof err) != 0) lt.n = 0;          /* no commit yet: nothing in HEAD */
     if (split(&lf, &tr, &ntr, &ctr) == -1 || split(&lt, &tr, &ntr, &ctr) == -1) goto done;
-    qsort(tr, ntr, sizeof *tr, cmp);
+    if (ntr > 0) qsort(tr, ntr, sizeof *tr, cmp);         /* none tracked: no array to sort */
 
     const size_t pl = strlen(prefix);
     for (size_t i = 0; i < n; i++) {
@@ -265,7 +265,7 @@ int gitclass(const char *scope, const char *const *paths, const size_t *lens, co
         if (r == 0 || r == 1) {
             nig = 0;
             if (split(&ci, &ig, &nig, &cig) == -1) goto done;
-            qsort(ig, nig, sizeof *ig, cmp);
+            if (nig > 0) qsort(ig, nig, sizeof *ig, cmp);
             for (size_t a = 0; a < nask; a++) {
                 const size_t i = ask[a];
                 full.n = 0;

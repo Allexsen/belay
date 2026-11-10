@@ -206,9 +206,10 @@ static bool in_dependency(const char *path, size_t len) {
 }
 
 static bool is_newdir(const struct flagctx *x, const char *path, size_t len) {
-    const char *sl = memrchr(path, '/', len);
-    if (sl == NULL) return false;
-    const size_t dl = (size_t)(sl - path);
+    size_t dl = len;
+    while (dl > 0 && path[dl - 1] != '/') dl--;
+    if (dl == 0) return false;
+    dl--;
     for (size_t i = x->n_newdirs; i-- > 0;)        /* the parent is among the latest: records come in path order */
         if (strlen(x->newdirs[i]) == dl && memcmp(x->newdirs[i], path, dl) == 0) return true;
     return false;
