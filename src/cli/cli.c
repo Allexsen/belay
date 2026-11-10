@@ -493,6 +493,8 @@ static int mode_of(void *ctx, int side, const char *path, size_t len, struct rec
     if (c->got != 1 || pathcmp(c->e.path, c->e.path_len, path, len) != 0) return -1;
     m->mode = c->e.mode;
     m->has_caps = c->e.has_caps;
+    m->has_iflags = c->e.has_iflags;
+    m->iflags = c->e.iflags;
     return 0;
 }
 

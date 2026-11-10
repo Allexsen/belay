@@ -13,6 +13,8 @@
 #include "belay/manifest.h"
 #include "belay/error.h"
 #include "policy/policy.h"
+#include "capture/fsops.h"
+#include "schema/iflags.h"
 
 #include <dirent.h>
 #include <stdbool.h>
@@ -678,6 +680,58 @@ TEST(the_test_file_rule_keeps_to_tests) {
     for (const char *const *p = no; *p != NULL; p++) NONE("touches_tests", *p);
 }
 
+/* test/expect/inode-flags.md, the rule itself, row by row and by hand.
+ * LOCK is a locking flag of this platform (immutable or append-only), OTHER
+ * one that is not (Linux: ext4's hashed-index flag). The policy model runs
+ * the same rows through verify on a real filesystem (make policy-model). */
+TEST(inode_flag_changes_that_count_are_the_pins) {
+    const uint64_t LOCK = belay_iflags_locking & (~belay_iflags_locking + 1), OTHER = 0x1000, BASE = 0x80000;
+    REQUIRE(LOCK != 0 && (OTHER & belay_iflags_locking) == 0 && (BASE & belay_iflags_locking) == 0);
+    const struct iflags_side none = { false, 0, false, false, 0 };
+#define SIDE(dir, flags) ((struct iflags_side){ true, (dir) ? 2 : 1, dir, true, flags })    /* 1: a file, 2: a directory */
+#define UNREAD(dir) ((struct iflags_side){ true, (dir) ? 2 : 1, dir, false, 0 })
+#define LINK ((struct iflags_side){ true, 3, false, false, 0 })                             /* a symlink: never any flags */
+#define COUNTS(b, a) iflags_change_counts(&(struct iflags_side){ (b).present, (b).type, (b).dir, (b).has, (b).flags }, \
+                                          &(struct iflags_side){ (a).present, (a).type, (a).dir, (a).has, (a).flags })
+    /* IF-2: a directory at both ends, only a locking flag set or cleared */
+    ASSERT_TRUE(!COUNTS(SIDE(true, BASE), SIDE(true, BASE | OTHER)));
+    ASSERT_TRUE(!COUNTS(SIDE(true, BASE | OTHER), SIDE(true, BASE)));
+    ASSERT_TRUE(COUNTS(SIDE(true, BASE), SIDE(true, BASE | LOCK)));
+    ASSERT_TRUE(COUNTS(SIDE(true, BASE | LOCK), SIDE(true, BASE)));
+    ASSERT_TRUE(COUNTS(SIDE(true, BASE), SIDE(true, BASE | LOCK | OTHER)));
+    ASSERT_TRUE(!COUNTS(SIDE(true, BASE | LOCK), SIDE(true, BASE | LOCK | OTHER)));     /* the lock itself unchanged */
+    ASSERT_TRUE(!COUNTS(SIDE(true, BASE), SIDE(true, BASE)));
+    /* IF-3: an entry added or removed, only when it holds a locking flag */
+    ASSERT_TRUE(!COUNTS(none, SIDE(false, BASE)));
+    ASSERT_TRUE(!COUNTS(none, SIDE(true, BASE | OTHER)));
+    ASSERT_TRUE(COUNTS(none, SIDE(false, BASE | LOCK)));
+    ASSERT_TRUE(COUNTS(none, SIDE(true, BASE | LOCK)));
+    ASSERT_TRUE(COUNTS(SIDE(false, BASE | LOCK), none));
+    ASSERT_TRUE(!COUNTS(SIDE(false, BASE | OTHER), none));
+    ASSERT_TRUE(!COUNTS(none, UNREAD(false)));
+    /* IF-4: any other entry at both ends, every change */
+    ASSERT_TRUE(COUNTS(SIDE(false, BASE), SIDE(false, BASE | OTHER)));
+    ASSERT_TRUE(COUNTS(SIDE(false, BASE | OTHER), SIDE(false, BASE)));
+    ASSERT_TRUE(!COUNTS(SIDE(false, BASE), SIDE(false, BASE)));
+    /* IF-4: a type change is judged as before the pin -- not under IF-2,
+     * and a file replaced by a symlink (which has no flags) still counts */
+    ASSERT_TRUE(COUNTS(SIDE(false, BASE), SIDE(true, BASE | OTHER)));
+    ASSERT_TRUE(COUNTS(SIDE(true, BASE | OTHER), SIDE(false, BASE)));
+    ASSERT_TRUE(!COUNTS(SIDE(false, BASE), SIDE(true, BASE)));
+    ASSERT_TRUE(COUNTS(SIDE(false, BASE), LINK));
+    ASSERT_TRUE(COUNTS(LINK, SIDE(true, BASE)));
+    /* IF-5: one type at both ends, flags read on one side only, never count */
+    ASSERT_TRUE(!COUNTS(UNREAD(false), SIDE(false, BASE | LOCK)));
+    ASSERT_TRUE(!COUNTS(SIDE(false, BASE | LOCK), UNREAD(false)));
+    ASSERT_TRUE(!COUNTS(UNREAD(true), SIDE(true, BASE | LOCK)));
+    ASSERT_TRUE(!COUNTS(UNREAD(false), UNREAD(false)));
+    ASSERT_TRUE(!COUNTS(none, none));
+#undef SIDE
+#undef UNREAD
+#undef LINK
+#undef COUNTS
+}
+
 /* Decision 171: a file added gets an iflags record only when its flags
  * lock it (immutable, append-only) -- never for a filesystem's own (ext4
  * sets the extents flag on every new file). Locking one takes privilege,
@@ -818,6 +872,7 @@ int main(void) {
     RUN(a_side_never_looked_at_is_not_counted);
     RUN(a_path_not_utf8_reads_as_the_receipt_writes_it);
     RUN(the_test_file_rule_keeps_to_tests);
+    RUN(inode_flag_changes_that_count_are_the_pins);
     RUN(an_added_file_s_own_iflags_are_no_privilege);
     RUN(unverifiable_reasons_come_in_the_pinned_order);
     RUN(verify_refuses_what_it_must_never_judge);

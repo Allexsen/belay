@@ -3,6 +3,7 @@
 
 #include "util/jsonr.h"
 #include "cli/gitclass.h"
+#include "schema/iflags.h"
 
 #include "belay/error.h"
 #include "belay/json.h"
@@ -11,6 +12,7 @@
 #include <stdarg.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/stat.h>
 
 /* Rendered lines, kept until the trailer is read: the heading comes first. */
 struct lines { char **v; size_t n, cap, more; };
@@ -173,12 +175,23 @@ static void privilege(struct sb *b, const struct jval *r, const char *path, size
                       const struct receipt_opts *o) {
     const struct jval *ch = jget(r, "changed");
     const char *outcome = jstr(r, "outcome");
-    const bool sides = has(ch, "mode") || strcmp(outcome, "added") == 0 || strcmp(outcome, "removed") == 0 ||
-                       strcmp(outcome, "type_changed") == 0;
+    const bool one_side = strcmp(outcome, "added") == 0 || strcmp(outcome, "removed") == 0;
+    const bool sides = has(ch, "mode") || has(ch, "iflags") || one_side || strcmp(outcome, "type_changed") == 0;
+    bool iflags_known = false, iflags_count = false;    /* by test/expect/inode-flags.md */
     if (sides && o->mode != NULL && path != NULL) {
-        struct receipt_meta m[2] = { { 0, false }, { 0, false } };
+        struct receipt_meta m[2] = { { 0, false, false, 0 }, { 0, false, false, 0 } };
         bool on[2];
         for (int s = 0; s < 2; s++) on[s] = o->mode(o->mode_ctx, s, path, len, &m[s]) == 0;
+        /* Inode flags: a record that lists them has both sides' (a side
+         * without them is `unknown`, never `changed`); an entry added or
+         * removed has its own. Where the lookup gives none, the record is
+         * believed, as before. */
+        if (one_side ? (on[0] != on[1]) : (on[0] && on[1] && m[0].has_iflags && m[1].has_iflags)) {
+            const struct iflags_side sb = { on[0], (int)(m[0].mode & S_IFMT), S_ISDIR(m[0].mode), m[0].has_iflags, m[0].iflags },
+                                     sa = { on[1], (int)(m[1].mode & S_IFMT), S_ISDIR(m[1].mode), m[1].has_iflags, m[1].iflags };
+            iflags_known = true;
+            iflags_count = iflags_change_counts(&sb, &sa);
+        }
         const uint32_t x0 = on[0] ? m[0].mode & 07000 : 0, x1 = on[1] ? m[1].mode & 07000 : 0;
         if (x0 != x1) {
             static const struct { uint32_t bit; const char *name; } B[] = {
@@ -195,7 +208,10 @@ static void privilege(struct sb *b, const struct jval *r, const char *path, size
             sbf(b, "%scapabilities %s", b->n ? ", " : "", on[1] && m[1].has_caps ? "set" : "removed");
     }
     if (has(ch, "caps")) sbf(b, "%scapabilities changed", b->n ? ", " : "");
-    if (has(ch, "iflags")) sbf(b, "%sinode flags changed", b->n ? ", " : "");
+    if (has(ch, "iflags") && (!iflags_known || iflags_count)) sbf(b, "%sinode flags changed", b->n ? ", " : "");
+    /* an entry that came or went holding immutable or append-only (IF-3, IF-8) */
+    if (one_side && iflags_known && iflags_count)
+        sbf(b, "%sinode flags %s", b->n ? ", " : "", strcmp(outcome, "added") == 0 ? "set" : "removed");
 }
 
 /* A count under a name -- an ignored top-level directory, or a repository's

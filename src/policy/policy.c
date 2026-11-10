@@ -14,6 +14,7 @@
 #include "policy/jw.h"
 #include "policy/pkgdb.h"
 #include "policy/pytests.h"
+#include "schema/iflags.h"
 #include "schema/policy_schema.h"
 #include "util/jsonr.h"
 
@@ -452,6 +453,16 @@ static const char *entry_flag_names(const struct belay_entry *e, const char **ou
     return NULL;
 }
 
+/* An entry as one side of an inode-flag comparison (schema/iflags.h). */
+static struct iflags_side iflags_side_of(const struct belay_entry *e) {
+    if (e == NULL) return (struct iflags_side){ false, 0, false, false, 0 };
+    return (struct iflags_side){ true, (int)e->type, e->type == BELAY_T_DIR, e->has_iflags, e->iflags };
+}
+static bool iflags_counts(const struct belay_entry *b, const struct belay_entry *a) {
+    const struct iflags_side sb = iflags_side_of(b), sa = iflags_side_of(a);
+    return iflags_change_counts(&sb, &sa);
+}
+
 static const char *base_name(const char *p, size_t n, size_t *bl) {
     size_t i = n;
     while (i > 0 && p[i - 1] != '/') i--;
@@ -483,9 +494,12 @@ static void protected(struct state *s, const char *p, size_t n, const struct bel
         if (r->modes & PROTECT_NO_CREATE) read_after = read_after || ma;
         if (exact) read_after = true;
         if (unknown) continue;
+        /* `iflags` in `changed` only when the change counts (inode-flags
+         * IF-6): a directory that grew is no write to it. */
         const bool priv = d != NULL && strcmp(outcome, "metadata_only") == 0 &&
                           (has_str(jget(&d->v, "changed"), "mode") || has_str(jget(&d->v, "changed"), "uid") ||
-                           has_str(jget(&d->v, "changed"), "gid") || has_str(jget(&d->v, "changed"), "iflags") ||
+                           has_str(jget(&d->v, "changed"), "gid") ||
+                           (has_str(jget(&d->v, "changed"), "iflags") && iflags_counts(b, a)) ||
                            has_str(jget(&d->v, "changed"), "caps") || has_str(jget(&d->v, "changed"), "xattrs"));
         if ((r->modes & PROTECT_NO_WRITE) && mb && a != NULL && !wrote &&
             (strcmp(outcome, "modified") == 0 || strcmp(outcome, "type_changed") == 0 || priv)) {
@@ -757,12 +771,11 @@ static void privilege(struct state *s, const char *p, size_t n, const struct bel
     char ib[32] = "none", ia[32] = "none";
     if (b != NULL && b->has_iflags) snprintf(ib, sizeof ib, "%llu", (unsigned long long)b->iflags);
     if (a != NULL && a->has_iflags) snprintf(ia, sizeof ia, "%llu", (unsigned long long)a->iflags);
-    /* a file added or removed: its iflags only when they lock it -- a
-     * filesystem's own on every new file (ext4's extents) are no privilege
-     * (decision 171) */
-    const struct belay_entry *one = b == NULL ? a : a == NULL ? b : NULL;
-    const bool locking = one == NULL || (one->has_iflags && (one->iflags & belay_iflags_locking) != 0);
-    if (locking && strcmp(ib, ia) != 0) {
+    /* only a change that counts (inode-flags IF-2 to IF-5, IF-7): a file
+     * added or removed only when its flags lock it (decision 171), a
+     * directory only when a locking flag is set or cleared, never flags
+     * read on one side only of an entry that kept its type */
+    if (iflags_counts(b, a)) {
         struct flag *f = add(c, PK_PRIVILEGE_CHANGED, prov);
         fs(c, f, "path", p, n);
         fstr(c, f, "what", "iflags");
