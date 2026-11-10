@@ -1,0 +1,4 @@
+# The belay release this plugin runs, and the sha256 of its binary for each
+# platform. belay-hook fetches that one file once and runs it only if its
+# sha256 is the one here. Written by the release; "unreleased" until then.
+version unreleased
