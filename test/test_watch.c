@@ -176,6 +176,11 @@ TEST(a_row_flags_as_its_limits_say) {
         { "node_modules/p/.travis.yml", "added", "reg", NULL, "none (added)" },
         { ".env", "added", "reg", NULL, "credentials|flag|.env added (credentials)" },
         { ".env", "added", "dir", NULL, "none (added)" },
+        /* BR-L2 is for a directory of that name: a file called so is no dependency */
+        { ".ssh/site-packages", "added", "reg", NULL, "credentials|flag|.ssh/site-packages added (credentials)" },
+        { ".ssh/node_modules/key", "added", "reg", NULL, "none (added)" },
+        /* the watched directory itself has no name a wildcard could match */
+        { ".", "metadata_only", "dir", ",\"changed\":[\"mode\"]", "none (metadata changed)" },
         { ".env/lib/x.py", "added", "reg", NULL, "none (added)" },
         { "deploy/prod.pem", "added", "reg", NULL, "credentials|flag|deploy/prod.pem added (credentials)" },
         { ".venv/lib/python3.12/site-packages/certifi/cacert.pem", "added", "reg", NULL, "none (added)" },
@@ -245,6 +250,7 @@ TEST(a_users_pattern_flags_whatever_it_matches_and_first) {
         { ".belay-donttouch", "modified", "reg", NULL, "don't-touch|flag|.belay-donttouch modified (don't-touch)" },
         { ".belay-donttouch", "removed", "reg", NULL, "don't-touch|flag|.belay-donttouch removed (don't-touch)" },
         { "sub/.belay-donttouch", "added", "reg", NULL, "none (added)" },
+        { ".", "metadata_only", "dir", ",\"changed\":[\"mode\"]", "none (metadata changed)" },    /* no pattern of a name matches the top */
         { "migrations/x", "unknown", "reg", ",\"unknown\":[\"hash_limit\"]", "could not be read|flag|migrations/x not compared (could not be read: hash_limit)" },
     };
     cases(&x, t, sizeof t / sizeof t[0]);
@@ -271,7 +277,7 @@ TEST(a_dont_touch_file_is_read_as_dt_2_to_dt_4_say) {
         { "!negated\n", "line 1 is not a pattern" },
         { "a\tb\n", "line 1 is not a pattern" },
         { "**/a/**/b/**/c/**\n", "1 patterns" },                /* four `**` */
-        { "**/a/**/b/**/c/**/d/**\n", "line 1 is not a pattern" },  /* five */
+        { "**/a/**/b/**/c/**/d/**\n", "more than 4 `**` in a pattern (line 1)" },  /* five: a limit passed */
     };
     for (size_t i = 0; i < sizeof t / sizeof t[0]; i++) {
         struct dtlist l;
@@ -315,7 +321,7 @@ TEST(a_dont_touch_file_is_bounded) {
     buf[4097] = '\n';
     buf[4096] = 'a';
     ASSERT_EQ_INT(-1, dtlist_parse(buf, 4098, &l, why, sizeof why));
-    ASSERT_EQ_STR("line 1 is not a pattern", why);
+    ASSERT_EQ_STR("a pattern of more than 4096 bytes (line 1)", why);
     free(buf);
 }
 

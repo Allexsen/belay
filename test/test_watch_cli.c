@@ -305,8 +305,11 @@ TEST(an_invalid_list_on_a_first_step_leaves_none_in_force) {
     fresh();
     sh("head -c 70000 /dev/zero | tr '\\0' 'a' > '%s/.belay-donttouch'", g_scope);
     step("s1", "--first-ok", NULL);
-    HAS(g_out, "belay: " RED " could not read .belay-donttouch: ");
-    HAS(g_out, "; no list is in force\n");
+    ASSERT_EQ_STR("belay: " RED " .belay-donttouch: the file is over 65536 bytes; no list is in force\n", g_out);
+    fresh();
+    sh("mkdir '%s/.belay-donttouch'", g_scope);
+    step("s1", "--first-ok", NULL);
+    ASSERT_EQ_STR("belay: " RED " could not read .belay-donttouch: it is not a regular file; no list is in force\n", g_out);
 }
 
 /* ---- the record ---- */

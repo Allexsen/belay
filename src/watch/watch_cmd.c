@@ -180,7 +180,7 @@ static int cmd_patterns(const char *scope, bool entries, FILE *out, FILE *err) {
         while ((got = belay_manifest_next(r, &e)) == 1) {
             const bool dir = e.type == BELAY_T_DIR;
             for (size_t i = 0; have_list && i < list.n; i++)
-                if (pattern_match(list.pat[i], list.len[i], e.path, e.path_len, PATTERN_DOTS) != 0) user[i]++;
+                if (flag_user_match(list.pat[i], list.len[i], e.path, e.path_len) != 0) user[i]++;
             for (size_t i = 0; i < flag_n_rows; i++)
                 if (flag_row_applies(&flag_rows[i], e.path, e.path_len, dir)) rows[i]++;
             if (entries) {
