@@ -48,9 +48,14 @@ class Tree(object):
 
 
 def scenario(name, category, tree, dt=None):
+    t = dict(tree.t)                                     # the Tree is not changed: it may be reused
     if dt is not None:
-        tree.add(".belay-donttouch", "f")
-    return {"name": name, "category": category, "tree": dict(tree.t), "links": dict(tree.links), "dt": dt}
+        if t.get(".belay-donttouch", "f") != "f":
+            raise ValueError("%s: .belay-donttouch is there and not a file" % name)
+        t[".belay-donttouch"] = "f"
+    elif t.get(".belay-donttouch") == "f":
+        raise ValueError("%s: .belay-donttouch is a file with no content given" % name)
+    return {"name": name, "category": category, "tree": t, "links": dict(tree.links), "dt": dt}
 
 
 # --------------------------------------------------------------------------- one row at a time
@@ -385,6 +390,13 @@ def donttouch_scenarios():
     t = base_tree()
     t.add(".belay-donttouch", "l")
     out.append(scenario("unreadable: a dangling symlink", U, t))
+
+    T = "the top itself (READING 15)"
+    for pat in (b"**", b"**/**", b"*", b".*", b"*.", b".**", b"**/.*", b"*/**", b"**/*", b".", b"x/**",
+                b"**/x", b"..*", b"*.*"):
+        if pat == b".":
+            continue                                     # invalid by DT-3; it is among the invalid
+        out.append(dt_scenario("the top and the pattern %s" % pat.decode(), T, pat + b"\n"))
 
     X = "interplay: the user's list, the file itself, the rows"
     t = base_tree()

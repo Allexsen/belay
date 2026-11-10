@@ -157,6 +157,11 @@ def run_scenario(M, sc, root):
                     "\t".join(got) if got else "no list covers it"))
         if c is not None and c[3] is not None and want == got:
             wins.append(c[3])
+    top = M.classify_top(user)                           # the directory itself, shown as `.`
+    want = None if top is None else top[:3]
+    got = seen.pop(b".", None)
+    res.append(("entries", want == got, ". (the watched directory itself)",
+                "\t".join(want) if want else "no list covers it", "\t".join(got) if got else "no list covers it"))
     for path, got in sorted(seen.items()):
         res.append(("entries", False, path.decode("utf-8", "replace"), "no such entry in the tree", "\t".join(got)))
 

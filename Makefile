@@ -299,6 +299,14 @@ replay-test:
 policy-model: $(BIN)
 	python3 -I -B scripts/policy-model/run.py
 
+# `belay watch patterns` against an independent model of the lists of watch-v1.md
+# (the dialect, the built-in rows and their limits, .belay-donttouch), written from the
+# pin alone (scripts/watch-model/). Exits 3 while `watch` is not built. BELAY_BIN
+# overrides the binary; WM_WORKDIR where scenarios are built.
+.PHONY: watch-model
+watch-model: $(BIN)
+	python3 -I -B scripts/watch-model/run.py
+
 bench: $(BENCH_BIN)
 	@echo "built: $(BENCH_BIN)"
 

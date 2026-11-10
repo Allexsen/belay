@@ -60,6 +60,10 @@ READINGS = {
     13: "BR-L5 for a current entry: level 'note' (the interface's rule: note for 'noted' and "
         "'noted when modified').",
     14: "A pattern's lines are split on LF only; a final line needs no LF.",
+    15: "The watched directory itself is an entry (belay lists it as `.`; taken after the first "
+        "run, the pin does not say). Its path relative to the top has no component, so by PS-P2 "
+        "only a pattern whose every component is `**` matches it; `*`, `.*` and `*.` do not: `.` "
+        "is not a name it has. A pattern that matches a directory below covers nothing above.",
 }
 
 
@@ -250,8 +254,17 @@ class Model(object):
 
     @staticmethod
     def user_count(pattern, tree):
+        """Entries of the tree the pattern covers, and the top itself when it matches that."""
         pc = split(pattern)
-        return sum(1 for p in tree if covers(pc, split(p)))
+        return sum(1 for p in tree if covers(pc, split(p))) + (1 if match(pc, ()) else 0)
+
+    @staticmethod
+    def classify_top(user):
+        """The watched directory itself (READING 15): its relative path has no components, so
+        only a pattern made of `**` alone matches it. No row can (each has a literal name)."""
+        if any(match(split(u), ()) for u in user):
+            return (DONTTOUCH_KIND, "flag", DONTTOUCH_KIND, None)
+        return None
 
 
 # --------------------------------------------------------------------------- .belay-donttouch
