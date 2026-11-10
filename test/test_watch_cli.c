@@ -538,7 +538,7 @@ TEST(steps_at_the_same_time_count_each_change_once) {
     }
     ASSERT_EQ_INT(13, (int)count(ledger(), "\"t\":\"step\""));         /* every one of the twelve wrote its line */
     ASSERT_EQ_STR("24\n", out_of("cat '%s'/scopes/*/watch/ledger-*.ndjson | grep '\"t\":\"step\"' | "
-                                 "sed 's/.*\"changes\":\\([0-9]*\\).*/\\1/' | paste -sd+ - | bc", g_state));
+                                 "sed 's/.*\"changes\":\\([0-9]*\\).*/\\1/' | awk '{ s += $1 } END { print s }'", g_state));
     ASSERT_EQ_INT(24, (int)count(receipt(), "\n  A q"));
 }
 

@@ -139,7 +139,11 @@ static int val(struct cur *c, struct jval *v) {
         buf[n] = '\0';
         v->t = J_NUM;
         v->num = strtod(buf, NULL);
-        v->i = integer ? strtoll(buf, NULL, 10) : (int64_t)v->num;
+        /* a number no int64 holds is clamped: the conversion is undefined otherwise (found by fuzz_watch) */
+        v->i = integer ? strtoll(buf, NULL, 10)
+             : v->num >= 9223372036854775807.0 ? INT64_MAX
+             : v->num <= -9223372036854775808.0 ? INT64_MIN
+             : v->num != v->num ? 0 : (int64_t)v->num;
         v->integer = integer;
         return 0;
     }
