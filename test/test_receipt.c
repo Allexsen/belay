@@ -7,6 +7,7 @@
  */
 #define _GNU_SOURCE
 #include "belay_test.h"
+#include "capture/fsops.h"
 #include "cli/receipt.h"
 
 #include "belay/error.h"
@@ -31,7 +32,7 @@ static int fake_mode(void *ctx, int side, const char *path, size_t len, struct r
 }
 
 /* Each side's paths, by table: a path absent from a side is not there. */
-struct side_meta { const char *path; size_t len; uint32_t mode; bool caps; };
+struct side_meta { const char *path; size_t len; uint32_t mode; bool caps; bool has_iflags; uint64_t iflags; };
 static const struct side_meta *g_sides[2];
 static int table_mode(void *ctx, int side, const char *path, size_t len, struct receipt_meta *m) {
     (void)ctx;
@@ -39,6 +40,8 @@ static int table_mode(void *ctx, int side, const char *path, size_t len, struct 
         if (t->len == len && memcmp(t->path, path, len) == 0) {
             m->mode = t->mode;
             m->has_caps = t->caps;
+            m->has_iflags = t->has_iflags;
+            m->iflags = t->iflags;
             return 0;
         }
     return -1;
@@ -138,6 +141,50 @@ TEST(long_sections_fold_but_privilege_never_does) {
     ASSERT_TRUE(strstr(g_text, "  and 10 more (--all shows them)\n") != NULL);
     ASSERT_EQ_INT(0, render(diff, true));
     ASSERT_TRUE(strstr(g_text, "  A q59\n") != NULL && strstr(g_text, "and 10 more") == NULL);
+}
+
+/* test/expect/inode-flags.md, IF-2 to IF-4 and IF-8, by hand: a directory
+ * whose flags changed without a locking flag (ext4's hashed index, set when
+ * it outgrows a block) is no privilege change and is still shown; a regular
+ * file's flags are; an entry that comes or goes is named only when it holds
+ * immutable or append-only. LOCK is whichever of those the platform has. */
+TEST(inode_flags_are_privilege_only_where_the_pin_counts_them) {
+    const uint64_t LOCK = belay_iflags_locking & (~belay_iflags_locking + 1), OTHER = 0x1000, BASE = 0x80000;
+    REQUIRE(LOCK != 0 && (OTHER & belay_iflags_locking) == 0 && (BASE & belay_iflags_locking) == 0);
+    const struct side_meta before[] = {
+        { "grew", 4, 0040755, false, true, BASE },      { "file", 4, 0100644, false, true, BASE },
+        { "lockdir", 7, 0040755, false, true, BASE },   { "gone", 4, 0100644, false, true, BASE | LOCK },
+        { "goneplain", 9, 0100644, false, true, BASE }, { NULL, 0, 0, false, false, 0 } };
+    const struct side_meta after[] = {
+        { "grew", 4, 0040755, false, true, BASE | OTHER }, { "file", 4, 0100644, false, true, BASE | OTHER },
+        { "lockdir", 7, 0040755, false, true, BASE | LOCK }, { "locked", 6, 0100644, false, true, BASE | LOCK },
+        { "plain", 5, 0100644, false, true, BASE },        { NULL, 0, 0, false, false, 0 } };
+    g_sides[0] = before;
+    g_sides[1] = after;
+    g_fn = table_mode;
+    ASSERT_EQ_INT(0, render(HEAD
+        "{\"path\":\"file\",\"outcome\":\"metadata_only\",\"type\":\"reg\",\"changed\":[\"iflags\"]}\n"
+        "{\"path\":\"gone\",\"outcome\":\"removed\",\"type\":\"reg\"}\n"
+        "{\"path\":\"goneplain\",\"outcome\":\"removed\",\"type\":\"reg\"}\n"
+        "{\"path\":\"grew\",\"outcome\":\"metadata_only\",\"type\":\"dir\",\"changed\":[\"iflags\"]}\n"
+        "{\"path\":\"lockdir\",\"outcome\":\"metadata_only\",\"type\":\"dir\",\"changed\":[\"iflags\"]}\n"
+        "{\"path\":\"locked\",\"outcome\":\"added\",\"type\":\"reg\"}\n"
+        "{\"path\":\"plain\",\"outcome\":\"added\",\"type\":\"reg\"}\n"
+        TRAIL("0", "2", "3", "0", "0", "0", "0"), true));
+    g_fn = fake_mode;
+    const char *priv = strstr(g_text, "\nprivilege\n"), *rest = strstr(g_text, "\nchanges\n");
+    REQUIRE(priv != NULL && rest != NULL && priv < rest);
+    const size_t pl = (size_t)(rest - priv);
+    static char p[4096];
+    snprintf(p, sizeof p, "%.*s", (int)pl, priv);
+    ASSERT_TRUE(strstr(p, "  ~ file   inode flags changed\n") != NULL);            /* IF-4 */
+    ASSERT_TRUE(strstr(p, "  ~ lockdir   inode flags changed\n") != NULL);         /* IF-2, a locking flag */
+    ASSERT_TRUE(strstr(p, "  A locked   inode flags set\n") != NULL);              /* IF-3, IF-8 */
+    ASSERT_TRUE(strstr(p, "  D gone   inode flags removed\n") != NULL);
+    ASSERT_TRUE(strstr(p, "grew") == NULL);                                         /* IF-2 */
+    ASSERT_TRUE(strstr(p, "plain") == NULL);                                        /* IF-3: covers goneplain too */
+    ASSERT_TRUE(strstr(rest, "  ~ grew   iflags\n") != NULL);                      /* IF-8: still shown */
+    ASSERT_TRUE(strstr(rest, "  A plain\n") != NULL && strstr(rest, "  D goneplain\n") != NULL);
 }
 
 TEST(no_changes_says_so) {
@@ -516,6 +563,7 @@ int main(void) {
     RUN(tracked_first_untracked_cut_ignored_folded_by_directory);
     RUN(git_bookkeeping_folds_and_counts_moves_in_place);
     RUN(ignored_text_edits_are_named_and_the_rest_ignored_folds);
+    RUN(inode_flags_are_privilege_only_where_the_pin_counts_them);
     RUN(files_hashed_unguarded_are_said_on_one_line);
     RUN(ignored_unknown_rows_fold_by_directory_and_reason);
     free(g_text);

@@ -1,8 +1,9 @@
 /*
  *  The receipt: diff.v1 rendered for a person (NOTES/phase5-structure.md §5;
  *  decisions §14.7, Q4 of Phase 4). It decides nothing the diff did not:
- *  events first, then every privilege change (caps, inode flags, setuid,
- *  setgid, sticky) -- never folded, never filtered -- then the other
+ *  events first, then every privilege change (caps, setuid, setgid,
+ *  sticky, and the inode-flag changes test/expect/inode-flags.md counts)
+ *  -- never folded, never filtered -- then the other
  *  records by path; each record at most RECEIPT_FINDINGS findings, then
  *  "and N more"; flagged entries named on their own lines, no global
  *  "provisional" banner. With a classifier (git's view of the repository,
@@ -33,6 +34,8 @@
 struct receipt_meta {
     uint32_t mode;
     bool has_caps;
+    bool has_iflags;            /* its inode flags were read (inode-flags IF-8) */
+    uint64_t iflags;
 };
 
 /* A path's metadata on a side (0 before, 1 after): 0 and *m, or -1 when the
