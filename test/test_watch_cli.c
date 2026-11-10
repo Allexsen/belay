@@ -513,7 +513,39 @@ TEST(no_word_after_go_is_said_and_the_step_is_not_killed) {
     ASSERT_EQ_INT(1, (int)count(receipt(), "A g.txt"));
 }
 
+/* Review of #125, finding 2: hooks of one directory running at the same
+ * time each reported the same change. Here the changes are made first, and
+ * then four processes step at once: one of them reports them, once. */
 TEST(steps_at_the_same_time_count_each_change_once) {
+    started("s0");
+    for (int j = 0; j < 24; j++) sh("echo x > '%s/q%d'", g_scope, j);
+    pid_t pids[4];
+    for (int c = 0; c < 4; c++) {
+        pids[c] = fork();
+        REQUIRE(pids[c] != -1);
+        if (pids[c] == 0) {
+            char session[16];
+            snprintf(session, sizeof session, "s%d", c + 1);
+            for (int j = 0; j < 3; j++)
+                if (step(session, NULL) != 0) _exit(1);
+            _exit(0);
+        }
+    }
+    for (int c = 0; c < 4; c++) {
+        int status = -1;
+        waitpid(pids[c], &status, 0);
+        ASSERT_EQ_INT(0, WIFEXITED(status) ? WEXITSTATUS(status) : -1);
+    }
+    ASSERT_EQ_INT(13, (int)count(ledger(), "\"t\":\"step\""));         /* every one of the twelve wrote its line */
+    ASSERT_EQ_STR("24\n", out_of("cat '%s'/scopes/*/watch/ledger-*.ndjson | grep '\"t\":\"step\"' | "
+                                 "sed 's/.*\"changes\":\\([0-9]*\\).*/\\1/' | paste -sd+ - | bc", g_state));
+    ASSERT_EQ_INT(24, (int)count(receipt(), "\n  A q"));
+}
+
+/* With files arriving while the steps run, a capture can meet one half made:
+ * it may then be in two steps, as two states it was in. What must hold: every
+ * file is in the record, and none is "added" twice. */
+TEST(a_change_made_while_steps_run_is_in_the_record_and_added_at_most_once) {
     started("s0");
     pid_t pids[4];
     for (int c = 0; c < 4; c++) {
@@ -535,15 +567,14 @@ TEST(steps_at_the_same_time_count_each_change_once) {
         ASSERT_EQ_INT(0, WIFEXITED(status) ? WEXITSTATUS(status) : -1);
     }
     step("s0", NULL);
-    /* 24 files, each in exactly one step's count and once in the receipt */
-    ASSERT_EQ_STR("24\n", out_of("cat '%s'/scopes/*/watch/ledger-*.ndjson | grep '\"t\":\"step\"' | "
-                                 "sed 's/.*\"changes\":\\([0-9]*\\).*/\\1/' | paste -sd+ | bc", g_state));
     const char *r = receipt();
     for (int c = 0; c < 4; c++)
         for (int j = 0; j < 6; j++) {
-            char name[32];
-            snprintf(name, sizeof name, "A c%d_%d\n", c, j);
-            ASSERT_EQ_INT(1, (int)count(r, name));
+            char added[32], name[32];
+            snprintf(added, sizeof added, "\n  A c%d_%d\n", c, j);
+            snprintf(name, sizeof name, " c%d_%d", c, j);
+            ASSERT_TRUE(count(r, name) >= 1);
+            ASSERT_TRUE(count(r, added) <= 1);
         }
 }
 
@@ -1017,6 +1048,7 @@ int main(void) {
     RUN(a_lock_that_is_not_free_by_the_deadline_is_a_line);
     RUN(no_word_after_go_is_said_and_the_step_is_not_killed);
     RUN(steps_at_the_same_time_count_each_change_once);
+    RUN(a_change_made_while_steps_run_is_in_the_record_and_added_at_most_once);
     RUN(the_receipt_is_every_step_newest_first);
     RUN(patterns_shows_the_lists_in_force_and_what_each_matches);
     RUN(a_change_of_what_is_read_is_flagged_and_what_is_not_read_is_said_once);

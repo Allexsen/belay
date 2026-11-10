@@ -1,3 +1,4 @@
+#define _GNU_SOURCE
 /*
  *  Fuzz target for what `belay watch` parses from outside its own code
  *  (NOTES/watch-structure.md section 11): .belay-donttouch, which the
