@@ -1,0 +1,64 @@
+#!/bin/sh
+# belay's hook for Claude Code: a thin wrapper. Everything it says and
+# records is the binary's (`belay hook claude-code EVENT`); this only finds
+# the binary -- fetching the pinned release once, and checking its sha256
+# -- and hands it the event with the hook's input on standard input.
+#
+# It exits 0 whatever happens: a hook that fails must not stop a tool call.
+# No `set -e`, no `set -u`: nothing here may end the script early.
+#
+#   BELAY_BIN            a belay binary to run instead (development, tests)
+#   BELAY_PIN            the pin file, instead of the one beside this script
+#   BELAY_RELEASE_URL    where releases are fetched from
+#   CLAUDE_PLUGIN_DATA   where the fetched binary is kept (Claude Code sets it)
+
+ev=$1
+HERE=$(dirname "$0")
+PIN=${BELAY_PIN:-$HERE/pin}
+say() {     # one line in the hook's JSON, with what JSON needs escaped
+    printf '{"systemMessage":"belay: \360\237\224\264 %s"}\n' "$(printf '%s' "$1" | sed 's/\\/\\\\/g; s/"/\\"/g')"
+    exit 0
+}
+
+if [ -n "$BELAY_BIN" ]; then
+    "$BELAY_BIN" hook claude-code "$ev"
+    exit 0
+fi
+
+version=$(sed -n 's/^version  *//p' "$PIN" 2>/dev/null | head -n 1)
+case $(uname -s)-$(uname -m) in
+    Linux-x86_64) target=linux-x86_64 ;;
+    Linux-aarch64|Linux-arm64) target=linux-arm64 ;;
+    Darwin-arm64) target=macos-arm64 ;;
+    *) target= ;;
+esac
+want=$(sed -n "s/^$target  *//p" "$PIN" 2>/dev/null | head -n 1)
+DATA=${CLAUDE_PLUGIN_DATA:-${XDG_DATA_HOME:-$HOME/.local/share}/belay-claude-code}
+BIN=$DATA/bin/belay-$version
+
+if [ ! -x "$BIN" ]; then
+    # Fetched when a session starts, where the hook has three minutes. Until
+    # then nothing is recorded, and a turn's end says so; a tool call does not.
+    case $ev in
+        start) ;;
+        prompt|stop) say "not recording: belay's binary is not here yet; it is fetched when a session starts" ;;
+        *) exit 0 ;;
+    esac
+    case $version in ''|unreleased) say "not recording: this plugin names no released belay yet" ;; esac
+    [ -n "$target" ] && [ -n "$want" ] || say "not recording: belay $version has no binary for $(uname -s) $(uname -m)"
+    command -v curl >/dev/null 2>&1 || say "not recording: curl is needed once, to fetch belay $version"
+    url=${BELAY_RELEASE_URL:-https://github.com/Allexsen/belay/releases/download}/$version/belay-$version-$target
+    tmp=$DATA/bin/.fetch.$$
+    mkdir -p "$DATA/bin" 2>/dev/null || say "not recording: cannot write $DATA/bin"
+    curl -fsSL --max-time 150 -o "$tmp" "$url" 2>/dev/null || { rm -f "$tmp"; say "not recording: could not fetch belay $version"; }
+    if command -v sha256sum >/dev/null 2>&1; then got=$(sha256sum "$tmp" | cut -d' ' -f1)
+    else got=$(shasum -a 256 "$tmp" 2>/dev/null | cut -d' ' -f1); fi
+    if [ "$got" != "$want" ]; then
+        rm -f "$tmp"
+        say "not recording: the download of belay $version has sha256 ${got:-unknown}, not the pinned one: not run"
+    fi
+    chmod 755 "$tmp" && mv "$tmp" "$BIN" || { rm -f "$tmp"; say "not recording: cannot write $BIN"; }
+fi
+
+"$BIN" hook claude-code "$ev"      # not exec: a binary that cannot start must still leave status 0
+exit 0

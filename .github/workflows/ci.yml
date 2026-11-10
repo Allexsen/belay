@@ -50,6 +50,8 @@ jobs:
         run: make pybelay-test
       - name: dogfood hooks (scripted sessions)
         run: make dogfood-test
+      - name: Claude Code plugin (the wrapper, against the binary)
+        run: make plugin-test
 
   build-linux-arm64:
     name: linux-arm64

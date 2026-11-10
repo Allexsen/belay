@@ -12,6 +12,7 @@ linux-x86_64 | union model (the host reader's union against an independent overl
 linux-x86_64 | policy model (baseline export and verify against an independent model of policy.v1) | check
 linux-x86_64 | pybelay (the Python API and the reward helper against the binary) | check
 linux-x86_64 | dogfood hooks (scripted sessions) | check
+linux-x86_64 | Claude Code plugin (the wrapper, against the binary) | check
 linux-arm64 | actions/checkout@v5 | setup
 linux-arm64 | uname -m | setup
 linux-arm64 | platform summary | setup

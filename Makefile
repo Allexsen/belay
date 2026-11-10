@@ -64,7 +64,7 @@ SAN_FLAGS	= -fsanitize=address,undefined -fno-omit-frame-pointer -g -O1
 SAN_BUILD	= $(BUILD)/san
 SAN_TEST_BIN	= $(TEST_SRC:test/%.c=$(SAN_BUILD)/test/%)
 
-.PHONY: replay-test version-test dogfood-test e2e all clean test check check-san fuzz bench platform fs-scenarios gen gen-check measure oracle reference lib lint ci-check
+.PHONY: replay-test version-test dogfood-test plugin-test e2e all clean test check check-san fuzz bench platform fs-scenarios gen gen-check measure oracle reference lib lint ci-check
 
 all: $(BIN) $(SESSION_OBJ)
 
@@ -240,6 +240,11 @@ ORACLE_BASES	?= 200
 # Run by the linux-x86_64 CI job.
 dogfood-test: $(BIN)
 	@sh scripts/dogfood/selftest.sh $(BIN)
+
+# The Claude Code plugin's wrapper, run as Claude Code runs it (claude-plugin/test.sh).
+# Run by the linux-x86_64 CI job.
+plugin-test: $(BIN)
+	@sh claude-plugin/test.sh $(BIN)
 
 oracle: all
 	scripts/oracle/run.sh $(ORACLE_BASES)

@@ -1,0 +1,12 @@
+{
+  "name": "belay",
+  "description": "belay: records what changed on a system and explains it.",
+  "owner": { "name": "Aleksi Svanidze" },
+  "plugins": [
+    {
+      "name": "belay",
+      "source": "./claude-plugin",
+      "description": "One line after every tool call: what changed in your project directory, whether or not the agent mentioned it."
+    }
+  ]
+}
