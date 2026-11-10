@@ -4,7 +4,7 @@
 list, and make it reversible.
 
 **Status: pre-alpha.** The checkpoint and diff engine runs (below); the formats it writes are drafts
-that may still change, and the latest pre-release is v0.1.0-alpha.6. Nothing that changes your files
+that may still change, and the latest pre-release is v0.1.0-alpha.7. Nothing that changes your files
 exists yet.
 
 Tested against 2,115 published agent runs: [results](bench/replay/RESULTS.md).
