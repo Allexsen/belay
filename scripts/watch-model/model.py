@@ -198,16 +198,19 @@ def in_dependency(ncomps, etype):
     return ncomps[-1] in DEPENDENCY_NAMES and etype == "d"
 
 
-def row_applies(row, ncomps, etype):
-    """Does this row, by itself, apply to this current entry (BR-L1, BR-L2, BR-L4)?"""
-    if row.not_dep and in_dependency(ncomps, etype):
+def row_applies(row, ncomps, etype, ignore=()):
+    """Does this row, by itself, apply to this current entry (BR-L1, BR-L2, BR-L4)?
+    `ignore` names limits to leave out ('L1', 'L2', 'L4'): run.py's gate uses it to tell
+    which limit switched a row off."""
+    if row.not_dep and "L2" not in ignore and in_dependency(ncomps, etype):
         return False
-    for ex in row.except_comps:
-        if covers(ex, ncomps):
-            return False
+    if "L4" not in ignore:
+        for ex in row.except_comps:
+            if covers(ex, ncomps):
+                return False
     f = fold(ncomps)
     if row.not_dir:
-        return etype != "d" and match(row.fcomps, f)
+        return (etype != "d" or "L1" in ignore) and match(row.fcomps, f)
     return covers(row.fcomps, f)
 
 
