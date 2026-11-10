@@ -134,6 +134,9 @@ int state_checkpoint_exists(const struct state *st, long id);
 /* Test hook: called between prune's unlocked pass and the locked one. NULL
  * in the binary. */
 extern void (*prune_between_passes)(void);
+/* Test hook: called between the removal of a watch day's ledger file and of
+ * its receipt file (state-retention-watch WR-7). NULL in the binary. */
+extern void (*prune_between_days)(void);
 
 /* Makes checkpoint `id` kept, for good (KP-3). 0, or -1 with belay_err. */
 int state_keep(const struct state *st, long id);

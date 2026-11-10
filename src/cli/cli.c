@@ -45,8 +45,11 @@ static const char USAGE[] =
     "                                        what the changes since the baseline mean: policy.v1\n"
 
     "  manifest --scope DIR --id ID          a checkpoint's manifest, on standard output\n"
-    "  prune --scope DIR [--keep-days N] [--keep-last N] [--keep-id ID]... [--keep-from ID] [--dry-run] [--json]\n"
+    "  prune --scope DIR [--keep-days N] [--keep-last N] [--keep-id ID]... [--keep-from ID] [--watch-only] [--dry-run] [--json]\n"
     "                                        remove old checkpoints, and stored copies nothing refers to\n"
+    "  watch step|close|mark|summary|receipt|patterns --scope DIR ...\n"
+    "                                        a running record of DIR while an agent works in it (belay help watch)\n"
+    "  hook claude-code EVENT                the Claude Code plugin's hook: reads the hook's input, always exits 0\n"
     "  help [command]                        this, or one command's options\n"
     "  --version\n"
     "\n"
@@ -97,14 +100,37 @@ static const struct { const char *cmd, *text; } HELP[] = {
                "  --exit-code  exit 1 when any record is a violation (signals never)\n" },
     { "manifest", "usage: belay manifest --scope DIR --id ID\n"
                "  Prints checkpoint ID's manifest, rebuilt and checked when it is stored as a delta.\n" },
-    { "prune", "usage: belay prune --scope DIR [--keep-days N] [--keep-last N] [--keep-id ID]... [--keep-from ID] [--dry-run] [--json]\n"
+    { "prune", "usage: belay prune --scope DIR [--keep-days N] [--keep-last N] [--keep-id ID]... [--keep-from ID] [--watch-only]\n"
+               "                   [--dry-run] [--json]\n"
                "  Removes the checkpoints outside the limits given, at least one of them required:\n"
                "  older than N days, and not among the last N. Then the stored copies no remaining\n"
                "  checkpoint refers to. The newest checkpoint and a kept one are never removed.\n"
                "  --keep-id    keep this checkpoint, for good; repeat it for several\n"
                "  --keep-from  keep this checkpoint and every later one (a pending diff)\n"
+               "  --watch-only remove only checkpoints a step of belay watch wrote (the plugin's prune)\n"
                "  --dry-run    change nothing, and say what a run would remove\n"
                "  --json       one JSON line\n" },
+    { "watch", "usage: belay watch step     --scope DIR --session S [--begin ID | --finish ID] [--agent A] [--first-ok]\n"
+               "                            [--deadline SECONDS]\n"
+               "       belay watch close    --scope DIR --session S (--id ID... | --all)\n"
+               "       belay watch mark     --scope DIR --session S --name NAME\n"
+               "       belay watch summary  --scope DIR --session S --since NAME\n"
+               "       belay watch receipt  --scope DIR [--max-lines N] [--path]\n"
+               "       belay watch patterns --scope DIR [--entries]\n"
+               "  A running record of DIR while an agent works in it (test/expect/watch-v1.md).\n"
+               "  step      records what changed since the last step and prints one line: anything in\n"
+               "            a sensitive place or matching .belay-donttouch first, the rest counted.\n"
+               "            --begin opens a call, --finish closes one: a step's changes belong to the\n"
+               "            calls open during it. Always a line when it could not record.\n"
+               "  close     closes calls that will never finish\n"
+               "  mark      a named marker for the session; summary prints the totals since it\n"
+               "  receipt   every change of every step, newest first, nothing folded (--path: as a\n"
+               "            file, whose path is printed)\n"
+               "  patterns  the lists in force and how many current entries each pattern matches\n"
+               "            (--entries: each entry that a list covers)\n" },
+    { "hook",  "usage: belay hook claude-code start|pre|post|batch|prompt|stop|subagent-stop|end|receipt [--scope DIR]\n"
+               "  The Claude Code plugin's hook: reads the hook's JSON on standard input, runs the\n"
+               "  matching belay watch commands, and prints the hook's reply. Exits 0 always.\n" },
     { "log",   "usage: belay log --scope DIR [--json]\n"
                "  The scope's checkpoints: id, kind, time, entries.\n"
                "  --json  one checkpoint a line (schema/checkpoint.v2.json)\n" },
@@ -675,6 +701,7 @@ static int run(int argc, char **argv, FILE *out, FILE *err) {
     if (!strcmp(cmd, "prune")) return cmd_prune(argc, argv, out, err);
     if (!strcmp(cmd, "manifest")) return cmd_manifest(argc, argv, out, err);
     if (!strcmp(cmd, "watch")) return cmd_watch(argc, argv, out, err);
+    if (!strcmp(cmd, "hook")) return cmd_hook(argc, argv, out, err);
     struct opts o;
     const bool known = !strcmp(cmd, "check") || !strcmp(cmd, "mark") || !strcmp(cmd, "diff") || !strcmp(cmd, "log") ||
                        !strcmp(cmd, "exclude");
@@ -703,6 +730,11 @@ static int run(int argc, char **argv, FILE *out, FILE *err) {
 /* Output that could not be written is a failure, exit 4 (review 2026-10-31,
  * Phase 5, 14): a full disk under `belay diff --json > f` must not exit 0. */
 int cli_main(int argc, char **argv, FILE *out, FILE *err) {
+    if (argc >= 2 && !strcmp(argv[1], "hook")) {       /* a hook exits 0 whatever happens (hook_claude.c) */
+        run(argc, argv, out, err);
+        fflush(out);
+        return EXIT_DONE;
+    }
     const int rc = run(argc, argv, out, err);
     errno = 0;
     const int e = fflush(out) != 0 ? errno : 0;
