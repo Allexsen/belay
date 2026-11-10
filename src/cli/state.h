@@ -80,6 +80,13 @@ struct state {
  * the root or inside it), CORRUPT (the directory is another scope's, a
  * symlink or not what belay wrote), IO. state_close always. */
 int state_open(const struct scope *sc, bool create, struct state *st, FILE *note);
+
+/* How long state_open waits for the lock, in milliseconds; -1 (the
+ * default): until it is free. Past it, state_open fails with belay_err IO
+ * and state_lock_timed_out set. Used by `belay watch`'s supervisor only,
+ * which must never hang on a lock (watch-v1 TL-2). */
+extern long state_lock_wait_ms;
+extern bool state_lock_timed_out;
 void state_close(struct state *st);
 
 /* A checkpoint id from its decimal text: digits only, no leading zero, at
@@ -98,6 +105,7 @@ struct checkpoint {
     uint64_t trusted, racy;
     bool walk_start_reference;  /* prefiltered against the previous walk's start, not its newest ctime */
     bool kept;                  /* never pruned (state-retention KP-1) */
+    bool watch;                 /* written by a step of `belay watch` (state-retention-watch WR-14) */
     bool has_since_full;        /* meta.json says since_full (older ones don't) */
     long since_full;            /* marks since the last full one: pruning can't reset it */
 };
@@ -150,6 +158,7 @@ struct capture_req {
     long full_every;            /* a full mark every N marks (Q8); 0: never */
     uint64_t hash_max_bytes;    /* 0: the default; raised with a protect spec (protect-spec PS-C3) */
     bool keep;                  /* mark --keep (KP-1) */
+    bool watch;                 /* a step of `belay watch`: the checkpoint is the watch's (WR-14) */
 };
 
 /* The state root's path relative to the scope, when its resolved path is
