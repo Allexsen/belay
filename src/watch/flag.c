@@ -109,7 +109,14 @@ int dtlist_parse(const char *buf, size_t len, struct dtlist *out, char *why, siz
         i = e + 1;
         line++;
         if (n == 0 || p[0] == '#') continue;
-        bool ok = pattern_valid(p, n) && p[0] != '!' && pattern_globstars(p, n) <= DT_GLOBSTARS;
+        /* DT-4's limits on one pattern are limits passed, not a line that is no pattern */
+        if (n > PATTERN_MAX || (pattern_valid(p, n) && pattern_globstars(p, n) > DT_GLOBSTARS)) {
+            if (n > PATTERN_MAX) snprintf(why, cap, "a pattern of more than %u bytes (line %zu)", PATTERN_MAX, line);
+            else snprintf(why, cap, "more than %u `**` in a pattern (line %zu)", DT_GLOBSTARS, line);
+            dtlist_free(out);
+            return -1;
+        }
+        bool ok = pattern_valid(p, n) && p[0] != '!';
         for (size_t k = 0; ok && k < n; k++) {
             const unsigned char c = (unsigned char)p[k];
             if (c < 0x20 || c == 0x7f || c == '?' || c == '[' || c == '\\') ok = false;
@@ -200,9 +207,18 @@ static int named(struct wflag *out, enum wkind kind, bool note, const char *path
 
 /* ---- the lists ---- */
 
-static bool in_dependency(const char *path, size_t len) {
-    return pattern_match("**/node_modules", 15, path, len, PATTERN_DOTS) != 0 ||
-           pattern_match("**/site-packages", 16, path, len, PATTERN_DOTS) != 0;
+/* The watched directory itself is the entry "."; its path has no component
+ * (WD-3), so only a pattern of nothing but `**` matches it. */
+static unsigned match(const char *pat, size_t plen, const char *path, size_t len, unsigned sw) {
+    if (len == 1 && path[0] == '.') len = 0;
+    return pattern_match(pat, plen, path, len, sw);
+}
+
+/* BR-L2: at or below a directory of that name; a file of that name is no dependency. */
+static bool in_dependency(const char *path, size_t len, bool dir) {
+    const unsigned want = PATTERN_ABOVE | (dir ? PATTERN_SELF : 0u);
+    return (match("**/node_modules", 15, path, len, PATTERN_DOTS) & want) != 0 ||
+           (match("**/site-packages", 16, path, len, PATTERN_DOTS) & want) != 0;
 }
 
 static bool is_newdir(const struct flagctx *x, const char *path, size_t len) {
@@ -216,10 +232,10 @@ static bool is_newdir(const struct flagctx *x, const char *path, size_t len) {
 }
 
 bool flag_row_applies(const struct brow *r, const char *path, size_t len, bool dir) {
-    const unsigned m = pattern_match(r->pattern, strlen(r->pattern), path, len, PATTERN_DOTS | PATTERN_NOCASE);
+    const unsigned m = match(r->pattern, strlen(r->pattern), path, len, PATTERN_DOTS | PATTERN_NOCASE);
     if (r->limits & BR_FILE ? !((m & PATTERN_SELF) && !dir) : m == 0) return false;
-    if (r->except != NULL && pattern_match(r->except, strlen(r->except), path, len, PATTERN_DOTS) != 0) return false;
-    return !((r->limits & BR_DEPS) && in_dependency(path, len));
+    if (r->except != NULL && match(r->except, strlen(r->except), path, len, PATTERN_DOTS) != 0) return false;
+    return !((r->limits & BR_DEPS) && in_dependency(path, len, dir));
 }
 
 /* The first built-in row that applies to the entry, or NULL. */
@@ -237,8 +253,12 @@ static bool user_match(const struct flagctx *x, const char *path, size_t len) {
     if (len == 16 && memcmp(path, ".belay-donttouch", 16) == 0) return true;
     for (int l = 0; l < 2; l++)
         for (size_t i = 0; x->lists[l] != NULL && i < x->lists[l]->n; i++)
-            if (pattern_match(x->lists[l]->pat[i], x->lists[l]->len[i], path, len, PATTERN_DOTS) != 0) return true;
+            if (match(x->lists[l]->pat[i], x->lists[l]->len[i], path, len, PATTERN_DOTS) != 0) return true;
     return false;
+}
+
+unsigned flag_user_match(const char *pat, size_t plen, const char *path, size_t len) {
+    return match(pat, plen, path, len, PATTERN_DOTS);
 }
 
 bool flag_path(const struct flagctx *x, const char *path, size_t len, bool dir, enum wkind *kind, const char **reason,

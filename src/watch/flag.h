@@ -78,6 +78,9 @@ void flagctx_free(struct flagctx *x);
  * true with its kind, the reason shown and whether a modification of it
  * would only be noted. */
 bool flag_row_applies(const struct brow *r, const char *path, size_t len, bool dir);
+/* How many entries a user's pattern matches is counted with this: the
+ * dialect's match, the watched directory itself (".") having no component. */
+unsigned flag_user_match(const char *pat, size_t plen, const char *path, size_t len);
 bool flag_path(const struct flagctx *x, const char *path, size_t len, bool dir, enum wkind *kind, const char **reason,
                bool *note);
 

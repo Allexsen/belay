@@ -159,7 +159,7 @@ static struct wkill *kill_of(struct wstate *s, const char *session, bool make) {
 
 /* ---- .belay-donttouch as the checkpoint holds it (DT-1) ---- */
 
-enum { DT_NONE, DT_OK, DT_UNREADABLE };
+enum { DT_NONE, DT_OK, DT_UNREADABLE, DT_TOO_LARGE };
 
 /* The file's stored copy at checkpoint `id`: DT_OK with its bytes
  * (malloc'd), DT_NONE when the checkpoint has no such file, DT_UNREADABLE
@@ -192,9 +192,11 @@ static int donttouch_read(const struct state *st, long id, char **bytes, size_t 
         if (e.type != BELAY_T_REG) {
             snprintf(why, cap, "it is not a regular file");
             rc = DT_UNREADABLE;
+        } else if (e.size > DT_FILE_MAX) {      /* DT-4: a limit passed is an invalid file, not an unreadable one */
+            snprintf(why, cap, "the file is over %u bytes", DT_FILE_MAX);
+            rc = DT_TOO_LARGE;
         } else if (!e.has_stored) {
-            snprintf(why, cap, e.writer_open ? "a writer has it open" : e.size > DT_FILE_MAX ? "it is over 65536 bytes"
-                                                                                               : "no stored copy");
+            snprintf(why, cap, e.writer_open ? "a writer has it open" : "no stored copy");
             rc = DT_UNREADABLE;
         } else {
             char rel[96];
@@ -272,6 +274,8 @@ static int donttouch_step(struct wctx *x, long id, struct wstep *s, bool have_ol
     const char *tail = st->list[0] != '\0' ? "the previous list stays in force" : "no list is in force";
     if (r == DT_NONE) {
         st->list[0] = '\0';
+    } else if (r == DT_TOO_LARGE) {
+        snprintf(trouble, sizeof trouble, ".belay-donttouch: %s; %s", why, tail);
     } else if (r == DT_UNREADABLE) {
         snprintf(trouble, sizeof trouble, "could not read .belay-donttouch: %s; %s", why, tail);
     } else {
