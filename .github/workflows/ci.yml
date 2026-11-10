@@ -72,7 +72,9 @@ jobs:
           make clean
           make CFLAGS='-O2 -static' all
           python3 -m venv /tmp/inspect
-          /tmp/inspect/bin/pip install -q 'inspect-ai==0.3.287'
+          # agent-client-protocol 1.0.0 (2026-11-09) dropped acp.helpers, which
+          # inspect-ai imports and does not bound: every eval then fails to start.
+          /tmp/inspect/bin/pip install -q 'inspect-ai==0.3.287' 'agent-client-protocol<1'
           make inspect-test PYTHON=/tmp/inspect/bin/python CFLAGS='-O2 -static'
 
   test-macos:
@@ -179,7 +181,9 @@ jobs:
       - name: pybelay.inspect in real Inspect evals (the mock model, a Docker sandbox)
         run: |
           python3 -m venv /tmp/inspect
-          /tmp/inspect/bin/pip install -q 'inspect-ai==0.3.287'
+          # agent-client-protocol 1.0.0 (2026-11-09) dropped acp.helpers, which
+          # inspect-ai imports and does not bound: every eval then fails to start.
+          /tmp/inspect/bin/pip install -q 'inspect-ai==0.3.287' 'agent-client-protocol<1'
           make inspect-test PYTHON=/tmp/inspect/bin/python CFLAGS='-O2 -static'
       - name: host reader against real containers (overlay2 store)
         run: sudo scripts/host-reader-e2e.sh bin/belay
