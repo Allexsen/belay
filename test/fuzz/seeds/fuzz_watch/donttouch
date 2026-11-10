@@ -1,0 +1,4 @@
+0migrations
+# c
+**/*.lock
+.git/config

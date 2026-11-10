@@ -134,6 +134,8 @@ static void state_json(struct wsb *b, const struct wstate *s) {
     wsb_f(b, "]}");
 }
 
+static bool state_parse(const struct jval *line, struct wstate *s);
+
 static bool id_at(const struct jval *arr, size_t i, char *out) {
     if (arr == NULL || arr->t != J_ARR || i >= arr->n || arr->kids[i].t != J_STR) return false;
     /* an agent may be "": the main thread */
@@ -147,6 +149,8 @@ static bool int_at(const struct jval *arr, size_t i, int64_t *out) {
     *out = arr->kids[i].i;
     return true;
 }
+
+bool ledger_state(const struct jval *line, struct wstate *s) { return state_parse(line, s); }
 
 /* A line's state into *s. false when the line has none that belay wrote. */
 static bool state_parse(const struct jval *line, struct wstate *s) {

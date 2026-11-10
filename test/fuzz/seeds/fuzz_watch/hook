@@ -1,0 +1,1 @@
+2{"session_id":"s","cwd":"/x","tool_use_id":"toolu_1","agent_id":"a","tool_input":{"a":[1,{"b":"\"}]"}]},"tool_calls":[{"tool_use_id":"t1"},{"tool_use_id":"t2"}],"prompt":"<task-notification>x"}
