@@ -731,6 +731,24 @@ out:
     return rc;
 }
 
+char *receipt_escaped(const char *s, size_t len) {
+    struct sb b = { 0 };
+    sbf(&b, "%s", "");
+    esc(&b, s, len);
+    if (b.bad) { free(b.p); return NULL; }
+    return b.p;
+}
+
+int receipt_record_path(const struct jval *r, char *buf, size_t cap, size_t *len) { return rpath(r, buf, cap, len); }
+
+char *receipt_privilege_words(const struct jval *r, const char *path, size_t len, receipt_mode_fn mode, void *ctx) {
+    const struct receipt_opts o = { .mode = mode, .mode_ctx = ctx };
+    struct sb b = { 0 };
+    privilege(&b, r, path, len, &o);
+    if (b.bad || b.n == 0) { free(b.p); return NULL; }
+    return b.p;
+}
+
 void receipt_fputs(FILE *f, const char *s) {
     struct sb b = { 0 };
     esc(&b, s, strlen(s));

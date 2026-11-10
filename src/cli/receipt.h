@@ -67,4 +67,14 @@ int receipt_render(FILE *diff, FILE *out, const struct receipt_opts *o);
  * reason read back, an error naming a path). */
 void receipt_fputs(FILE *f, const char *s);
 
+/* For `belay watch`, which names what it flags as the receipt would:
+ * `len` bytes escaped as the receipt escapes a path (malloc'd; NULL: no
+ * memory); a diff record's path as bytes (0, or -1); and what makes a
+ * record a privilege change, in the privilege section's words (malloc'd),
+ * or NULL when it is none. */
+struct jval;
+char *receipt_escaped(const char *s, size_t len);
+int   receipt_record_path(const struct jval *r, char *buf, size_t cap, size_t *len);
+char *receipt_privilege_words(const struct jval *r, const char *path, size_t len, receipt_mode_fn mode, void *ctx);
+
 #endif

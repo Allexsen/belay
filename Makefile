@@ -34,7 +34,7 @@ CORE_OBJ	= $(CORE_SRC:src/%.c=$(BUILD)/%.o)
 SAN_CORE_OBJ	= $(CORE_SRC:src/%.c=$(SAN_BUILD)/%.o)
 SESSION_SRC	= $(wildcard src/session/*.c)
 TOP_SRC		= $(wildcard src/*.c)
-CLI_SRC		= $(wildcard src/cli/*.c)
+CLI_SRC		= $(wildcard src/cli/*.c src/watch/*.c)
 CLI_OBJ		= $(CLI_SRC:src/%.c=$(BUILD)/%.o) $(BUILD)/utils.o
 SAN_CLI_OBJ	= $(CLI_SRC:src/%.c=$(SAN_BUILD)/%.o) $(SAN_BUILD)/utils.o
 
