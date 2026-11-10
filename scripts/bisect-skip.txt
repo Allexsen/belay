@@ -192,3 +192,6 @@
 # Protect spec 2: the code fails make policy-model until the model follows; its first commit until the second.
 2026-11-05T16:06:32+04:00	protect spec version 2: no_write forbids deleting; version 1 refused
 2026-11-05T16:08:44+04:00	policy-model: protect spec version 2 -- no_write forbids deleting, version 1 refused
+# Inode flags (test/expect/inode-flags.md): the code fails make policy-model until the model follows, its first commit until the second.
+2026-11-10T16:44:02+04:00	verify, receipt: inode flags are a privilege change only as inode-flags.md says
+2026-11-10T16:41:59+04:00	policy-model: inode flags are a privilege change only as inode-flags.md says
