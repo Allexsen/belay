@@ -30,6 +30,7 @@
 void (*watch_stage_hook)(const char *stage) = NULL;
 int64_t (*watch_clock)(void) = NULL;
 long watch_second_ms = WATCH_SECOND_S * 1000;
+bool watch_withhold_go = false;
 
 static int64_t now_ns(void) {
     if (watch_clock != NULL) return watch_clock();
@@ -1059,7 +1060,7 @@ int watch_run(const struct wreq *q, struct wsb *out) {
     bool went = false, open = true;
     int rc = 4;
     for (;;) {
-        if (s.commit && !went) {
+        if (s.commit && !went && !watch_withhold_go) {
             went = true;
             if (write(down[1], "g", 1) != 1) open = false;
         }

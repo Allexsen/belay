@@ -503,7 +503,7 @@ static const char *summary(const struct wstep *steps, size_t n, const char *cons
 }
 
 TEST(a_summary_is_the_pins) {
-    char *c1[] = { "c1" }, *c2[] = { "c2" }, *c12[] = { "c1", "c2" };
+    char *c1[] = { "c1" }, *c2[] = { "c2" }, *c3[] = { "c3" }, *c12[] = { "c1", "c2" };
     ASSERT_EQ_STR("belay: nothing changed this turn\n", summary(NULL, 0, NULL, NULL));
 
     struct wflag hook[] = { fl(WK_GIT, false, ".git/hooks/pre-push added (git hook)") };
@@ -516,7 +516,7 @@ TEST(a_summary_is_the_pins) {
     struct wstep many[] = {
         { .session = "me", .calls = c1, .n_calls = 1, .changes = 10, .flags = note, .n_flags = 1 },
         { .session = "me", .calls = c12, .n_calls = 2, .changes = 30 },
-        { .session = "me", .calls = c2, .n_calls = 1, .changes = 0 },
+        { .session = "me", .calls = c3, .n_calls = 1, .changes = 0 },      /* a call that changed nothing is not counted */
         { .session = "me", .changes = 2 },
         { .session = "me", .calls = c1, .n_calls = 1, .changes = 0 },
     };
