@@ -5,9 +5,9 @@ running record `belay watch` will keep of a directory (one line a step, the full
 it). It amends `state-retention.md` with exactly the rows below; everything not listed here is as
 that pin says. A scope with no watch record is pruned exactly as today.
 
-It is written before `belay watch` exists, from the structure the author is reviewing
-(2026-11-10). Nothing here takes effect until that code does, and a change to that structure
-changes this pin first.
+It is written before `belay watch` exists, from the structure the author approved on 2026-11-10.
+Nothing here takes effect until that code does, and a change to that structure changes this pin
+first.
 
 **Changing it.** In its own PR, presented as a table, after the author's explicit OK.
 
@@ -17,6 +17,13 @@ changes this pin first.
 |---|---|
 | WR-1 | A watch record is the directory `watch/` in the scope's state directory. It holds, for each UTC day on which a step was recorded, one ledger file and one receipt file, and the don't-touch list in force as a file named by its sha256. Its format belongs to the state directory, as ST-3 says of a delta: no one outside belay reads it. |
 | WR-2 | **The cursor** is the checkpoint the newest readable ledger line names as its end. Every later step diffs against it. |
+
+## Whose checkpoint
+
+| id | rule |
+|---|---|
+| WR-14 | A checkpoint a `belay watch` step writes is recorded as the watch's in its `meta.json`, as KP-2 records a kept one, and `belay log` shows it. Every other checkpoint is not the watch's: one written by `check`, `mark`, `diff` or `baseline export`, and any written before this rule. |
+| WR-15 | `belay prune --watch-only`, beside the limits PR-1 requires, removes a checkpoint only when it is the watch's and outside those limits. A checkpoint that is not the watch's stays whatever its age and whatever the limits, for that run; it is not made kept. The rest of the run is any prune's: PR-4 to PR-11 and WR-3 to WR-9. So what is no checkpoint still goes: a directory under `checkpoints/` with no `meta.json` (a capture that never finished, or a removal a crash cut short), an object no remaining manifest refers to, and PR-11's files. |
 
 ## belay prune
 
@@ -34,8 +41,8 @@ changes this pin first.
 
 | id | rule |
 |---|---|
-| WR-10 | Once a day at most, at a Stop, a detached `belay prune --keep-days 7`, as HK-1 does for the dogfood hooks. No `--keep-from` is needed: WR-3 keeps what the next step reads. |
-| WR-11 | That prune removes every unkept checkpoint of the directory older than a week, the user's own included, as any `belay prune --keep-days 7` does. The plugin's README says so. |
+| WR-10 | Once a day at most, at a Stop, a detached `belay prune --keep-days 7 --watch-only`, as HK-1 does for the dogfood hooks. No `--keep-from` is needed: WR-3 keeps what the next step reads. |
+| WR-11 | The plugin prunes only what the watch wrote. Installing it, enabling it and every prune it runs remove no checkpoint the watch did not write: the user's own stay, whatever their age, until the user prunes them. The plugin runs prune in no other form. |
 | WR-12 | A failed prune is a line at the next Stop, as HK-2. |
 
 ## docs/cli.md
