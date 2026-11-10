@@ -153,6 +153,111 @@ def fixture_iflags_decision_163():
         '"text":"d/new: iflags none -> 524304","paths":["d/new"]}'])
 
 
+def fixture_inode_flags():
+    """inode-flags.md by hand, row by row (IF-8 is the receipt's: not this model's). The values:
+    0x80000 ext4's extents (524288), 0x1000 its hashed index, 0x40 nodump, 0x10 immutable,
+    0x20 append-only."""
+    priv = ('{"flag":"privilege_changed","level":"signal","path":"%s","what":"iflags","before":"%s","after":"%s",'
+            '"text":"%s: iflags %s -> %s","paths":["%s"]}')
+
+    def P(path, x, y):
+        return priv % (path, x, y, path, x, y, path)
+
+    def written(path, changed):
+        return ('{"flag":"protected_path_written","level":"violation","path":"%s","rule":"tests/**",'
+                '"outcome":"metadata_only","changed":%s,'
+                '"text":"%s: protected by tests/** (no_write), metadata_only","paths":["%s"]}' % (path, changed, path, path))
+
+    def recs_of(before, after):
+        return model.diff(model.Side(model.view(before, model.HASH_DEFAULT), 10, []),
+                          model.Side(model.view(after, model.HASH_DEFAULT), 10, []))
+
+    root = {b".": raw("dir", D, ino=2)}
+
+    # IF-1, IF-2, IF-7: directories at both ends, no spec
+    before = {**root, b"d1": raw("dir", D, ino=3, iflags=0x80000), b"d2": raw("dir", D, ino=4, iflags=0x80000),
+              b"d3": raw("dir", D, ino=5, iflags=0x80020), b"d4": raw("dir", D, ino=6, iflags=0x80010),
+              b"d5": raw("dir", D, ino=7, iflags=0x10)}
+    after = {**root, b"d1": raw("dir", D, ino=3, iflags=0x81000),     # hashed index set: does not count
+             b"d2": raw("dir", D, ino=4, iflags=0x80010),             # immutable set
+             b"d3": raw("dir", D, ino=5, iflags=0x80000),             # append-only cleared
+             b"d4": raw("dir", D, ino=6, iflags=0x81010),             # immutable kept, hashed index set (P55)
+             b"d5": raw("dir", D, ino=7, iflags=0x20)}                # immutable cleared, append-only set (P55)
+    got, _f = verify(None, before, after)
+    check("IF-2, IF-7: a directory's flags count only when a locking flag is set or cleared", got[1:-1],
+          [P("d2", 524288, 524304), P("d3", 524320, 524288), P("d5", 16, 32)])
+    r = recs_of(before, after)
+    quiet = {"outcome": "metadata_only", "type": "dir", "changed": ["iflags"]}
+    check("IF-9: the diff still lists iflags, metadata_only", [r.get(b"d1"), r.get(b"d4"), r.get(b"d2")], [quiet, quiet, quiet])
+
+    # IF-6 and the pin's example: a spec with tests/** as no_write
+    spec = b'{"belay_protect":2,"protect":[{"path":"tests/**","mode":["no_write"]}]}'
+
+    def tests_dir(mode_after, flags_after, spec_raw=spec):
+        b = {**root, b"tests": raw("dir", D, ino=3, iflags=0x80000)}
+        a = {**root, b"tests": raw("dir", mode_after, ino=3, iflags=flags_after)}
+        got, flags = verify(spec_raw, b, a)
+        return got[1:-1], model.verify_exit(flags, True)
+    check("the example: the hashed index set on tests gives neither", tests_dir(D, 0x81000), ([], 0))
+    check("the example: chattr +i tests still gives both", tests_dir(D, 0x80010),
+          ([written("tests", '["iflags"]'), P("tests", 524288, 524304)], 1))
+    check("IF-6: mode also changed: a violation, changed as the diff lists it; IF-7: no iflags record",
+          tests_dir(0o40700, 0x81000), ([written("tests", '["mode","iflags"]')], 1))
+    check("IF-6, IF-7: with setgid: its own record, none for iflags", tests_dir(0o42755, 0x81000),
+          ([written("tests", '["mode","iflags"]'),
+            '{"flag":"privilege_changed","level":"signal","path":"tests","what":"setgid","before":"off","after":"on",'
+            '"text":"tests: setgid off -> on","paths":["tests"]}'], 1))
+    check("IF-2 unprotected: nothing", tests_dir(D, 0x81000, None), ([], 0))
+    check("IF-2 unprotected, locked: the signal", tests_dir(D, 0x80010, None), ([P("tests", 524288, 524304)], 0))
+
+    # IF-4: a regular file at both ends: every change counts, as before
+    b = {**root, b"tests": raw("dir", D, ino=3, iflags=0x80000), b"tests/f.txt": raw("reg", F, b"f\n", ino=4, iflags=0x80000)}
+    a = {**b, b"tests/f.txt": raw("reg", F, b"f\n", ino=4, iflags=0x80040)}
+    got, flags = verify(spec, b, a)
+    check("IF-4, IF-6: a regular file's nodump is a violation and a signal", (got[1:-1], model.verify_exit(flags, True)),
+          ([written("tests/f.txt", '["iflags"]'), P("tests/f.txt", 524288, 524352)], 1))
+
+    # IF-3: directories added and removed
+    before = {**root, b"gone-locked": raw("dir", D, ino=3, iflags=0x80020), b"gone-plain": raw("dir", D, ino=4, iflags=0x81040)}
+    after = {**root, b"new-locked": raw("dir", D, ino=5, iflags=0x80010), b"new-plain": raw("dir", D, ino=6, iflags=0x81000)}
+    got, _f = verify(None, before, after)
+    check("IF-3: an added or removed directory's flags count only when they lock it", got[1:-1],
+          [P("gone-locked", 524320, "none"), P("new-locked", "none", 524304)])
+
+    # IF-4's last sentence: a type change is judged as before, a directory at either end (P56, P57)
+    before = {**root, b"t": raw("dir", D, ino=3, iflags=0x80000), b"t/a": raw("reg", F, b"a\n", ino=4, iflags=0x80040),
+              b"t/b": raw("dir", D, ino=5, iflags=0x81000), b"t/c": raw("reg", F, b"c\n", ino=6, iflags=0x80000)}
+    after = {**root, b"t": raw("dir", D, ino=3, iflags=0x80000), b"t/a": raw("dir", D, ino=7, iflags=0x80000),
+             b"t/b": raw("reg", F, b"b\n", ino=8, iflags=0x80000), b"t/c": raw("lnk", 0o120777, ino=9, link=b"/x")}
+    got, _f = verify(None, before, after)
+    check("IF-4: a type change is not under IF-2", got[1:-1],
+          [P("t/a", 524352, 524288), P("t/b", 528384, 524288), P("t/c", 524288, "none")])
+
+    # IF-5: flags read on one side only, the same type at both ends
+    gspec = b'{"belay_protect":2,"protect":[{"path":"g/**","mode":["no_write"]}]}'
+    unread = raw("reg", F, b"k\n", ino=4)
+    unread["readable"] = False
+    unread["iflags"] = None                       # no descriptor to ask through (P25)
+    sub = raw("dir", D, ino=5)
+    sub["iflags"] = None                          # a side that could not read them
+    before = {**root, b"g": raw("dir", D, ino=3, iflags=0x80000), b"g/sub": sub,
+              b"g/x": raw("reg", F, b"k\n", ino=4, iflags=0x80000)}
+    after = {**root, b"g": raw("dir", D, ino=3, iflags=0x80000), b"g/sub": raw("dir", D, ino=5, iflags=0x80010),
+             b"g/x": unread}
+    unver = ('{"flag":"protected_path_unverifiable","level":"violation","path":"%s","rule":"g/**","reasons":%s,'
+             '"text":"%s: protected by g/**, cannot be verified: %s","paths":["%s"]}')
+    got, _f = verify(gspec, before, after)
+    check("IF-5: unverifiable as before, no written, no `none` against a value (a locking one included, P58)", got[1:-1],
+          [unver % ("g/sub", '["iflags_unknown"]', "g/sub", "iflags_unknown", "g/sub"),
+           unver % ("g/x", '["unverified","unreadable","iflags_unknown"]', "g/x", "unverified, unreadable, iflags_unknown", "g/x")])
+    got, _f = verify(None, before, after)
+    check("IF-5 without a spec: nothing", got[1:-1], [])
+    r = recs_of(before, after)
+    check("IF-5: the diff's outcome stays unknown, iflags_unknown", [r[b"g/sub"], r[b"g/x"]],
+          [{"outcome": "unknown", "type": "dir", "unknown": ["iflags_unknown"]},
+           {"outcome": "unknown", "type": "reg", "unknown": ["unverified", "unreadable", "iflags_unknown"]}])
+
+
 def fixture_text_cut():
     long_dir = "\u00e9" * 300                       # 600 bytes, two to a character
     p = ("tests/%s/%s/test_x.py" % (long_dir, long_dir)).encode()
@@ -549,7 +654,8 @@ def tables():
 
 def run():
     del FAILS[:]
-    for f in (tables, fixture_protected_write, fixture_privilege_path, fixture_iflags_decision_163, fixture_text_cut,
+    for f in (tables, fixture_protected_write, fixture_privilege_path, fixture_iflags_decision_163, fixture_inode_flags,
+              fixture_text_cut,
               fixture_pip_reinstall_judged, fixture_pyc_decision_186, fixture_pip_bundle,
               fixture_dpkg_bundle_and_tamper, fixture_git_reset, fixture_writer_open, fixture_manifest_v4, fixture_protect_v2):
         try:

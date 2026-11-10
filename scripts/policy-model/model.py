@@ -1,7 +1,7 @@
 """policy-model: an independent model of policy.v1, from the pins alone (decision 150, Q9).
 
-Written only from test/expect/policy-v1.md, protect-spec.md, protect-spec-v2.md and
-baseline-bundle.md, diff.v1's
+Written only from test/expect/policy-v1.md, protect-spec.md, protect-spec-v2.md, inode-flags.md
+and baseline-bundle.md, diff.v1's
 pins (diff-fields.md, diff-values.md, finding-kinds.md, diff-events.md), the manifest pins,
 docs/spec prose outside its generated blocks, and docs/cli.md -- never from belay's code, the
 oracle, the reference, or a generated table. Where it and belay disagree, one of them misreads a
@@ -31,9 +31,9 @@ P3  SETTLED (decision 163). privilege_changed `iflags`, read as written at first
     file `none -> 0`, on ext4 `none -> 524288`). The row now reads: "For a file added or
     removed, `iflags` only when they hold the immutable or append-only flag (Linux
     `FS_IMMUTABLE_FL`, `FS_APPEND_FL`; ...)". Modelled: an entry on one side only gives an
-    iflags record only when that side's flags hold 0x10 or 0x20 (`none -> 16`); an entry on both
-    sides gives one whenever the two values differ, `none` where one is not recorded (so a file
-    that becomes unreadable is `0 -> none`). See P32.
+    iflags record only when that side's flags hold 0x10 or 0x20 (`none -> 16`). See P32. What
+    an entry on both sides gives was this model's ("whenever the two values differ, `none`
+    where one is not recorded") until inode-flags.md pinned it: IF-2, IF-4, IF-5 (P55-P59).
 
 P4  privilege_changed "any file": any entry type, directories included (setgid and sticky
     matter most on directories).
@@ -279,6 +279,46 @@ P54 New with protect spec 2. PV2-2's "a path matched before whose outcome is `re
     `unreadable`) and removed is both protected_path_deleted and protected_path_unverifiable, as
     under no_delete, PS-M5's "whose entry there" being before's. protected_path_written is
     unchanged: its `rule` is still the first with `no_write` (policy-v1, "the mode concerned").
+
+P55 New with inode-flags.md. IF-2's "a locking flag is set or cleared": the two values differ in
+    a locking bit (Linux 0x10, 0x20). A directory that holds a locking flag at both ends while
+    another of its flags changes has had none set or cleared: it does not count. One whose
+    immutable flag is cleared while append-only is set (16 -> 32) counts. A change that counts
+    is reported with the whole values, as before (`524288 -> 524304`), other bits included.
+
+P56 New with inode-flags.md. IF-4's "An entry whose type changed is not under IF-2: it is
+    `type_changed`, judged as today". Today (P3, before this pin) an entry on both sides gave a
+    privilege_changed `iflags` record whenever its two values differed. Read: a path whose type
+    differs between the manifests gives one whenever the values differ, a directory at either
+    end included, a non-locking flag included -- neither IF-2 (not a directory at both ends)
+    nor IF-3 (it is not added or removed) is applied to it. PS-M1 needs no reading: the outcome
+    `type_changed` is a violation by itself.
+
+P57 New with inode-flags.md. IF-5 against P56. IF-5 describes the same-type case ("the diff's
+    outcome stays `unknown`, reason `iflags_unknown`": rule 4 gives that reason only between
+    entries of one type, P29), and IF-4 says a type change is "judged as today". Read: IF-5
+    covers an entry of the same type at both ends; a type change whose one end records no flags
+    (a regular file replaced by a symlink) still gives `0 -> none`, as today. The other reading
+    -- IF-5's first sentence taken alone, for every entry at both ends -- would drop that
+    record; this is the reading with the widest effect, and the pin's words allow both.
+
+P58 New with inode-flags.md. IF-5 is unconditional: an entry of one type at both ends whose flags
+    were read on one side only gives no `iflags` record even when the side read holds a locking
+    flag (`none -> 16` is not reported). IF-3's `none` is another thing -- the entry is absent
+    on that side -- and stays (`none -> 16` for an added, immutable file).
+
+P59 New with inode-flags.md. IF-6 and IF-7 together: a protected directory whose `mode` and
+    hashed-index flag both change is protected_path_written with `changed` as the diff lists it
+    (`["mode","iflags"]`), and has no privilege_changed `iflags` record: IF-7 depends only on
+    whether the flag change counts, never on whether the path is a violation for another field.
+    A `metadata_only` record whose `changed` holds `iflags` beside only timestamps or identity
+    is no violation when the flag change does not count (PS-M1: "anything but timestamps ...
+    and identity").
+
+Not modelled: IF-8 (the receipt's privilege section) -- this model produces policy.v1, not the
+receipt. IF-1's macOS flags: the harness measures Linux's FS_IOC_GETFLAGS, so only
+`FS_IMMUTABLE_FL` (0x10) and `FS_APPEND_FL` (0x20) are tested for. IF-9 needs no code: the
+model's manifest view and diff (`_both`) are as they were, and the self-test holds them there.
 """
 
 import base64
@@ -1689,9 +1729,10 @@ def protected_flags(spec, recs, B, A):
             if "no_write" not in r.modes:
                 continue
             if b is not None and a is not None:
-                hit = outcome in ("modified", "type_changed") or (
-                    outcome == "metadata_only"
-                    and set(rec["changed"]) & {"mode", "uid", "gid", "iflags", "caps", "xattrs"})
+                ch = set(rec.get("changed", ())) if outcome == "metadata_only" else set()
+                hit = (outcome in ("modified", "type_changed")
+                       or bool(ch & {"mode", "uid", "gid", "caps", "xattrs"})        # IF-6: as today
+                       or ("iflags" in ch and iflags_count(b, a)))                    # IF-6: IF-2, IF-4
                 if hit:
                     flags.append(Flag("protected_path_written", "violation",
                                       [("path", p), ("rule", r.pattern), ("outcome", outcome),
@@ -1974,7 +2015,27 @@ def other_flags(ctx, recs, B, A, events):
     return flags
 
 
-LOCKING_IFLAGS = 0x10 | 0x20          # Linux FS_IMMUTABLE_FL, FS_APPEND_FL
+LOCKING_IFLAGS = 0x10 | 0x20          # IF-1: Linux FS_IMMUTABLE_FL, FS_APPEND_FL
+
+
+def iflags_count(b, a):
+    """inode-flags.md: whether the `iflags` of a path's two entries (None: absent on that side)
+    are a privilege change. PS-M1 (IF-6) and privilege_changed (IF-7) both ask here."""
+    if b is None and a is None:
+        return False
+    if b is None or a is None:                                                         # IF-3, P32
+        e = a if b is None else b
+        return bool((e.get("iflags") or 0) & LOCKING_IFLAGS)
+    ib, ia = b.get("iflags"), a.get("iflags")
+    if ib == ia:
+        return False
+    if b["type"] != a["type"]:                                                        # IF-4, P56, P57
+        return True
+    if ib is None or ia is None:                                                      # IF-5, P58
+        return False
+    if a["type"] == "dir":                                                            # IF-2, P55
+        return bool((ib ^ ia) & LOCKING_IFLAGS)
+    return True                                                                       # IF-4
 
 
 def privilege(p, b, a, prov):
@@ -1992,11 +2053,7 @@ def privilege(p, b, a, prov):
         out.append(("caps", cb or "none", ca or "none"))
     ib = b.get("iflags") if b is not None else None
     ia = a.get("iflags") if a is not None else None
-    if (b is None) != (a is None):                                                      # P32
-        report = bool(((ib if b is not None else ia) or 0) & LOCKING_IFLAGS)              # decision 163
-    else:
-        report = ib != ia
-    if report:
+    if iflags_count(b, a):                                                              # IF-7
         out.append(("iflags", "none" if ib is None else str(ib), "none" if ia is None else str(ia)))
     return [Flag("privilege_changed", "signal",
                  [("path", p), ("what", w), ("before", x), ("after", y)],
