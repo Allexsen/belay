@@ -124,12 +124,13 @@ def apply(root, ops):
         elif k == "touch":                       # mtime only
             st = os.stat(p)
             os.utime(p, ns=(st.st_atime_ns, st.st_mtime_ns + 1_000_000_000))
-        elif k == "chattr":
+        elif k in ("chattr", "unchattr"):        # set, or clear, inode flags
             fd = os.open(p, os.O_RDONLY | os.O_NONBLOCK)
             try:
                 buf = bytearray(8)
                 fcntl.ioctl(fd, FS_IOC_GETFLAGS, buf, True)
-                v = int.from_bytes(buf[:4], "little") | op[2]
+                v = int.from_bytes(buf[:4], "little")
+                v = v | op[2] if k == "chattr" else v & ~op[2]
                 fcntl.ioctl(fd, FS_IOC_SETFLAGS, bytearray(v.to_bytes(4, "little") + b"\0" * 4), True)
             finally:
                 os.close(fd)
@@ -856,6 +857,7 @@ def scenarios():
         add(S("verify-corrupt-" + c, BASE, [], TW, verify={"corrupt": c}, refusal="verify:corrupt-" + c))
     out.extend(writer_scenarios())
     out.extend(version2_scenarios())
+    out.extend(inode_flag_scenarios())
     names = [s["name"] for s in out]
     assert len(names) == len(set(names)), "duplicate scenario names"
     return out
@@ -940,6 +942,67 @@ def version2_scenarios():
           refusal="verify:v1-bundle-no-spec"))
     add(S("pv2-6-no-spec-bundle-judged", BASE, [("rm", T)], None))
     add(S("pv2-6-no-spec-bundle-v1-spec", BASE, [], None, verify={"spec": V1_SPEC}, tags=["P24"], refusal="verify:no-spec-bundle-v1-spec"))
+    return out
+
+
+def inode_flag_scenarios():
+    """inode-flags.md, row by row. FS_NODUMP_FL is the flag an owner may set: not a locking one.
+    The locking flags (immutable, append-only) need CAP_LINUX_IMMUTABLE, which the harness does
+    not have, so no scenario sets or clears one: IF-1, IF-2's counting half, IF-3's and IF-5's
+    locking cases are selftest.py's, by hand (fixture_inode_flags). IF-8 is the receipt's."""
+    out = []
+    add = out.append
+    N = FS_NODUMP_FL
+    TW = spec_of(rule("tests/**", "no_write"))
+    GW = spec_of(rule("grader/**", "no_write"))
+    # IF-2: a directory at both ends, a flag that locks nothing
+    add(S("if-2-dir-nodump-protected", BASE, [("chattr", "tests", N)], TW))
+    add(S("if-2-dir-nodump-unprotected", BASE, [("chattr", "src", N)]))
+    add(S("if-2-dir-nodump-cleared-protected", BASE + [("chattr", "tests", N)], [("unchattr", "tests", N)], TW))
+    add(S("if-2-dir-nodump-cleared-unprotected", BASE + [("chattr", "src", N)], [("unchattr", "src", N)]))
+    add(S("if-2-scope-root-nodump", BASE, [("chattr", ".", N)]))
+    # the pin's example: on a filesystem that sets the hashed index itself (ext4), 450 files in tests/
+    add(S("if-2-disk-450-files", BASE, [("file", "tests/data/f%03d.txt" % i, b"") for i in range(450)]
+          + [("file", "tests/g%03d.txt" % i, b"") for i in range(450)], TW, workdir="disk"))
+    # IF-4: any other entry at both ends, as before (pw-iflags and priv-iflags set one; these clear it)
+    add(S("if-4-file-nodump-cleared-protected", BASE + [("chattr", "grader/check.py", N)],
+          [("unchattr", "grader/check.py", N)], GW))
+    add(S("if-4-file-nodump-cleared-unprotected", BASE + [("chattr", "src/app.py", N)], [("unchattr", "src/app.py", N)]))
+    add(S("if-4-file-in-dir-both-nodump", BASE, [("chattr", "tests", N), ("chattr", "tests/test_api.py", N)], TW))
+    # IF-4's last sentence: a type change, a directory at one end (P56, P57)
+    add(S("if-4-type-file-to-dir", BASE + [("file", "tests/thing", b"t\n"), ("chattr", "tests/thing", N)],
+          [("rm", "tests/thing"), ("dir", "tests/thing")], TW, tags=["P56"]))
+    add(S("if-4-type-dir-to-file", BASE + [("dir", "src/box"), ("chattr", "src/box", N)],
+          [("rmtree", "src/box"), ("file", "src/box", b"b\n")], tags=["P56"]))
+    add(S("if-4-type-file-to-symlink", BASE + [("file", "src/l", b"l\n"), ("chattr", "src/l", N)],
+          [("rm", "src/l"), ("symlink", "src/l", "app.py")], tags=["P56", "P57"]))
+    # IF-3: entries added and removed that carry a flag locking nothing
+    add(S("if-3-dirs-added-removed-nodump", BASE + [("dir", "tests/olddir"), ("chattr", "tests/olddir", N)],
+          [("dir", "tests/newdir"), ("chattr", "tests/newdir", N), ("rmtree", "tests/olddir")],
+          spec_of(rule("tests/**", "no_write", "no_create")), tags=["P32"]))
+    add(S("if-3-files-added-removed-nodump-protected", BASE + [("file", "tests/old.txt", b"o\n"), ("chattr", "tests/old.txt", N)],
+          [("file", "tests/new.txt", b"n\n"), ("chattr", "tests/new.txt", N), ("rm", "tests/old.txt")],
+          spec_of(rule("tests/**", "no_write", "no_create")), tags=["P32"]))
+    # IF-6: iflags and another listed field on a protected directory
+    add(S("if-6-dir-nodump-and-mode", BASE, [("chattr", "tests", N), ("chmod", "tests", 0o700)], TW, tags=["P59"]))
+    add(S("if-6-dir-nodump-and-setgid", BASE, [("chattr", "tests", N), ("chmod", "tests", 0o2755)], TW, tags=["P59"]))
+    add(S("if-6-dir-nodump-and-xattr", BASE, [("chattr", "tests", N), ("setxattr", "tests", "user.note", b"x")], TW,
+          tags=["P59"]))
+    add(S("if-6-dir-nodump-and-mode-unprotected", BASE, [("chattr", "src", N), ("chmod", "src", 0o2755)], tags=["P59"]))
+    add(S("if-6-file-nodump-and-mode", BASE, [("chattr", "grader/check.py", N), ("chmod", "grader/check.py", 0o600)], GW))
+    # IF-5: flags read on one side only -- what cannot be opened has none (P25)
+    add(S("if-5-file-unreadable-after", BASE + [("file", "grader/secret.txt", b"s3cret\n")],
+          [("chmod", "grader/secret.txt", 0o000)], GW, tags=["P25", "P29"]))
+    add(S("if-5-file-unreadable-before", BASE + [("file", "grader/secret.txt", b"s3cret\n"), ("chmod", "grader/secret.txt", 0o000)],
+          [("chmod", "grader/secret.txt", 0o644)], GW, tags=["P25", "P29"]))
+    add(S("if-5-file-unreadable-after-unprotected", BASE + [("file", "src/secret.txt", b"s3cret\n")],
+          [("chmod", "src/secret.txt", 0o000)], tags=["P25", "P29"]))
+    add(S("if-5-dir-unreadable-after", BASE + [("dir", "grader/sub")], [("chmod", "grader/sub", 0o000)], GW,
+          tags=["P25", "P29"]))
+    add(S("if-5-dir-unreadable-before", BASE + [("dir", "grader/sub", 0o000)], [("chmod", "grader/sub", 0o755)], GW,
+          tags=["P25", "P29"]))
+    add(S("if-5-dir-unreadable-after-unprotected", BASE + [("dir", "src/sub")], [("chmod", "src/sub", 0o000)],
+          tags=["P25", "P29"]))
     return out
 
 
