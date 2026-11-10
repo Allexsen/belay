@@ -72,6 +72,15 @@ int flag_event(const struct jval *e, struct wflag *out);
 
 void flagctx_free(struct flagctx *x);
 
+/* For `belay watch patterns`: whether a row applies to an entry, by its
+ * pattern, exception and the limits that do not depend on a change
+ * (BR-L1, BR-L2, BR-L4); and which list a current entry falls under --
+ * true with its kind, the reason shown and whether a modification of it
+ * would only be noted. */
+bool flag_row_applies(const struct brow *r, const char *path, size_t len, bool dir);
+bool flag_path(const struct flagctx *x, const char *path, size_t len, bool dir, enum wkind *kind, const char **reason,
+               bool *note);
+
 /* `len` bytes of a path as a line shows them (LN-7): escaped as the receipt
  * does, cut in the middle past 80 characters. malloc'd; NULL: no memory. */
 char *flag_shown(const char *path, size_t len);

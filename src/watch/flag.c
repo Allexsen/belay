@@ -214,19 +214,18 @@ static bool is_newdir(const struct flagctx *x, const char *path, size_t len) {
     return false;
 }
 
+bool flag_row_applies(const struct brow *r, const char *path, size_t len, bool dir) {
+    const unsigned m = pattern_match(r->pattern, strlen(r->pattern), path, len, PATTERN_DOTS | PATTERN_NOCASE);
+    if (r->limits & BR_FILE ? !((m & PATTERN_SELF) && !dir) : m == 0) return false;
+    if (r->except != NULL && pattern_match(r->except, strlen(r->except), path, len, PATTERN_DOTS) != 0) return false;
+    return !((r->limits & BR_DEPS) && in_dependency(path, len));
+}
+
 /* The first built-in row that applies to the entry, or NULL. */
 static const struct brow *row_of(const struct flagctx *x, const char *path, size_t len, bool dir, bool added) {
-    bool deps_known = false, deps = false;
     for (size_t i = 0; i < flag_n_rows; i++) {
         const struct brow *r = &flag_rows[i];
-        const unsigned m = pattern_match(r->pattern, strlen(r->pattern), path, len, PATTERN_DOTS | PATTERN_NOCASE);
-        if (r->limits & BR_FILE ? !((m & PATTERN_SELF) && !dir) : m == 0) continue;
-        if (r->except != NULL && pattern_match(r->except, strlen(r->except), path, len, PATTERN_DOTS) != 0) continue;
-        if (r->limits & BR_DEPS) {
-            if (!deps_known) deps = in_dependency(path, len);
-            deps_known = true;
-            if (deps) continue;
-        }
+        if (!flag_row_applies(r, path, len, dir)) continue;
         if ((r->limits & BR_NEWDIR) && added && is_newdir(x, path, len)) continue;
         return r;
     }
@@ -239,6 +238,22 @@ static bool user_match(const struct flagctx *x, const char *path, size_t len) {
         for (size_t i = 0; x->lists[l] != NULL && i < x->lists[l]->n; i++)
             if (pattern_match(x->lists[l]->pat[i], x->lists[l]->len[i], path, len, PATTERN_DOTS) != 0) return true;
     return false;
+}
+
+bool flag_path(const struct flagctx *x, const char *path, size_t len, bool dir, enum wkind *kind, const char **reason,
+               bool *note) {
+    if (user_match(x, path, len)) {
+        *kind = WK_DONTTOUCH;
+        *reason = "don't-touch";
+        *note = false;
+        return true;
+    }
+    const struct brow *r = row_of(x, path, len, dir, false);
+    if (r == NULL) return false;
+    *kind = r->kind;
+    *reason = r->label;
+    *note = (r->limits & (BR_NOTE | BR_NOTE_MOD)) != 0;
+    return true;
 }
 
 int flag_record(struct flagctx *x, const struct jval *r, const char *path, size_t len, struct wflag *out,
