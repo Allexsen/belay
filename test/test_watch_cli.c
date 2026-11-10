@@ -325,11 +325,11 @@ TEST(every_step_writes_a_line_and_a_torn_tail_is_cut) {
     ASSERT_EQ_INT(0, (int)count(ledger(), "\"t\":\"st{"));
     ASSERT_EQ_STR("", out_of("grep -v '^{\"belay_watch\":1,.*}$' '%s'/scopes/*/watch/ledger-*.ndjson", g_state));
     sh("for f in '%s'/scopes/*/watch/ledger-*.ndjson; do printf '\\0\\0\\0\\0\\0\\0\\n' >> \"$f\"; done", g_state);
-    ASSERT_EQ_STR("1\n", out_of("grep -c -a -P '\\x00' '%s'/scopes/*/watch/ledger-*.ndjson", g_state));
+    ASSERT_EQ_STR("6", out_of("cat '%s'/scopes/*/watch/ledger-*.ndjson | tr -cd '\\000' | wc -c | tr -d ' \\n'", g_state));
     sh("echo n > '%s/n2'", g_scope);
     ASSERT_EQ_INT(0, step("s1", NULL));
     ASSERT_EQ_STR("belay: outside tool calls: 1 change: n2 added\n", g_out);
-    ASSERT_EQ_STR("0\n", out_of("grep -c -a -P '\\x00' '%s'/scopes/*/watch/ledger-*.ndjson", g_state));
+    ASSERT_EQ_STR("0", out_of("cat '%s'/scopes/*/watch/ledger-*.ndjson | tr -cd '\\000' | wc -c | tr -d ' \\n'", g_state));
     /* every line of the record is one JSON object of this version */
     ASSERT_EQ_STR("", out_of("grep -v '^{\"belay_watch\":1,' '%s'/scopes/*/watch/ledger-*.ndjson", g_state));
 }
@@ -483,7 +483,7 @@ TEST(steps_at_the_same_time_count_each_change_once) {
         pids[c] = fork();
         REQUIRE(pids[c] != -1);
         if (pids[c] == 0) {
-            char session[8];
+            char session[16];
             snprintf(session, sizeof session, "s%d", c + 1);
             for (int j = 0; j < 6; j++) {
                 sh("echo x > '%s/c%d_%d'", g_scope, c, j);
@@ -536,7 +536,7 @@ TEST(the_receipt_is_every_step_newest_first) {
     ASSERT_EQ_STR(path, out_of("sed -n 2p '%s' | tr -d '\\n'", path));
     HAS(out_of("cat '%s'", path), "A second.txt");
     /* TL-13: a section that is gone or fails its digest is said in its place */
-    sh("for f in '%s'/scopes/*/watch/receipt-*.txt; do sed -i 's/second.txt/SECOND.txt/' \"$f\"; done", g_state);
+    sh("for f in '%s'/scopes/*/watch/receipt-*.txt; do perl -pi -e 's/second.txt/SECOND.txt/' \"$f\"; done", g_state);
     ASSERT_EQ_INT(0, belay("watch", "receipt", "--scope", g_scope, NULL));
     HAS(g_out, "this step's section is missing\n");
     HAS(g_out, "A first.txt");
@@ -935,10 +935,10 @@ TEST(the_hook_prunes_once_a_day_and_only_the_watchs_own) {
     HAS(g_out, "mark 2 ");
     ASSERT_EQ_STR("", out_of("cat '%s'/scopes/*/watch/prune.log 2>/dev/null", g_state));
     /* not again the same day */
-    const char *stamp = strdup(out_of("stat -c %%Y '%s'/scopes/*/watch/pruned", g_state));
+    const char *stamp = strdup(out_of("perl -e 'print((stat($ARGV[0]))[9])' '%s'/scopes/*/watch/pruned", g_state));
     sleep(1);
     hook("stop", "{" S1 "}");
-    ASSERT_EQ_STR(stamp, out_of("stat -c %%Y '%s'/scopes/*/watch/pruned", g_state));
+    ASSERT_EQ_STR(stamp, out_of("perl -e 'print((stat($ARGV[0]))[9])' '%s'/scopes/*/watch/pruned", g_state));
     free((char *)stamp);
     /* WR-12: a failed prune is a line at the next Stop, once */
     sh("echo 'belay: it broke' > \"$(ls -d '%s'/scopes/*/watch)/prune.log\"", g_state);
