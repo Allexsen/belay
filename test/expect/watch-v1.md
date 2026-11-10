@@ -23,15 +23,15 @@ diffs with a model of the dialect below:
 
 - **A**: the list of the draft plugin (PR #125) under its rule, a name with no slash matching at any depth.
 - **B**: the rows below without BR-L2 and BR-L3.
-- **C**: the rows below as pinned.
+- **C**: the rows below as pinned, with their limits and the quiet level (FL-2).
 
 A step is "flagged" when its line would carry the red circle.
 
-| Steps | Count | Changed entries | Flagged under A | under B | under C |
-|---|---|---|---|---|---|
-| Installs, scaffolds, builds, test runs (npm, pnpm, pip, create-vite, create-next-app, django, pytest, make) | 27 | 75,479 | 9 steps, 68 entries | 6 steps, 11 entries | **2 steps, 2 entries** |
-| Git operations (init, clone, branch, commit, amend, fetch, stash, rebase, gc, remote add, config, submodule add) | 14 | 647 | 8 steps, 33 entries | 8 steps, 20 entries | **7 steps, 15 entries** |
-| Installing a hook manager (husky, pre-commit, lefthook): flags are the point | 6 | 841 | 3 steps, 24 entries | 3 steps, 24 entries | 3 steps, 24 entries |
+| Steps | Count | Changed entries | Flagged under A | under B | under C | Noted only, under C |
+|---|---|---|---|---|---|---|
+| Installs, scaffolds, builds, test runs (npm, pnpm, pip, create-vite, create-next-app, django, pytest, make) | 27 | 75,479 | 9 steps, 68 entries | 6 steps, 11 entries | **2 steps, 2 entries** | 0 |
+| Git operations (init, clone, branch, commit, amend, fetch, stash, rebase, gc, remote add, config, submodule add) | 14 | 647 | 8 steps, 33 entries | 8 steps, 20 entries | **4 steps, 11 entries** | 3 steps |
+| Installing a hook manager (husky, pre-commit, lefthook): flags are the point | 6 | 841 | 3 steps, 24 entries | 3 steps, 24 entries | 3 steps, 23 entries | 0 |
 
 What is still flagged under C, in the 41 steps where no flag was the aim:
 
@@ -40,9 +40,19 @@ What is still flagged under C, in the 41 steps where no flag was the aim:
 | `pip install -U pip setuptools wheel` | `site-packages/distutils-precedence.pth` added | It does run at every Python start. |
 | `pip install -e .` | `site-packages/__editable__.demo-0.1.pth` added | The same. |
 | `git clone` of a repository | its `.devcontainer` (3 entries) and `.pre-commit-config.yaml` | What the cloned repository carries. |
-| `git submodule add` | `.gitmodules`, `.git/config` modified, and the same 4 entries of the submodule | The same, and the parent's config did change. |
-| `git checkout -b x origin/main`; `git remote add`; `git config user.name` | `.git/config` modified | belay does not read which key changed. 3 of 14 git steps. |
+| `git submodule add` | `.gitmodules`, and the same 4 entries of the submodule | The same. The parent's `.git/config`, modified, is noted. |
 | `git commit --amend`; `git rebase` | history rewritten | They do rewrite it. 2 of 14 git steps. |
+
+Noted, without the red circle: `.git/config` modified by `git checkout -b x origin/main`,
+`git remote add` and `git config user.name` (3 of 14 git steps), and beside the flags of
+`git submodule add` and `husky init`. Without the quiet level each of the three was a flagged
+step (author, 2026-11-10: it fires on routine work).
+
+**What Claude Code writes under `.claude/` itself** (2.1.322, a scratch project): a `claude -p`
+session that wrote, ran and edited files wrote nothing there. An interactive session in manual
+mode with three permission prompts, a subagent and an edit wrote one file,
+`.claude/settings.local.json`, when a prompt was answered "Yes, and don't ask again"; the other
+two answers and the subagent wrote nothing. So that file is its own row, noted (BR-17).
 
 What A and B flagged and C does not:
 
@@ -59,7 +69,7 @@ a symlink. `belay mark` after a step took 0.036 s at the median (2,167 entries) 
 
 | Case | Time |
 |---|---|
-| The 65 rows below against the 67,144 distinct paths the workloads changed | 0.26 s, 0.004 ms a changed path |
+| The rows below (65 when measured) against the 67,144 distinct paths the workloads changed | 0.26 s, 0.004 ms a changed path |
 | The same paths against 256 ordinary user patterns (`**/dir/**/*.ext`) | 1.3 s, 0.02 ms a path |
 | The worst the limits of DT-4 allow, on ordinary paths: 256 patterns of four `**`, each before a component that scans every name to its end | 0.05 ms a path |
 | The same patterns on paths of 3,839 bytes in 15 components of 255 bytes | 26 ms a path |
@@ -81,8 +91,14 @@ So a list written to be slow, in a directory holding paths near the system's lim
 
 ## What is flagged, and the order
 
-A flag has a kind and a reason. Flags are named in this order of kind, one of each kind before a
-second of any (LN-4).
+| id | rule |
+|---|---|
+| FL-1 | **Flagged**: the line carries the red circle and names the entry first. Every kind below is flagged unless FL-2 says otherwise. |
+| FL-2 | **Noted**, the quiet level: the entry is named at the front of the line, after anything flagged, with its reason, and brings no red circle. Only a built-in row can note, and only where its limit says so (BR-L5, BR-L6). Reading a file's keys to flag the dangerous ones is not in this version. |
+| FL-3 | A user's pattern always flags. Every line of "The record could not be kept", below, is flagged. |
+
+A flag or a note has a kind and a reason. They are named in this order of kind, one of each kind
+before a second of any (LN-4).
 
 | id | kind | when | the reason shown |
 |---|---|---|---|
@@ -119,16 +135,18 @@ Limits a row may carry:
 | BR-L2 | not in a dependency | The row does not apply at or below a directory named `node_modules` or `site-packages`, at any depth. What a package ships inside itself is the package's content: npm does not read a dependency's `.npmrc` (probed), and an install would otherwise be flagged for every package that ships its own CI or test keys. |
 | BR-L3 | not in a new directory | The row does not flag an entry that is added when the directory it is in is added in the same step: a new repository's `config` and `info/exclude` are git's own. A change to one that was there, or one added to a directory that was there, is flagged. |
 | BR-L4 | except PATTERN | The row does not apply to a path the exception matches or that lies below its match. |
+| BR-L5 | noted when modified | A match whose outcome is `modified` is noted (FL-2), not flagged. Added, removed, type changed or metadata changed, it is flagged. So `git config core.hooksPath` on an existing repository is noted, like `git config user.name`: the file's keys are not read. |
+| BR-L6 | noted | Every match is noted, not flagged. |
 
 | id | kind | label | pattern | limits | probed |
 |---|---|---|---|---|---|
 | BR-1 | git hooks and config | git hook | `**/.git/hooks` | not a directory | `.git/hooks` replaced by a symlink to a directory holding `pre-commit`; `git commit`: ran |
 | BR-2 | git hooks and config | git hook | `**/.git/hooks/*` | not a directory; except `**/*.sample` | an executable `pre-commit`; `git commit`: ran |
 | BR-3 | git hooks and config | git hook | `**/.git/modules/**/hooks/*` | not a directory; except `**/*.sample` | `pre-commit` there; a commit inside the submodule: ran |
-| BR-4 | git hooks and config | git config | `**/.git/config` | not a directory; not in a new directory | `core.hooksPath`; `git commit`: the hook there ran |
-| BR-5 | git hooks and config | git config | `**/.git/config.worktree` | not a directory; not in a new directory | `core.hooksPath`: honoured with `extensions.worktreeConfig`, not without |
-| BR-6 | git hooks and config | git config | `**/.git/worktrees/*/config.worktree` | not a directory; not in a new directory | `core.hooksPath`; a commit in that worktree: the hook ran (with `extensions.worktreeConfig`) |
-| BR-7 | git hooks and config | git config | `**/.git/modules/**/config` | not a directory; not in a new directory | `core.hooksPath`; a commit inside the submodule: the hook ran |
+| BR-4 | git hooks and config | git config | `**/.git/config` | not a directory; not in a new directory; noted when modified | `core.hooksPath`; `git commit`: the hook there ran |
+| BR-5 | git hooks and config | git config | `**/.git/config.worktree` | not a directory; not in a new directory; noted when modified | `core.hooksPath`: honoured with `extensions.worktreeConfig`, not without |
+| BR-6 | git hooks and config | git config | `**/.git/worktrees/*/config.worktree` | not a directory; not in a new directory; noted when modified | `core.hooksPath`; a commit in that worktree: the hook ran (with `extensions.worktreeConfig`) |
+| BR-7 | git hooks and config | git config | `**/.git/modules/**/config` | not a directory; not in a new directory; noted when modified | `core.hooksPath`; a commit inside the submodule: the hook ran |
 | BR-8 | git hooks and config | git exclude list | `**/.git/info/exclude` | not a directory; not in a new directory | a file listed there is no longer shown by `git status` |
 | BR-9 | git hooks and config | git attributes | `**/.git/info/attributes` | not a directory; not in a new directory | `* filter=x` with the filter defined in `.git/config`; `git add`: the filter's command ran |
 | BR-10 | git hooks and config | git submodules | `**/.gitmodules` | not a directory | the `url` changed; `git submodule sync` and `update --remote`: fetched from the new place |
@@ -138,59 +156,61 @@ Limits a row may carry:
 | BR-14 | git hooks and config | git hook manager | `**/lefthook.yaml` | not a directory; not in a dependency | as `lefthook.yml`: ran |
 | BR-15 | git hooks and config | git hook manager | `**/.lefthook.yml` | not a directory; not in a dependency | as `lefthook.yml`: ran |
 | BR-16 | git hooks and config | git hook manager | `**/.lefthook.yaml` | not a directory; not in a dependency | as `lefthook.yml`: ran |
-| BR-17 | agent rules | agent rules | `.claude` | except `.claude/worktrees` | Claude Code 2.1.322: a `SessionStart` hook in `.claude/settings.json` ran under `claude -p` |
-| BR-18 | agent rules | agent rules | `**/CLAUDE.md` | not a directory; not in a dependency | Claude Code 2.1.322: read at the top of the directory. Below the top: **not verified** |
-| BR-19 | agent rules | agent rules | `**/CLAUDE.local.md` | not a directory; not in a dependency | Claude Code 2.1.322: read at the top of the directory. Below the top: **not verified** |
-| BR-20 | agent rules | agent rules | `**/AGENTS.md` | not a directory; not in a dependency | **not verified** (no tool that reads it is installed here) |
-| BR-21 | agent rules | agent rules | `.mcp.json` | not a directory | Claude Code 2.1.322: the server's command ran under `claude -p`; `claude mcp list` shows it as pending approval |
-| BR-22 | agent rules | agent rules | `.cursor` | -- | **not verified** (Cursor is not installed here) |
-| BR-23 | agent rules | agent rules | `.cursorrules` | not a directory | **not verified** (Cursor is not installed here) |
-| BR-24 | agent rules | agent rules | `.github/copilot-instructions.md` | not a directory | **not verified** (Copilot is not installed here) |
-| BR-25 | loads on its own | runs on entering the directory | `**/.envrc` | not a directory; not in a dependency | **not verified** (direnv is not installed here) |
-| BR-26 | loads on its own | editor runs it | `**/.vscode/tasks.json` | not a directory; not in a dependency | **not verified** (no way to run it here) |
-| BR-27 | loads on its own | editor settings | `**/.vscode/settings.json` | not a directory; not in a dependency | **not verified** (no way to run it here) |
-| BR-28 | loads on its own | editor runs it | `**/.vscode/launch.json` | not a directory; not in a dependency | **not verified** (no way to run it here) |
-| BR-29 | loads on its own | container setup | `**/.devcontainer` | not in a dependency | **not verified** (no way to run it here) |
-| BR-30 | loads on its own | container setup | `**/.devcontainer.json` | not a directory; not in a dependency | **not verified** (no way to run it here) |
-| BR-31 | loads on its own | runs at every Python start | `**/site-packages/*.pth` | not a directory | a line starting `import`, in a virtualenv; `python -c pass`: ran. Not run from the working directory |
-| BR-32 | loads on its own | runs at every Python start | `**/site-packages/sitecustomize.py` | not a directory | **not verified**: not run on this machine, where Ubuntu's own `sitecustomize.py` is found first |
-| BR-33 | loads on its own | runs at every install | `**/.pnpmfile.cjs` | not a directory; not in a dependency | pnpm 10.34.7; `pnpm add`: ran |
-| BR-34 | package source | package source | `**/.npmrc` | not a directory; not in a dependency | `registry=`: honoured by npm 9.2.0 and pnpm 10.34.7, also in a subdirectory with its own `package.json`; not read from a dependency's directory |
-| BR-35 | package source | package source | `**/.yarnrc` | not a directory; not in a dependency | yarn 1.22.22: `registry` honoured |
-| BR-36 | package source | package source | `**/.yarnrc.yml` | not a directory; not in a dependency | **not verified** (yarn 2 or later is not installed here) |
-| BR-37 | package source | package source | `**/pip.conf` | not a directory; not in a dependency | honoured at a virtualenv's root; not in the working directory |
-| BR-38 | package source | package source | `**/.cargo/config.toml` | not a directory; not in a dependency | **not verified** (cargo is not installed here) |
-| BR-39 | package source | package source | `**/.cargo/config` | not a directory; not in a dependency | **not verified** (cargo is not installed here) |
-| BR-40 | CI | CI | `.github/workflows` | -- | **not verified** (no way to run it here) |
-| BR-41 | CI | CI | `.github/actions` | -- | **not verified** (no way to run it here) |
-| BR-42 | CI | CI | `.github/CODEOWNERS` | not a directory | **not verified** (no way to run it here) |
-| BR-43 | CI | CI | `CODEOWNERS` | not a directory | **not verified** (no way to run it here) |
-| BR-44 | CI | CI | `docs/CODEOWNERS` | not a directory | **not verified** (no way to run it here) |
-| BR-45 | CI | CI | `.github/dependabot.yml` | not a directory | **not verified** (no way to run it here) |
-| BR-46 | CI | CI | `.github/dependabot.yaml` | not a directory | **not verified** (no way to run it here) |
-| BR-47 | CI | CI | `.gitlab-ci.yml` | not a directory | **not verified** (no way to run it here) |
-| BR-48 | CI | CI | `.circleci` | -- | **not verified** (no way to run it here) |
-| BR-49 | CI | CI | `Jenkinsfile` | not a directory | **not verified** (no way to run it here) |
-| BR-50 | CI | CI | `azure-pipelines.yml` | not a directory | **not verified** (no way to run it here) |
-| BR-51 | CI | CI | `.travis.yml` | not a directory | **not verified** (no way to run it here) |
-| BR-52 | credentials | credentials | `**/.env` | not a directory; not in a dependency | by name; nothing to run |
-| BR-53 | credentials | credentials | `**/.env.*` | not a directory; not in a dependency | by name; nothing to run |
-| BR-54 | credentials | credentials | `**/*.pem` | not a directory; not in a dependency | by name; nothing to run |
-| BR-55 | credentials | credentials | `**/*.key` | not a directory; not in a dependency | by name; nothing to run |
-| BR-56 | credentials | credentials | `**/*.p12` | not a directory; not in a dependency | by name; nothing to run |
-| BR-57 | credentials | credentials | `**/*.pfx` | not a directory; not in a dependency | by name; nothing to run |
-| BR-58 | credentials | credentials | `**/id_rsa*` | not a directory; not in a dependency | by name; nothing to run |
-| BR-59 | credentials | credentials | `**/id_ed25519*` | not a directory; not in a dependency | by name; nothing to run |
-| BR-60 | credentials | credentials | `**/id_ecdsa*` | not a directory; not in a dependency | by name; nothing to run |
-| BR-61 | credentials | credentials | `**/.ssh` | not in a dependency | by name; nothing to run |
-| BR-62 | credentials | credentials | `**/.aws` | not in a dependency | by name; nothing to run |
-| BR-63 | credentials | credentials | `**/.netrc` | not a directory; not in a dependency | by name; nothing to run |
-| BR-64 | credentials | credentials | `**/.git-credentials` | not a directory; not in a dependency | by name; nothing to run |
-| BR-65 | credentials | credentials | `**/.kube/config` | not a directory; not in a dependency | by name; nothing to run |
+| BR-17 | agent rules | agent permissions | `.claude/settings.local.json` | not a directory; noted | Claude Code 2.1.322 wrote it itself when a permission prompt was answered "Yes, and don't ask again" |
+| BR-18 | agent rules | agent rules | `.claude/*` | except `.claude/worktrees` | Claude Code 2.1.322: a `SessionStart` hook in `.claude/settings.json` ran under `claude -p` |
+| BR-19 | agent rules | agent rules | `**/CLAUDE.md` | not a directory; not in a dependency | Claude Code 2.1.322: read at the top of the directory. Below the top: **not verified** |
+| BR-20 | agent rules | agent rules | `**/CLAUDE.local.md` | not a directory; not in a dependency | Claude Code 2.1.322: read at the top of the directory. Below the top: **not verified** |
+| BR-21 | agent rules | agent rules | `**/AGENTS.md` | not a directory; not in a dependency | **not verified** (no tool that reads it is installed here) |
+| BR-22 | agent rules | agent rules | `.mcp.json` | not a directory | Claude Code 2.1.322: the server's command ran under `claude -p`; `claude mcp list` shows it as pending approval |
+| BR-23 | agent rules | agent rules | `.cursor` | -- | **not verified** (Cursor is not installed here) |
+| BR-24 | agent rules | agent rules | `.cursorrules` | not a directory | **not verified** (Cursor is not installed here) |
+| BR-25 | agent rules | agent rules | `.github/copilot-instructions.md` | not a directory | **not verified** (Copilot is not installed here) |
+| BR-26 | loads on its own | runs on entering the directory | `**/.envrc` | not a directory; not in a dependency | **not verified** (direnv is not installed here) |
+| BR-27 | loads on its own | editor runs it | `**/.vscode/tasks.json` | not a directory; not in a dependency | **not verified** (no way to run it here) |
+| BR-28 | loads on its own | editor settings | `**/.vscode/settings.json` | not a directory; not in a dependency | **not verified** (no way to run it here) |
+| BR-29 | loads on its own | editor runs it | `**/.vscode/launch.json` | not a directory; not in a dependency | **not verified** (no way to run it here) |
+| BR-30 | loads on its own | container setup | `**/.devcontainer` | not in a dependency | **not verified** (no way to run it here) |
+| BR-31 | loads on its own | container setup | `**/.devcontainer.json` | not a directory; not in a dependency | **not verified** (no way to run it here) |
+| BR-32 | loads on its own | runs at every Python start | `**/site-packages/*.pth` | not a directory | a line starting `import`, in a virtualenv; `python -c pass`: ran. Not run from the working directory |
+| BR-33 | loads on its own | runs at every Python start | `**/site-packages/sitecustomize.py` | not a directory | **not verified**: not run on this machine, where Ubuntu's own `sitecustomize.py` is found first |
+| BR-34 | loads on its own | runs at every install | `**/.pnpmfile.cjs` | not a directory; not in a dependency | pnpm 10.34.7; `pnpm add`: ran |
+| BR-35 | package source | package source | `**/.npmrc` | not a directory; not in a dependency | `registry=`: honoured by npm 9.2.0 and pnpm 10.34.7, also in a subdirectory with its own `package.json`; not read from a dependency's directory |
+| BR-36 | package source | package source | `**/.yarnrc` | not a directory; not in a dependency | yarn 1.22.22: `registry` honoured |
+| BR-37 | package source | package source | `**/.yarnrc.yml` | not a directory; not in a dependency | **not verified** (yarn 2 or later is not installed here) |
+| BR-38 | package source | package source | `**/pip.conf` | not a directory; not in a dependency | honoured at a virtualenv's root; not in the working directory |
+| BR-39 | package source | package source | `**/.cargo/config.toml` | not a directory; not in a dependency | **not verified** (cargo is not installed here) |
+| BR-40 | package source | package source | `**/.cargo/config` | not a directory; not in a dependency | **not verified** (cargo is not installed here) |
+| BR-41 | CI | CI | `.github/workflows` | -- | **not verified** (no way to run it here) |
+| BR-42 | CI | CI | `.github/actions` | -- | **not verified** (no way to run it here) |
+| BR-43 | CI | CI | `.github/CODEOWNERS` | not a directory | **not verified** (no way to run it here) |
+| BR-44 | CI | CI | `CODEOWNERS` | not a directory | **not verified** (no way to run it here) |
+| BR-45 | CI | CI | `docs/CODEOWNERS` | not a directory | **not verified** (no way to run it here) |
+| BR-46 | CI | CI | `.github/dependabot.yml` | not a directory | **not verified** (no way to run it here) |
+| BR-47 | CI | CI | `.github/dependabot.yaml` | not a directory | **not verified** (no way to run it here) |
+| BR-48 | CI | CI | `.gitlab-ci.yml` | not a directory | **not verified** (no way to run it here) |
+| BR-49 | CI | CI | `.circleci` | -- | **not verified** (no way to run it here) |
+| BR-50 | CI | CI | `Jenkinsfile` | not a directory | **not verified** (no way to run it here) |
+| BR-51 | CI | CI | `azure-pipelines.yml` | not a directory | **not verified** (no way to run it here) |
+| BR-52 | CI | CI | `.travis.yml` | not a directory | **not verified** (no way to run it here) |
+| BR-53 | credentials | credentials | `**/.env` | not a directory; not in a dependency | by name; nothing to run |
+| BR-54 | credentials | credentials | `**/.env.*` | not a directory; not in a dependency | by name; nothing to run |
+| BR-55 | credentials | credentials | `**/*.pem` | not a directory; not in a dependency | by name; nothing to run |
+| BR-56 | credentials | credentials | `**/*.key` | not a directory; not in a dependency | by name; nothing to run |
+| BR-57 | credentials | credentials | `**/*.p12` | not a directory; not in a dependency | by name; nothing to run |
+| BR-58 | credentials | credentials | `**/*.pfx` | not a directory; not in a dependency | by name; nothing to run |
+| BR-59 | credentials | credentials | `**/id_rsa*` | not a directory; not in a dependency | by name; nothing to run |
+| BR-60 | credentials | credentials | `**/id_ed25519*` | not a directory; not in a dependency | by name; nothing to run |
+| BR-61 | credentials | credentials | `**/id_ecdsa*` | not a directory; not in a dependency | by name; nothing to run |
+| BR-62 | credentials | credentials | `**/.ssh` | not in a dependency | by name; nothing to run |
+| BR-63 | credentials | credentials | `**/.aws` | not in a dependency | by name; nothing to run |
+| BR-64 | credentials | credentials | `**/.netrc` | not a directory; not in a dependency | by name; nothing to run |
+| BR-65 | credentials | credentials | `**/.git-credentials` | not a directory; not in a dependency | by name; nothing to run |
+| BR-66 | credentials | credentials | `**/.kube/config` | not a directory; not in a dependency | by name; nothing to run |
 
 | id | rule |
 |---|---|
 | BR-P1 | No row's first component holds a `*` unless it is exactly `**`, when more components follow it. Checked by a test over the list. This is what makes CV-3 computable. |
+| BR-P3 | `.claude` itself, added as a directory, matches no row; what is in it does. Replaced by a symlink it is FK-9. |
 | BR-P2 | CI rows and the agent's directories are at the top only: a host runs the workflows of the repository's root. A repository below the watched directory is not covered by them, and its `.git` is, by the `**/.git` rows. |
 
 Left out, and why:
@@ -219,20 +239,20 @@ Left out, and why:
 |---|---|
 | CV-1 | A step is flagged when the two manifests' excluded sets differ. |
 | CV-2 | Once per session, a line that is not flagged names what is not being read: excludes, mounts, unreadable directories. |
-| CV-3 | A summary is flagged when such a path matches a row or a user's pattern, or lies below a match; and, for a row or pattern whose first component is not `**`, also when the path is an ancestor of something it could match. Limits BR-L1 to BR-L4 are ignored in this test, which can only flag more. So excluding `node_modules` is no alarm, and excluding `.claude/worktrees` is one at every Stop until the exclude goes. |
+| CV-3 | A summary is flagged when such a path matches a row or a user's pattern, or lies below a match; and, for a row or pattern whose first component is not `**`, also when the path is an ancestor of something it could match. Limits BR-L1 to BR-L6 are ignored in this test, which can only flag more. So excluding `node_modules` is no alarm, and excluding `.claude/worktrees` is one at every Stop until the exclude goes. |
 
 ## The lines
 
 Every line starts `belay: `. When anything in it is flagged, `🔴 ` follows at once, always in that
-place. Examples are in the last section.
+place. A line with notes only has none. Examples are in the last section.
 
 | id | rule |
 |---|---|
 | LN-1 | **A step that changed nothing prints nothing.** A step that changed something prints one line. |
 | LN-2 | A step with no call open at any time in its interval says `outside tool calls: ` after the prefix. |
-| LN-3 | **A flagged entry is named** as `PATH WORD (REASON)`. WORD is the outcome: `added`, `removed`, `modified`, `type changed`, `metadata changed`, `not compared`. FK-4: the receipt's privilege words stand in place of WORD. FK-9: `PATH replaced by a symlink`, with no parentheses. FK-10: the event's text in place of `PATH WORD`, its commit ids cut to seven characters. |
-| LN-4 | **At most three flagged entries are named**, joined by `; `: in FK's order, one of each kind before a second of any, and within a kind in path order. The rest are counted by kind: `; and N more flagged: 17 git hooks and config, 1 credentials`. |
-| LN-5 | **The entries not flagged** follow ` · `. With flags before them: `N more: ` and the counts. Alone: `N change(s): ` and, when N is three or fewer, each named as `PATH WORD` joined by `; `; otherwise the counts. |
+| LN-3 | **A flagged or noted entry is named** as `PATH WORD (REASON)`. WORD is the outcome: `added`, `removed`, `modified`, `type changed`, `metadata changed`, `not compared`. FK-4: the receipt's privilege words stand in place of WORD. FK-9: `PATH replaced by a symlink`, with no parentheses. FK-10: the event's text in place of `PATH WORD`, its commit ids cut to seven characters. |
+| LN-4 | **At most three entries are named**, joined by `; `: the flagged before the noted; within each, in FK's order, one of each kind before a second of any, and within a kind in path order. The rest are counted by kind: `; and N more flagged: 17 git hooks and config, 1 credentials`, then `; and N more noted: ...`. |
+| LN-5 | **The entries neither flagged nor noted** follow ` · `. With flags or notes before them: `N more: ` and the counts. Alone: `N change(s): ` and, when N is three or fewer, each named as `PATH WORD` joined by `; `; otherwise the counts. |
 | LN-6 | **The counts** are by outcome, in LN-3's order, zero left out: `7 added, 1 modified`. When more than three are counted and more than half lie under one top-level directory, ` (N under DIR/)` follows. |
 | LN-7 | A path is shown as the receipt shows one (belay's escaping, so no control or bidirectional character reaches the line), cut in its middle with `…` past 80 characters. |
 | LN-8 | A line is at most 64 KiB in the record; a flagged path is cut to fit and the cut ones are counted. |
@@ -244,6 +264,7 @@ place. Examples are in the last section.
 |---|---|
 | SM-1 | With nothing changed: `belay: nothing changed this turn`. |
 | SM-2 | If anything was flagged in the span, first: `belay: 🔴 N flagged: ` and the flags as LN-3 and LN-4, over every step of the span. |
+| SM-7 | If anything was noted in the span, next: `belay: N noted: ` and the notes likewise, with no red circle. |
 | SM-3 | Then the totals: `belay: N changed this turn in K tool call(s)`, or `N changed this turn: A in K tool call(s), B outside tool calls`, then ` · full receipt: /belay:receipt`. |
 | SM-4 | **N is the sum of the steps' counts.** A file changed in five steps is five. Nothing is recomputed from a diff across the span, so nothing made and undone across steps is hidden. |
 | SM-5 | When another session's steps are among them, the totals line says ` (with another session's steps)`. A summary whose span began in a day file that has been pruned says ` (the record before DATE is gone)`. |
@@ -290,12 +311,15 @@ belay: 1 change: a.txt modified
 belay: outside tool calls: 2 changes: b.txt added; c.txt removed
 belay: 714 changes: 714 added (713 under node_modules/)
 belay: 🔴 .git/hooks/pre-push added (git hook) · 7 more: 7 added (5 under node_modules/)
+belay: .git/config modified (git config) · 7 more: 3 added, 4 modified
+belay: 🔴 .gitmodules added (git submodules); .git/config modified (git config) · 258 more: 258 added (254 under vendor/)
 belay: 🔴 migrations/0001.py modified (don't-touch); .husky/pre-commit added (git hook manager); .env added (credentials); and 19 more flagged: 19 git hooks and config · 1 more: 1 modified
 belay: 🔴 bin/tool setuid added (mode 0755 -> 4755) (privilege)
 belay: 🔴 feature rewritten by commit (amend): c38c0d4 -> e487650 (history) · 6 more: 2 added, 4 modified
 belay: 🔴 could not record in 45 s: capturing
 
 belay: 🔴 1 flagged: .git/hooks/pre-push added (git hook)
+belay: 1 noted: .git/config modified (git config)
 belay: 8 changed this turn in 1 tool call · full receipt: /belay:receipt
 belay: 42 changed this turn: 40 in 15 tool calls, 2 outside tool calls · full receipt: /belay:receipt
 belay: nothing changed this turn
