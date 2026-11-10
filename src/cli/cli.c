@@ -299,7 +299,7 @@ static int open_scope(const struct opts *o, bool create, struct state *st, FILE 
  * whatever the other side holds there (decision 2026-11-01, 3). Under a
  * "not compared" heading, or, with `prefix` (stderr beside --json), one
  * prefixed line each. */
-static void not_compared(FILE *out, const struct belay_manifest_header *hb,
+void cli_not_compared(FILE *out, const struct belay_manifest_header *hb,
                          const struct belay_manifest_header *ha, const char *prefix) {
     const struct belay_manifest_header *hs[2] = { hb, ha };
     bool heading = false;
@@ -479,16 +479,14 @@ static int cmd_log(const struct opts *o, FILE *out, FILE *err) {
 
 /* The receipt's mode lookup: a forward-only cursor on each manifest, as
  * records arrive in path order. */
-struct cursor { struct belay_manifest_reader *r; struct belay_entry e; int got; };
-struct modes { struct cursor side[2]; };
 
 static int pathcmp(const char *a, size_t al, const char *b, size_t bl) {
     const int c = memcmp(a, b, al < bl ? al : bl);
     return c ? c : (al > bl) - (al < bl);
 }
 
-static int mode_of(void *ctx, int side, const char *path, size_t len, struct receipt_meta *m) {
-    struct cursor *c = &((struct modes *)ctx)->side[side];
+int cli_mode_of(void *ctx, int side, const char *path, size_t len, struct receipt_meta *m) {
+    struct cli_cursor *c = &((struct cli_modes *)ctx)->side[side];
     while (c->got == 1 && pathcmp(c->e.path, c->e.path_len, path, len) < 0)
         c->got = belay_manifest_next(c->r, &c->e);
     if (c->got != 1 || pathcmp(c->e.path, c->e.path_len, path, len) != 0) return -1;
@@ -500,7 +498,7 @@ static int mode_of(void *ctx, int side, const char *path, size_t len, struct rec
 }
 
 /* The receipt's classifier: git on the scope as it is now (gitclass.h). */
-static int classify(void *ctx, const char *const *paths, const size_t *lens, const bool *dir, size_t n,
+int cli_classify(void *ctx, const char *const *paths, const size_t *lens, const bool *dir, size_t n,
                     unsigned char *out) {
     return gitclass(ctx, paths, lens, dir, n, out);
 }
@@ -519,7 +517,7 @@ static int cmd_diff(const struct opts *o, FILE *out, FILE *err) {
     struct manifest_file mf_a = { .temporary = false }, mf_b = { .temporary = false };
     char a[PATH_MAX + 200], b[PATH_MAX + 200], d[PATH_MAX + 200], label_a[64], label_b[64];
     char work[PATH_MAX] = "";                   /* a stored diff's pair: computed here, not in the state */
-    struct modes m = { 0 };
+    struct cli_modes m = { 0 };
     FILE *in = NULL;
     char note[128] = "";
     if (state_list(&st, &list, &n) == -1) { rc = failed(err); goto done; }
@@ -614,7 +612,7 @@ static int cmd_diff(const struct opts *o, FILE *out, FILE *err) {
             rc = failed(err);
             goto done;
         }
-        not_compared(err, belay_manifest_header(m.side[0].r), belay_manifest_header(m.side[1].r), "belay: ");
+        cli_not_compared(err, belay_manifest_header(m.side[0].r), belay_manifest_header(m.side[1].r), "belay: ");
     } else {
         if (belay_manifest_open(a, &m.side[0].r) == -1 || belay_manifest_open(b, &m.side[1].r) == -1) {
             rc = failed(err);
@@ -628,7 +626,7 @@ static int cmd_diff(const struct opts *o, FILE *out, FILE *err) {
         if (to < latest)
             snprintf(note, sizeof note, "tracked, untracked and ignored: as the repository is now, not at checkpoint %ld",
                      to);
-        const struct receipt_opts ro = { label_a, label_b, o->all, mode_of, &m, o->docker != NULL ? NULL : classify,
+        const struct receipt_opts ro = { label_a, label_b, o->all, cli_mode_of, &m, o->docker != NULL ? NULL : cli_classify,
                                          st.scope.path, note[0] ? note : NULL };
         if (receipt_render(in, out, &ro) == -1) { rc = failed(err); goto done; }
         if (now.id != 0 && (now.raced || now.unstable || now.vanished)) {
@@ -636,7 +634,7 @@ static int cmd_diff(const struct opts *o, FILE *out, FILE *err) {
             capture_notes(out, &st, &(struct checkpoint){ .id = now.id, .raced = now.raced,
                                                           .unstable = now.unstable, .vanished = now.vanished });
         }
-        not_compared(out, belay_manifest_header(m.side[0].r), belay_manifest_header(m.side[1].r), NULL);
+        cli_not_compared(out, belay_manifest_header(m.side[0].r), belay_manifest_header(m.side[1].r), NULL);
     }
     if (o->exit_code && ds.records > 0) rc = EXIT_CHANGES;
 done:
@@ -676,6 +674,7 @@ static int run(int argc, char **argv, FILE *out, FILE *err) {
     if (!strcmp(cmd, "verify")) return cmd_verify(argc, argv, out, err);
     if (!strcmp(cmd, "prune")) return cmd_prune(argc, argv, out, err);
     if (!strcmp(cmd, "manifest")) return cmd_manifest(argc, argv, out, err);
+    if (!strcmp(cmd, "watch")) return cmd_watch(argc, argv, out, err);
     struct opts o;
     const bool known = !strcmp(cmd, "check") || !strcmp(cmd, "mark") || !strcmp(cmd, "diff") || !strcmp(cmd, "log") ||
                        !strcmp(cmd, "exclude");
