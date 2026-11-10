@@ -296,7 +296,8 @@ renamed or moved, commits added, history rewritten, HEAD switched), then every p
 inode flags, setuid, setgid or sticky bits, on a file changed, added or removed -- then the other
 changes. Inode flags count as [inode-flags.md](../test/expect/inode-flags.md) says: on a directory, and on
 an entry added or removed, only immutable and append-only (ext4 sets a directory's hashed-index flag by
-itself when the directory grows); a flag change that does not count stays among the other changes. When the scope is in a git repository, belay asks git (`git ls-files`, `ls-tree HEAD`,
+itself when the directory grows). A flag change that does not count is still shown: among the other
+changes, or as `iflags` on the entry's privilege line when it is a privilege change for another reason. When the scope is in a git repository, belay asks git (`git ls-files`, `ls-tree HEAD`,
 `check-ignore`, run read-only) which of their paths are tracked, untracked or ignored, and lists
 tracked changes first and in full, then untracked ones, then each git-ignored file whose text or
 type changed, by name (`M .env   (git-ignored)`: an ignored file edited is often local

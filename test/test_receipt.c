@@ -154,11 +154,13 @@ TEST(inode_flags_are_privilege_only_where_the_pin_counts_them) {
     const struct side_meta before[] = {
         { "grew", 4, 0040755, false, true, BASE },      { "file", 4, 0100644, false, true, BASE },
         { "lockdir", 7, 0040755, false, true, BASE },   { "gone", 4, 0100644, false, true, BASE | LOCK },
-        { "goneplain", 9, 0100644, false, true, BASE }, { NULL, 0, 0, false, false, 0 } };
+        { "goneplain", 9, 0100644, false, true, BASE }, { "sgdir", 5, 0040755, false, true, BASE },
+        { NULL, 0, 0, false, false, 0 } };
     const struct side_meta after[] = {
         { "grew", 4, 0040755, false, true, BASE | OTHER }, { "file", 4, 0100644, false, true, BASE | OTHER },
         { "lockdir", 7, 0040755, false, true, BASE | LOCK }, { "locked", 6, 0100644, false, true, BASE | LOCK },
-        { "plain", 5, 0100644, false, true, BASE },        { NULL, 0, 0, false, false, 0 } };
+        { "plain", 5, 0100644, false, true, BASE },        { "sgdir", 5, 0042755, false, true, BASE | OTHER },
+        { NULL, 0, 0, false, false, 0 } };
     g_sides[0] = before;
     g_sides[1] = after;
     g_fn = table_mode;
@@ -170,7 +172,8 @@ TEST(inode_flags_are_privilege_only_where_the_pin_counts_them) {
         "{\"path\":\"lockdir\",\"outcome\":\"metadata_only\",\"type\":\"dir\",\"changed\":[\"iflags\"]}\n"
         "{\"path\":\"locked\",\"outcome\":\"added\",\"type\":\"reg\"}\n"
         "{\"path\":\"plain\",\"outcome\":\"added\",\"type\":\"reg\"}\n"
-        TRAIL("0", "2", "3", "0", "0", "0", "0"), true));
+        "{\"path\":\"sgdir\",\"outcome\":\"metadata_only\",\"type\":\"dir\",\"changed\":[\"mode\",\"iflags\"]}\n"
+        TRAIL("0", "2", "4", "0", "0", "0", "0"), true));
     g_fn = fake_mode;
     const char *priv = strstr(g_text, "\nprivilege\n"), *rest = strstr(g_text, "\nchanges\n");
     REQUIRE(priv != NULL && rest != NULL && priv < rest);
@@ -182,6 +185,8 @@ TEST(inode_flags_are_privilege_only_where_the_pin_counts_them) {
     ASSERT_TRUE(strstr(p, "  A locked   inode flags set\n") != NULL);              /* IF-3, IF-8 */
     ASSERT_TRUE(strstr(p, "  D gone   inode flags removed\n") != NULL);
     ASSERT_TRUE(strstr(p, "grew") == NULL);                                         /* IF-2 */
+    /* a privilege change for another reason: its flags, which are none, are still named (IF-8) */
+    ASSERT_TRUE(strstr(p, "  ~ sgdir   setgid added (mode 0755 -> 2755), iflags\n") != NULL);
     ASSERT_TRUE(strstr(p, "plain") == NULL);                                        /* IF-3: covers goneplain too */
     ASSERT_TRUE(strstr(rest, "  ~ grew   iflags\n") != NULL);                      /* IF-8: still shown */
     ASSERT_TRUE(strstr(rest, "  A plain\n") != NULL && strstr(rest, "  D goneplain\n") != NULL);
@@ -208,9 +213,9 @@ TEST(a_truncated_or_malformed_diff_renders_nothing) {
  * heading or a terminal sequence. */
 TEST(privilege_is_found_whatever_the_path_and_the_outcome) {
     static const struct side_meta before[] = {
-        { "bad\xffname", 8, 0100755, false }, { "gone", 4, 0100755, true }, { NULL, 0, 0, false } };
+        { "bad\xffname", 8, 0100755, false, false, 0 }, { "gone", 4, 0100755, true, false, 0 }, { NULL, 0, 0, false, false, 0 } };
     static const struct side_meta after[] = {
-        { "bad\xffname", 8, 0104755, false }, { "newsuid", 7, 0104755, false }, { NULL, 0, 0, false } };
+        { "bad\xffname", 8, 0104755, false, false, 0 }, { "newsuid", 7, 0104755, false, false, 0 }, { NULL, 0, 0, false, false, 0 } };
     g_sides[0] = before;
     g_sides[1] = after;
     g_fn = table_mode;
@@ -305,8 +310,8 @@ TEST(a_line_of_many_strings_is_read_in_linear_memory) {
  * U+10FFFF are shown as bytes; a type change that is also a privilege
  * change says both. */
 TEST(invisible_and_invalid_bytes_are_shown_and_a_type_change_is_said) {
-    static const struct side_meta before[] = { { "tc", 2, 0040755, false }, { NULL, 0, 0, false } };
-    static const struct side_meta after[] = { { "tc", 2, 0104755, false }, { NULL, 0, 0, false } };
+    static const struct side_meta before[] = { { "tc", 2, 0040755, false, false, 0 }, { NULL, 0, 0, false, false, 0 } };
+    static const struct side_meta after[] = { { "tc", 2, 0104755, false, false, 0 }, { NULL, 0, 0, false, false, 0 } };
     g_sides[0] = before;
     g_sides[1] = after;
     g_fn = table_mode;

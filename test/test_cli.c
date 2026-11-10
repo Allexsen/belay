@@ -1831,6 +1831,22 @@ TEST(a_held_open_writer_on_a_small_file_marks_it) {
     close(w);
 }
 
+/* inode-flags IF-2 and IF-8 through `belay diff` itself, which gives the
+ * receipt both manifests' inode flags (review of #129, 1): on ext4 a
+ * directory that outgrows a block gains its hashed-index flag, and
+ * v0.1.0-alpha.6's receipt called that a privilege change. Where a
+ * filesystem sets no such flag the test says less. */
+TEST(a_directory_that_grows_is_no_privilege_change_in_the_receipt) {
+    fresh();
+    sh("mkdir '%s/grows'", g_scope);
+    ASSERT_EQ_INT(EXIT_DONE, belay("check", "--scope", g_scope, NULL));
+    sh("i=0; while [ $i -lt 450 ]; do : > '%s'/grows/f$i; i=$((i+1)); done", g_scope);
+    ASSERT_EQ_INT(EXIT_DONE, belay("diff", "--scope", g_scope, "--since", "1", "--all", NULL));
+    ASSERT_TRUE(strstr(g_out, "inode flags") == NULL);
+    ASSERT_TRUE(strstr(g_out, "\nprivilege\n") == NULL);
+    ASSERT_TRUE(strstr(g_out, "  A grows/f449\n") != NULL);
+}
+
 int main(void) {
     snprintf(g_dir, sizeof g_dir, "/tmp/belay_cli_%d", (int)getpid());
     mkdir(g_dir, 0700);
@@ -1920,6 +1936,7 @@ int main(void) {
     RUN(a_shared_mapping_writer_marks_every_pass_and_nothing_diffs_on_the_hash);
     RUN(a_quiet_tree_has_no_marked_entry);
     RUN(a_held_open_writer_on_a_small_file_marks_it);
+    RUN(a_directory_that_grows_is_no_privilege_change_in_the_receipt);
     free(g_out);
     free(g_err);
     char cmd[800];

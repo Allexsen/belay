@@ -732,6 +732,22 @@ TEST(inode_flag_changes_that_count_are_the_pins) {
 #undef COUNTS
 }
 
+/* inode-flags IF-2, IF-6 and IF-7 through verify itself (review of #129,
+ * 1): files created in a protected directory. On ext4 the directory
+ * outgrows a block and gains its hashed-index flag, which v0.1.0-alpha.6
+ * reported as protected_path_written; where a filesystem sets no such
+ * flag there is nothing to report either way, and the test says less. */
+TEST(a_protected_directory_that_grows_is_not_written) {
+    fresh("{\"belay_protect\":2,\"protect\":[{\"path\":\"tests/**\",\"mode\":[\"no_write\"]}]}");
+    sh("mkdir tests && printf 't\\n' > tests/t.py");
+    REQUIRE(export_(true) == EXIT_DONE);
+    sh("i=0; while [ $i -lt 450 ]; do : > tests/f$i; i=$((i+1)); done");
+    ASSERT_EQ_INT(EXIT_DONE, verify_(true));
+    NONE("protected_path_written", "tests");
+    NONE("privilege_changed", "tests");
+    HAS("touches_tests", "tests/f449", NULL);           /* the files themselves are seen */
+}
+
 /* Decision 171: a file added gets an iflags record only when its flags
  * lock it (immutable, append-only) -- never for a filesystem's own (ext4
  * sets the extents flag on every new file). Locking one takes privilege,
@@ -873,6 +889,7 @@ int main(void) {
     RUN(a_path_not_utf8_reads_as_the_receipt_writes_it);
     RUN(the_test_file_rule_keeps_to_tests);
     RUN(inode_flag_changes_that_count_are_the_pins);
+    RUN(a_protected_directory_that_grows_is_not_written);
     RUN(an_added_file_s_own_iflags_are_no_privilege);
     RUN(unverifiable_reasons_come_in_the_pinned_order);
     RUN(verify_refuses_what_it_must_never_judge);

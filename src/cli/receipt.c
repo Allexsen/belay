@@ -212,6 +212,11 @@ static void privilege(struct sb *b, const struct jval *r, const char *path, size
     /* an entry that came or went holding immutable or append-only (IF-3, IF-8) */
     if (one_side && iflags_known && iflags_count)
         sbf(b, "%sinode flags %s", b->n ? ", " : "", strcmp(outcome, "added") == 0 ? "set" : "removed");
+    /* A flag change that is no privilege change, on a record that is one
+     * for another reason: its line shows only these reasons, so the flags
+     * are named here, as the other changes name them, or they would be
+     * shown nowhere (IF-8; review of #129, 2). */
+    if (has(ch, "iflags") && iflags_known && !iflags_count && b->n) sbf(b, ", iflags");
 }
 
 /* A count under a name -- an ignored top-level directory, or a repository's
