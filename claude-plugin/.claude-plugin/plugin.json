@@ -1,0 +1,9 @@
+{
+  "name": "belay",
+  "version": "0.1.0-alpha.6",
+  "description": "A receipt after every tool call: what changed in your project directory, whether or not the agent mentioned it.",
+  "author": { "name": "Aleksi Svanidze" },
+  "homepage": "https://getbelay.dev",
+  "repository": "https://github.com/Allexsen/belay",
+  "license": "Apache-2.0"
+}

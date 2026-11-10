@@ -1,0 +1,72 @@
+# The built-in list: places where a change is rarely the task itself, and
+# either runs code nobody asked to run, holds a credential, or changes what
+# later automation does. A change to a match leads the receipt's one line.
+#
+# label <TAB> pattern. Patterns are .belay-donttouch's (README): `*` is any
+# run within a name, `**` any run across names, both matching names that
+# start with a dot; a pattern with no slash matches at any depth; a match
+# on a directory covers everything below it. `.git/hooks/*.sample` is
+# never flagged (belay-receipt.awk).
+
+# git runs it
+git hook	**/.git/hooks/*
+git config	**/.git/config
+git exclude list	**/.git/info/exclude
+git submodules	.gitmodules
+git attributes	.gitattributes
+git hook	.husky
+git hook config	.pre-commit-config.yaml
+git hook config	lefthook.yml
+
+# loads on its own
+runs on entering the directory	.envrc
+editor runs it	**/.vscode/tasks.json
+editor settings	**/.vscode/settings.json
+editor runs it	**/.vscode/launch.json
+container setup	.devcontainer
+runs at every Python start	sitecustomize.py
+runs at every Python start	usercustomize.py
+runs at every Python start	*.pth
+
+# credentials
+credentials	.env
+credentials	.env.*
+credentials	*.pem
+credentials	*.key
+credentials	*.p12
+credentials	*.pfx
+credentials	id_rsa*
+credentials	id_ed25519*
+credentials	.ssh
+credentials	.aws
+credentials	.netrc
+credentials	.git-credentials
+credentials	**/.kube/config
+
+# where packages come from
+package source	.npmrc
+package source	.yarnrc*
+package source	.pypirc
+package source	pip.conf
+package source	**/.cargo/config.toml
+
+# CI
+CI	**/.github/workflows
+CI	**/.github/actions
+CI	**/.github/CODEOWNERS
+CI	**/.github/dependabot.yml
+CI	.gitlab-ci.yml
+CI	.circleci
+CI	Jenkinsfile
+CI	azure-pipelines.yml
+CI	.travis.yml
+
+# the agent's own rules
+agent rules	.claude
+agent rules	CLAUDE.md
+agent rules	AGENTS.md
+agent rules	.mcp.json
+agent rules	.cursor
+agent rules	.cursorrules
+agent rules	**/.github/copilot-instructions.md
+don't-touch list	/.belay-donttouch

@@ -16,6 +16,15 @@ Tested against 2,115 published agent runs: [results](bench/replay/RESULTS.md).
 > change in noise, open an issue with the receipt. That's the data
 > I need the most.
 
+## Try it in Claude Code
+
+    claude plugin install belay --marketplace Allexsen/belay
+
+Then start Claude Code in a project. After every tool call that changes something you get one line
+saying what changed in the directory, whether or not the agent mentioned it, with anything in a
+sensitive place first; `/belay:receipt` opens the full receipt. What it installs and downloads, and
+its limits: [claude-plugin/README.md](claude-plugin/README.md).
+
 ## What exists today
 
 - `belay check`, `mark`, `diff` and `log` (see [docs/cli.md](docs/cli.md)): record a directory as a
@@ -28,6 +37,8 @@ Tested against 2,115 published agent runs: [results](bench/replay/RESULTS.md).
 - `belay baseline export` and `belay verify`: a checkpoint kept as a bundle, and a directory compared
   with it and judged against a protect spec.
 - `--docker`: a container's layers read from the host.
+- A Claude Code plugin: a line after every tool call that changed something, and the full receipt on
+  request ([claude-plugin/](claude-plugin/README.md)).
 - pybelay, Python bindings around the binary, with a reward helper and an
   [Inspect integration](python/README.md#using-belay-with-inspect).
 - The manifest format, version 4 ([test/expect/manifest-v4.md](test/expect/manifest-v4.md), built on

@@ -1,0 +1,278 @@
+#!/bin/sh
+#
+# belay-hook EVENT -- the belay plugin for Claude Code: what changed in the
+# project directory, in two layers.
+#
+#   Short, shown inline:
+#     - after a tool call that changed something, one line: what it changed,
+#       leading with anything in a sensitive place (sensitive.txt) or a place
+#       the project declares don't-touch (.belay-donttouch), marked with a
+#       red circle, then the rest, counted;
+#     - the same, saying "outside tool calls", for what changed between
+#       calls: a background process, another program, or the user;
+#     - when the agent stops, a line for what the turn flagged, if anything,
+#       and a line for its totals, ending in the command that opens the
+#       long layer.
+#   Every line starts "belay:", with the red circle right after it.
+#   Long, in a file: every change of the turn, call by call, as `belay diff
+#   --all` prints it: nothing folded, nothing filtered. One fixed path per
+#   project, newest turn first. `/belay:receipt` opens it: as an editor tab
+#   in the VS Code extension, where no path in a hook's line can be clicked,
+#   and as text in the conversation elsewhere. Nothing opens unasked.
+#
+#   Claude Code labels every line of a hook's message with the hook it
+#   came from ("Stop says:", "PostToolUse:Bash says:"): the label is the
+#   event's name and the tool's, and nothing a hook prints changes it (read
+#   in Claude Code 2.1.319). The VS Code extension gives an empty line the
+#   label too, so a message here never has one.
+#
+#   start    SessionStart            fetches the pinned belay binary if it is
+#                                    not there yet; a fresh checkpoint
+#   pre      PreToolUse              changes since the last line: outside
+#   post     PostToolUse(Failure)    changes since the last line: the call's
+#   prompt   UserPromptSubmit        as pre
+#   stop     Stop                    as pre, then the turn's lines
+#   receipt  UserPromptExpansion     /belay:receipt: the long layer, opened
+#                                    or shown; the command goes no further
+#
+# One cursor per project directory: the checkpoint the last line ended at.
+# Every hook records a checkpoint, asks belay what changed from the cursor
+# to it, and moves the cursor there. So a change is counted in exactly one
+# line and listed in the long layer, whoever made it and whenever: only its
+# label depends on which hook saw it first. Parallel tool calls share
+# lines: the first to finish shows what all of them had done by then.
+#
+# The hook's input decides nothing about a receipt. Only the tool's name is
+# taken from it, as a heading in the long layer; a call could imitate
+# another's name there, and nothing else. (`receipt` checks that the
+# command typed is its own.)
+#
+# Never fails a tool call: always exits 0. What goes wrong is said once, as
+# a line of its own, until it changes.
+#
+# Needs sh, awk, sed, cksum, and for the first run curl and sha256sum (or
+# shasum). Linux x86_64 and arm64, macOS arm64.
+#
+# Environment:
+#   CLAUDE_PROJECT_DIR   the directory watched (Claude Code sets it)
+#   CLAUDE_PLUGIN_DATA   where the binary, the cursors and the receipts are
+#   BELAY_HOOK_BINARY    a belay binary to run instead of the pinned one
+
+set -u
+ev=${1:-}
+VERSION=v0.1.0-alpha.6
+URL=https://github.com/Allexsen/belay/releases/download/$VERSION
+DATA=${CLAUDE_PLUGIN_DATA:-${XDG_DATA_HOME:-$HOME/.local/share}/belay-claude-plugin}
+BIN=$DATA/bin/belay-$VERSION
+BELAY=${BELAY_HOOK_BINARY:-$BIN}
+HERE=$(cd "$(dirname "$0")" && pwd -P)
+in=$(cat)
+
+case $ev in start|pre|post|prompt|stop|receipt) ;; *) exit 0 ;; esac
+dir=${CLAUDE_PROJECT_DIR:-}
+[ -n "$dir" ] && dir=$(cd "$dir" 2>/dev/null && pwd -P) || exit 0
+key=$(printf '%s' "$dir" | cksum | tr ' ' '-')
+K=$DATA/scopes/$key                 # this directory's cursor and turn
+T=$K/turn
+R=$DATA/receipts/$key               # the long layer
+FIXED=$R/belay-receipt-$(printf '%s' "$(basename "$dir")" | tr -c 'A-Za-z0-9._-' '_').txt
+mkdir -p "$T" "$R/turns" 2>/dev/null || exit 0
+CUR=$K/cursor
+SAID=$K/said
+
+# Standard input as the inside of a JSON string, its lines kept.
+json() {
+    awk 'BEGIN { ORS = "" }
+         { gsub(/\\/, "\\\\"); gsub(/"/, "\\\""); gsub(/\t/, "  "); gsub(/[\001-\037]/, "");
+           if (NR > 1) printf "\\n"; print }'
+}
+# Lines for the user, and nothing for the model.
+show() { printf '{"systemMessage":"%s"}\n' "$(printf '%s\n' "$1" | json)"; }
+# A problem, said once: again only when it is another one, or in a new session.
+problem() {
+    [ "$(cat "$SAID" 2>/dev/null)" = "$1" ] && exit 0
+    printf '%s\n' "$1" > "$SAID" 2>/dev/null
+    show "belay: $1"
+    exit 0
+}
+num() { n_=$(cat "$1" 2>/dev/null); case $n_ in ''|*[!0-9]*) n_=0 ;; esac; printf '%s' "$n_"; }
+
+# The pinned release binary, fetched once and checked against the digest
+# written here: a download that is anything else is never run.
+fetch() {
+    case $(uname -s)-$(uname -m) in
+    Linux-x86_64)               t=linux-x86_64 s=b6a59579b1f28270f01f0e011bb64b18624a654e241bb6a9c4df2c5d2ec1c7c6 ;;
+    Linux-aarch64|Linux-arm64)  t=linux-arm64  s=a3fe654cb53f927161d9a71026b4eb9852decea6658bd87cefa6d879e6801c8d ;;
+    Darwin-arm64)               t=macos-arm64  s=e66bb19dc5299e26f643267c6587e7a943823c1f90749bf35190b5e492c611cb ;;
+    *) problem "no receipts: belay has no binary for $(uname -s) $(uname -m) yet" ;;
+    esac
+    command -v curl >/dev/null 2>&1 || problem "no receipts: curl is needed once, to fetch belay $VERSION"
+    mkdir -p "$DATA/bin" && tmp=$DATA/bin/.fetch.$$ || problem "no receipts: cannot write $DATA/bin"
+    if ! curl -fsSL --max-time 60 -o "$tmp" "$URL/belay-$VERSION-$t" 2>/dev/null; then
+        rm -f "$tmp"
+        problem "no receipts: could not fetch $URL/belay-$VERSION-$t"
+    fi
+    if command -v sha256sum >/dev/null 2>&1; then got=$(sha256sum "$tmp" | cut -d' ' -f1)
+    else got=$(shasum -a 256 "$tmp" 2>/dev/null | cut -d' ' -f1); fi
+    if [ "$got" != "$s" ]; then
+        rm -f "$tmp"
+        problem "no receipts: the download of belay $VERSION has sha256 ${got:-unknown}, not the pinned $s: not run"
+    fi
+    chmod 755 "$tmp" && mv "$tmp" "$BIN" || problem "no receipts: cannot write $BIN"
+}
+
+# A new checkpoint: its id in $new.
+mark() {
+    out=$("$BELAY" mark --scope "$dir" --json 2>"$K/err") ||
+        problem "no receipt: $(head -1 "$K/err" | cut -c1-300)"
+    new=${out#\{\"id\":}
+    new=${new%%,*}
+    case $new in ''|*[!0-9]*) problem "no receipt: belay mark printed no checkpoint id" ;; esac
+}
+# The cursor moved to $new, never backwards: another hook of this
+# directory may have moved it since.
+advance() {
+    now=$(num "$CUR")
+    [ "$new" -gt "$now" ] && printf '%s\n' "$new" > "$CUR"
+}
+# A turn's counts and its part of the long layer, emptied.
+turn_reset() {
+    rm -f "$T/calls" "$T/incalls" "$T/outside" "$T/flagged" "$T/receipt.txt" "$T/closed"
+}
+# The fixed file: the turn so far ($1, or none), then this session's
+# earlier turns, newest first. Written in place, so an open tab follows it.
+publish() {
+    {
+        printf 'belay receipt · %s\n' "$dir"
+        printf 'This file: %s\n' "$FIXED"
+        printf 'Every change, call by call, nothing folded. Newest turn first; rewritten as the turn goes.\n'
+        printf 'Turns of the last week: %s\n' "$R/turns"
+        [ -n "${1:-}" ] && [ -s "$1" ] && { printf '\n== this turn, so far ==\n'; cat "$1"; }
+        [ -s "$K/session" ] && awk '{ a[NR] = $0 } END { for (i = NR; i > 0; i--) print a[i] }' "$K/session" |
+            while IFS= read -r f; do [ -s "$f" ] && { printf '\n'; cat "$f"; }; done
+    } > "$FIXED" 2>/dev/null
+}
+
+# /belay:receipt: the long layer, asked for. In the extension it is opened
+# as an editor tab; elsewhere, or where that cannot be done, its text is
+# the answer. Either way the command stops here: nothing goes to the model.
+if [ "$ev" = receipt ]; then
+    # This command and no other, whatever the matcher let through: a hook
+    # that blocked another command would break it. (A quote inside a JSON
+    # string is escaped, so this text can only be the key and its value.)
+    case $in in *'"command_name":"belay:receipt"'*) ;; *) exit 0 ;; esac
+    if [ ! -s "$FIXED" ]; then
+        r="belay has no receipt for this directory yet: nothing has changed in it this session."
+    elif [ "${CLAUDE_CODE_ENTRYPOINT:-}" = claude-vscode ] && command -v code >/dev/null 2>&1 &&
+         code --reuse-window "$FIXED" </dev/null >/dev/null 2>&1; then
+        r="belay's full receipt is open in an editor tab: $FIXED"
+    else
+        r=$(head -n 400 "$FIXED")
+        [ "$(wc -l < "$FIXED")" -gt 400 ] && r="$r
+... the rest is in $FIXED"
+    fi
+    printf '{"decision":"block","reason":"%s","hookSpecificOutput":{"hookEventName":"UserPromptExpansion","suppressOriginalPrompt":true}}\n' \
+        "$(printf '%s\n' "$r" | json)"
+    exit 0
+fi
+
+if [ "$ev" = start ]; then
+    rm -f "$SAID" "$K/session"
+    : > "$FIXED"                            # a new session's receipt starts empty; its turns stay in turns/
+    turn_reset
+    # Too wide to watch: every hook would walk it.
+    [ "$dir" = / ] || [ "$dir" = "$(cd "$HOME" 2>/dev/null && pwd -P)" ] &&
+        problem "no receipts here: $dir is too wide a directory to watch. Start Claude Code in a project directory"
+    [ -n "${BELAY_HOOK_BINARY:-}" ] || [ -x "$BIN" ] || fetch
+fi
+[ -x "$BELAY" ] || exit 0                   # said at start, once
+
+if [ "$ev" = start ]; then
+    mark
+    printf '%s\n' "$new" > "$CUR"
+    # Once a day, detached: belay's state for this directory, and the long
+    # layer's turns, stay within a week.
+    P=$K/pruned
+    if [ -z "$(find "$P" -mmin -1440 2>/dev/null)" ]; then
+        : > "$P"
+        find "$R/turns" -name '*.txt' -mtime +7 -exec rm -f {} + 2>/dev/null
+        "$BELAY" prune --scope "$dir" --keep-days 7 --keep-from "$new" </dev/null >/dev/null 2>&1 &
+    fi
+    exit 0
+fi
+
+# A Stop closed the turn: whatever comes next begins another.
+[ -e "$T/closed" ] && turn_reset
+
+cur=$(num "$CUR")
+mark
+if [ "$cur" = 0 ]; then                     # no cursor: start from here
+    printf '%s\n' "$new" > "$CUR"
+    cur=$new
+fi
+"$BELAY" diff --scope "$dir" --since "$cur" --to "$new" --json --exit-code > "$K/diff.json" 2>"$K/err"
+rc=$?
+if [ "$rc" = 2 ]; then                      # the cursor's checkpoint is gone: start again from here
+    printf '%s\n' "$new" > "$CUR"
+    rc=0
+elif [ "$rc" -gt 2 ]; then
+    problem "no receipt: $(head -1 "$K/err" | cut -c1-300)"
+fi
+advance
+rm -f "$SAID"
+
+if [ "$rc" = 1 ]; then
+    # the long layer first: if it cannot be written, the line says so
+    "$BELAY" diff --scope "$dir" --since "$cur" --to "$new" --all > "$K/diff.txt" 2>"$K/err" ||
+        problem "no receipt: $(head -1 "$K/err" | cut -c1-300)"
+    if [ "$ev" = post ]; then
+        tool=$(printf '%s\n' "$in" | awk 'match($0, /"tool_name"[ ]*:[ ]*"[A-Za-z0-9_.-]*"/) {
+                   s = substr($0, RSTART, RLENGTH); sub(/"$/, "", s); sub(/.*"/, "", s); print s; exit }')
+        what="after ${tool:-a tool call}"
+    else
+        what="outside tool calls"
+    fi
+    dont=
+    [ -f "$dir/.belay-donttouch" ] && dont=$dir/.belay-donttouch
+    where=
+    [ "$ev" = post ] || where="outside tool calls: "
+    res=$(LC_ALL=C awk -f "$HERE/belay-receipt.awk" -v mode=call -v where="$where" -v sens="$HERE/sensitive.txt" -v dont="$dont" \
+              -v json="$K/diff.json" -v text="$K/diff.txt" -v flagout="$T/flagged" 2>"$K/err") ||
+        problem "no receipt: $(head -1 "$K/err" | cut -c1-300)"
+    n=$(printf '%s\n' "$res" | sed -n 1p)
+    line=$(printf '%s\n' "$res" | sed -n 2p)
+    case $n in ''|*[!0-9]*) problem "no receipt: the changes could not be counted" ;; esac
+    {
+        printf -- '-- %s · %s UTC · checkpoints %s -> %s --\n' "$what" "$(date -u +%H:%M:%S)" "$cur" "$new"
+        sed 1d "$K/diff.txt"
+        printf '\n'
+    } >> "$T/receipt.txt"
+    if [ "$ev" = post ]; then
+        printf '%s\n' $(( $(num "$T/calls") + 1 )) > "$T/calls"
+        printf '%s\n' $(( $(num "$T/incalls") + n )) > "$T/incalls"
+    else
+        printf '%s\n' $(( $(num "$T/outside") + n )) > "$T/outside"
+    fi
+    publish "$T/receipt.txt"
+    [ "$ev" = stop ] || show "$line"
+fi
+[ "$ev" = stop ] || exit 0
+
+# The turn's lines, and the turn kept among the session's.
+: >> "$T/flagged"
+lines=$(LC_ALL=C awk -f "$HERE/belay-receipt.awk" -v mode=turn -v flagged="$T/flagged" -v calls="$(num "$T/calls")" \
+            -v incalls="$(num "$T/incalls")" -v outside="$(num "$T/outside")" \
+            -v receipt="$([ -s "$T/receipt.txt" ] && echo 1)" 2>/dev/null)
+[ -n "$lines" ] || lines="belay: this turn's totals could not be made"
+if [ -s "$T/receipt.txt" ]; then
+    kept=$R/turns/$(date -u +%Y%m%dT%H%M%SZ)-$$.txt
+    {
+        printf '== turn ended %s UTC ==\n' "$(date -u '+%Y-%m-%d %H:%M:%S')"
+        printf '%s\n' "$lines"
+        cat "$T/receipt.txt"
+    } > "$kept" 2>/dev/null && printf '%s\n' "$kept" >> "$K/session"
+    publish
+fi
+: > "$T/closed"
+show "$lines"
+exit 0
