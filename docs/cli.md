@@ -4,12 +4,15 @@
 belay check --scope DIR [--json]
 belay mark  --scope DIR [--full] [--full-every N] [--keep] [--json]
 belay manifest --scope DIR --id ID
-belay prune --scope DIR [--keep-days N] [--keep-last N] [--keep-id ID]... [--keep-from ID] [--dry-run] [--json]
+belay prune --scope DIR [--keep-days N] [--keep-last N] [--keep-id ID]... [--keep-from ID] [--watch-only]
+            [--dry-run] [--json]
 belay diff  --scope DIR --since ID [--to ID] [--full-every N] [--json] [--exit-code] [--all]
 belay log   --scope DIR [--json]
 belay exclude --scope DIR [--add PATH | --remove PATH]
 belay baseline export --scope DIR --out FILE [--protect SPEC] [--json]
 belay verify --scope DIR --baseline FILE --baseline-sha256 HEX [--protect SPEC] [--to ID] [--exit-code]
+belay watch step|close|mark|summary|receipt|patterns --scope DIR ...   (below)
+belay hook claude-code EVENT
 belay help [command]  |  belay <command> --help  |  belay --version
 ```
 
@@ -24,6 +27,7 @@ that container, read from its layers on the host (below).
   it is now -- that capture is kept as a new checkpoint, prefiltered as a mark is. Without `--json`
   it prints a receipt; with `--json`, the diff in [diff.v1](spec/diff-v1.md).
 - **log** lists the scope's checkpoints: id, kind, time, number of entries.
+- **watch** keeps a running record of `DIR` while an agent works in it, one line a step (below).
 
 belay only reads `DIR`. It writes only under its state directory: `$BELAY_STATE_DIR` (an absolute
 path), else `$XDG_STATE_HOME/belay`, else `$HOME/.local/state/belay`.
@@ -86,11 +90,12 @@ writes is corrupt state (exit 4). Protected paths (a later milestone) will never
     checkpoints/<id>/diff-from-<since>.ndjson   what diff --since computed for this checkpoint
     checkpoints/<id>/meta.json  written last: a checkpoint exists once it does
     excludes                    the scope's excludes, one a line (belay exclude)
+    watch/                      the record `belay watch` keeps (below; state-retention-watch.md)
     lock                        one writer at a time
 ```
 
-Only `check`, `mark`, `diff` without `--to`, `baseline export` and `exclude --add`/`--remove`
-write there. `log`, `exclude` without options, `verify` and a `diff --to` whose pair's diff is
+Only `check`, `mark`, `diff` without `--to`, `baseline export`, `exclude --add`/`--remove`,
+`watch step`, `close` and `mark`, and the hook write there. `log`, `exclude` without options, `verify` and a `diff --to` whose pair's diff is
 already stored read it and write nothing; a `diff --to` stores its pair's diff the first time only,
 and every diff is computed afresh, whichever build stored the file.
 
@@ -134,9 +139,83 @@ killed capture leaves. Never removed: the newest checkpoint, one marked with
 pending diff is protected. `--keep-id ID`, repeated for several, makes an existing checkpoint kept
 for good.
 
+Where `belay watch` keeps a record, the checkpoint its next step reads is never removed either, and
+a day of the record goes once no checkpoint its lines name is left; the newest day's never does.
+`--watch-only` removes only checkpoints a watch step wrote and leaves every other one, whatever its
+age: it is the form the Claude Code plugin runs, once a day
+([test/expect/state-retention-watch.md](../test/expect/state-retention-watch.md)).
+
 `--dry-run` writes nothing and says what a run would remove. A run reads every manifest that stays
 before it removes anything: one that doesn't read stops it with nothing removed (exit 4). A command
 naming a removed checkpoint is refused. A crash leaves valid state, and running it again finishes.
+
+## watch: a running record of a directory
+
+```
+belay watch step     --scope DIR --session S [--begin ID | --finish ID] [--agent A] [--first-ok] [--deadline SECONDS]
+belay watch close    --scope DIR --session S (--id ID... | --all)
+belay watch mark     --scope DIR --session S --name NAME
+belay watch summary  --scope DIR --session S --since NAME
+belay watch receipt  --scope DIR [--max-lines N] [--path]
+belay watch patterns --scope DIR [--entries]
+```
+
+What it says and when is pinned in [test/expect/watch-v1.md](../test/expect/watch-v1.md). It catches
+careless changes: what an agent, a tool it ran or an install did to a directory without saying. It
+does not hold against a process running as you that attacks belay's state, its lock or its
+commands.
+
+- **step** captures the directory as `mark` does, compares it with the last step's checkpoint, and
+  prints one line if anything changed:
+
+  ```
+  belay: 🔴 .git/hooks/pre-push added (git hook) · 7 more: 7 added (5 under node_modules/)
+  belay: .git/config modified (git config) · 2 more: 2 modified
+  belay: outside tool calls: 1 change: notes.txt added
+  ```
+
+  What is *flagged* leads the line behind a red circle: a path matching `.belay-donttouch`, a
+  built-in list of places where a change is rarely the task itself (git hooks, the agent's own
+  rules, files that load on their own, package sources, CI, credentials), a privilege change, a
+  file replaced by a symlink, rewritten git history. What is *noted* is named the same way with no
+  red circle: a modified `.git/config`, and the permissions file Claude Code writes itself. The
+  rest is counted, and named when there are three or fewer. Nothing is left out for not being
+  flagged: every changed entry is counted in its step's line and listed in the receipt.
+- A step's changes belong to the *calls* open while it ran. `--begin ID` opens one after the step,
+  `--finish ID` closes one; with none open the line says `outside tool calls`. **close** closes
+  calls that will never finish, without a capture.
+- **mark** sets a named marker for the session, and **summary** prints what was flagged and noted
+  and how many entries changed in the steps since it. The total is the sum of the steps' counts: a
+  file changed in five steps is five.
+- **receipt** prints every change of every step, newest first, each step as `belay diff --all`
+  shows it. `--path` writes it to a file in the state directory and prints the file's path.
+- **patterns** prints the lists in force and how many current entries each pattern matches;
+  `--entries` prints each entry a list covers.
+
+`.belay-donttouch`, at the top of `DIR`, is one pattern a line: `*` is any run of bytes within a
+name and `**` any number of whole names, both matching names that start with a dot; a pattern
+starts at the top of `DIR` (`*.lock` is the top level, `**/*.lock` any depth); a match on a
+directory covers everything below it. `#` starts a comment. `?`, `[`, `\` and a leading `!` are
+refused, with the line's number. A change to the file is itself flagged, and takes effect from the
+next step. It is read from the checkpoint's stored copy, never from the directory as it is later.
+
+**Always a line, never silence.** Every command that captures runs a worker under a supervisor and
+a deadline (45 s; `--deadline`). The worker asks before it writes the record and the supervisor
+answers or kills it, never both: a step is never said to be lost after it was recorded. When a
+step cannot be recorded, a line says so and why (`could not record: another belay holds this
+directory's lock`, `could not record in 45 s: capturing`, `belay stopped unexpectedly while
+matching`), the next step covers the same interval and says `the previous step did not finish`,
+and the summary repeats it. After three steps of a session killed at the deadline in a row, that
+session stops capturing and says so. `/`, `$HOME` and any directory `$HOME` is inside are refused.
+
+Not noticed, as the pin says: anything a process running as you does to belay's state; a change
+made and undone between two steps; a change under an excluded path; what `mark`'s prefilter is
+documented to miss, until the next full capture; a write after a session's last step, until a
+later session's first.
+
+`belay hook claude-code EVENT` is the Claude Code plugin's hook
+([claude-plugin/](../claude-plugin/)): it reads the hook's JSON on standard input, runs the matching
+steps, and prints the hook's reply. Its exit status is 0 whatever happens.
 
 ## baseline export: the bundle a later verify judges against
 
