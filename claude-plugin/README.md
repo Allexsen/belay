@@ -25,7 +25,8 @@ belay: one that rewrites belay's state, or runs its commands itself.
 
 ## Install
 
-    claude plugin install belay --marketplace Allexsen/belay
+    claude plugin marketplace add Allexsen/belay
+    claude plugin install belay@belay
 
 Then start Claude Code in a project directory. To remove it: `claude plugin uninstall belay@belay`.
 

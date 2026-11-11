@@ -1,6 +1,6 @@
 {
   "name": "belay",
-  "version": "0.0.0",
+  "version": "0.1.0-alpha.8",
   "description": "One line after every tool call: what changed in your project directory, whether or not the agent mentioned it.",
   "author": { "name": "Aleksi Svanidze" },
   "homepage": "https://getbelay.dev",
