@@ -38,8 +38,8 @@ GIT = "git hooks and config"
 
 def run():
     # The table itself.
-    check("68 rows", len(M.rows), 68)
-    check("row ids in order", [r.num for r in M.rows], list(range(1, 69)))
+    check("94 rows", len(M.rows), 94)
+    check("row ids in order", [r.num for r in M.rows], list(range(1, 95)))
     check("kinds of rows, in FK's order", M.kind_order,
           [GIT, "agent rules", "loads on its own", "package source", "CI", "credentials"])
     seen = []
@@ -51,10 +51,18 @@ def run():
         first = r.comps[0]
         ok = b"*" not in first or (first == b"**" and len(r.comps) > 1)
         check("BR-P1 %s" % r.id, ok, True)
-    check("BR-4 limits", (M.rows[3].not_dir, M.rows[3].not_new_dir, M.rows[3].noted_modified), (True, True, True))
-    check("BR-17 noted", (M.rows[16].noted, M.rows[16].noted_modified), (True, False))
-    check("BR-2 except", M.rows[1].excepts, ["**/*.sample"])
-    check("BR-18 except", M.rows[17].excepts, [".claude/worktrees"])
+    def row(pattern):                     # by pattern: an id moves when rows are added
+        found = [r for r in M.rows if r.pattern == pattern]
+        check("one row for " + pattern, len(found), 1)
+        return found[0]
+    r = row("**/.git/config")
+    check("git config's limits", (r.not_dir, r.not_new_dir, r.noted_modified), (True, True, True))
+    r = row(".claude/settings.local.json")
+    check("settings.local.json noted", (r.noted, r.noted_modified), (True, False))
+    check("hooks except", row("**/.git/hooks/*").excepts, ["**/*.sample"])
+    check(".claude except", row(".claude/*").excepts, [".claude/worktrees"])
+    r = row("**/.pnp.cjs")
+    check(".pnp.cjs noted when modified", (r.noted, r.noted_modified, r.not_dir), (False, True, True))
 
     # WD-1, PS-P2, PS-P3.
     mt = lambda p, n: model.match(model.split(p), model.split(n))

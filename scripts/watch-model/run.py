@@ -11,7 +11,7 @@ a HOME, both beside the directory, never above it), then compare with the model:
                and reason, or that no list covers it
   counts       `belay watch patterns`: the user's patterns in order with their counts and the
                `matches nothing` mark, and each built-in row's count
-  the table    that the rows printed are the pin's (pattern, label, limits), 68 of them
+  the table    that the rows printed are the pin's (pattern, label, limits), 94 of them
 
 Every disagreement is printed in full: scenario, path, what the model says, what belay says.
 A gate, as policy-model has: every row must have won an entry at least once, and been switched
