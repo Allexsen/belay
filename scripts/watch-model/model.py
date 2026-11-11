@@ -47,9 +47,10 @@ READINGS = {
        "its content is valid; nothing below it (were it a directory) is covered by that clause.",
     7: "DT-2: no trimming. A blank line is an empty line; a line of spaces is a pattern; `#` is a "
        "comment only as the line's first byte.",
-    8: "DT-3: a comment line is not a pattern and is not validated (a control byte or NUL in a "
-       "comment does not make the file invalid).",
-    9: "DT-3: 'a control byte' is 0x01-0x1f and 0x7f; bytes >= 0x80 are ordinary.",
+    8: "DT-3: a comment line is not a pattern and is not validated (a control byte other than "
+       "NUL in a comment does not make the file invalid). A NUL is not a reading: DT-3 as "
+       "amended says a file holding one anywhere, a comment included, cannot be read.",
+    9: "DT-3: 'a control byte other than NUL' is 0x01-0x1f and 0x7f; bytes >= 0x80 are ordinary.",
     10: "DT-4: 'at most four `**`' counts components that are exactly `**`; `a**b` is two `*` "
         "inside a component and counts for nothing.",
     11: "DT-4: 256 counts patterns, not lines; comments and blank lines are free. Every DT-4 "
@@ -60,6 +61,9 @@ READINGS = {
     13: "BR-L5 for a current entry: level 'note' (the interface's rule: note for 'noted' and "
         "'noted when modified').",
     14: "A pattern's lines are split on LF only; a final line needs no LF.",
+    16: "DT-3/DT-4: a file that both holds a NUL and passes a limit of DT-4 (or has an invalid "
+        "line) cannot be read: with no stored copy there is nothing to measure or to number. "
+        "The pin does not order the two; no scenario rests on it.",
     15: "The watched directory itself is an entry (belay lists it as `.`; taken after the first "
         "run, the pin does not say). Its path relative to the top has no component, so by PS-P2 "
         "only a pattern whose every component is `**` matches it; `*`, `.*` and `*.` do not: `.` "
@@ -271,9 +275,7 @@ class Model(object):
 
 def pattern_error(line):
     """DT-3: why a line is not a pattern, or None."""
-    for b in line:
-        if b == 0:
-            return "a NUL"
+    for b in line:                    # a NUL never comes here: parse_donttouch has said so
         if b < 0x20 or b == 0x7f:
             return "a control byte"
     if line.startswith(b"/"):
@@ -294,7 +296,10 @@ def pattern_error(line):
 
 
 def parse_donttouch(data):
-    """('ok', [patterns]) | ('line', N, why) | ('limit', what). `data` is the file's bytes."""
+    """('ok', [patterns]) | ('line', N, why) | ('limit', what) | ('unreadable', why).
+    `data` is the file's bytes."""
+    if b"\x00" in data:              # DT-3: not text, no stored copy, no line number (READING 16)
+        return ("unreadable", "no stored copy: a NUL byte")
     if len(data) > MAX_FILE:
         return ("limit", "file over 64 KiB")
     lines = data.split(b"\n")
@@ -328,4 +333,6 @@ def list_in_force(tree, content):
     res = parse_donttouch(content)
     if res[0] == "ok":
         return (("ok",), res[1])
+    if res[0] == "unreadable":
+        return (("unreadable",), [])
     return (res, [])

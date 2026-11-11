@@ -334,7 +334,7 @@ def donttouch_scenarios():
     I = "user list: invalid by DT-3"
     bad = [
         ("CRLF", b"x.lock\r"), ("a tab", b"a\tb"), ("byte 0x01", b"a\x01b"), ("byte 0x1f", b"a\x1f"),
-        ("DEL 0x7f", b"a\x7fb"), ("a NUL", b"a\x00b"), ("leading /", b"/migrations"),
+        ("DEL 0x7f", b"a\x7fb"), ("leading /", b"/migrations"),
         ("trailing /", b"migrations/"), ("empty component", b"src//a.lock"), (". alone", b"."),
         (".. alone", b".."), (". component", b"src/./a.lock"), (".. component", b"src/../x"),
         ("leading ./", b"./x"), ("trailing /..", b"src/.."), ("?", b"x.loc?"), ("[", b"x.[l]ock"),
@@ -350,7 +350,6 @@ def donttouch_scenarios():
     E = "user list: DT-3's edges (readings)"
     out.append(dt_scenario("edge: a CR in a comment only (READING 8)", E, b"# c\r\nmigrations\n"))
     out.append(dt_scenario("edge: a tab in a comment only (READING 8)", E, b"#\tc\nmigrations\n"))
-    out.append(dt_scenario("edge: a NUL in a comment only (READING 8)", E, b"# c\x00\nmigrations\n"))
     out.append(dt_scenario("edge: ? [ \\ in a comment", E, b"#?[\\\nmigrations\n"))
     out.append(dt_scenario("edge: ! not leading", E, b"a!b\nmigrations/!x\n"))
     out.append(dt_scenario("edge: a blank CRLF line", E, b"migrations\n\r\n"))
@@ -379,6 +378,10 @@ def donttouch_scenarios():
     out.append(dt_scenario("limit: four ** and ***", L, b"**/***/**/**/**/x\n"))
 
     U = "user list: cannot be read"
+    out.append(dt_scenario("unreadable: a NUL in a pattern", U, b"migrations\na\x00b\nx.lock\n"))
+    out.append(dt_scenario("unreadable: a NUL in a comment only", U, b"# c\x00\nmigrations\n"))
+    out.append(dt_scenario("unreadable: a NUL alone on the last line, no final LF", U, b"migrations\n\x00"))
+    out.append(dt_scenario("unreadable: a NUL is the whole file", U, b"\x00"))
     t = base_tree()
     t.add(".belay-donttouch", "d")
     t.add(".belay-donttouch/inner", "f")                 # READING 6
