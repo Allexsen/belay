@@ -764,6 +764,26 @@ TEST(prune_removes_what_is_outside_the_count) {
 }
 
 /* PR-2: both limits given, a checkpoint within either stays. */
+/* A prune killed while it made a delta whole again (PR-4) leaves the whole
+ * file's temporary beside it. That is belay's own: a later prune removes the
+ * checkpoint with it, and does not stop on it for good (review of #132, 3). */
+TEST(prune_removes_what_a_killed_rewrite_left) {
+    fresh();
+    for (int i = 0; i < 4; i++) ASSERT_EQ_INT(0, belay("mark", "--scope", g_scope, NULL));
+    sh("for d in '%s'/scopes/*/checkpoints/2; do echo half > \"$d/manifest.ndjson.tmp\"; done", g_state);
+    ASSERT_EQ_INT(0, belay("prune", "--scope", g_scope, "--keep-last", "1", "--dry-run", NULL));
+    ASSERT_EQ_INT(0, belay("prune", "--scope", g_scope, "--keep-last", "1", NULL));
+    ASSERT_TRUE(strstr(g_out, "removed 3 of 4 checkpoints") != NULL);
+    ASSERT_EQ_STR("", g_err);
+    ASSERT_EQ_INT(0, belay("log", "--scope", g_scope, NULL));
+    ASSERT_TRUE(strstr(g_out, "mark 2 ") == NULL);
+    /* what belay did not write still stops it, before anything goes */
+    for (int i = 0; i < 2; i++) ASSERT_EQ_INT(0, belay("mark", "--scope", g_scope, NULL));
+    sh("for d in '%s'/scopes/*/checkpoints/5; do echo x > \"$d/not-belays\"; done", g_state);
+    ASSERT_EQ_INT(4, belay("prune", "--scope", g_scope, "--keep-last", "1", NULL));
+    ASSERT_TRUE(strstr(g_err, "holds what belay did not write") != NULL);
+}
+
 TEST(prune_keeps_what_is_within_either_limit) {
     history(4);
     ASSERT_TRUE(holds("for i in 1 2 3; do sed -i.bak 's/\"created_ns\":[0-9]*/\"created_ns\":1000/' \"$d/checkpoints/$i/meta.json\" && "
@@ -1885,6 +1905,7 @@ int main(void) {
     RUN(mark_keep_is_recorded_and_shown);
     RUN(prune_needs_a_limit_and_good_values);
     RUN(prune_removes_what_is_outside_the_count);
+    RUN(prune_removes_what_a_killed_rewrite_left);
     RUN(prune_keeps_what_is_within_either_limit);
     RUN(prune_never_removes_the_newest_a_kept_one_or_a_pending_diff);
     RUN(prune_keep_id_lasts_and_is_checked);
