@@ -210,6 +210,10 @@ static void reply_block(FILE *out, const char *text) {
 
 /* ---- the daily prune (state-retention-watch WR-10, WR-12) ---- */
 
+/* Test hook: false, and no Stop starts the detached prune (it outlives the
+ * test that started it, and works on the next one's directories). */
+bool hook_claude_prunes = true;
+
 /* The record's directory for housekeeping files, opened without a lock; -1
  * when there is no record. */
 static int watch_dir(const char *scope) {
@@ -432,7 +436,7 @@ int hook_claude(const char *event, const char *scope_arg, FILE *in, FILE *out) {
         const int dfd = watch_dir(scope);
         if (dfd != -1) {
             prune_said(dfd, &lines);
-            prune_daily(scope, dfd);
+            if (hook_claude_prunes) prune_daily(scope, dfd);
             close(dfd);
         }
     }

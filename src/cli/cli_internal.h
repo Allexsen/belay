@@ -42,7 +42,8 @@ struct hook_claude_in {
     char *calls;
 };
 int hook_claude_parse(const char *buf, size_t len, struct hook_claude_in *out);    /* 0, or -1 when it is not such an object */
-int hook_claude(const char *event, const char *scope, FILE *in, FILE *out);         /* always 0 */
+int hook_claude(const char *event, const char *scope, FILE *in, FILE *out);
+extern bool hook_claude_prunes;      /* test hook: false, and a Stop starts no detached prune */         /* always 0 */
 int  cmd_verify(int argc, char **argv, FILE *out, FILE *err);
 int  cmd_prune(int argc, char **argv, FILE *out, FILE *err);
 int  cmd_manifest(int argc, char **argv, FILE *out, FILE *err);
