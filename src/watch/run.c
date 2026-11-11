@@ -140,7 +140,12 @@ static void drop_stale(struct wctx *x) {
     const char *me = x->q->session;
     for (size_t i = s->n_open; i-- > 0;) {
         if (strcmp(s->open[i].session, me) == 0) {
-            s->open[i].ns = x->now;     /* kept with the next line this event writes, if it writes one: no line of its own */
+            /* Kept with whatever line this event writes. An event that writes
+             * none (a batch that closes nothing) gets one for it only once the
+             * renewal is an hour due: the session has fired, and that must be
+             * on record before another session could take it for dead. */
+            if (x->now - s->open[i].ns > NS_PER_DAY / 24) x->dirty = true;
+            s->open[i].ns = x->now;
         } else if (x->now - s->open[i].ns > NS_PER_DAY) {
             open_remove(s, i);
             x->dropped++;
@@ -149,6 +154,7 @@ static void drop_stale(struct wctx *x) {
     }
     for (size_t i = s->n_marks; i-- > 0;) {
         if (strcmp(s->marks[i].session, me) == 0) {
+            if (x->now - s->marks[i].seen_ns > NS_PER_DAY / 24) x->dirty = true;
             s->marks[i].seen_ns = x->now;
         } else if (x->now - s->marks[i].seen_ns > NS_PER_DAY) {
             memmove(&s->marks[i], &s->marks[i + 1], (s->n_marks - i - 1) * sizeof s->marks[0]);

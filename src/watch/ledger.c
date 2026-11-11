@@ -412,6 +412,10 @@ static int put_line(struct ledger *l, int64_t ns, const char *line, size_t len, 
             belay_err_set(BELAY_ERR_IO, e, "cannot write %s/%s", l->dir, name);
             return -1;
         }
+        if (fresh && !renamed) {            /* it stands only in the temporary, which nothing reads */
+            belay_err_set(BELAY_ERR_IO, e, "cannot write %s/%s", l->dir, name);
+            return -1;
+        }
         /* It could not be taken back either: the line stands, and the record
          * goes on from it. That it may not have reached the disk is said. */
         l->unconfirmed = true;
