@@ -120,6 +120,7 @@ static void fresh(void) {
     ledger_fail_at = 0;
     ledger_fail_sync_at = 0;
     ledger_fail_dirsync = false;
+    hook_claude_prunes = false;         /* only the test of the daily prune lets one loose, and waits for it */
 }
 
 /* A fresh directory with a record: the session's first step made. */
@@ -1186,6 +1187,7 @@ TEST(the_receipt_command_is_answered_by_the_hook_and_no_other_command_is) {
 
 TEST(the_hook_prunes_once_a_day_and_only_the_watchs_own) {
     fresh();
+    hook_claude_prunes = true;
     unsetenv("CLAUDE_CODE_ENTRYPOINT");
     belay("mark", "--scope", g_scope, NULL);                            /* the user's own, before the plugin */
     belay("mark", "--scope", g_scope, NULL);
@@ -1208,6 +1210,8 @@ TEST(the_hook_prunes_once_a_day_and_only_the_watchs_own) {
     sh("echo 'belay: it broke' > \"$(ls -d '%s'/scopes/*/watch)/prune.log\"", g_state);
     HAS(hook("stop", "{" S1 "}"), "belay: " RED " the last prune failed: belay: it broke");
     HAS_NOT(hook("stop", "{" S1 "}"), "the last prune failed");
+    hook_claude_prunes = false;
+    sleep(1);                                                           /* none is left running into the next test */
 }
 
 int main(void) {
