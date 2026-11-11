@@ -16,13 +16,32 @@ ev=$1
 HERE=$(dirname "$0")
 PIN=${BELAY_PIN:-$HERE/pin}
 say() {     # one line in the hook's JSON, with what JSON needs escaped
-    printf '{"systemMessage":"belay: \360\237\224\264 %s"}\n' "$(printf '%s' "$1" | sed 's/\\/\\\\/g; s/"/\\"/g')"
+    printf '{"systemMessage":"belay: \360\237\224\264 %s"}\n' \
+        "$(printf '%s' "$1" | tr -d '\000-\037\177' | sed 's/\\/\\\\/g; s/"/\\"/g')"
     exit 0
+}
+sum() {
+    if command -v sha256sum >/dev/null 2>&1; then sha256sum "$1" 2>/dev/null | cut -d' ' -f1
+    else shasum -a 256 "$1" 2>/dev/null | cut -d' ' -f1; fi
+}
+# Runs the binary with the hook's input. Its reply is passed on only when it
+# exited 0, as `belay hook` always does. Anything else -- it cannot start, it
+# died, it is not belay -- comes back here with the status, so that a line
+# says nothing is being recorded: never silence.
+run() {
+    reply=$("$1" hook claude-code "$ev" 2>/dev/null)
+    status=$?
+    if [ "$status" -eq 0 ]; then
+        [ -n "$reply" ] && printf '%s\n' "$reply"
+        exit 0
+    fi
+    [ "$ev" = end ] && exit 0       # at a session's end nothing can be shown
+    return 0
 }
 
 if [ -n "$BELAY_BIN" ]; then
-    "$BELAY_BIN" hook claude-code "$ev"
-    exit 0
+    run "$BELAY_BIN"
+    say "not recording: belay could not run (status $status): $BELAY_BIN"
 fi
 
 version=$(sed -n 's/^version  *//p' "$PIN" 2>/dev/null | head -n 1)
@@ -51,8 +70,7 @@ if [ ! -x "$BIN" ]; then
     tmp=$DATA/bin/.fetch.$$
     mkdir -p "$DATA/bin" 2>/dev/null || say "not recording: cannot write $DATA/bin"
     curl -fsSL --max-time 150 -o "$tmp" "$url" 2>/dev/null || { rm -f "$tmp"; say "not recording: could not fetch belay $version"; }
-    if command -v sha256sum >/dev/null 2>&1; then got=$(sha256sum "$tmp" | cut -d' ' -f1)
-    else got=$(shasum -a 256 "$tmp" 2>/dev/null | cut -d' ' -f1); fi
+    got=$(sum "$tmp")
     if [ "$got" != "$want" ]; then
         rm -f "$tmp"
         say "not recording: the download of belay $version has sha256 ${got:-unknown}, not the pinned one: not run"
@@ -60,5 +78,11 @@ if [ ! -x "$BIN" ]; then
     chmod 755 "$tmp" && mv "$tmp" "$BIN" || { rm -f "$tmp"; say "not recording: cannot write $BIN"; }
 fi
 
-"$BIN" hook claude-code "$ev"      # not exec: a binary that cannot start must still leave status 0
-exit 0
+run "$BIN"
+# It did not run. If it is no longer the pinned binary (damaged, cut short)
+# it is removed, so the next session's start fetches it again.
+if [ -n "$want" ] && [ "$(sum "$BIN")" != "$want" ]; then
+    rm -f "$BIN"
+    say "not recording: belay could not run (status $status): its binary was damaged and is removed; it is fetched again when a session starts"
+fi
+say "not recording: belay could not run (status $status): $BIN"
