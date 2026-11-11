@@ -41,6 +41,8 @@ const struct brow flag_rows[] = {
     { WK_AGENT, "agent rules", ".cursor", 0, NULL },
     { WK_AGENT, "agent rules", ".cursorrules", BR_FILE, NULL },
     { WK_AGENT, "agent rules", ".github/copilot-instructions.md", BR_FILE, NULL },
+    { WK_AGENT, "agent rules", ".claude.json", BR_FILE, NULL },
+    { WK_AGENT, "search config", ".ripgreprc", BR_FILE, NULL },
     { WK_LOAD, "runs on entering the directory", "**/.envrc", BR_FILE | BR_DEPS, NULL },
     { WK_LOAD, "editor runs it", "**/.vscode/tasks.json", BR_FILE | BR_DEPS, NULL },
     { WK_LOAD, "editor settings", "**/.vscode/settings.json", BR_FILE | BR_DEPS, NULL },
