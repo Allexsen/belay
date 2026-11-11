@@ -47,6 +47,24 @@ for case in "no argument|" "an unknown event|bogus" "input that is not JSON|pre"
 done
 printf '{}' | BELAY_BIN=/bin/false sh "$HOOK" pre >/dev/null 2>&1; is "exit 0: a binary that fails" 0 $?
 printf '{}' | BELAY_BIN="$T/no-such-binary" sh "$HOOK" pre >/dev/null 2>&1; is "exit 0: a binary that is not there" 0 $?
+
+# ---- a binary that cannot run or dies is a line on every event that can show one, never silence (review of #132, 2) ----
+printf '#!/bin/sh\nkill -SEGV $$\n' > "$T/crashes" && chmod +x "$T/crashes"
+printf '#!/bin/sh\necho not json\nexit 3\n' > "$T/garbage" && chmod +x "$T/garbage"
+head -c 5000 /dev/urandom > "$T/corrupt" && chmod +x "$T/corrupt"
+mkdir "$T/adir"
+for b in /bin/false "$T/no-such-binary" "$T/crashes" "$T/garbage" "$T/corrupt" "$T/adir"; do
+    for ev in start pre post prompt stop; do
+        out=$(printf '{%s}' "$S" | BELAY_BIN=$b sh "$HOOK" $ev 2>/dev/null); rc=$?
+        is "exit 0: $(basename "$b") at $ev" 0 $rc
+        has "and a line says belay did not run: $(basename "$b") at $ev" "{\"systemMessage\":\"belay: $RED not recording: belay could not run" "$out"
+        case $out in *'not json'*) bad "what a failed binary printed is not passed on: $ev" "(nothing of it)" "$out" ;; *) ok "what a failed binary printed is not passed on: $ev" ;; esac
+    done
+    is "at a session's end nothing can be shown: $(basename "$b")" "" "$(printf '{%s}' "$S" | BELAY_BIN=$b sh "$HOOK" end 2>/dev/null)"
+done
+is "a control character in what is said cannot break the JSON" 1 \
+   "$(printf '{%s}' "$S" | BELAY_BIN="$T/no
+such	binary" sh "$HOOK" stop 2>/dev/null | wc -l | tr -d ' ')"
 printf '{}' | BELAY_BIN=$BIN CLAUDE_PROJECT_DIR=/nonexistent sh "$HOOK" stop >/dev/null 2>&1; is "exit 0: a directory that is not there" 0 $?
 has "and a directory that is not there is a line, not silence" "belay: $RED could not record: " \
     "$(printf '{%s}' "$S" | BELAY_BIN=$BIN CLAUDE_PROJECT_DIR=/nonexistent sh "$HOOK" stop)"
@@ -81,6 +99,16 @@ if [ -n "$target" ]; then
     rm -rf "$T/rel"
     is "and not fetched again" '{"systemMessage":"belay: outside tool calls: 1 change: b.txt added"}' "$(pinned pre "{$S,\"tool_use_id\":\"toolu_2\"}")"
     pinned start "{$S,\"source\":\"startup\"}" >/dev/null 2>&1; is "exit 0: with the release gone and the binary here" 0 $?
+    # damaged after it was fetched: said, removed, and fetched again at the next start
+    mkdir -p "$T/rel/vtest" && cp "$BIN" "$T/rel/vtest/belay-vtest-$target"
+    head -c 5000 /dev/urandom > "$T/data/bin/belay-vtest"
+    has "a fetched binary that no longer runs is a line" "belay: $RED not recording: belay could not run" "$(pinned stop "{$S}" 2>/dev/null)"
+    is "and it is removed, being no longer the pinned one" "" "$(ls "$T/data/bin")"
+    is "the next start fetches it again, and it runs" "" "$(pinned start "{$S,\"source\":\"resume\"}" 2>/dev/null)"
+    is "kept again" "belay-vtest" "$(ls "$T/data/bin")"
+    echo z > "$T/proj/c.txt"
+    has "and records" 'c.txt added' "$(pinned pre "{$S,\"tool_use_id\":\"toolu_3\"}")"
+    rm -rf "$T/rel"
     rm -rf "$T/data"
     has "a fetch that fails is a line" "not recording: could not fetch belay vtest" "$(pinned start "{$S,\"source\":\"startup\"}")"
     pinned start "{$S}" >/dev/null 2>&1; is "exit 0: a fetch that fails" 0 $?
