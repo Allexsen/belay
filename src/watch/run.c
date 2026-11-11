@@ -140,7 +140,7 @@ static void drop_stale(struct wctx *x) {
     const char *me = x->q->session;
     for (size_t i = s->n_open; i-- > 0;) {
         if (strcmp(s->open[i].session, me) == 0) {
-            if (s->open[i].ns != x->now) { s->open[i].ns = x->now; x->dirty = true; }
+            s->open[i].ns = x->now;     /* kept with the next line this event writes, if it writes one: no line of its own */
         } else if (x->now - s->open[i].ns > NS_PER_DAY) {
             open_remove(s, i);
             x->dropped++;
@@ -149,7 +149,7 @@ static void drop_stale(struct wctx *x) {
     }
     for (size_t i = s->n_marks; i-- > 0;) {
         if (strcmp(s->marks[i].session, me) == 0) {
-            if (s->marks[i].seen_ns != x->now) { s->marks[i].seen_ns = x->now; x->dirty = true; }
+            s->marks[i].seen_ns = x->now;
         } else if (x->now - s->marks[i].seen_ns > NS_PER_DAY) {
             memmove(&s->marks[i], &s->marks[i + 1], (s->n_marks - i - 1) * sizeof s->marks[0]);
             s->n_marks--;
@@ -971,6 +971,10 @@ static void worker(const struct wreq *q, int to_sup, int from_sup) {
         free(body.p);
         belay_err_clear();
         wsb_f(&x.out, "belay: " RED " %s\n", text);
+        status = 4;
+    }
+    if (x.l.unconfirmed) {                  /* written, and not known to have reached the disk */
+        wsb_f(&x.out, "belay: " RED " could not confirm the record\n");
         status = 4;
     }
 done:

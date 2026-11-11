@@ -109,7 +109,23 @@ if [ -n "$target" ]; then
     echo z > "$T/proj/c.txt"
     has "and records" 'c.txt added' "$(pinned pre "{$S,\"tool_use_id\":\"toolu_3\"}")"
     rm -rf "$T/rel"
+    # what is at the binary's path is not a file: said as that, every time, and nothing hangs (re-review, 2 and 3)
+    rm -f "$T/data/bin/belay-vtest" && mkdir "$T/data/bin/belay-vtest"
+    has "a directory where the binary should be is said to be no file" "is not a file" "$(pinned stop "{$S}" 2>/dev/null)"
+    has "and is not called damaged and removed" "is not a file" "$(pinned stop "{$S}" 2>/dev/null)"
+    rmdir "$T/data/bin/belay-vtest" && mkfifo "$T/data/bin/belay-vtest" && chmod 755 "$T/data/bin/belay-vtest"
+    has "a FIFO there does not hang the wrapper" "is not a file" "$(printf '{%s}' "$S" | BELAY_PIN="$T/pin" BELAY_RELEASE_URL="file://$T/rel" timeout 10 sh "$HOOK" stop 2>/dev/null)"
+    rm -f "$T/data/bin/belay-vtest"
+    # an intact binary that fails is kept, also where no sha256 tool can say it is intact (re-review, 4)
+    printf '#!/bin/sh\nexit 7\n' > "$T/data/bin/belay-vtest" && chmod 755 "$T/data/bin/belay-vtest"
+    printf 'version vtest\n%s %s\n' "$target" "$(sum "$T/data/bin/belay-vtest")" > "$T/pin"
+    has "an intact binary that fails is a line" "could not run (status 7)" "$(pinned stop "{$S}" 2>/dev/null)"
+    is "and is kept" "belay-vtest" "$(ls "$T/data/bin")"
+    mkdir "$T/nosha" && for c in sh sed tr cut head uname dirname basename rm mkdir chmod mv cat curl; do ln -s "$(command -v $c)" "$T/nosha/$c"; done
+    has "with no sha256 tool it is still a line" "could not run (status 7)" "$(printf '{%s}' "$S" | PATH="$T/nosha" BELAY_PIN="$T/pin" BELAY_RELEASE_URL="file://$T/rel" sh "$HOOK" stop 2>/dev/null)"
+    is "and still kept: no tool is no proof of damage" "belay-vtest" "$(ls "$T/data/bin")"
     rm -rf "$T/data"
+    printf '# a comment\nversion vtest\n%s %s\n' "$target" "$(sum "$BIN")" > "$T/pin"
     has "a fetch that fails is a line" "not recording: could not fetch belay vtest" "$(pinned start "{$S,\"source\":\"startup\"}")"
     pinned start "{$S}" >/dev/null 2>&1; is "exit 0: a fetch that fails" 0 $?
 else

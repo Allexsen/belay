@@ -257,6 +257,26 @@ TEST(a_users_pattern_flags_whatever_it_matches_and_first) {
     flagctx_free(&x);
     dtlist_free(&old);
     dtlist_free(&fresh);
+    /* the watched directory itself is the entry ".": patterns that would match that as a name do not */
+    const char *dots = ".*\n*\n*.\n**/.*\n";
+    REQUIRE(dtlist_parse(dots, strlen(dots), &old, why, sizeof why) == 0);
+    struct flagctx y = { .lists = { &old, NULL }, .mode = mode_stub };
+    static const struct fcase top[] = {
+        { ".", "metadata_only", "dir", ",\"changed\":[\"mode\"]", "none (metadata changed)" },
+        { ".env", "added", "dir", NULL, "don't-touch|flag|.env added (don't-touch)" },
+    };
+    cases(&y, top, 2);
+    flagctx_free(&y);
+    dtlist_free(&old);
+    const char *all = "**\n";                             /* a pattern of nothing but `**` does: it has no component to match */
+    REQUIRE(dtlist_parse(all, strlen(all), &old, why, sizeof why) == 0);
+    struct flagctx z = { .lists = { &old, NULL }, .mode = mode_stub };
+    static const struct fcase star[] = {
+        { ".", "metadata_only", "dir", ",\"changed\":[\"mode\"]", "don't-touch|flag|. metadata changed (don't-touch)" },
+    };
+    cases(&z, star, 1);
+    flagctx_free(&z);
+    dtlist_free(&old);
 }
 
 TEST(a_dont_touch_file_is_read_as_dt_2_to_dt_4_say) {
