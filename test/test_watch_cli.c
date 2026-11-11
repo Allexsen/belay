@@ -117,6 +117,7 @@ static void fresh(void) {
     watch_second_ms = WATCH_SECOND_S * 1000;
     watch_withhold_go = false;
     prune_between_days = NULL;
+    ledger_fail_at = 0;
 }
 
 /* A fresh directory with a record: the session's first step made. */
@@ -130,6 +131,10 @@ static const char *receipt(void) {
     belay("watch", "receipt", "--scope", g_scope, NULL);
     return g_out;
 }
+
+static int64_t g_now;
+static int64_t fixed_clock(void) { return g_now; }
+#define DAY1 1793534400LL       /* 2026-11-01T12:00:00Z */
 
 /* ---- steps ---- */
 
@@ -578,6 +583,91 @@ TEST(a_change_made_while_steps_run_is_in_the_record_and_added_at_most_once) {
         }
 }
 
+/* ---- the Claude Code adapter ---- */
+
+static const char *hook(const char *event, const char *fmt, ...) {
+    static char *reply;
+    char in[4096];
+    va_list ap;
+    va_start(ap, fmt);
+    vsnprintf(in, sizeof in, fmt, ap);
+    va_end(ap);
+    free(reply);
+    reply = NULL;
+    size_t n;
+    FILE *fin = fmemopen(in, strlen(in), "r"), *fout = open_memstream(&reply, &n);
+    hook_claude(event, g_scope, fin, fout);
+    fclose(fin);
+    fclose(fout);
+    return reply;
+}
+
+#define S1 "\"session_id\":\"sess-1\",\"cwd\":\"/nowhere\""
+
+/* Review of #132, finding 1: what fails after a step's line is written must
+ * not undo it. The step was recorded: its line is shown, it is not said to
+ * be lost, and the next step does not report it again. */
+TEST(a_failure_after_a_step_is_recorded_neither_loses_it_nor_records_it_twice) {
+    /* the line after the step's fails to be written: a prompt is a step, then a marker */
+    fresh();
+    unsetenv("CLAUDE_CODE_ENTRYPOINT");
+    hook("start", "{" S1 ",\"source\":\"startup\"}");
+    sh("mkdir -p '%s/.git/hooks' && printf '#!/bin/sh\\n' > '%s/.git/hooks/pre-commit' && echo 1 > '%s/f1'", g_scope, g_scope, g_scope);
+    ledger_fail_at = 3;                                                 /* the attempt, the step, then the marker */
+    const char *r = hook("prompt", "{" S1 ",\"prompt\":\"go\"}");
+    ledger_fail_at = 0;
+    HAS(r, "belay: " RED " outside tool calls: .git/hooks/pre-commit added (git hook)");
+    HAS(r, "belay: " RED " this step is recorded; what came after it failed: ");
+    HAS_NOT(r, "could not record");
+    ASSERT_EQ_STR("", hook("pre", "{" S1 ",\"tool_use_id\":\"t1\"}"));       /* not again */
+    ASSERT_EQ_INT(1, (int)count(receipt(), "A .git/hooks/pre-commit"));
+    ASSERT_EQ_INT(3, (int)count(ledger(), "\"t\":\"step\""));                /* the start's, the prompt's, the pre's: no second go at it */
+
+    /* the summary fails, after the Stop's step is written: an older day's file cannot be read */
+    fresh();
+    watch_clock = fixed_clock;
+    g_now = DAY1 * 1000000000LL;
+    hook("start", "{" S1 ",\"source\":\"startup\"}");
+    hook("prompt", "{" S1 ",\"prompt\":\"go\"}");
+    g_now += 86400LL * 1000000000LL;
+    sh("echo 1 > '%s/f1'", g_scope);
+    hook("pre", "{" S1 ",\"tool_use_id\":\"t1\"}");                          /* today's file now exists */
+    sh("cd '%s'/scopes/*/watch && mv ledger-2026-11-01.ndjson aside && mkdir ledger-2026-11-01.ndjson", g_state);
+    sh("mkdir -p '%s/.git/hooks' && printf '#!/bin/sh\\n' > '%s/.git/hooks/pre-commit' && echo 2 > '%s/f2'", g_scope, g_scope, g_scope);
+    r = hook("stop", "{" S1 "}");
+    HAS(r, ".git/hooks/pre-commit added (git hook)");
+    HAS(r, "belay: " RED " this step is recorded; what came after it failed: ");
+    HAS_NOT(r, "could not record");
+    sh("cd '%s'/scopes/*/watch && rmdir ledger-2026-11-01.ndjson && mv aside ledger-2026-11-01.ndjson", g_state);
+    ASSERT_EQ_STR("", hook("pre", "{" S1 ",\"tool_use_id\":\"t2\"}"));       /* the cursor did not go back */
+    ASSERT_EQ_INT(1, (int)count(receipt(), "A .git/hooks/pre-commit"));
+    r = hook("stop", "{" S1 "}");
+    HAS(r, "belay: " RED " 1 flagged: .git/hooks/pre-commit added (git hook)\\n");     /* once, and counted once */
+    HAS(r, "belay: " RED " this step is recorded; what came after it failed: ");       /* and the trouble is repeated */
+    HAS(r, "belay: 5 changed this turn outside tool calls");                        /* f1, f2, .git, hooks, pre-commit: each once */
+}
+
+/* The other side: a step whose own line could not be written is not
+ * recorded, is said so, and is recorded by the next. And an event that
+ * fails before it writes anything leaves the state as it found it. */
+TEST(a_step_whose_line_fails_is_said_lost_and_the_state_is_as_it_was) {
+    fresh();
+    unsetenv("CLAUDE_CODE_ENTRYPOINT");
+    hook("start", "{" S1 ",\"source\":\"startup\"}");
+    hook("prompt", "{" S1 ",\"prompt\":\"go\"}");
+    ASSERT_EQ_STR("", hook("pre", "{" S1 ",\"tool_use_id\":\"t1\"}"));
+    sh("echo 1 > '%s/f1'", g_scope);
+    ledger_fail_at = 2;                                                 /* the Stop's attempt is written, its step is not */
+    const char *r = hook("stop", "{" S1 "}");
+    ledger_fail_at = 0;
+    HAS(r, "belay: " RED " could not record: ");
+    HAS_NOT(r, "f1");
+    HAS_NOT(r, "this step is recorded");
+    /* the Stop had closed t1 in memory before it failed: t1 is still open, so the change is its call's */
+    ASSERT_EQ_STR("{\"systemMessage\":\"belay: 1 change: f1 added\"}\n", hook("post", "{" S1 ",\"tool_use_id\":\"t1\"}"));
+    ASSERT_EQ_INT(1, (int)count(receipt(), "A f1"));
+}
+
 /* ---- the receipt, and patterns ---- */
 
 TEST(the_receipt_is_every_step_newest_first) {
@@ -704,9 +794,6 @@ TEST(usage_errors_exit_2_and_say_why) {
 
 /* ---- prune ---- */
 
-static int64_t g_now;
-static int64_t fixed_clock(void) { return g_now; }
-#define DAY1 1793534400LL       /* 2026-11-01T12:00:00Z */
 
 static void two_days(void) {
     started("s1");                                                      /* today's first step, then into the past */
@@ -876,26 +963,7 @@ TEST(a_list_file_no_remaining_line_names_is_removed_and_the_one_in_force_never) 
     HAS(g_out, "new added (don't-touch)");                              /* the list in force still is */
 }
 
-/* ---- the Claude Code adapter ---- */
-
-static const char *hook(const char *event, const char *fmt, ...) {
-    static char *reply;
-    char in[4096];
-    va_list ap;
-    va_start(ap, fmt);
-    vsnprintf(in, sizeof in, fmt, ap);
-    va_end(ap);
-    free(reply);
-    reply = NULL;
-    size_t n;
-    FILE *fin = fmemopen(in, strlen(in), "r"), *fout = open_memstream(&reply, &n);
-    hook_claude(event, g_scope, fin, fout);
-    fclose(fin);
-    fclose(fout);
-    return reply;
-}
-
-#define S1 "\"session_id\":\"sess-1\",\"cwd\":\"/nowhere\""
+/* ---- the Claude Code adapter's events ---- */
 
 TEST(the_claude_code_hook_maps_its_events_to_steps_calls_and_a_summary) {
     fresh();
@@ -1049,6 +1117,8 @@ int main(void) {
     RUN(no_word_after_go_is_said_and_the_step_is_not_killed);
     RUN(steps_at_the_same_time_count_each_change_once);
     RUN(a_change_made_while_steps_run_is_in_the_record_and_added_at_most_once);
+    RUN(a_failure_after_a_step_is_recorded_neither_loses_it_nor_records_it_twice);
+    RUN(a_step_whose_line_fails_is_said_lost_and_the_state_is_as_it_was);
     RUN(the_receipt_is_every_step_newest_first);
     RUN(patterns_shows_the_lists_in_force_and_what_each_matches);
     RUN(a_change_of_what_is_read_is_flagged_and_what_is_not_read_is_said_once);

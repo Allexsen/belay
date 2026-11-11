@@ -99,6 +99,7 @@ struct wctx {
     bool readonly;              /* `belay watch summary`: no lock is held, nothing is written */
     struct pending *pend;       /* WATCH_OPS_MAX of them */
     size_t n_pend;
+    size_t written;             /* how many of them are on disk: past the first, the event cannot be undone */
     bool dirty;                 /* the state changed since the last pending line */
     struct wsb out;
     size_t dropped;             /* calls and markers of sessions that ended without saying so (TL-15) */
@@ -736,6 +737,7 @@ static int commit(struct wctx *x) {
             if (p->section != NULL && ledger_section_write(l, p->step, p->section, p->section_len) == -1) return -1;
             l->st = p->snap;
             if (ledger_append_step(l, p->step) == -1) return -1;
+            x->written = i + 1;
             continue;
         }
         if (p->mark[0] != '\0') {
@@ -759,6 +761,7 @@ static int commit(struct wctx *x) {
         char body[160] = "";
         if (p->mark[0] != '\0') snprintf(body, sizeof body, "\"name\":\"%s\",", p->mark);
         if (ledger_append(l, p->type, x->q->session, x->now, body, NULL) == -1) return -1;
+        x->written = i + 1;
     }
     return 0;
 }
@@ -927,18 +930,31 @@ static void worker(const struct wreq *q, int to_sup, int from_sup) {
     if (x.pend == NULL || work(&x) == -1) {
         if (x.pend == NULL) nomem();
         err_text(why, sizeof why);
-        x.l.st = found;                     /* a failed event leaves the state as it found it */
-        /* kept in the record too, so the summary repeats it */
         struct wsb body = { 0 };
         char text[1100];
-        snprintf(text, sizeof text, "could not record: %s", why);
+        x.out.n = 0;
+        if (x.out.p != NULL) x.out.p[0] = '\0';
+        if (x.written == 0) {
+            /* nothing of it is on disk: the event leaves the state as it found it */
+            x.l.st = found;
+            snprintf(text, sizeof text, "could not record: %s", why);
+        } else {
+            /* A line of it is on disk, and the cursor with it. What is written
+             * stands: the state is that line's, the step is shown, and it is
+             * not said to be lost -- or the next step would record it again
+             * (review of #132, 1). */
+            x.l.st = x.pend[x.written - 1].snap;
+            for (size_t i = 0; i < x.written; i++)
+                if (x.pend[i].step != NULL) lines_step(&x.out, x.pend[i].step);
+            snprintf(text, sizeof text, "this step is recorded; what came after it failed: %s", why);
+        }
+        /* kept in the record too, so the summary repeats it */
         wsb_f(&body, "\"trouble\":");
         wsb_json(&body, text);
         wsb_f(&body, ",");
         if (!body.bad && x.l.dfd != -1) ledger_append(&x.l, "trouble", q->session, x.now, body.p, NULL);
         free(body.p);
         belay_err_clear();
-        x.out.n = 0;
         wsb_f(&x.out, "belay: " RED " %s\n", text);
         status = 4;
     }

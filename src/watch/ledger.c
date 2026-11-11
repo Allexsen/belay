@@ -18,6 +18,8 @@
 #define FILE_MAX ((size_t)1 << 30)      /* a day's file: read whole, never more than this */
 
 void (*ledger_before_line)(void) = NULL;
+long ledger_fail_at = 0;
+static long g_puts;
 
 void wsb_json(struct wsb *b, const char *s) {
     const size_t n = strlen(s);
@@ -365,6 +367,10 @@ static int put_line(struct ledger *l, int64_t ns, const char *line, size_t len, 
     snprintf(name, sizeof name, "ledger-%s.ndjson", day);
     if (len > WATCH_LINE_MAX) {
         belay_err_set(BELAY_ERR_RANGE, 0, "%s/%s: a line of %zu bytes", l->dir, name, len);
+        return -1;
+    }
+    if (ledger_fail_at != 0 && ++g_puts == ledger_fail_at) {
+        belay_err_set(BELAY_ERR_IO, 0, "cannot write %s/%s (a test's failure)", l->dir, name);
         return -1;
     }
     const bool fresh = strcmp(day, l->day) != 0;
