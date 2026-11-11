@@ -647,6 +647,37 @@ TEST(a_failure_after_a_step_is_recorded_neither_loses_it_nor_records_it_twice) {
     HAS(r, "belay: 5 changed this turn outside tool calls");                        /* f1, f2, .git, hooks, pre-commit: each once */
 }
 
+/* Review of #132, finding 4: TM-4 drops the calls and markers of a session
+ * that fires nothing for a day -- not of one that is still firing. A turn
+ * longer than a day keeps its marker, and its summary its span. */
+TEST(a_turn_longer_than_a_day_keeps_its_marker_and_its_open_call) {
+    fresh();
+    unsetenv("CLAUDE_CODE_ENTRYPOINT");
+    watch_clock = fixed_clock;
+    g_now = DAY1 * 1000000000LL;
+    hook("start", "{" S1 ",\"source\":\"startup\"}");
+    hook("prompt", "{" S1 ",\"prompt\":\"a long job\"}");
+    hook("pre", "{" S1 ",\"tool_use_id\":\"t1\"}");
+    sh("mkdir -p '%s/.git/hooks' && printf '#!/bin/sh\\n' > '%s/.git/hooks/pre-commit'", g_scope, g_scope);
+    hook("post", "{" S1 ",\"tool_use_id\":\"t1\"}");
+    hook("pre", "{" S1 ",\"tool_use_id\":\"t2\"}");
+    hook("pre", "{\"session_id\":\"sess-dead\",\"cwd\":\"/nowhere\",\"tool_use_id\":\"d1\"}");    /* another session, which dies here */
+    /* the session goes on firing, every twenty hours, for sixty */
+    for (int i = 0; i < 3; i++) {
+        g_now += 20 * 3600LL * 1000000000LL;
+        hook("pre", "{" S1 ",\"tool_use_id\":\"keepalive\"}");
+        hook("post", "{" S1 ",\"tool_use_id\":\"keepalive\"}");
+    }
+    sh("echo late > '%s/later.txt'", g_scope);
+    ASSERT_EQ_STR("{\"systemMessage\":\"belay: 1 change: later.txt added\"}\n", hook("post", "{" S1 ",\"tool_use_id\":\"t2\"}"));   /* t2 was still open */
+    const char *r = hook("stop", "{" S1 "}");
+    HAS(r, "belay: " RED " 1 flagged: .git/hooks/pre-commit added (git hook)\\n");     /* the first day's, in this turn's summary */
+    HAS(r, "belay: 4 changed this turn in 2 tool calls");
+    /* the session that died is the one whose call is dropped, and that is said */
+    HAS(out_of("cat '%s'/scopes/*/watch/ledger-*.ndjson | grep -c 'call of a session that ended without saying so was closed'", g_state), "1\n");
+    HAS_NOT(out_of("cat '%s'/scopes/*/watch/ledger-*.ndjson | tail -1", g_state), "sess-dead");
+}
+
 /* The other side: a step whose own line could not be written is not
  * recorded, is said so, and is recorded by the next. And an event that
  * fails before it writes anything leaves the state as it found it. */
@@ -661,7 +692,7 @@ TEST(a_step_whose_line_fails_is_said_lost_and_the_state_is_as_it_was) {
     const char *r = hook("stop", "{" S1 "}");
     ledger_fail_at = 0;
     HAS(r, "belay: " RED " could not record: ");
-    HAS_NOT(r, "f1");
+    HAS_NOT(r, "f1 added");
     HAS_NOT(r, "this step is recorded");
     /* the Stop had closed t1 in memory before it failed: t1 is still open, so the change is its call's */
     ASSERT_EQ_STR("{\"systemMessage\":\"belay: 1 change: f1 added\"}\n", hook("post", "{" S1 ",\"tool_use_id\":\"t1\"}"));
@@ -1118,6 +1149,7 @@ int main(void) {
     RUN(steps_at_the_same_time_count_each_change_once);
     RUN(a_change_made_while_steps_run_is_in_the_record_and_added_at_most_once);
     RUN(a_failure_after_a_step_is_recorded_neither_loses_it_nor_records_it_twice);
+    RUN(a_turn_longer_than_a_day_keeps_its_marker_and_its_open_call);
     RUN(a_step_whose_line_fails_is_said_lost_and_the_state_is_as_it_was);
     RUN(the_receipt_is_every_step_newest_first);
     RUN(patterns_shows_the_lists_in_force_and_what_each_matches);

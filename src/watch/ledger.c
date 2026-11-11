@@ -127,8 +127,8 @@ static void state_json(struct wsb *b, const struct wstate *s) {
               (long long)s->open[i].ns);
     wsb_f(b, "],\"marks\":[");
     for (size_t i = 0; i < s->n_marks; i++)
-        wsb_f(b, "%s[\"%s\",\"%s\",\"%s\",%ld,%lld]", i ? "," : "", s->marks[i].session, s->marks[i].name,
-              s->marks[i].day, s->marks[i].off, (long long)s->marks[i].ns);
+        wsb_f(b, "%s[\"%s\",\"%s\",\"%s\",%ld,%lld,%lld]", i ? "," : "", s->marks[i].session, s->marks[i].name,
+              s->marks[i].day, s->marks[i].off, (long long)s->marks[i].ns, (long long)s->marks[i].seen_ns);
     wsb_f(b, "],\"kills\":[");
     for (size_t i = 0; i < s->n_kills; i++) wsb_f(b, "%s[\"%s\",%ld]", i ? "," : "", s->kills[i].session, s->kills[i].n);
     wsb_f(b, "],\"told\":[");
@@ -190,6 +190,8 @@ static bool state_parse(const struct jval *line, struct wstate *s) {
         memcpy(m->day, day, 11);
         m->off = (long)off;
         m->ns = ns;
+        int64_t seen;
+        m->seen_ns = int_at(&a->kids[i], 5, &seen) ? seen : ns;     /* a line written before this field */
     }
     a = jget(v, "kills");
     if (a == NULL || a->t != J_ARR || a->n > W_KILL_MAX) return false;
