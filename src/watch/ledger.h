@@ -107,5 +107,7 @@ int ledger_step(const struct jval *line, struct wstep *s);
 /* Test hook: called after a step's section is synced and before its line is
  * written. NULL in the binary. */
 extern void (*ledger_before_line)(void);
+/* Test hook: the Nth line a process writes fails as a full disk would (1: the first). 0 in the binary. */
+extern long ledger_fail_at;
 
 #endif
