@@ -56,7 +56,7 @@ static int on_packed(const char *ref, size_t rl, const char *oid, size_t ol, voi
 static int on_log(const struct git_reflog_entry *e, void *c) {
     (void)c;
     if (!git_oid(e->old_oid, e->oid_len) || !git_oid(e->new_oid, e->oid_len)) abort();
-    inside(e->operation, e->operation_len, GIT_NAME_MAX);
+    inside(e->operation, e->operation_len, g_len);      /* within the buffer; git gives it no bound of its own */
     g_count++;
     return 0;
 }

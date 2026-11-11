@@ -10,7 +10,12 @@
 #include <stdbool.h>
 #include <stddef.h>
 
-#define GIT_NAME_MAX 1024u              /* bytes of a ref name or reflog operation */
+/* Bytes of a ref name. A reflog entry's operation is not bounded by it, or
+ * by anything but its line: git writes and reads one of any length
+ * (`git update-ref -m`, probed on 2.43.0), and git_reflog_each hands it on
+ * as git has it. A finding that carries one over a finding's 1,024-byte
+ * string limit is replaced by invalid_finding (finding-kinds.md). */
+#define GIT_NAME_MAX 1024u
 
 /* An object id: 40 (SHA-1) or 64 (SHA-256) lowercase hex digits. */
 bool git_oid(const char *s, size_t n);
