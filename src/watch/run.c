@@ -131,17 +131,31 @@ static void open_remove(struct wstate *s, size_t i) {
     s->n_open--;
 }
 
-/* Calls and markers a day old belong to a session that died (TM-4). */
+/* TM-4: the calls and markers of a session that has fired nothing for a
+ * day are dropped: it died. The session firing now is alive, whatever its
+ * calls' age: its own are kept, and their day starts again from this event
+ * (review of #132, 4: a turn longer than a day lost its marker). */
 static void drop_stale(struct wctx *x) {
     struct wstate *s = &x->l.st;
-    for (size_t i = s->n_open; i-- > 0;)
-        if (x->now - s->open[i].ns > NS_PER_DAY) { open_remove(s, i); x->dropped++; x->dirty = true; }
-    for (size_t i = s->n_marks; i-- > 0;)
-        if (x->now - s->marks[i].ns > NS_PER_DAY) {
+    const char *me = x->q->session;
+    for (size_t i = s->n_open; i-- > 0;) {
+        if (strcmp(s->open[i].session, me) == 0) {
+            if (s->open[i].ns != x->now) { s->open[i].ns = x->now; x->dirty = true; }
+        } else if (x->now - s->open[i].ns > NS_PER_DAY) {
+            open_remove(s, i);
+            x->dropped++;
+            x->dirty = true;
+        }
+    }
+    for (size_t i = s->n_marks; i-- > 0;) {
+        if (strcmp(s->marks[i].session, me) == 0) {
+            if (s->marks[i].seen_ns != x->now) { s->marks[i].seen_ns = x->now; x->dirty = true; }
+        } else if (x->now - s->marks[i].seen_ns > NS_PER_DAY) {
             memmove(&s->marks[i], &s->marks[i + 1], (s->n_marks - i - 1) * sizeof s->marks[0]);
             s->n_marks--;
             x->dirty = true;
         }
+    }
 }
 
 static struct wkill *kill_of(struct wstate *s, const char *session, bool make) {
@@ -817,6 +831,7 @@ static int work(struct wctx *x) {
             snprintf(m->name, sizeof m->name, "%s", op->arg);
             memcpy(m->day, "1970-01-01", 11);           /* set when its line is written */
             m->ns = x->now;
+            m->seen_ns = x->now;
             struct pending *p = pend(x, "mark");
             snprintf(p->mark, sizeof p->mark, "%s", op->arg);
             p->snap = *st;

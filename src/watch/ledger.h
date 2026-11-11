@@ -26,7 +26,8 @@
 #define W_TOLD_MAX 32
 
 struct wcall { char id[WATCH_ID_MAX + 1], session[WATCH_ID_MAX + 1], agent[WATCH_ID_MAX + 1]; int64_t ns; };
-struct wmark { char session[WATCH_ID_MAX + 1], name[WATCH_ID_MAX + 1], day[11]; long off; int64_t ns; };
+/* ns: when the marker was set; seen_ns: when its session last fired (TM-4) */
+struct wmark { char session[WATCH_ID_MAX + 1], name[WATCH_ID_MAX + 1], day[11]; long off; int64_t ns, seen_ns; };
 struct wkill { char session[WATCH_ID_MAX + 1]; long n; };
 
 struct wstate {
