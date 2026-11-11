@@ -282,7 +282,7 @@ lasts.
 | TL-3 | Capture or diff failed | `could not record: ` and belay's message |
 | TL-4 | The worker died by itself | `belay stopped unexpectedly while ` and the stage |
 | TL-5 | Still capturing, or matching, at the deadline | `could not record in N s: ` and the stage |
-| TL-6 | No answer after "go" by the second limit | `could not confirm the record` |
+| TL-6 | No answer after "go" by the second limit; or a line was written, its sync failed, and it could not be taken back out of the file | `could not confirm the record` |
 | TL-7 | Back-off (TM-3) | `not recording: capturing this directory takes longer than N s` |
 | TL-8 | An attempt with no step line after it | `the previous step did not finish` |
 | TL-9 | `.belay-donttouch` is invalid | `.belay-donttouch: line N is not a pattern` (or the limit passed), then `; the previous list stays in force` or `; no list is in force` |
@@ -292,6 +292,7 @@ lasts.
 | TL-13 | A step's section of the receipt is missing or fails its digest | in the receipt, in that step's place: `this step's section is missing` |
 | TL-14 | The directory is `/`, `$HOME`, or one `$HOME` is inside | at a session's start only: `not watching DIR: too wide` |
 | TL-15 | Calls or markers older than a day were dropped | `N calls of a session that ended without saying so were closed` |
+| TL-16 | What an event did after its step was written failed (its marker's line, its summary) | after the step's own line: `this step is recorded; what came after it failed: ` and belay's message. The step is not said to be lost, and the next step does not record it again |
 
 The stages are `waiting for the lock`, `capturing`, `matching`, `rendering`.
 
