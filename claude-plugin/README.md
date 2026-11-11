@@ -30,6 +30,13 @@ belay: one that rewrites belay's state, or runs its commands itself.
 
 Then start Claude Code in a project directory. To remove it: `claude plugin uninstall belay@belay`.
 
+Claude Code tries the repository over SSH first and falls back to HTTPS, so no GitHub SSH key is
+needed. On a network that blocks SSH the first command waits two minutes before falling back; the
+full URL goes straight to HTTPS:
+
+    claude plugin marketplace add https://github.com/Allexsen/belay.git
+    claude plugin install belay@belay
+
 ## The lines
 
 Every line starts `belay:`. When something is flagged, a 🔴 comes right after it, always in the
