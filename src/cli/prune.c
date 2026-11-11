@@ -175,7 +175,9 @@ static int mark_entry(const struct belay_entry *e, void *ctx) {
 /* What belay writes in a checkpoint's directory, a killed capture's leftovers
  * included (manifest_write.c). Anything else is not belay's to remove. */
 static bool ours(const char *n) {
-    return !strcmp(n, "manifest.ndjson") || !strcmp(n, "manifest.delta") || !strcmp(n, "manifest.delta.tmp") ||
+    /* manifest.ndjson.tmp: a delta being made whole again (PR-4) when its prune was killed */
+    return !strcmp(n, "manifest.ndjson") || !strcmp(n, "manifest.ndjson.tmp") || !strcmp(n, "manifest.delta") ||
+           !strcmp(n, "manifest.delta.tmp") ||
            !strcmp(n, "meta.json") || !strcmp(n, "meta.json.tmp") ||
            !strncmp(n, "diff-from-", 10) || !strncmp(n, "manifest.ndjson.tmp.", 20) || !strncmp(n, "manifest.ndjson.run.", 20);
 }
