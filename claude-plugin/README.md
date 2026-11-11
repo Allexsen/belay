@@ -108,7 +108,7 @@ to the model.
 The first session fetches one file: the belay binary for your platform, of the release named in
 [hooks/pin](hooks/pin), from this repository's GitHub releases. The wrapper runs it only if its
 sha256 is the one in that file. Nothing else is fetched, then or later, and belay itself makes no
-network calls. Linux x86_64 and arm64, and macOS arm64. The wrapper needs `sh`, `curl` and
+network calls. Linux x86_64 and arm64, and macOS on Apple silicon only. The wrapper needs `sh`, `curl` and
 `sha256sum` or `shasum`.
 
 ## What it keeps, and removes
@@ -135,7 +135,7 @@ made with `belay mark` or `belay check` is never removed by the plugin, whatever
   in a row the session stops recording and says so.
 - A plugin enabled in a session that is already running records from its next start. Until then a
   turn's end says it is not recording.
-- macOS has not been tested by hand.
+- On macOS, Apple silicon only: there is no binary for an Intel Mac.
 - It is a record, not a sandbox. See [SECURITY.md](../SECURITY.md).
 
 ## Develop
