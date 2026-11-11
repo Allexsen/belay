@@ -27,6 +27,11 @@ diffs with a model of the dialect below:
 
 A step is "flagged" when its line would carry the red circle.
 
+2026-11-11: the 28 rows added since (from claude-code-action's list and Claude Code's own) were
+applied to the same recorded diffs. No step's result changed: none of the 47 steps touches a name
+they match. No workload uses yarn 2 or later, bun, bazel, gradle or maven, so what those tools'
+own scaffolds and installs would flag is not measured.
+
 | Steps | Count | Changed entries | Flagged under A | under B | under C | Noted only, under C |
 |---|---|---|---|---|---|---|
 | Installs, scaffolds, builds, test runs (npm, pnpm, pip, create-vite, create-next-app, django, pytest, make) | 27 | 75,479 | 9 steps, 68 entries | 6 steps, 11 entries | **2 steps, 2 entries** | 0 |
@@ -127,6 +132,14 @@ check that its tool honours it. A row marked **not verified** is included by nam
 decided (2026-11-10): its tool could not be run here, and its behaviour is from the tool's
 documentation.
 
+A row whose last column starts "Claude Code's list (2.1.322)" is here because Claude Code itself
+will not edit that name without asking: the names are read from the lists in the 2.1.322 binary
+(build 660928a, 2026-11-10) that its check of a path to write goes through, 37 file names matched
+at any depth, the directories `.git`, `.vscode`, `.idea`, `.claude`, `.husky`, `.cargo`,
+`.devcontainer`, `.yarn` and `.mvn`, and `.config/git`. They are included by name, as the author
+decided (2026-11-11), and the column says what was run here, if anything. Two more rows, `.claude.json`
+and `.ripgreprc`, came the same way from claude-code-action.
+
 Limits a row may carry:
 
 | id | limit | meaning |
@@ -156,58 +169,84 @@ Limits a row may carry:
 | BR-14 | git hooks and config | git hook manager | `**/lefthook.yaml` | not a directory; not in a dependency | as `lefthook.yml`: ran |
 | BR-15 | git hooks and config | git hook manager | `**/.lefthook.yml` | not a directory; not in a dependency | as `lefthook.yml`: ran |
 | BR-16 | git hooks and config | git hook manager | `**/.lefthook.yaml` | not a directory; not in a dependency | as `lefthook.yml`: ran |
-| BR-17 | agent rules | agent permissions | `.claude/settings.local.json` | not a directory; noted | Claude Code 2.1.322 wrote it itself when a permission prompt was answered "Yes, and don't ask again" |
-| BR-18 | agent rules | agent rules | `.claude/*` | except `.claude/worktrees` | Claude Code 2.1.322: a `SessionStart` hook in `.claude/settings.json` ran under `claude -p` |
-| BR-19 | agent rules | agent rules | `**/CLAUDE.md` | not a directory; not in a dependency | Claude Code 2.1.322: read at the top of the directory. Below the top: **not verified** |
-| BR-20 | agent rules | agent rules | `**/CLAUDE.local.md` | not a directory; not in a dependency | Claude Code 2.1.322: read at the top of the directory. Below the top: **not verified** |
-| BR-21 | agent rules | agent rules | `**/AGENTS.md` | not a directory; not in a dependency | **not verified** (no tool that reads it is installed here) |
-| BR-22 | agent rules | agent rules | `.mcp.json` | not a directory | Claude Code 2.1.322: the server's command ran under `claude -p`; `claude mcp list` shows it as pending approval |
-| BR-23 | agent rules | agent rules | `.cursor` | -- | **not verified** (Cursor is not installed here) |
-| BR-24 | agent rules | agent rules | `.cursorrules` | not a directory | **not verified** (Cursor is not installed here) |
-| BR-25 | agent rules | agent rules | `.github/copilot-instructions.md` | not a directory | **not verified** (Copilot is not installed here) |
-| BR-26 | agent rules | agent rules | `.claude.json` | not a directory | listed as PR-controlled config by claude-code-action (`src/github/operations/restore-config.ts`, `SENSITIVE_PATHS`, at d5f7970). Claude Code 2.1.322 reads `.claude.json` only from `CLAUDE_CONFIG_DIR` or the home directory: under `claude -p`, MCP servers declared in one in the directory did not run, while a `.mcp.json` server in the same setup did |
-| BR-27 | agent rules | search config | `.ripgreprc` | not a directory | listed as PR-controlled config by claude-code-action (`src/github/operations/restore-config.ts`, `SENSITIVE_PATHS`, at d5f7970). ripgrep reads a config file only where `RIPGREP_CONFIG_PATH` names it, and Claude Code 2.1.322 starts its bundled ripgrep with `--no-config` (read from the binary). Read from the directory when that variable names it: **not verified** |
-| BR-28 | loads on its own | runs on entering the directory | `**/.envrc` | not a directory; not in a dependency | **not verified** (direnv is not installed here) |
-| BR-29 | loads on its own | editor runs it | `**/.vscode/tasks.json` | not a directory; not in a dependency | **not verified** (no way to run it here) |
-| BR-30 | loads on its own | editor settings | `**/.vscode/settings.json` | not a directory; not in a dependency | **not verified** (no way to run it here) |
-| BR-31 | loads on its own | editor runs it | `**/.vscode/launch.json` | not a directory; not in a dependency | **not verified** (no way to run it here) |
-| BR-32 | loads on its own | container setup | `**/.devcontainer` | not in a dependency | **not verified** (no way to run it here) |
-| BR-33 | loads on its own | container setup | `**/.devcontainer.json` | not a directory; not in a dependency | **not verified** (no way to run it here) |
-| BR-34 | loads on its own | runs at every Python start | `**/site-packages/*.pth` | not a directory | a line starting `import`, in a virtualenv; `python -c pass`: ran. Not run from the working directory |
-| BR-35 | loads on its own | runs at every Python start | `**/site-packages/sitecustomize.py` | not a directory | **not verified**: not run on this machine, where Ubuntu's own `sitecustomize.py` is found first |
-| BR-36 | loads on its own | runs at every install | `**/.pnpmfile.cjs` | not a directory; not in a dependency | pnpm 10.34.7; `pnpm add`: ran |
-| BR-37 | package source | package source | `**/.npmrc` | not a directory; not in a dependency | `registry=`: honoured by npm 9.2.0 and pnpm 10.34.7, also in a subdirectory with its own `package.json`; not read from a dependency's directory |
-| BR-38 | package source | package source | `**/.yarnrc` | not a directory; not in a dependency | yarn 1.22.22: `registry` honoured |
-| BR-39 | package source | package source | `**/.yarnrc.yml` | not a directory; not in a dependency | **not verified** (yarn 2 or later is not installed here) |
-| BR-40 | package source | package source | `**/pip.conf` | not a directory; not in a dependency | honoured at a virtualenv's root; not in the working directory |
-| BR-41 | package source | package source | `**/.cargo/config.toml` | not a directory; not in a dependency | **not verified** (cargo is not installed here) |
-| BR-42 | package source | package source | `**/.cargo/config` | not a directory; not in a dependency | **not verified** (cargo is not installed here) |
-| BR-43 | CI | CI | `.github/workflows` | -- | **not verified** (no way to run it here) |
-| BR-44 | CI | CI | `.github/actions` | -- | **not verified** (no way to run it here) |
-| BR-45 | CI | CI | `.github/CODEOWNERS` | not a directory | **not verified** (no way to run it here) |
-| BR-46 | CI | CI | `CODEOWNERS` | not a directory | **not verified** (no way to run it here) |
-| BR-47 | CI | CI | `docs/CODEOWNERS` | not a directory | **not verified** (no way to run it here) |
-| BR-48 | CI | CI | `.github/dependabot.yml` | not a directory | **not verified** (no way to run it here) |
-| BR-49 | CI | CI | `.github/dependabot.yaml` | not a directory | **not verified** (no way to run it here) |
-| BR-50 | CI | CI | `.gitlab-ci.yml` | not a directory | **not verified** (no way to run it here) |
-| BR-51 | CI | CI | `.circleci` | -- | **not verified** (no way to run it here) |
-| BR-52 | CI | CI | `Jenkinsfile` | not a directory | **not verified** (no way to run it here) |
-| BR-53 | CI | CI | `azure-pipelines.yml` | not a directory | **not verified** (no way to run it here) |
-| BR-54 | CI | CI | `.travis.yml` | not a directory | **not verified** (no way to run it here) |
-| BR-55 | credentials | credentials | `**/.env` | not a directory; not in a dependency | by name; nothing to run |
-| BR-56 | credentials | credentials | `**/.env.*` | not a directory; not in a dependency | by name; nothing to run |
-| BR-57 | credentials | credentials | `**/*.pem` | not a directory; not in a dependency | by name; nothing to run |
-| BR-58 | credentials | credentials | `**/*.key` | not a directory; not in a dependency | by name; nothing to run |
-| BR-59 | credentials | credentials | `**/*.p12` | not a directory; not in a dependency | by name; nothing to run |
-| BR-60 | credentials | credentials | `**/*.pfx` | not a directory; not in a dependency | by name; nothing to run |
-| BR-61 | credentials | credentials | `**/id_rsa*` | not a directory; not in a dependency | by name; nothing to run |
-| BR-62 | credentials | credentials | `**/id_ed25519*` | not a directory; not in a dependency | by name; nothing to run |
-| BR-63 | credentials | credentials | `**/id_ecdsa*` | not a directory; not in a dependency | by name; nothing to run |
-| BR-64 | credentials | credentials | `**/.ssh` | not in a dependency | by name; nothing to run |
-| BR-65 | credentials | credentials | `**/.aws` | not in a dependency | by name; nothing to run |
-| BR-66 | credentials | credentials | `**/.netrc` | not a directory; not in a dependency | by name; nothing to run |
-| BR-67 | credentials | credentials | `**/.git-credentials` | not a directory; not in a dependency | by name; nothing to run |
-| BR-68 | credentials | credentials | `**/.kube/config` | not a directory; not in a dependency | by name; nothing to run |
+| BR-17 | git hooks and config | git config | `**/.gitconfig` | not a directory; not in a dependency | Claude Code's list (2.1.322). git 2.43.0 reads it only from the home directory: one in the directory was not read, and was with `HOME` set to the directory |
+| BR-18 | git hooks and config | git config | `**/.config/git` | not in a dependency | Claude Code's list (2.1.322). git 2.43.0 reads `.config/git/config` only below the home directory: one in the directory was not read, and was with `HOME` set to the directory |
+| BR-19 | agent rules | agent permissions | `.claude/settings.local.json` | not a directory; noted | Claude Code 2.1.322 wrote it itself when a permission prompt was answered "Yes, and don't ask again" |
+| BR-20 | agent rules | agent rules | `.claude/*` | except `.claude/worktrees` | Claude Code 2.1.322: a `SessionStart` hook in `.claude/settings.json` ran under `claude -p` |
+| BR-21 | agent rules | agent rules | `**/CLAUDE.md` | not a directory; not in a dependency | Claude Code 2.1.322: read at the top of the directory. Below the top: **not verified** |
+| BR-22 | agent rules | agent rules | `**/CLAUDE.local.md` | not a directory; not in a dependency | Claude Code 2.1.322: read at the top of the directory. Below the top: **not verified** |
+| BR-23 | agent rules | agent rules | `**/AGENTS.md` | not a directory; not in a dependency | **not verified** (no tool that reads it is installed here) |
+| BR-24 | agent rules | agent rules | `.mcp.json` | not a directory | Claude Code 2.1.322: the server's command ran under `claude -p`; `claude mcp list` shows it as pending approval |
+| BR-25 | agent rules | agent rules | `.cursor` | -- | **not verified** (Cursor is not installed here) |
+| BR-26 | agent rules | agent rules | `.cursorrules` | not a directory | **not verified** (Cursor is not installed here) |
+| BR-27 | agent rules | agent rules | `.github/copilot-instructions.md` | not a directory | **not verified** (Copilot is not installed here) |
+| BR-28 | agent rules | agent rules | `.claude.json` | not a directory | listed as PR-controlled config by claude-code-action (`src/github/operations/restore-config.ts`, `SENSITIVE_PATHS`, at d5f7970). Claude Code 2.1.322 reads `.claude.json` only from `CLAUDE_CONFIG_DIR` or the home directory: under `claude -p`, MCP servers declared in one in the directory did not run, while a `.mcp.json` server in the same setup did |
+| BR-29 | agent rules | search config | `.ripgreprc` | not a directory | listed as PR-controlled config by claude-code-action (`src/github/operations/restore-config.ts`, `SENSITIVE_PATHS`, at d5f7970). ripgrep reads a config file only where `RIPGREP_CONFIG_PATH` names it, and Claude Code 2.1.322 starts its bundled ripgrep with `--no-config` (read from the binary). Read from the directory when that variable names it: **not verified** |
+| BR-30 | loads on its own | runs on entering the directory | `**/.envrc` | not a directory; not in a dependency | **not verified** (direnv is not installed here) |
+| BR-31 | loads on its own | editor runs it | `**/.vscode/tasks.json` | not a directory; not in a dependency | **not verified** (no way to run it here) |
+| BR-32 | loads on its own | editor settings | `**/.vscode/settings.json` | not a directory; not in a dependency | **not verified** (no way to run it here) |
+| BR-33 | loads on its own | editor runs it | `**/.vscode/launch.json` | not a directory; not in a dependency | **not verified** (no way to run it here) |
+| BR-34 | loads on its own | container setup | `**/.devcontainer` | not in a dependency | **not verified** (no way to run it here) |
+| BR-35 | loads on its own | container setup | `**/.devcontainer.json` | not a directory; not in a dependency | **not verified** (no way to run it here) |
+| BR-36 | loads on its own | runs at every Python start | `**/site-packages/*.pth` | not a directory | a line starting `import`, in a virtualenv; `python -c pass`: ran. Not run from the working directory |
+| BR-37 | loads on its own | runs at every Python start | `**/site-packages/sitecustomize.py` | not a directory | **not verified**: not run on this machine, where Ubuntu's own `sitecustomize.py` is found first |
+| BR-38 | loads on its own | runs at every install | `**/.pnpmfile.cjs` | not a directory; not in a dependency | pnpm 10.34.7; `pnpm add`: ran |
+| BR-39 | loads on its own | shell startup file | `**/.bashrc` | not a directory; not in a dependency | Claude Code's list (2.1.322). bash 5.2.21 reads it only from the home directory: started in the directory it ran none of these files; with `HOME` set to the directory it ran `.bashrc`, `.bash_profile` and `.bash_logout` |
+| BR-40 | loads on its own | shell startup file | `**/.bash_profile` | not a directory; not in a dependency | Claude Code's list (2.1.322). bash 5.2.21 reads it only from the home directory: started in the directory it ran none of these files; with `HOME` set to the directory it ran `.bashrc`, `.bash_profile` and `.bash_logout` |
+| BR-41 | loads on its own | shell startup file | `**/.zshrc` | not a directory; not in a dependency | Claude Code's list (2.1.322). **not verified** (zsh is not installed here) |
+| BR-42 | loads on its own | shell startup file | `**/.zprofile` | not a directory; not in a dependency | Claude Code's list (2.1.322). **not verified** (zsh is not installed here) |
+| BR-43 | loads on its own | shell startup file | `**/.profile` | not a directory; not in a dependency | Claude Code's list (2.1.322). **not verified**: bash 5.2.21 with `HOME` set to the directory did not run it there (`.bash_profile` is found first, and `.bash_aliases` is read only by a `.bashrc` that asks for it) |
+| BR-44 | loads on its own | shell startup file | `**/.zshenv` | not a directory; not in a dependency | Claude Code's list (2.1.322). **not verified** (zsh is not installed here) |
+| BR-45 | loads on its own | shell startup file | `**/.zlogin` | not a directory; not in a dependency | Claude Code's list (2.1.322). **not verified** (zsh is not installed here) |
+| BR-46 | loads on its own | shell startup file | `**/.zlogout` | not a directory; not in a dependency | Claude Code's list (2.1.322). **not verified** (zsh is not installed here) |
+| BR-47 | loads on its own | shell startup file | `**/.bash_login` | not a directory; not in a dependency | Claude Code's list (2.1.322). **not verified**: bash 5.2.21 with `HOME` set to the directory did not run it there (`.bash_profile` is found first, and `.bash_aliases` is read only by a `.bashrc` that asks for it) |
+| BR-48 | loads on its own | shell startup file | `**/.bash_aliases` | not a directory; not in a dependency | Claude Code's list (2.1.322). **not verified**: bash 5.2.21 with `HOME` set to the directory did not run it there (`.bash_profile` is found first, and `.bash_aliases` is read only by a `.bashrc` that asks for it) |
+| BR-49 | loads on its own | shell startup file | `**/.bash_logout` | not a directory; not in a dependency | Claude Code's list (2.1.322). bash 5.2.21 reads it only from the home directory: started in the directory it ran none of these files; with `HOME` set to the directory it ran `.bashrc`, `.bash_profile` and `.bash_logout` |
+| BR-50 | loads on its own | runs at every Node start | `**/.pnp.cjs` | not a directory; not in a dependency; noted when modified | Claude Code's list (2.1.322). **not verified** (yarn 2 or later is not installed here). Noted when modified: by yarn's documentation an install rewrites it |
+| BR-51 | loads on its own | runs at every Node start | `**/.pnp.loader.mjs` | not a directory; not in a dependency; noted when modified | Claude Code's list (2.1.322). **not verified** (yarn 2 or later is not installed here). Noted when modified, as `.pnp.cjs` |
+| BR-52 | loads on its own | bun config | `**/bunfig.toml` | not a directory; not in a dependency | Claude Code's list (2.1.322). **not verified** (bun is not installed here) |
+| BR-53 | loads on its own | bun config | `**/.bunfig.toml` | not a directory; not in a dependency | Claude Code's list (2.1.322). **not verified** (bun is not installed here) |
+| BR-54 | loads on its own | build setup | `**/.bazelrc` | not a directory; not in a dependency | Claude Code's list (2.1.322). **not verified** (bazel is not installed here) |
+| BR-55 | loads on its own | type checker config | `**/pyrightconfig.json` | not a directory; not in a dependency | Claude Code's list (2.1.322). **not verified** (pyright is not installed here) |
+| BR-56 | loads on its own | build setup | `**/.mvn` | not in a dependency | Claude Code's list (2.1.322). **not verified** (maven is not installed here) |
+| BR-57 | loads on its own | runs at every yarn start | `**/.yarn/releases` | not in a dependency | Claude Code's list (2.1.322). The list has `.yarn` whole; see Left out. **not verified** (yarn 2 or later is not installed here) |
+| BR-58 | loads on its own | runs at every yarn start | `**/.yarn/plugins` | not in a dependency | Claude Code's list (2.1.322). As `.yarn/releases`: **not verified** |
+| BR-59 | package source | package source | `**/.npmrc` | not a directory; not in a dependency | `registry=`: honoured by npm 9.2.0 and pnpm 10.34.7, also in a subdirectory with its own `package.json`; not read from a dependency's directory |
+| BR-60 | package source | package source | `**/.yarnrc` | not a directory; not in a dependency | yarn 1.22.22: `registry` honoured |
+| BR-61 | package source | package source | `**/.yarnrc.yml` | not a directory; not in a dependency | **not verified** (yarn 2 or later is not installed here) |
+| BR-62 | package source | package source | `**/pip.conf` | not a directory; not in a dependency | honoured at a virtualenv's root; not in the working directory |
+| BR-63 | package source | package source | `**/.cargo/config.toml` | not a directory; not in a dependency | **not verified** (cargo is not installed here) |
+| BR-64 | package source | package source | `**/.cargo/config` | not a directory; not in a dependency | **not verified** (cargo is not installed here) |
+| BR-65 | package source | build tool source | `**/.bazelversion` | not a directory; not in a dependency | Claude Code's list (2.1.322). **not verified** (bazel is not installed here) |
+| BR-66 | package source | build tool source | `**/.bazeliskrc` | not a directory; not in a dependency | Claude Code's list (2.1.322). **not verified** (bazelisk is not installed here) |
+| BR-67 | package source | build tool source | `**/gradle-wrapper.properties` | not a directory; not in a dependency | Claude Code's list (2.1.322). **not verified** (gradle is not installed here) |
+| BR-68 | package source | build tool source | `**/maven-wrapper.properties` | not a directory; not in a dependency | Claude Code's list (2.1.322). **not verified** (maven is not installed here) |
+| BR-69 | CI | CI | `.github/workflows` | -- | **not verified** (no way to run it here) |
+| BR-70 | CI | CI | `.github/actions` | -- | **not verified** (no way to run it here) |
+| BR-71 | CI | CI | `.github/CODEOWNERS` | not a directory | **not verified** (no way to run it here) |
+| BR-72 | CI | CI | `CODEOWNERS` | not a directory | **not verified** (no way to run it here) |
+| BR-73 | CI | CI | `docs/CODEOWNERS` | not a directory | **not verified** (no way to run it here) |
+| BR-74 | CI | CI | `.github/dependabot.yml` | not a directory | **not verified** (no way to run it here) |
+| BR-75 | CI | CI | `.github/dependabot.yaml` | not a directory | **not verified** (no way to run it here) |
+| BR-76 | CI | CI | `.gitlab-ci.yml` | not a directory | **not verified** (no way to run it here) |
+| BR-77 | CI | CI | `.circleci` | -- | **not verified** (no way to run it here) |
+| BR-78 | CI | CI | `Jenkinsfile` | not a directory | **not verified** (no way to run it here) |
+| BR-79 | CI | CI | `azure-pipelines.yml` | not a directory | **not verified** (no way to run it here) |
+| BR-80 | CI | CI | `.travis.yml` | not a directory | **not verified** (no way to run it here) |
+| BR-81 | credentials | credentials | `**/.env` | not a directory; not in a dependency | by name; nothing to run |
+| BR-82 | credentials | credentials | `**/.env.*` | not a directory; not in a dependency | by name; nothing to run |
+| BR-83 | credentials | credentials | `**/*.pem` | not a directory; not in a dependency | by name; nothing to run |
+| BR-84 | credentials | credentials | `**/*.key` | not a directory; not in a dependency | by name; nothing to run |
+| BR-85 | credentials | credentials | `**/*.p12` | not a directory; not in a dependency | by name; nothing to run |
+| BR-86 | credentials | credentials | `**/*.pfx` | not a directory; not in a dependency | by name; nothing to run |
+| BR-87 | credentials | credentials | `**/id_rsa*` | not a directory; not in a dependency | by name; nothing to run |
+| BR-88 | credentials | credentials | `**/id_ed25519*` | not a directory; not in a dependency | by name; nothing to run |
+| BR-89 | credentials | credentials | `**/id_ecdsa*` | not a directory; not in a dependency | by name; nothing to run |
+| BR-90 | credentials | credentials | `**/.ssh` | not in a dependency | by name; nothing to run |
+| BR-91 | credentials | credentials | `**/.aws` | not in a dependency | by name; nothing to run |
+| BR-92 | credentials | credentials | `**/.netrc` | not a directory; not in a dependency | by name; nothing to run |
+| BR-93 | credentials | credentials | `**/.git-credentials` | not a directory; not in a dependency | by name; nothing to run |
+| BR-94 | credentials | credentials | `**/.kube/config` | not a directory; not in a dependency | by name; nothing to run |
 
 | id | rule |
 |---|---|
@@ -223,6 +262,9 @@ Left out, and why:
 | `.pypirc` in the directory | Probed with twine 7.0.0: only `~/.pypirc` is read. |
 | `sitecustomize.py`, `usercustomize.py`, `*.pth` outside `site-packages` | Probed: not run from the working directory. `usercustomize.py` is not run in a virtualenv. |
 | `.vscode/extensions.json` | It recommends extensions and runs nothing. |
+| `.idea` | On Claude Code's list (2.1.322). A JetBrains IDE rewrites `.idea/workspace.xml` while it is open, so a row would flag whenever one is. **Not verified** (none is installed here). |
+| `.yarn` other than `releases` and `plugins` | On Claude Code's list (2.1.322) as a whole. By yarn's documentation an install rewrites `.yarn/cache` and `.yarn/install-state.gz`. **Not verified** (yarn 2 or later is not installed here). |
+| `.git`, `.vscode` and `.cargo` as whole directories | On Claude Code's list (2.1.322) as wholes. The rows name what was found to run code or decide a source in them; the rest of `.git` changes with every commit. |
 
 ## `.belay-donttouch`
 

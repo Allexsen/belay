@@ -41,7 +41,7 @@ READINGS = {
     4: "BR-L4: the exception is matched against the whole path from the top, case-sensitively, "
        "with WD-2 ('or lies below its match'), so `proj.sample/.git/hooks/pre-commit` is excepted.",
     5: "First row wins among the rows that APPLY: a row its limit switches off does not stop a "
-       "later row (`.env/key.pem` is credentials by BR-57; `.claude/worktrees/x/CLAUDE.md` is "
+       "later row (`.env/key.pem` is credentials by BR-83; `.claude/worktrees/x/CLAUDE.md` is "
        "agent rules by BR-19).",
     6: "FK-1: `.belay-donttouch` at the top is don't-touch whatever its type and whether or not "
        "its content is valid; nothing below it (were it a directory) is covered by that clause.",

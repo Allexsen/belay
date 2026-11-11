@@ -163,11 +163,27 @@ TEST(a_row_flags_as_its_limits_say) {
         { "node_modules/p/AGENTS.md", "added", "reg", NULL, "none (added)" },
         { ".mcp.json", "added", "reg", NULL, "agent rules|flag|.mcp.json added (agent rules)" },
         { "sub/.mcp.json", "added", "reg", NULL, "none (added)" },
-        /* BR-26, BR-27: claude-code-action's list; at the top only, files only */
+        /* BR-28, BR-29: claude-code-action's list; at the top only, files only */
         { ".claude.json", "modified", "reg", NULL, "agent rules|flag|.claude.json modified (agent rules)" },
         { ".ripgreprc", "added", "reg", NULL, "agent rules|flag|.ripgreprc added (search config)" },
         { "sub/.ripgreprc", "added", "reg", NULL, "none (added)" },
         { ".claude.json", "added", "dir", NULL, "none (added)" },
+        /* Claude Code's own list (2.1.322): by name at any depth, not in a dependency */
+        { ".gitconfig", "added", "reg", NULL, "git hooks and config|flag|.gitconfig added (git config)" },
+        { "a/.config/git/config", "modified", "reg", NULL, "git hooks and config|flag|a/.config/git/config modified (git config)" },
+        { "dot/.zshrc", "modified", "reg", NULL, "loads on its own|flag|dot/.zshrc modified (shell startup file)" },
+        { ".bashrc", "added", "dir", NULL, "none (added)" },
+        { ".pnp.cjs", "added", "reg", NULL, "loads on its own|flag|.pnp.cjs added (runs at every Node start)" },
+        { ".pnp.cjs", "modified", "reg", NULL, "loads on its own|note|.pnp.cjs modified (runs at every Node start)" },
+        { "bunfig.toml", "modified", "reg", NULL, "loads on its own|flag|bunfig.toml modified (bun config)" },
+        { "node_modules/p/bunfig.toml", "added", "reg", NULL, "none (added)" },
+        { ".venv/lib/python3.12/site-packages/p/pyrightconfig.json", "added", "reg", NULL, "none (added)" },
+        { ".mvn/extensions.xml", "added", "reg", NULL, "loads on its own|flag|.mvn/extensions.xml added (build setup)" },
+        { ".mvn/wrapper/maven-wrapper.properties", "modified", "reg", NULL, "loads on its own|flag|.mvn/wrapper/maven-wrapper.properties modified (build setup)" },
+        { ".yarn/releases/yarn-4.1.0.cjs", "added", "reg", NULL, "loads on its own|flag|.yarn/releases/yarn-4.1.0.cjs added (runs at every yarn start)" },
+        { ".yarn/cache/x.zip", "added", "reg", NULL, "none (added)" },
+        { "gradle/wrapper/gradle-wrapper.properties", "modified", "reg", NULL, "package source|flag|gradle/wrapper/gradle-wrapper.properties modified (build tool source)" },
+        { ".bazelversion", "modified", "reg", NULL, "package source|flag|.bazelversion modified (build tool source)" },
         /* loads on its own */
         { ".venv/lib/python3.12/site-packages/evil.pth", "added", "reg", NULL, "loads on its own|flag|.venv/lib/python3.12/site-packages/evil.pth added (runs at every Python start)" },
         { "evil.pth", "added", "reg", NULL, "none (added)" },
