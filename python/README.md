@@ -16,7 +16,7 @@ from v0.1.0-alpha.5 on, not on PyPI. It needs Python 3.10 or later. This is the 
 release has one for Linux arm64 and one for macOS arm64:
 
 ```sh
-pip install "pybelay[inspect] @ https://github.com/Allexsen/belay/releases/download/v0.1.0-alpha.7/pybelay-0.1.0a7-py3-none-manylinux_2_17_x86_64.musllinux_1_1_x86_64.whl" "agent-client-protocol<1"
+pip install "pybelay[inspect] @ https://github.com/Allexsen/belay/releases/download/v0.1.0-alpha.8/pybelay-0.1.0a8-py3-none-manylinux_2_17_x86_64.musllinux_1_1_x86_64.whl" "agent-client-protocol<1"
 ```
 
 The second argument works around a break in Inspect, not in belay: Inspect needs

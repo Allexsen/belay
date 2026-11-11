@@ -4,7 +4,7 @@
 list, and make it reversible.
 
 **Status: pre-alpha.** The checkpoint and diff engine runs (below); the formats it writes are drafts
-that may still change, and the latest pre-release is v0.1.0-alpha.7. Nothing that changes your files
+that may still change, and the latest pre-release is v0.1.0-alpha.8. Nothing that changes your files
 exists yet.
 
 Tested against 2,115 published agent runs: [results](bench/replay/RESULTS.md).
@@ -28,6 +28,10 @@ Tested against 2,115 published agent runs: [results](bench/replay/RESULTS.md).
 - `belay baseline export` and `belay verify`: a checkpoint kept as a bundle, and a directory compared
   with it and judged against a protect spec.
 - `--docker`: a container's layers read from the host.
+- `belay watch`: a running record of a directory while an agent works in it, one line a step, with
+  anything in a sensitive place first ([docs/cli.md](docs/cli.md#watch-a-running-record-of-a-directory),
+  pinned in [test/expect/watch-v1.md](test/expect/watch-v1.md)); and a
+  [Claude Code plugin](claude-plugin/README.md) around it.
 - pybelay, Python bindings around the binary, with a reward helper and an
   [Inspect integration](python/README.md#using-belay-with-inspect).
 - The manifest format, version 4 ([test/expect/manifest-v4.md](test/expect/manifest-v4.md), built on
