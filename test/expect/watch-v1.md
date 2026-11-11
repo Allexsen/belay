@@ -228,10 +228,10 @@ Left out, and why:
 |---|---|
 | DT-1 | The list in force is read only from the checkpoint's stored, hash-checked copy of `.belay-donttouch` at the top of the directory. No file is an empty list. |
 | DT-2 | One pattern a line, in the dialect above. A line starting `#` is a comment; blank lines are allowed. No exceptions and no limits: a pattern flags whatever it matches, whatever happens to it. |
-| DT-3 | Invalid, said with its line number: a control byte (so a CRLF line ending), a NUL, a leading or trailing `/`, an empty, `.` or `..` component, and `?`, `[`, `\` or a leading `!`. |
+| DT-3 | Invalid, said with its line number: a control byte other than NUL (so a CRLF line ending), a leading or trailing `/`, an empty, `.` or `..` component, and `?`, `[`, `\` or a leading `!`. A file that holds a NUL byte anywhere, a comment included, is not text: belay keeps no stored copy of it, so it cannot be read (TL-10: `no stored copy`), and no line number is given. |
 | DT-4 | Limits: the file at most 64 KiB, 256 patterns, a pattern at most 4,096 bytes with at most four `**`. Past any of them the file is invalid. |
 | DT-5 | A change to the file is itself flagged, kind don't-touch. In that step the old list and the new both apply; from the next step the new one. |
-| DT-6 | An invalid file (`line N is not a pattern`, or the limit passed) and a file that cannot be read (no stored copy, a writer has it open, it is under an exclude) are two different flagged lines (TL-9, TL-10). In both, the previous list stays in force until a valid file, or no file, replaces it. On a first step there is no previous list: the list in force is empty, and the line says so. |
+| DT-6 | An invalid file (`line N is not a pattern`, or the limit passed) and a file that cannot be read (no stored copy, which is also what a NUL byte in it gives; a writer has it open; it is under an exclude; it is not a regular file) are two different flagged lines (TL-9, TL-10). In both, the previous list stays in force until a valid file, or no file, replaces it. On a first step there is no previous list: the list in force is empty, and the line says so. |
 
 ## Coverage
 
