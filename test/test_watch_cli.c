@@ -741,6 +741,30 @@ TEST(a_turn_longer_than_a_day_keeps_its_marker_and_its_open_call) {
     HAS_NOT(out_of("cat '%s'/scopes/*/watch/ledger-*.ndjson | tail -1", g_state), "sess-dead");
 }
 
+/* Second re-review of #132, new 1: a session whose events write no line (a
+ * batch that closes nothing) has still fired. Another session must not drop
+ * its marker inside the day. */
+TEST(a_session_that_fired_without_writing_a_line_keeps_its_marker) {
+    fresh();
+    unsetenv("CLAUDE_CODE_ENTRYPOINT");
+    watch_clock = fixed_clock;
+    g_now = DAY1 * 1000000000LL;
+    hook("start", "{" S1 ",\"source\":\"startup\"}");
+    hook("prompt", "{" S1 ",\"prompt\":\"go\"}");
+    sh("mkdir -p '%s/.git/hooks' && printf '#!/bin/sh\\n' > '%s/.git/hooks/pre-commit'", g_scope, g_scope);
+    hook("post", "{" S1 ",\"tool_use_id\":\"t1\"}");
+    g_now += 20 * 3600LL * 1000000000LL;
+    hook("batch", "{" S1 ",\"tool_calls\":[{\"tool_use_id\":\"never-open\"}]}");      /* closes nothing */
+    /* it costs a line only when the renewal is due, not at every such event */
+    const size_t before = count(ledger(), "\n");
+    hook("batch", "{" S1 ",\"tool_calls\":[{\"tool_use_id\":\"never-open\"}]}");
+    hook("batch", "{" S1 ",\"tool_calls\":[{\"tool_use_id\":\"never-open\"}]}");
+    ASSERT_EQ_INT((int)before, (int)count(ledger(), "\n"));
+    g_now += 20 * 3600LL * 1000000000LL;
+    hook("post", "{\"session_id\":\"sess-2\",\"cwd\":\"/nowhere\",\"tool_use_id\":\"x1\"}");
+    HAS(hook("stop", "{" S1 "}"), "belay: " RED " 1 flagged: .git/hooks/pre-commit added (git hook)");
+}
+
 /* The other side: a step whose own line could not be written is not
  * recorded, is said so, and is recorded by the next. And an event that
  * fails before it writes anything leaves the state as it found it. */
@@ -1214,6 +1238,7 @@ int main(void) {
     RUN(a_failure_after_a_step_is_recorded_neither_loses_it_nor_records_it_twice);
     RUN(a_step_line_whose_sync_fails_is_taken_back_not_left_to_be_recorded_twice);
     RUN(a_turn_longer_than_a_day_keeps_its_marker_and_its_open_call);
+    RUN(a_session_that_fired_without_writing_a_line_keeps_its_marker);
     RUN(a_step_whose_line_fails_is_said_lost_and_the_state_is_as_it_was);
     RUN(the_receipt_is_every_step_newest_first);
     RUN(patterns_shows_the_lists_in_force_and_what_each_matches);
