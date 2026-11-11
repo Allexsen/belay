@@ -165,47 +165,49 @@ Limits a row may carry:
 | BR-23 | agent rules | agent rules | `.cursor` | -- | **not verified** (Cursor is not installed here) |
 | BR-24 | agent rules | agent rules | `.cursorrules` | not a directory | **not verified** (Cursor is not installed here) |
 | BR-25 | agent rules | agent rules | `.github/copilot-instructions.md` | not a directory | **not verified** (Copilot is not installed here) |
-| BR-26 | loads on its own | runs on entering the directory | `**/.envrc` | not a directory; not in a dependency | **not verified** (direnv is not installed here) |
-| BR-27 | loads on its own | editor runs it | `**/.vscode/tasks.json` | not a directory; not in a dependency | **not verified** (no way to run it here) |
-| BR-28 | loads on its own | editor settings | `**/.vscode/settings.json` | not a directory; not in a dependency | **not verified** (no way to run it here) |
-| BR-29 | loads on its own | editor runs it | `**/.vscode/launch.json` | not a directory; not in a dependency | **not verified** (no way to run it here) |
-| BR-30 | loads on its own | container setup | `**/.devcontainer` | not in a dependency | **not verified** (no way to run it here) |
-| BR-31 | loads on its own | container setup | `**/.devcontainer.json` | not a directory; not in a dependency | **not verified** (no way to run it here) |
-| BR-32 | loads on its own | runs at every Python start | `**/site-packages/*.pth` | not a directory | a line starting `import`, in a virtualenv; `python -c pass`: ran. Not run from the working directory |
-| BR-33 | loads on its own | runs at every Python start | `**/site-packages/sitecustomize.py` | not a directory | **not verified**: not run on this machine, where Ubuntu's own `sitecustomize.py` is found first |
-| BR-34 | loads on its own | runs at every install | `**/.pnpmfile.cjs` | not a directory; not in a dependency | pnpm 10.34.7; `pnpm add`: ran |
-| BR-35 | package source | package source | `**/.npmrc` | not a directory; not in a dependency | `registry=`: honoured by npm 9.2.0 and pnpm 10.34.7, also in a subdirectory with its own `package.json`; not read from a dependency's directory |
-| BR-36 | package source | package source | `**/.yarnrc` | not a directory; not in a dependency | yarn 1.22.22: `registry` honoured |
-| BR-37 | package source | package source | `**/.yarnrc.yml` | not a directory; not in a dependency | **not verified** (yarn 2 or later is not installed here) |
-| BR-38 | package source | package source | `**/pip.conf` | not a directory; not in a dependency | honoured at a virtualenv's root; not in the working directory |
-| BR-39 | package source | package source | `**/.cargo/config.toml` | not a directory; not in a dependency | **not verified** (cargo is not installed here) |
-| BR-40 | package source | package source | `**/.cargo/config` | not a directory; not in a dependency | **not verified** (cargo is not installed here) |
-| BR-41 | CI | CI | `.github/workflows` | -- | **not verified** (no way to run it here) |
-| BR-42 | CI | CI | `.github/actions` | -- | **not verified** (no way to run it here) |
-| BR-43 | CI | CI | `.github/CODEOWNERS` | not a directory | **not verified** (no way to run it here) |
-| BR-44 | CI | CI | `CODEOWNERS` | not a directory | **not verified** (no way to run it here) |
-| BR-45 | CI | CI | `docs/CODEOWNERS` | not a directory | **not verified** (no way to run it here) |
-| BR-46 | CI | CI | `.github/dependabot.yml` | not a directory | **not verified** (no way to run it here) |
-| BR-47 | CI | CI | `.github/dependabot.yaml` | not a directory | **not verified** (no way to run it here) |
-| BR-48 | CI | CI | `.gitlab-ci.yml` | not a directory | **not verified** (no way to run it here) |
-| BR-49 | CI | CI | `.circleci` | -- | **not verified** (no way to run it here) |
-| BR-50 | CI | CI | `Jenkinsfile` | not a directory | **not verified** (no way to run it here) |
-| BR-51 | CI | CI | `azure-pipelines.yml` | not a directory | **not verified** (no way to run it here) |
-| BR-52 | CI | CI | `.travis.yml` | not a directory | **not verified** (no way to run it here) |
-| BR-53 | credentials | credentials | `**/.env` | not a directory; not in a dependency | by name; nothing to run |
-| BR-54 | credentials | credentials | `**/.env.*` | not a directory; not in a dependency | by name; nothing to run |
-| BR-55 | credentials | credentials | `**/*.pem` | not a directory; not in a dependency | by name; nothing to run |
-| BR-56 | credentials | credentials | `**/*.key` | not a directory; not in a dependency | by name; nothing to run |
-| BR-57 | credentials | credentials | `**/*.p12` | not a directory; not in a dependency | by name; nothing to run |
-| BR-58 | credentials | credentials | `**/*.pfx` | not a directory; not in a dependency | by name; nothing to run |
-| BR-59 | credentials | credentials | `**/id_rsa*` | not a directory; not in a dependency | by name; nothing to run |
-| BR-60 | credentials | credentials | `**/id_ed25519*` | not a directory; not in a dependency | by name; nothing to run |
-| BR-61 | credentials | credentials | `**/id_ecdsa*` | not a directory; not in a dependency | by name; nothing to run |
-| BR-62 | credentials | credentials | `**/.ssh` | not in a dependency | by name; nothing to run |
-| BR-63 | credentials | credentials | `**/.aws` | not in a dependency | by name; nothing to run |
-| BR-64 | credentials | credentials | `**/.netrc` | not a directory; not in a dependency | by name; nothing to run |
-| BR-65 | credentials | credentials | `**/.git-credentials` | not a directory; not in a dependency | by name; nothing to run |
-| BR-66 | credentials | credentials | `**/.kube/config` | not a directory; not in a dependency | by name; nothing to run |
+| BR-26 | agent rules | agent rules | `.claude.json` | not a directory | listed as PR-controlled config by claude-code-action (`src/github/operations/restore-config.ts`, `SENSITIVE_PATHS`, at d5f7970). Claude Code 2.1.322 reads `.claude.json` only from `CLAUDE_CONFIG_DIR` or the home directory: under `claude -p`, MCP servers declared in one in the directory did not run, while a `.mcp.json` server in the same setup did |
+| BR-27 | agent rules | search config | `.ripgreprc` | not a directory | listed as PR-controlled config by claude-code-action (`src/github/operations/restore-config.ts`, `SENSITIVE_PATHS`, at d5f7970). ripgrep reads a config file only where `RIPGREP_CONFIG_PATH` names it, and Claude Code 2.1.322 starts its bundled ripgrep with `--no-config` (read from the binary). Read from the directory when that variable names it: **not verified** |
+| BR-28 | loads on its own | runs on entering the directory | `**/.envrc` | not a directory; not in a dependency | **not verified** (direnv is not installed here) |
+| BR-29 | loads on its own | editor runs it | `**/.vscode/tasks.json` | not a directory; not in a dependency | **not verified** (no way to run it here) |
+| BR-30 | loads on its own | editor settings | `**/.vscode/settings.json` | not a directory; not in a dependency | **not verified** (no way to run it here) |
+| BR-31 | loads on its own | editor runs it | `**/.vscode/launch.json` | not a directory; not in a dependency | **not verified** (no way to run it here) |
+| BR-32 | loads on its own | container setup | `**/.devcontainer` | not in a dependency | **not verified** (no way to run it here) |
+| BR-33 | loads on its own | container setup | `**/.devcontainer.json` | not a directory; not in a dependency | **not verified** (no way to run it here) |
+| BR-34 | loads on its own | runs at every Python start | `**/site-packages/*.pth` | not a directory | a line starting `import`, in a virtualenv; `python -c pass`: ran. Not run from the working directory |
+| BR-35 | loads on its own | runs at every Python start | `**/site-packages/sitecustomize.py` | not a directory | **not verified**: not run on this machine, where Ubuntu's own `sitecustomize.py` is found first |
+| BR-36 | loads on its own | runs at every install | `**/.pnpmfile.cjs` | not a directory; not in a dependency | pnpm 10.34.7; `pnpm add`: ran |
+| BR-37 | package source | package source | `**/.npmrc` | not a directory; not in a dependency | `registry=`: honoured by npm 9.2.0 and pnpm 10.34.7, also in a subdirectory with its own `package.json`; not read from a dependency's directory |
+| BR-38 | package source | package source | `**/.yarnrc` | not a directory; not in a dependency | yarn 1.22.22: `registry` honoured |
+| BR-39 | package source | package source | `**/.yarnrc.yml` | not a directory; not in a dependency | **not verified** (yarn 2 or later is not installed here) |
+| BR-40 | package source | package source | `**/pip.conf` | not a directory; not in a dependency | honoured at a virtualenv's root; not in the working directory |
+| BR-41 | package source | package source | `**/.cargo/config.toml` | not a directory; not in a dependency | **not verified** (cargo is not installed here) |
+| BR-42 | package source | package source | `**/.cargo/config` | not a directory; not in a dependency | **not verified** (cargo is not installed here) |
+| BR-43 | CI | CI | `.github/workflows` | -- | **not verified** (no way to run it here) |
+| BR-44 | CI | CI | `.github/actions` | -- | **not verified** (no way to run it here) |
+| BR-45 | CI | CI | `.github/CODEOWNERS` | not a directory | **not verified** (no way to run it here) |
+| BR-46 | CI | CI | `CODEOWNERS` | not a directory | **not verified** (no way to run it here) |
+| BR-47 | CI | CI | `docs/CODEOWNERS` | not a directory | **not verified** (no way to run it here) |
+| BR-48 | CI | CI | `.github/dependabot.yml` | not a directory | **not verified** (no way to run it here) |
+| BR-49 | CI | CI | `.github/dependabot.yaml` | not a directory | **not verified** (no way to run it here) |
+| BR-50 | CI | CI | `.gitlab-ci.yml` | not a directory | **not verified** (no way to run it here) |
+| BR-51 | CI | CI | `.circleci` | -- | **not verified** (no way to run it here) |
+| BR-52 | CI | CI | `Jenkinsfile` | not a directory | **not verified** (no way to run it here) |
+| BR-53 | CI | CI | `azure-pipelines.yml` | not a directory | **not verified** (no way to run it here) |
+| BR-54 | CI | CI | `.travis.yml` | not a directory | **not verified** (no way to run it here) |
+| BR-55 | credentials | credentials | `**/.env` | not a directory; not in a dependency | by name; nothing to run |
+| BR-56 | credentials | credentials | `**/.env.*` | not a directory; not in a dependency | by name; nothing to run |
+| BR-57 | credentials | credentials | `**/*.pem` | not a directory; not in a dependency | by name; nothing to run |
+| BR-58 | credentials | credentials | `**/*.key` | not a directory; not in a dependency | by name; nothing to run |
+| BR-59 | credentials | credentials | `**/*.p12` | not a directory; not in a dependency | by name; nothing to run |
+| BR-60 | credentials | credentials | `**/*.pfx` | not a directory; not in a dependency | by name; nothing to run |
+| BR-61 | credentials | credentials | `**/id_rsa*` | not a directory; not in a dependency | by name; nothing to run |
+| BR-62 | credentials | credentials | `**/id_ed25519*` | not a directory; not in a dependency | by name; nothing to run |
+| BR-63 | credentials | credentials | `**/id_ecdsa*` | not a directory; not in a dependency | by name; nothing to run |
+| BR-64 | credentials | credentials | `**/.ssh` | not in a dependency | by name; nothing to run |
+| BR-65 | credentials | credentials | `**/.aws` | not in a dependency | by name; nothing to run |
+| BR-66 | credentials | credentials | `**/.netrc` | not a directory; not in a dependency | by name; nothing to run |
+| BR-67 | credentials | credentials | `**/.git-credentials` | not a directory; not in a dependency | by name; nothing to run |
+| BR-68 | credentials | credentials | `**/.kube/config` | not a directory; not in a dependency | by name; nothing to run |
 
 | id | rule |
 |---|---|

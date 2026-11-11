@@ -38,8 +38,8 @@ GIT = "git hooks and config"
 
 def run():
     # The table itself.
-    check("66 rows", len(M.rows), 66)
-    check("row ids in order", [r.num for r in M.rows], list(range(1, 67)))
+    check("68 rows", len(M.rows), 68)
+    check("row ids in order", [r.num for r in M.rows], list(range(1, 69)))
     check("kinds of rows, in FK's order", M.kind_order,
           [GIT, "agent rules", "loads on its own", "package source", "CI", "credentials"])
     seen = []
@@ -182,7 +182,9 @@ def run():
     t = tree_of({"migrations/0001.py": "f", "migrations/0002.py": "f", ".env": "d", ".env/x": "f",
                  "node_modules/p/.env": "f", "src/.env": "f"})
     check("user count includes what is below", M.user_count(b"migrations", t), 3)
-    check("row count applies the limits", M.row_count(M.rows[52], t), 1)
+    env = [r for r in M.rows if r.pattern == "**/.env"]
+    check("one **/.env row", len(env), 1)
+    check("row count applies the limits", M.row_count(env[0], t), 1)
 
 
 def main():

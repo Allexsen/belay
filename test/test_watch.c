@@ -163,6 +163,11 @@ TEST(a_row_flags_as_its_limits_say) {
         { "node_modules/p/AGENTS.md", "added", "reg", NULL, "none (added)" },
         { ".mcp.json", "added", "reg", NULL, "agent rules|flag|.mcp.json added (agent rules)" },
         { "sub/.mcp.json", "added", "reg", NULL, "none (added)" },
+        /* BR-26, BR-27: claude-code-action's list; at the top only, files only */
+        { ".claude.json", "modified", "reg", NULL, "agent rules|flag|.claude.json modified (agent rules)" },
+        { ".ripgreprc", "added", "reg", NULL, "agent rules|flag|.ripgreprc added (search config)" },
+        { "sub/.ripgreprc", "added", "reg", NULL, "none (added)" },
+        { ".claude.json", "added", "dir", NULL, "none (added)" },
         /* loads on its own */
         { ".venv/lib/python3.12/site-packages/evil.pth", "added", "reg", NULL, "loads on its own|flag|.venv/lib/python3.12/site-packages/evil.pth added (runs at every Python start)" },
         { "evil.pth", "added", "reg", NULL, "none (added)" },
