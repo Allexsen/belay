@@ -151,11 +151,18 @@ def run():
     check("no final LF", pd(b"a\nb"), ("ok", [b"a", b"b"]))
     check("empty", pd(b""), ("ok", []))
     check("CRLF", pd(b"a\r\nb\r\n")[:2], ("line", 1))
-    for bad in (b"a\tb", b"a\x00b", b"/a", b"a/", b"a//b", b".", b"..", b"a/./b", b"a/../b", b"a?",
+    for bad in (b"a\tb", b"a\x01b", b"a\x7fb", b"/a", b"a/", b"a//b", b".", b"..", b"a/./b", b"a/../b", b"a?",
                 b"a[b]", b"a\\b", b"!a"):
         check("invalid %r" % bad, pd(b"# one\nok\n" + bad + b"\nok2\n")[:2], ("line", 3))
     for good in (b"a!b", b"...", b".a", b"a b", b"a#b", b"**", b"*"):
         check("valid %r" % good, pd(good + b"\n"), ("ok", [good]))
+    check("a NUL in a pattern: cannot be read, no line", pd(b"ok\na\x00b\n")[0], "unreadable")
+    check("a NUL in a comment: cannot be read", pd(b"# c\x00\nok\n")[0], "unreadable")
+    check("a NUL alone on a line", pd(b"ok\n\x00\n")[0], "unreadable")
+    check("a NUL beside an invalid line (READING 16)", pd(b"a?\n\x00\n")[0], "unreadable")
+    check("a NUL: no list in force", model.list_in_force({b".belay-donttouch": "f"}, b"a\n#\x00\n"),
+          (("unreadable",), []))
+    check("a CR in a comment is not validated", pd(b"# c\r\nok\n"), ("ok", [b"ok"]))
     check("256 patterns", pd(b"".join(b"p%d\n" % i for i in range(256)))[0], "ok")
     check("257 patterns", pd(b"".join(b"p%d\n" % i for i in range(257)))[0], "limit")
     check("4096 bytes", pd(b"a" * 4096 + b"\n")[0], "ok")
