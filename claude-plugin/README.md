@@ -108,8 +108,8 @@ to the model.
 The first session fetches one file: the belay binary for your platform, of the release named in
 [hooks/pin](hooks/pin), from this repository's GitHub releases. The wrapper runs it only if its
 sha256 is the one in that file. Nothing else is fetched, then or later, and belay itself makes no
-network calls. Linux x86_64 and arm64, and macOS on Apple silicon only. The wrapper needs `sh`, `curl` and
-`sha256sum` or `shasum`.
+network calls. Linux x86_64 and arm64, and macOS on Apple silicon only. The wrapper needs `sh`,
+`curl` and `sha256sum` or `shasum`.
 
 ## What it keeps, and removes
 
