@@ -81,7 +81,11 @@ fi
 run "$BIN"
 # It did not run. If it is no longer the pinned binary (damaged, cut short)
 # it is removed, so the next session's start fetches it again.
-if [ -n "$want" ] && [ "$(sum "$BIN")" != "$want" ]; then
+# What is there is not a file at all (a directory, a FIFO): said as that, and
+# never read, which a FIFO would block.
+[ -f "$BIN" ] || say "not recording: belay could not run: $BIN is not a file"
+got=$(sum "$BIN")       # empty where no sha256 tool is at hand: no proof of damage, so it is kept
+if [ -n "$want" ] && [ -n "$got" ] && [ "$got" != "$want" ]; then
     rm -f "$BIN"
     say "not recording: belay could not run (status $status): its binary was damaged and is removed; it is fetched again when a session starts"
 fi

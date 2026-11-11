@@ -118,6 +118,8 @@ static void fresh(void) {
     watch_withhold_go = false;
     prune_between_days = NULL;
     ledger_fail_at = 0;
+    ledger_fail_sync_at = 0;
+    ledger_fail_dirsync = false;
 }
 
 /* A fresh directory with a record: the session's first step made. */
@@ -214,6 +216,12 @@ TEST(a_summary_sums_the_steps_since_the_marker) {
     step("s1", NULL);
     belay("watch", "summary", "--scope", g_scope, "--session", "s1", "--since", "prompt", NULL);
     ASSERT_EQ_STR("belay: 3 changed since prompt: 2 in 2 calls, 1 outside calls\n", g_out);
+    /* an event that changes nothing in the state writes no line (re-review of #132, 6) */
+    {
+        const size_t before = count(ledger(), "\n");
+        ASSERT_EQ_INT(0, belay("watch", "close", "--scope", g_scope, "--session", "s1", "--id", "never-opened", NULL));
+        ASSERT_EQ_INT((int)before, (int)count(ledger(), "\n"));
+    }
     /* a summary reads: it is the same twice, and writes no line */
     const size_t lines = count(ledger(), "\n");
     belay("watch", "summary", "--scope", g_scope, "--session", "s1", "--since", "prompt", NULL);
@@ -645,6 +653,61 @@ TEST(a_failure_after_a_step_is_recorded_neither_loses_it_nor_records_it_twice) {
     HAS(r, "belay: " RED " 1 flagged: .git/hooks/pre-commit added (git hook)\\n");     /* once, and counted once */
     HAS(r, "belay: " RED " this step is recorded; what came after it failed: ");       /* and the trouble is repeated */
     HAS(r, "belay: 5 changed this turn outside tool calls");                        /* f1, f2, .git, hooks, pre-commit: each once */
+}
+
+/* Re-review of #132: a line whose bytes were written and whose sync then
+ * failed. It must not stay in the file while the event says "could not
+ * record": the step would be in the record and recorded again. */
+TEST(a_step_line_whose_sync_fails_is_taken_back_not_left_to_be_recorded_twice) {
+    fresh();
+    unsetenv("CLAUDE_CODE_ENTRYPOINT");
+    hook("start", "{" S1 ",\"source\":\"startup\"}");
+    hook("prompt", "{" S1 ",\"prompt\":\"go\"}");
+    sh("mkdir -p '%s/.git/hooks' && printf '#!/bin/sh\\n' > '%s/.git/hooks/pre-commit' && echo 1 > '%s/a'", g_scope, g_scope, g_scope);
+    const size_t steps = count(ledger(), "\"t\":\"step\"");
+    ledger_fail_sync_at = 2;                                            /* the attempt's sync holds, the step's fails */
+    const char *r = hook("post", "{" S1 ",\"tool_use_id\":\"t1\"}");
+    ledger_fail_sync_at = 0;
+    HAS(r, "belay: " RED " could not record: ");
+    ASSERT_EQ_INT((int)steps, (int)count(ledger(), "\"t\":\"step\""));       /* said lost, and not in the record */
+    ASSERT_EQ_STR("", out_of("grep -v '^{\"belay_watch\":1,.*}$' '%s'/scopes/*/watch/ledger-*.ndjson", g_state));
+    r = hook("post", "{" S1 ",\"tool_use_id\":\"t2\"}");
+    HAS(r, ".git/hooks/pre-commit added (git hook)");                   /* so the next step records it: once */
+    ASSERT_EQ_INT(1, (int)count(receipt(), "A .git/hooks/pre-commit"));
+    r = hook("stop", "{" S1 "}");
+    HAS(r, "belay: " RED " 1 flagged: .git/hooks/pre-commit added (git hook)\\n");
+    HAS(r, "belay: 4 changed this turn");
+    /* the same on a day's first line, which is a new file: nothing of it stays */
+    fresh();
+    watch_clock = fixed_clock;
+    g_now = DAY1 * 1000000000LL;
+    hook("start", "{" S1 ",\"source\":\"startup\"}");
+    g_now += 86400LL * 1000000000LL;
+    sh("echo 1 > '%s/b'", g_scope);
+    ledger_fail_sync_at = 1;                                            /* the new day's attempt line */
+    r = hook("post", "{" S1 ",\"tool_use_id\":\"t1\"}");
+    ledger_fail_sync_at = 0;
+    HAS(r, "belay: " RED " could not record: ");
+    /* the day's file holds the line that says so, and not the attempt that was taken back */
+    ASSERT_EQ_STR("0 1\n", out_of("f=$(ls '%s'/scopes/*/watch/ledger-2026-11-02.ndjson); echo \"$(grep -c '\"t\":\"attempt\"' $f) $(grep -c '\"t\":\"trouble\"' $f)\"", g_state));
+    ASSERT_EQ_STR("", out_of("ls -a '%s'/scopes/*/watch | grep tmp", g_state));
+    ASSERT_EQ_STR("{\"systemMessage\":\"belay: outside tool calls: 1 change: b added\"}\n", hook("post", "{" S1 ",\"tool_use_id\":\"t2\"}"));
+    ASSERT_EQ_INT(1, (int)count(receipt(), "A b\n"));
+    /* and when the new file was already renamed into place before its directory's sync failed */
+    fresh();
+    watch_clock = fixed_clock;
+    g_now = DAY1 * 1000000000LL;
+    hook("start", "{" S1 ",\"source\":\"startup\"}");
+    g_now += 86400LL * 1000000000LL;
+    sh("echo 1 > '%s/c'", g_scope);
+    ledger_fail_dirsync = true;
+    r = hook("post", "{" S1 ",\"tool_use_id\":\"t1\"}");
+    HAS(r, "belay: " RED " could not record: ");
+    ASSERT_EQ_STR("ledger-2026-11-01.ndjson\n", out_of("ls '%s'/scopes/*/watch | grep '^ledger-'", g_state));   /* the trouble line's file went the same way */
+    ledger_fail_dirsync = false;
+    ASSERT_EQ_STR("{\"systemMessage\":\"belay: outside tool calls: 1 change: c added\"}\n", hook("post", "{" S1 ",\"tool_use_id\":\"t2\"}"));
+    ASSERT_EQ_INT(1, (int)count(receipt(), "A c\n"));
+    ASSERT_EQ_INT(0, (int)count(ledger(), "\"t\":\"attempt\"") - (int)count(ledger(), "\"t\":\"step\""));   /* no attempt left without its step */
 }
 
 /* Review of #132, finding 4: TM-4 drops the calls and markers of a session
@@ -1149,6 +1212,7 @@ int main(void) {
     RUN(steps_at_the_same_time_count_each_change_once);
     RUN(a_change_made_while_steps_run_is_in_the_record_and_added_at_most_once);
     RUN(a_failure_after_a_step_is_recorded_neither_loses_it_nor_records_it_twice);
+    RUN(a_step_line_whose_sync_fails_is_taken_back_not_left_to_be_recorded_twice);
     RUN(a_turn_longer_than_a_day_keeps_its_marker_and_its_open_call);
     RUN(a_step_whose_line_fails_is_said_lost_and_the_state_is_as_it_was);
     RUN(the_receipt_is_every_step_newest_first);

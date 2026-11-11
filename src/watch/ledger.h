@@ -52,6 +52,7 @@ struct ledger {
     struct wstate st;
     bool unreadable;            /* ledger files, and no line of any parses (TL-12) */
     bool unfinished;            /* the newest line is an attempt: a step that did not finish (TL-8) */
+    bool unconfirmed;           /* a line was written, its sync failed, and it could not be taken back: it stands (TL-6) */
     char dir[PATH_MAX + 80];    /* for messages */
 };
 
@@ -110,5 +111,9 @@ int ledger_step(const struct jval *line, struct wstep *s);
 extern void (*ledger_before_line)(void);
 /* Test hook: the Nth line a process writes fails as a full disk would (1: the first). 0 in the binary. */
 extern long ledger_fail_at;
+/* Test hook: the Nth line a process writes is written, and its sync then fails (EIO). 0 in the binary. */
+extern long ledger_fail_sync_at;
+/* Test hook: a new day's file is written and renamed into place, and the sync of its directory then fails. */
+extern bool ledger_fail_dirsync;
 
 #endif

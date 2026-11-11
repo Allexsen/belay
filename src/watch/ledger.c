@@ -19,7 +19,9 @@
 
 void (*ledger_before_line)(void) = NULL;
 long ledger_fail_at = 0;
-static long g_puts;
+long ledger_fail_sync_at = 0;
+bool ledger_fail_dirsync = false;
+static long g_puts, g_syncs;
 
 void wsb_json(struct wsb *b, const char *s) {
     const size_t n = strlen(s);
@@ -49,6 +51,12 @@ static int barrier(int fd) {
     if (fcntl(fd, F_BARRIERFSYNC) == 0) return 0;
 #endif
     return fsync(fd);
+}
+
+/* put_line's sync of the line it has just written; a test can make the Nth fail. */
+static int line_sync(int fd) {
+    if (ledger_fail_sync_at != 0 && ++g_syncs == ledger_fail_sync_at) { errno = EIO; return -1; }
+    return barrier(fd);
 }
 
 static void day_of(int64_t ns, char day[11]) {
@@ -382,14 +390,34 @@ static int put_line(struct ledger *l, int64_t ns, const char *line, size_t len, 
     const int fd = fresh ? openat(l->dfd, tmp, O_WRONLY | O_CREAT | O_EXCL | O_NOFOLLOW | O_CLOEXEC, 0600)
                          : openat(l->dfd, name, O_WRONLY | O_APPEND | O_NOFOLLOW | O_CLOEXEC);
     struct stat fs;
-    if (fd == -1 || fstat(fd, &fs) == -1 || write_all(fd, line, len) == -1 || barrier(fd) == -1 ||
-        (fresh && renameat(l->dfd, tmp, l->dfd, name) == -1) || (fresh && fsync(l->dfd) == -1)) {
+    if (fd == -1 || fstat(fd, &fs) == -1) {
         belay_err_set(BELAY_ERR_IO, errno, "cannot write %s/%s", l->dir, name);
         if (fd != -1) close(fd);
         if (fresh) unlinkat(l->dfd, tmp, 0);
         return -1;
     }
-    close(fd);
+    /* From the first byte written, a failure must not leave the line, or part
+     * of it, in the file: the caller will say it was not written, and a line
+     * that stayed would be read all the same (re-review of #132: a step line
+     * whose sync failed was said lost and recorded twice). So it is taken
+     * back -- an appended line cut off again, a new day's file removed. */
+    bool renamed = false;
+    if (write_all(fd, line, len) == -1 || line_sync(fd) == -1 ||
+        (fresh && renameat(l->dfd, tmp, l->dfd, name) == -1) || (fresh && (renamed = true, ledger_fail_dirsync ? (errno = EIO, true) : fsync(l->dfd) == -1))) {
+        const int e = errno;
+        const bool gone = fresh ? unlinkat(l->dfd, renamed ? name : tmp, 0) == 0 || errno == ENOENT
+                                : ftruncate(fd, fs.st_size) == 0;
+        close(fd);
+        if (gone) {
+            belay_err_set(BELAY_ERR_IO, e, "cannot write %s/%s", l->dir, name);
+            return -1;
+        }
+        /* It could not be taken back either: the line stands, and the record
+         * goes on from it. That it may not have reached the disk is said. */
+        l->unconfirmed = true;
+    } else {
+        close(fd);
+    }
     memcpy(l->day, day, 11);
     if (off != NULL) *off = (long)fs.st_size + (long)len;
     return 0;
