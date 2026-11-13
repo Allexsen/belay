@@ -26,7 +26,7 @@ const char *wkind_name(enum wkind k);
 #define BR_NOTE_MOD 8u      /* noted when modified */
 #define BR_NOTE     16u     /* noted */
 
-struct brow { enum wkind kind; const char *label, *pattern; unsigned limits; const char *except; };
+struct brow { enum wkind kind; const char *label, *pattern; unsigned limits; const char *except, *except2; };
 extern const struct brow flag_rows[];
 extern const size_t flag_n_rows;
 
