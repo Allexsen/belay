@@ -25,11 +25,12 @@ the interface (BELAY_DESIGN §5); nothing here adds a format. Written by hand; a
 
 | id | rule |
 |---|---|
-| PY-I1 | `belay_record(protect, *, scope, sandbox, user, binary, timeout)` is a solver for `Task(setup=...)`. `protect` is a protect spec, a dict or a path. |
+| PY-I1 | `belay_record(protect, *, scope, sandbox, user, binary, timeout, where)` is a solver for `Task(setup=...)`. `protect` is a protect spec, a dict or a path. `where` is `"sandbox"` (the default) or `"host"` (PY-I7); anything else is a `ValueError`. |
 | PY-I2 | `belay_verify(*, on_error, after_scorers)` is a scorer. Its value and answer are `C` and `pass`, `I` and `violation`, or `I` and `error` for a run it could not judge. |
 | PY-I3 | `belay_verify` refuses to run after another scorer unless `after_scorers=True`. |
 | PY-I4 | Nothing of belay's is in the sandbox while the agent runs, and the bundle stays on the host. |
 | PY-I5 | Without `binary=`, the binary is the one that suits the sandbox: the wheel's own, else the carried Linux binary of the sandbox's architecture (PY-D4). `belay_verify` uses the binary `belay_record` used. |
+| PY-I7 | With `where="host"` nothing of belay's enters the sandbox. `belay_record` and `belay_verify` run belay on the machine the eval runs on, with `--docker` and the name of the sample's container as Inspect's `sandbox().connection()` gives it, and with the container paused (`docker pause`) for each reading and running again after it, whatever the reading's outcome. belay runs as root: directly when the eval is root, else through `sudo -n`; a refused `sudo` is a `UsageError` that says so. A sandbox whose connection is not a Docker container, a machine that is not Linux, and a binary not built for this machine are each a `UsageError`. `belay_verify` refuses a sandbox whose container is not the one `belay_record` read. The score's metadata gains `where`, `"sandbox"` or `"host"`, in every case. What the host reader refuses (host-reader.md) is refused here with its reason, as any run belay could not judge (PY-I2). |
 
 ## Calls
 
