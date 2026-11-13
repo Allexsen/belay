@@ -177,6 +177,19 @@ class _Host:
             f.write(spec)
         # belay refuses to read a container's layers unless it is root.
         self.root = [] if os.geteuid() == 0 else ["sudo", "-n", "--"]
+        # Where root's belay keeps its state: a directory of root's own. belay refuses
+        # a state directory below one that belongs to another user, as this one's would.
+        self.priv = self.dir
+
+    async def start(self) -> "_Host":
+        if self.root:
+            r = await inspect_subprocess(self.root + ["mktemp", "-d", "/tmp/pybelay-host.XXXXXXXX"], timeout=self.timeout)
+            if not r.success:
+                raise UsageError("reading a container from this machine needs root for belay, and `sudo -n` was "
+                                 "refused (%s). Run the eval as root, or allow sudo without a password."
+                                 % r.stderr.strip()[:160])
+            self.priv = r.stdout.strip()
+        return self
 
     async def _docker(self, verb: str) -> None:
         r = await inspect_subprocess(["docker", verb, self.container], timeout=self.timeout)
@@ -185,17 +198,13 @@ class _Host:
 
     async def run(self, *args: str) -> List[dict]:
         """One belay command with the container paused for it, and running again after."""
-        cmd = self.root + ["env", "BELAY_STATE_DIR=" + os.path.join(self.dir, "state"), "TMPDIR=" + self.dir,
+        cmd = self.root + ["env", "BELAY_STATE_DIR=" + os.path.join(self.priv, "state"), "TMPDIR=" + self.priv,
                            self.belay] + list(args)
         await self._docker("pause")
         try:
             r = await inspect_subprocess(cmd, timeout=self.timeout)
         finally:
             await self._docker("unpause")
-        if self.root and r.returncode == 1 and "sudo:" in r.stderr and not r.stdout:
-            raise UsageError("reading a container from this machine needs root for belay, and `sudo -n` was refused "
-                             "(%s). Run the eval as root, or allow sudo without a password for %s."
-                             % (r.stderr.strip()[:160], self.belay))
         return _parsed(r.stdout.encode("utf-8", "surrogateescape"), r.returncode, r.stderr)[0]
 
     async def version(self) -> str:
@@ -206,10 +215,10 @@ class _Host:
         return r.stdout.strip()
 
     def close(self) -> None:
-        # belay ran as root and left its state here: remove it the same way.
-        if self.root:
+        # belay ran as root and left its state in root's directory: remove it the same way.
+        if self.root and self.priv != self.dir and self.priv.startswith("/tmp/pybelay-host."):
             try:
-                subprocess.run(self.root + ["rm", "-rf", os.path.join(self.dir, "state")], timeout=self.timeout,
+                subprocess.run(self.root + ["rm", "-rf", self.priv], timeout=self.timeout,
                                stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
             except (OSError, ValueError, subprocess.SubprocessError):
                 pass
@@ -288,6 +297,7 @@ def belay_record(protect: Union[str, "os.PathLike[str]", Dict[str, Any]], *, sco
             root = r.stdout.strip()
         h = _Host(await _container(env), path, spec, timeout)
         try:
+            await h.start()
             version = await h.version()
             kept = os.path.join(_bundle_dir(), uuid.uuid4().hex)
             lines = await h.run("baseline", "export", "--docker", h.container, "--scope", root, "--out", kept,
@@ -435,6 +445,7 @@ def belay_verify(*, on_error: str = "fail_closed", after_scorers: bool = False) 
                     raise UsageError("the sandbox's container is not the one belay_record read")
                 h = _Host(recorded["container"], recorded["binary"], recorded["spec"], recorded["timeout"])
                 try:
+                    await h.start()
                     lines = await h.run("verify", "--docker", h.container, "--scope", recorded["scope"],
                                         "--baseline", recorded["bundle"],
                                         "--baseline-sha256", recorded["baseline_sha256"], "--protect", h.protect)
