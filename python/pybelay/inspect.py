@@ -10,11 +10,16 @@
         scorer=[belay_verify(), your_scorer()],
     )
 
-belay_record runs before the agent and belay_verify after it, each from inside
-the sample's sandbox, through Inspect's own sandbox calls. So it works with any
-sandbox whose files Inspect can reach, and needs nothing on the Docker host:
-reading a container from the host (`--docker`) needs root there and refuses
-Docker Desktop's VM.
+belay_record runs before the agent and belay_verify after it. By default each
+runs from inside the sample's sandbox, through Inspect's own sandbox calls. So
+it works with any sandbox whose files Inspect can reach, and needs nothing on
+the Docker host.
+
+With `belay_record(..., where="host")` belay never enters the sandbox: it reads
+the sample's Docker container from this machine (`--docker`), with the container
+paused for each reading. That needs a Docker daemon on this machine (not Docker
+Desktop's VM) and root for belay itself: the eval runs as root, or `sudo -n`
+works for the belay binary.
 
 Nothing of belay's stays in the sandbox while the agent runs: the binary goes in
 for each step and comes out again, and the baseline bundle is kept on the host,
@@ -25,8 +30,10 @@ import atexit
 import hashlib
 import json
 import os
+import platform
 import shutil
 import struct
+import subprocess
 import tempfile
 import uuid
 from typing import Any, Dict, List, Optional, Union
@@ -36,6 +43,7 @@ try:
                                    value_to_float)
     from inspect_ai.solver import Generate, Solver, TaskState, solver
     from inspect_ai.util import OutputLimitExceededError, SandboxEnvironment, sandbox as inspect_sandbox
+    from inspect_ai.util import subprocess as inspect_subprocess
 except ImportError as e:
     raise ImportError('pybelay.inspect needs Inspect: pip install "pybelay[inspect]" (%s)' % e) from None
 
@@ -158,6 +166,83 @@ async def _sandbox_platform(env: SandboxEnvironment, user: Optional[str], timeou
     return system, machine
 
 
+class _Host:
+    """belay on this machine, reading a paused container. Nothing goes into the sandbox."""
+
+    def __init__(self, container: str, belay: str, spec: str, timeout: int):
+        self.container, self.belay, self.timeout = container, belay, timeout
+        self.dir = tempfile.mkdtemp(prefix="host-", dir=_bundle_dir())
+        self.protect = os.path.join(self.dir, "protect.json")
+        with open(self.protect, "w") as f:
+            f.write(spec)
+        # belay refuses to read a container's layers unless it is root.
+        self.root = [] if os.geteuid() == 0 else ["sudo", "-n", "--"]
+
+    async def _docker(self, verb: str) -> None:
+        r = await inspect_subprocess(["docker", verb, self.container], timeout=self.timeout)
+        if not r.success:
+            raise UsageError("docker %s %s failed: %s" % (verb, self.container, r.stderr.strip()[:200]))
+
+    async def run(self, *args: str) -> List[dict]:
+        """One belay command with the container paused for it, and running again after."""
+        cmd = self.root + ["env", "BELAY_STATE_DIR=" + os.path.join(self.dir, "state"), "TMPDIR=" + self.dir,
+                           self.belay] + list(args)
+        await self._docker("pause")
+        try:
+            r = await inspect_subprocess(cmd, timeout=self.timeout)
+        finally:
+            await self._docker("unpause")
+        if self.root and r.returncode == 1 and "sudo:" in r.stderr and not r.stdout:
+            raise UsageError("reading a container from this machine needs root for belay, and `sudo -n` was refused "
+                             "(%s). Run the eval as root, or allow sudo without a password for %s."
+                             % (r.stderr.strip()[:160], self.belay))
+        return _parsed(r.stdout.encode("utf-8", "surrogateescape"), r.returncode, r.stderr)[0]
+
+    async def version(self) -> str:
+        r = await inspect_subprocess([self.belay, "--version"], timeout=self.timeout)
+        if not r.success:
+            raise UsageError("the belay binary doesn't run on this machine (exit %d: %s)"
+                             % (r.returncode, r.stderr.strip()[:200]))
+        return r.stdout.strip()
+
+    def close(self) -> None:
+        # belay ran as root and left its state here: remove it the same way.
+        if self.root:
+            try:
+                subprocess.run(self.root + ["rm", "-rf", os.path.join(self.dir, "state")], timeout=self.timeout,
+                               stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            except (OSError, ValueError, subprocess.SubprocessError):
+                pass
+        shutil.rmtree(self.dir, ignore_errors=True)
+
+
+async def _container(env: SandboxEnvironment) -> str:
+    """The Docker container behind a sandbox, by Inspect's own account of it."""
+    try:
+        conn = await env.connection()
+    except (NotImplementedError, ConnectionError) as e:
+        raise UsageError('where="host" needs a Docker sandbox, and this one gives no container (%s)' % e) from None
+    name = getattr(conn, "container", None)
+    if getattr(conn, "type", None) != "docker" or not name:
+        raise UsageError('where="host" reads a Docker container from this machine, and this sandbox is %r. '
+                         'Use where="sandbox".' % getattr(conn, "type", None))
+    return name
+
+
+def _host_binary(given: Optional[str]) -> str:
+    """The belay that runs on this machine: it reads the container, whatever is inside it."""
+    path = given if given is not None else checked_binary()
+    if platform.system() != "Linux":
+        raise UsageError('where="host" needs Linux with a local Docker daemon: belay reads the container\'s '
+                         "layers from this machine, and Docker Desktop keeps them in its own VM.")
+    built = _built_for(_read(path)[:20])
+    here = _ARCH_NAMES.get(platform.machine(), platform.machine())
+    if built != here:
+        raise UsageError("the belay binary %s is built for %s, and this machine is Linux %s"
+                         % (path, built or "another system", here))
+    return path
+
+
 def _env(name: Optional[str]) -> SandboxEnvironment:
     try:
         return inspect_sandbox(name)
@@ -168,7 +253,7 @@ def _env(name: Optional[str]) -> SandboxEnvironment:
 @solver
 def belay_record(protect: Union[str, "os.PathLike[str]", Dict[str, Any]], *, scope: Optional[str] = None,
                  sandbox: Optional[str] = None, user: Optional[str] = None, binary: Optional[str] = None,
-                 timeout: int = 300) -> Solver:
+                 timeout: int = 300, where: str = "sandbox") -> Solver:
     """Records the sandbox at sample start. Use it as `Task(setup=...)`, which
     runs before the solver even when `--solver` replaces it.
 
@@ -181,11 +266,49 @@ def belay_record(protect: Union[str, "os.PathLike[str]", Dict[str, Any]], *, sco
             wheel suits. By default the wheel's own, or the Linux one it carries
             for the sandbox's architecture.
         timeout: Seconds for each sandbox command.
+        where: "sandbox" runs belay inside the sandbox, for the record and for
+            belay_verify. "host" runs it on this machine instead and reads the
+            sample's Docker container from outside, paused for each reading:
+            nothing of belay's enters the sandbox. It needs a Docker daemon on
+            this machine and root for belay (the eval as root, or `sudo -n`);
+            `binary`, if given, is then a belay for this machine.
     """
     spec = _spec_text(protect)
+    if where not in ("sandbox", "host"):
+        raise ValueError("where is 'sandbox' or 'host'")
+
+    async def solve_host(state: TaskState, env: SandboxEnvironment) -> TaskState:
+        path = _host_binary(binary)
+        data = _read(path)
+        root = scope
+        if root is None:
+            r = await env.exec(["pwd"], user=user, timeout=timeout)
+            if not r.success:
+                raise UsageError("the sandbox's working directory could not be read: %s" % r.stderr.strip())
+            root = r.stdout.strip()
+        h = _Host(await _container(env), path, spec, timeout)
+        try:
+            version = await h.version()
+            kept = os.path.join(_bundle_dir(), uuid.uuid4().hex)
+            lines = await h.run("baseline", "export", "--docker", h.container, "--scope", root, "--out", kept,
+                                "--protect", h.protect, "--json")
+            if len(lines) != 1 or "sha256" not in lines[0]:
+                raise FormatError("baseline export printed %r" % (lines,))
+        finally:
+            h.close()
+        state.store.set(_STORE_KEY, {
+            "scope": root, "sandbox": sandbox, "user": user, "binary": path, "timeout": timeout,
+            "spec": spec, "bundle": kept, "baseline_sha256": lines[0]["sha256"], "version": version,
+            "binary_sha256": hashlib.sha256(data).hexdigest(),
+            "baseline_integrity": lines[0].get("baseline_integrity", []),
+            "where": "host", "container": h.container,
+        })
+        return state
 
     async def solve(state: TaskState, generate: Generate) -> TaskState:
         env = _env(sandbox)
+        if where == "host":
+            return await solve_host(state, env)
         path = _pick_binary(binary, *await _sandbox_platform(env, user, timeout))
         data = _read(path)
         async with _Scratch(env, data, spec, user, timeout) as s:
@@ -213,6 +336,7 @@ def belay_record(protect: Union[str, "os.PathLike[str]", Dict[str, Any]], *, sco
                 "spec": spec, "bundle": kept, "baseline_sha256": sha, "version": s.version,
                 "binary_sha256": hashlib.sha256(data).hexdigest(),
                 "baseline_integrity": lines[0].get("baseline_integrity", []),
+                "where": "sandbox",
             })
         return state
 
@@ -263,7 +387,8 @@ def _score(recorded: Dict[str, Any], lines: List[dict], version: str) -> Score:
         metadata={"violations": p.violations, "signals": p.signals, "flags": kinds, "policy": p.lines(),
                   "scope": recorded["scope"], "baseline_sha256": recorded["baseline_sha256"],
                   "baseline_integrity": recorded["baseline_integrity"],
-                  "belay_version": version, "binary_sha256": recorded["binary_sha256"], "error": None})
+                  "belay_version": version, "binary_sha256": recorded["binary_sha256"],
+                  "where": recorded.get("where", "sandbox"), "error": None})
 
 
 @scorer(metrics=[pass_rate(), violations(), errors()])
@@ -303,6 +428,19 @@ def belay_verify(*, on_error: str = "fail_closed", after_scorers: bool = False) 
             data = _read(recorded["binary"])
             if hashlib.sha256(data).hexdigest() != recorded["binary_sha256"]:
                 raise UsageError("the belay binary changed between belay_record and belay_verify")
+            if recorded.get("where") == "host":
+                # The container belay_record read, by the name Inspect gives it now:
+                # a sandbox that was replaced is not the one recorded.
+                if await _container(env) != recorded["container"]:
+                    raise UsageError("the sandbox's container is not the one belay_record read")
+                h = _Host(recorded["container"], recorded["binary"], recorded["spec"], recorded["timeout"])
+                try:
+                    lines = await h.run("verify", "--docker", h.container, "--scope", recorded["scope"],
+                                        "--baseline", recorded["bundle"],
+                                        "--baseline-sha256", recorded["baseline_sha256"], "--protect", h.protect)
+                finally:
+                    h.close()
+                return _score(recorded, lines, recorded["version"])
             with open(recorded["bundle"], "rb") as f:
                 bundle = f.read()
             async with _Scratch(env, data, recorded["spec"], recorded["user"], recorded["timeout"]) as s:
@@ -317,6 +455,7 @@ def belay_verify(*, on_error: str = "fail_closed", after_scorers: bool = False) 
             return Score(value=INCORRECT, answer="error", explanation="belay could not judge this run: %s" % e,
                          metadata={"violations": None, "signals": None, "flags": None, "policy": [],
                                    "scope": recorded["scope"], "baseline_sha256": recorded["baseline_sha256"],
+                                   "where": recorded.get("where", "sandbox"),
                                    "error": {"type": type(e).__name__, "message": str(e)}})
         finally:
             # Inspect's score() can run the scorers before the end too, and

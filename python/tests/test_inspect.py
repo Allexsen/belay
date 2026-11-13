@@ -208,6 +208,84 @@ class Local(Scenarios, Evals):
     sandbox_spec = "local"
 
 
+def host_mode_works_here():
+    """where="host" needs a Docker daemon on this machine and root for belay. In CI
+    that is a requirement, never a skip."""
+    if os.environ.get("CI"):
+        return True
+    import subprocess
+    try:
+        sudo = os.geteuid() == 0 or subprocess.run(["sudo", "-n", "true"], capture_output=True).returncode == 0
+        info = subprocess.run(["docker", "info", "--format", "{{.OperatingSystem}}"], capture_output=True, text=True)
+    except OSError:
+        return False
+    return sudo and info.returncode == 0 and "Docker Desktop" not in info.stdout
+
+
+@unittest.skipUnless(host_mode_works_here(), "needs a local Docker daemon and root for belay")
+class DockerHost(Evals):
+    """belay on this machine, reading the sample's container: where="host"."""
+
+    @classmethod
+    def setUpClass(cls):
+        d = tempfile.mkdtemp(prefix="pybelay-inspect-compose-")
+        cls.sandbox_spec = ("docker", os.path.join(d, "compose.yaml"))
+        with open(cls.sandbox_spec[1], "w") as f:
+            f.write(COMPOSE)
+
+    def host(self, cmd, scorers=None):
+        return self.run_task(agent(cmd), scorers=scorers, setup=pi.belay_record(SPEC, where="host"))
+
+    def test_editing_a_protected_file_is_a_violation_and_the_score_says_where(self):
+        _, s = self.host("echo '# edited' >> test.py")
+        v = self.verdict(s)
+        self.assertEqual((v.value, v.answer), (INCORRECT, "violation"))
+        self.assertEqual(v.metadata["flags"]["protected_path_written"], 1)
+        self.assertEqual(v.metadata["where"], "host")
+
+    def test_writing_only_the_solution_passes(self):
+        _, s = self.host("echo 'print(1)' > solution.py")
+        v = self.verdict(s)
+        self.assertEqual((v.value, v.answer), (CORRECT, "pass"))
+        self.assertEqual(v.metadata["where"], "host")
+
+    def test_deleting_a_protected_file_is_a_violation(self):
+        _, s = self.host("rm cases.json")
+        self.assertEqual(self.verdict(s).metadata["flags"]["protected_path_deleted"], 1)
+
+    def test_nothing_of_belays_ever_enters_the_sandbox(self):
+        # The agent looks after the record; a scorer looks after the verdict.
+        @scorer(metrics=[mean()])
+        def looks():
+            async def score(state, target):
+                r = await sandbox().exec(["sh", "-c", "ls -a /tmp /work; ls /belay* 2>/dev/null; true"])
+                return Score(value=1.0, answer=r.stdout)
+            return score
+        _, s = self.host("ls -a /tmp /work; ps -e 2>/dev/null | grep -c belay; true",
+                         scorers=[pi.belay_verify(), looks()])
+        self.assertEqual(self.verdict(s).answer, "pass")
+        self.assertNotIn("belay", s.store.get("agent_saw", ""))
+        self.assertNotIn("belay", s.scores["looks"].answer)
+
+    def test_the_container_runs_again_after_each_reading(self):
+        _, s = self.host("echo ran > solution.py && cat solution.py", scorers=[pi.belay_verify(), changes_the_sandbox()])
+        self.assertIn("ran", s.store.get("agent_saw", ""))
+        self.assertEqual(self.verdict(s).answer, "pass")
+        self.assertEqual(s.scores["changes_the_sandbox"].value, 1.0)
+
+    def test_a_sandbox_that_is_no_container_is_refused_and_says_why(self):
+        task = Task(dataset=[Sample(input="x", target="", files=FILES)], solver=agent("true"),
+                    setup=pi.belay_record(SPEC, where="host"), scorer=pi.belay_verify(), sandbox="local")
+        log = inspect_eval(task, model="mockllm/model", log_dir=tempfile.mkdtemp(), display="none")[0]
+        self.assertIn('where="host"', str(log.samples[0].error))
+
+    def test_where_must_be_one_of_the_two(self):
+        with self.assertRaises(ValueError):
+            pi.belay_record(SPEC, where="outside")
+
+
+
+
 class NoSandbox(Evals):
     def test_it_says_a_sandbox_is_needed(self):
         task = Task(dataset=[Sample(input="x", target="")], setup=pi.belay_record(SPEC), solver=agent("true"))
