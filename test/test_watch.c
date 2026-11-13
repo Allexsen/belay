@@ -33,6 +33,7 @@ static const char *limits_text(const struct brow *r, char *buf, size_t cap) {
     for (size_t i = 0; i < sizeof L / sizeof L[0]; i++)
         if (r->limits & L[i].bit) w += (size_t)snprintf(buf + w, cap - w, "%s%s", w ? "; " : "", L[i].text);
     if (r->except != NULL) w += (size_t)snprintf(buf + w, cap - w, "%sexcept `%s`", w ? "; " : "", r->except);
+    if (r->except2 != NULL) w += (size_t)snprintf(buf + w, cap - w, "%sexcept `%s`", w ? "; " : "", r->except2);
     if (w == 0) snprintf(buf, cap, "--");
     return buf;
 }
@@ -158,6 +159,10 @@ TEST(a_row_flags_as_its_limits_say) {
         { ".claude/skills/a/SKILL.md", "added", "reg", NULL, "agent rules|flag|.claude/skills/a/SKILL.md added (agent rules)" },
         { ".claude/worktrees", "added", "dir", NULL, "none (added)" },
         { ".claude/worktrees/w/src/x.c", "modified", "reg", NULL, "none (modified)" },
+        /* the second exception: the directory Claude Code's sandbox mode makes, and what is in it */
+        { ".claude/.cc-writes", "added", "dir", NULL, "none (added)" },
+        { ".claude/.cc-writes/x", "added", "reg", NULL, "none (added)" },
+        { ".claude/.cc-writes-other", "added", "dir", NULL, "agent rules|flag|.claude/.cc-writes-other added (agent rules)" },
         { "sub/.claude/settings.json", "modified", "reg", NULL, "none (modified)" },
         { "docs/claude.MD", "modified", "reg", NULL, "agent rules|flag|docs/claude.MD modified (agent rules)" },
         { "node_modules/p/AGENTS.md", "added", "reg", NULL, "none (added)" },

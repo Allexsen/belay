@@ -170,6 +170,7 @@ def row_scenarios(row):
 
     # Exceptions (BR-L4).
     for ex in row.excepts:
+        tag = "" if len(row.excepts) == 1 else " " + ex      # a row may carry more than one
         t = Tree()
         if ex.startswith("**/*"):
             suf = ex[4:]
@@ -196,11 +197,11 @@ def row_scenarios(row):
             t2 = Tree()
             t2.add(ex, "f")                              # the exception's path as a file
             t2.add(os.path.dirname(ex) + "/kept", "f")
-            out.append(scenario("%s exception as a file" % row.id, "row exception (BR-L4)", t2))
+            out.append(scenario("%s exception%s as a file" % (row.id, tag), "row exception (BR-L4)", t2))
             t3 = Tree()
             t3.add(ex, "l")
-            out.append(scenario("%s exception as a symlink" % row.id, "row exception (BR-L4)", t3))
-        out.append(scenario("%s exception" % row.id, "row exception (BR-L4)", t))
+            out.append(scenario("%s exception%s as a symlink" % (row.id, tag), "row exception (BR-L4)", t3))
+        out.append(scenario("%s exception%s" % (row.id, tag), "row exception (BR-L4)", t))
     return out
 
 

@@ -35,7 +35,7 @@ const struct brow flag_rows[] = {
     { WK_GIT, "git config", "**/.gitconfig", BR_FILE | BR_DEPS, NULL },
     { WK_GIT, "git config", "**/.config/git", BR_DEPS, NULL },
     { WK_AGENT, "agent permissions", ".claude/settings.local.json", BR_FILE | BR_NOTE, NULL },
-    { WK_AGENT, "agent rules", ".claude/*", 0, ".claude/worktrees" },
+    { WK_AGENT, "agent rules", ".claude/*", 0, ".claude/worktrees", ".claude/.cc-writes" },
     { WK_AGENT, "agent rules", "**/CLAUDE.md", BR_FILE | BR_DEPS, NULL },
     { WK_AGENT, "agent rules", "**/CLAUDE.local.md", BR_FILE | BR_DEPS, NULL },
     { WK_AGENT, "agent rules", "**/AGENTS.md", BR_FILE | BR_DEPS, NULL },
@@ -263,6 +263,7 @@ bool flag_row_applies(const struct brow *r, const char *path, size_t len, bool d
     const unsigned m = match(r->pattern, strlen(r->pattern), path, len, PATTERN_DOTS | PATTERN_NOCASE);
     if (r->limits & BR_FILE ? !((m & PATTERN_SELF) && !dir) : m == 0) return false;
     if (r->except != NULL && match(r->except, strlen(r->except), path, len, PATTERN_DOTS) != 0) return false;
+    if (r->except2 != NULL && match(r->except2, strlen(r->except2), path, len, PATTERN_DOTS) != 0) return false;
     return !((r->limits & BR_DEPS) && in_dependency(path, len, dir));
 }
 

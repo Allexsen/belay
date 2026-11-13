@@ -131,6 +131,7 @@ static void limits_text(struct wsb *b, const struct brow *r) {
     for (size_t i = 0; i < sizeof L / sizeof L[0]; i++)
         if (r->limits & L[i].bit) { wsb_f(b, "%s%s", any ? "; " : "", L[i].text); any = true; }
     if (r->except != NULL) { wsb_f(b, "%sexcept %s", any ? "; " : "", r->except); any = true; }
+    if (r->except2 != NULL) { wsb_f(b, "%sexcept %s", any ? "; " : "", r->except2); any = true; }
     if (!any) wsb_f(b, "--");
 }
 

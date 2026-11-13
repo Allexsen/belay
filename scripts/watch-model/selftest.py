@@ -60,7 +60,7 @@ def run():
     r = row(".claude/settings.local.json")
     check("settings.local.json noted", (r.noted, r.noted_modified), (True, False))
     check("hooks except", row("**/.git/hooks/*").excepts, ["**/*.sample"])
-    check(".claude except", row(".claude/*").excepts, [".claude/worktrees"])
+    check(".claude except", row(".claude/*").excepts, [".claude/worktrees", ".claude/.cc-writes"])
     r = row("**/.pnp.cjs")
     check(".pnp.cjs noted when modified", (r.noted, r.noted_modified, r.not_dir), (False, True, True))
 
