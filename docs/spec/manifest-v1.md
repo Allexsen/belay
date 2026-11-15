@@ -97,7 +97,7 @@ owner is invisible.
 | `caps` | string | `reg` | The file capability: the raw `security.capability` value, lowercase hex. `setcap` on an interpreter is a privilege change; this is where it shows. |
 | `xattrs` | array | any type | One string per extended attribute other than `security.capability`, `"<name>=<sha256 of value>"`, sorted strictly by name bytes; absent when there are none. POSIX ACLs appear here as `system.posix_acl_access` / `system.posix_acl_default`. A name is written as itself when it is printable ASCII without `"`, `\` or `=` and does not start `x:`; otherwise as `x:` followed by its bytes in hex. At most 8192 bytes of array body; a larger set is recorded as `xattrs_sha256` instead. |
 | `xattrs_sha256` | string | any type | For a set too large for `xattrs`: the sha256 of the array body `xattrs` would have held, so a set recorded inline in one manifest and by digest in another still compares. |
-| `xattrs_unknown` | bool | any type | `true`: the attributes could not be read. An absent `xattrs` means "none", so failing to read must say so. `diff` reports the entry's metadata as `unknown`, never unchanged. |
+| `xattrs_unknown` | bool | any type | `true`: the attributes could not be read, or include a file capability `caps` cannot hold (on anything but a regular file; empty, or longer than 64 bytes). An absent `xattrs` means "none", so failing to read must say so. `diff` reports the entry's metadata as `unknown`, never unchanged. |
 | `sha256` | string | `reg` | Lowercase hex content digest, of a file within `hash_max_bytes` read in one stable pass (see "What a hash, and a stored copy, prove"). |
 | `unverified` | bool | `reg` | `true`: no hash is recorded. The file is larger than `hash_max_bytes`, or it is also flagged `unstable`, `unreadable` or `mount`, which say why. `diff` must report any change to it as **modified (unverified)**, never as unchanged. |
 | `unstable` | bool | `reg`, `dir` | `true`. On a regular file: it changed while being read (size, mtime or ctime moved, or the inode opened was not the one stat'ed); no hash is recorded, because the bytes read describe no state the file ever had. On a directory: **its listing is not its listing at the end of the walk** -- the end-of-walk validator found it changed since it was recorded (its inode, device, mode, mtime or ctime differ, it is now a mount, or it can no longer be reached), or the listing failed part way (it could not be read as a directory stream, a `readdir` error, a child that could not be stat'ed at all, or a child name too long to fit the path limit). Entries may be missing from it or recorded under another directory; the comparator MUST NOT read its children as a complete listing. |
@@ -422,7 +422,10 @@ hidden-traversal risk the NUL rule above exists to prevent.
   `trusted.*` attributes, which only root can list; macOS ACLs, which are not extended attributes;
   inode flags of symlinks, FIFOs, sockets and devices on Linux (no safe fd to ask through); and on
   macOS the attributes of FIFOs, sockets and devices, which are recorded as `xattrs_unknown`
-  because opening them has side effects. A change to any of these still moves `ctime_ns`, which
+  because opening them has side effects. So is an entry with a file capability the format has no
+  field for: one on a directory, a symlink or a FIFO (Linux lets a user namespace's root set it
+  there), or an empty or over-long one on a regular file. Its value is not kept, and the entry's
+  other attributes are not listed. A change to any of these still moves `ctime_ns`, which
   the ctime rule above reports on a regular file or symlink and counts on a directory; on a FIFO,
   socket or device node ctime is not compared, so such a change is not seen there.
 - **File content**, except copies under `store/` of small text files (within `store_max_bytes`) and

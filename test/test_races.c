@@ -65,7 +65,8 @@ enum arm { NONE, SWAP_ON_DIR_OPEN, SWAP_ON_READLINK, REPLACE_LINK_WITH_FILE,
            XATTR_GET_EIO,            /* the first fd listing names one attribute; its get fails */
            XSRC_FAIL,                /* g_x cannot be reached for its attributes (EXDEV) */
            ROOT_READDIR_EIO,         /* the root's listing fails with EIO after one name */
-           SYNC_DIR_EIO };           /* every fsync of a directory fails with EIO */
+           SYNC_DIR_EIO,             /* every fsync of a directory fails with EIO */
+           CAPS_PLANT };             /* g_x's one attribute is security.capability, g_caps_len bytes */
 static int g_flip;
 
 static char g_root[256], g_m[300];
@@ -75,6 +76,7 @@ static enum arm g_arm;
 static char g_store[300];        /* check_store's content store */
 static const char *g_x, *g_y;
 static int g_fired;
+static size_t g_caps_len;        /* CAPS_PLANT: the planted value's length */
 
 /* The default adapter, and the decorated copy the writer runs on. */
 static const struct fsops *g_real;
@@ -297,9 +299,24 @@ static int t_fstatat(void *ctx, int dfd, const char *name, struct stat *st, int 
     return r;
 }
 
+/* Whether the attributes being read are those of g_root/rel. */
+static int xsrc_is(const struct xsrc *x, const char *rel) {
+    char p[600];
+    struct stat a, b;
+    const int fd = x->fd != -1 ? x->fd : x->own;
+    if (rel == NULL || fd == -1) return 0;
+    snprintf(p, sizeof p, "%s/%s", g_root, rel);
+    return fstat(fd, &a) == 0 && lstat(p, &b) == 0 && a.st_dev == b.st_dev && a.st_ino == b.st_ino;
+}
+
 /* XATTR_EIO: the first attribute listing through an open fd fails. */
 static ssize_t t_xattr_list(void *ctx, const struct xsrc *x, char *buf, size_t n) {
     (void)ctx;
+    if (g_arm == CAPS_PLANT && n >= 20 && xsrc_is(x, g_x)) {
+        g_fired = 1;
+        memcpy(buf, "security.capability", 20);
+        return 20;
+    }
     if (g_arm == XATTR_EIO && !g_fired && x->path == NULL) {
         g_fired = 1;
         errno = EIO;
@@ -320,6 +337,12 @@ static ssize_t t_xattr_get(void *ctx, const struct xsrc *x, const char *name, vo
     if (g_arm == XATTR_GET_EIO && strcmp(name, "user.t") == 0) {
         errno = EIO;
         return -1;
+    }
+    if (g_arm == CAPS_PLANT && strcmp(name, "security.capability") == 0 && xsrc_is(x, g_x)) {
+        if (g_caps_len > n) { errno = ERANGE; return -1; }
+        memset(buf, 0, g_caps_len);
+        if (g_caps_len >= 4) memcpy(buf, "\x01\x00\x00\x02", 4);   /* revision 2, effective */
+        return (ssize_t)g_caps_len;
     }
     return g_real->xattr_get(g_real->ctx, x, name, buf, n);
 }
@@ -1027,6 +1050,43 @@ static int caps_child(void) {
     return 0;
 }
 
+/* W6-F1, on the real kernel: a user namespace's root may give a capability
+ * to a directory, a link and a FIFO as well, and an empty one to a file
+ * (Linux 6.18 on ext4 takes all four; setcap(8) is what refuses, not the
+ * kernel). The manifest must still be one the reader accepts. */
+static int caps_elsewhere_child(void) {
+    char p[400];
+    if (enter_userns() != 0) return 77;
+    const uint32_t v[5] = { 0x02000001u, 1u << 13, 0, 0, 0 };
+    static const char *const held[] = { "d", "l", "p" };
+    for (size_t i = 0; i < 3; i++) {
+        snprintf(p, sizeof p, "%s/%s", g_root, held[i]);
+        if (lsetxattr(p, "security.capability", v, sizeof v, 0) != 0) return 77;
+    }
+    snprintf(p, sizeof p, "%s/empty", g_root);
+    if (setxattr(p, "security.capability", "", 0, 0) != 0) return 77;
+    snprintf(p, sizeof p, "%s/capfile", g_root);
+    if (setxattr(p, "security.capability", v, sizeof v, 0) != 0) return 77;
+    struct belay_manifest_opts o = {
+        .hash_max_bytes = BELAY_HASH_MAX_BYTES_DEFAULT,
+        .store_max_bytes = BELAY_STORE_MAX_BYTES_DEFAULT,
+    };
+    if (capture_write(&g_ops, g_m, g_root, &o, NULL) != 0) return 1;
+    g_n = 0;
+    if (belay_manifest_read(g_m, collect, NULL) != 0) return 2;
+    static const char *const unknown[] = { "d", "l", "p", "empty" };
+    for (size_t i = 0; i < 4; i++) {
+        const struct belay_entry *e = find(unknown[i]);
+        if (e == NULL || !e->xattrs_unknown || e->has_caps || e->has_xattrs) return 3 + (int)i;
+    }
+    /* The file with a capability the format can hold is recorded as before,
+     * and the tree around the four is read as usual. */
+    const struct belay_entry *c = find("capfile"), *in = find("d/in");
+    if (c == NULL || !c->has_caps || c->xattrs_unknown || strlen(c->caps_hex) != 40) return 8;
+    if (in == NULL || !in->has_hash || in->xattrs_unknown) return 9;
+    return 0;
+}
+
 static int overlay_child(void) {
     char lower[300], up[300], merged[300], p[400];
     snprintf(lower, sizeof lower, "%s/lower", g_root);
@@ -1320,6 +1380,90 @@ TEST(w6_unreadable_xattrs_are_unknown_not_none) {
     size_t unknown = 0;
     for (size_t i = 0; i < g_n; i++) if (g_e[i].xattrs_unknown) unknown++;
     ASSERT_EQ_INT(1, (int)unknown);
+}
+
+/* W6-F1. `caps` holds a regular file's capability, 1 to 64 bytes of it, and
+ * `xattrs` never lists that name: the format has no place for one anywhere
+ * else. The writer used to emit `caps` regardless, its own check of the entry
+ * then refused it, and one planted attribute stopped every capture of the
+ * tree. Such an entry is recorded with its attributes unknown. A failed
+ * assertion does not end a test here, so no line dereferences what an
+ * earlier one only checked. */
+static const struct belay_entry *planted(const char *rel, size_t len) {
+    arm(CAPS_PLANT, rel, NULL);
+    g_caps_len = len;
+    if (check(NULL) != 0 || !g_fired) return NULL;
+    return find(rel);
+}
+
+TEST(w6_a_capability_on_a_directory_is_unknown_and_the_tree_is_still_captured) {
+    reset();
+    mk("d");
+    touch("d/in", "x");
+    touch("g", "y");
+    const struct belay_entry *d = planted("d", 20);
+    ASSERT_TRUE(d != NULL && d->xattrs_unknown && !d->has_caps && !d->has_xattrs);
+    size_t unknown = 0;
+    for (size_t i = 0; i < g_n; i++) if (g_e[i].xattrs_unknown) unknown++;
+    ASSERT_EQ_INT(1, (int)unknown);                 /* one entry's property */
+    const struct belay_entry *in = find("d/in");
+    ASSERT_TRUE(in != NULL && in->has_hash);
+    ASSERT_TRUE(find("g") != NULL);
+}
+
+TEST(w6_a_capability_on_a_symlink_is_unknown) {
+    reset();
+    touch("g", "y");
+    char l[512];
+    path(l, sizeof l, "l");
+    ASSERT_EQ_INT(0, symlink("g", l));
+    const struct belay_entry *e = planted("l", 20);
+    ASSERT_TRUE(e != NULL && e->xattrs_unknown && !e->has_caps && !e->has_xattrs);
+    /* The rest of the entry stands. */
+    ASSERT_TRUE(e != NULL && e->has_link_target && strcmp(e->link_target, "g") == 0);
+}
+
+/* The bounds of what `caps` holds (addendum A5: 2 to 128 hex digits). */
+TEST(w6_a_file_capability_of_no_bytes_or_over_64_is_unknown) {
+    reset();
+    touch("g", "y");
+    const struct belay_entry *e = planted("g", 0);
+    ASSERT_TRUE(e != NULL && e->xattrs_unknown && !e->has_caps);
+    ASSERT_TRUE(e != NULL && e->has_hash);          /* its content is still hashed */
+    e = planted("g", 65);
+    ASSERT_TRUE(e != NULL && e->xattrs_unknown && !e->has_caps);
+    /* 1 and 64 bytes are held, as 20 always was. */
+    e = planted("g", 1);
+    ASSERT_TRUE(e != NULL && e->has_caps && !e->xattrs_unknown && strlen(e->caps_hex) == 2);
+    e = planted("g", 64);
+    ASSERT_TRUE(e != NULL && e->has_caps && !e->xattrs_unknown && strlen(e->caps_hex) == 128);
+    e = planted("g", 20);
+    ASSERT_TRUE(e != NULL && e->has_caps && !e->xattrs_unknown &&
+                strcmp(e->caps_hex, "0100000200000000000000000000000000000000") == 0);
+}
+
+TEST(w6_capabilities_the_kernel_allows_elsewhere_leave_a_readable_manifest) {
+#ifndef __linux__
+    SKIP("Linux only -- setting a capability needs a user namespace's root");
+#else
+    reset();
+    mk("d");
+    touch("d/in", "x");
+    touch("capfile", "x");
+    touch("empty", "x");
+    char p[512];
+    path(p, sizeof p, "l");
+    ASSERT_EQ_INT(0, symlink("capfile", p));
+    path(p, sizeof p, "p");
+    ASSERT_EQ_INT(0, mkfifo(p, 0644));
+    const pid_t pid = fork();
+    if (pid == 0) _exit(caps_elsewhere_child());
+    int status = 0;
+    waitpid(pid, &status, 0);
+    const int rc = WIFEXITED(status) ? WEXITSTATUS(status) : 99;
+    if (rc == 77) SKIP("no unprivileged user namespace here");
+    ASSERT_EQ_INT(0, rc);
+#endif
 }
 
 TEST(r2_overlay_scope_files_are_hashed_not_flagged_as_mounts) {
@@ -1875,6 +2019,10 @@ int main(void) {
     RUN(each_per_entry_decision_flags_only_what_it_should);
     RUN(w6_file_capability_is_recorded);
     RUN(w6_unreadable_xattrs_are_unknown_not_none);
+    RUN(w6_a_capability_on_a_directory_is_unknown_and_the_tree_is_still_captured);
+    RUN(w6_a_capability_on_a_symlink_is_unknown);
+    RUN(w6_a_file_capability_of_no_bytes_or_over_64_is_unknown);
+    RUN(w6_capabilities_the_kernel_allows_elsewhere_leave_a_readable_manifest);
 
     char cmd[1000];
     snprintf(cmd, sizeof cmd, "rm -rf '%s' '%s' '%s'", g_root, g_m, g_store);
