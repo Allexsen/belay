@@ -136,21 +136,25 @@ int belay_base64_encode(char *out, size_t outsz, const void *in, size_t len) {
     return 0;
 }
 
+/* A digit's value, or -1 for every byte outside the alphabet, so whitespace
+ * and newlines are rejected rather than skipped: lenient decoding would let
+ * two different inputs mean the same path. Computed from the byte, with no
+ * table: the table this replaces was built on first use, in static storage,
+ * and two threads decoding at once could read it half built (a valid digit
+ * refused). The ranges are ASCII's, as b64[] above is. */
+static int b64_value(unsigned char c) {
+    if (c >= 'A' && c <= 'Z') return c - 'A';
+    if (c >= 'a' && c <= 'z') return c - 'a' + 26;
+    if (c >= '0' && c <= '9') return c - '0' + 52;
+    if (c == '+') return 62;
+    if (c == '/') return 63;
+    return -1;
+}
+
 int belay_base64_decode(void *out, size_t outsz, size_t *outlen, const char *in) {
     if (out == NULL || in == NULL || outlen == NULL) {
         belay_err_set(BELAY_ERR_INVALID, 0, "base64_decode: null argument");
         return -1;
-    }
-
-    /* Reverse table built once; -1 marks every byte outside the alphabet, so
-     * whitespace and newlines are rejected rather than skipped. Lenient
-     * decoding would let two different inputs mean the same path. */
-    static signed char rev[256];
-    static int rev_ready;
-    if (!rev_ready) {
-        memset(rev, -1, sizeof rev);
-        for (int i = 0; i < 64; i++) rev[(unsigned char)b64[i]] = (signed char)i;
-        rev_ready = 1;
     }
 
     const size_t inlen = strlen(in);
@@ -188,7 +192,7 @@ int belay_base64_decode(void *out, size_t outsz, size_t *outlen, const char *in)
                 }
                 q[k] = 0;
             } else {
-                q[k] = rev[(unsigned char)c];
+                q[k] = (signed char)b64_value((unsigned char)c);
                 if (q[k] < 0) {
                     belay_err_set(BELAY_ERR_CORRUPT, 0,
                                   "base64_decode: invalid byte 0x%02x at offset %zu",
