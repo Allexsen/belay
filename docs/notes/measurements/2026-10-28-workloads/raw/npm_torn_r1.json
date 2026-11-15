@@ -1,0 +1,81 @@
+{
+ "clean_hashes": 129868,
+ "compared": 129206,
+ "torn": 12,
+ "no_truth": 662,
+ "partial_real_state": 3,
+ "torn_examples": [
+  {
+   "manifest": "r1.1793177352513.60553.ndjson",
+   "path": "package.json",
+   "size": 50,
+   "final_size": 309
+  },
+  {
+   "manifest": "r1.1793177354517.60584.ndjson",
+   "path": "package.json",
+   "size": 50,
+   "final_size": 309
+  },
+  {
+   "manifest": "r1.1793177356522.60593.ndjson",
+   "path": "package.json",
+   "size": 50,
+   "final_size": 309
+  },
+  {
+   "manifest": "r1.1793177358527.60609.ndjson",
+   "path": "package.json",
+   "size": 50,
+   "final_size": 309
+  },
+  {
+   "manifest": "r1.1793177360531.60620.ndjson",
+   "path": "package.json",
+   "size": 50,
+   "final_size": 309
+  },
+  {
+   "manifest": "r1.1793177362536.60629.ndjson",
+   "path": "package.json",
+   "size": 50,
+   "final_size": 309
+  },
+  {
+   "manifest": "r1.1793177364550.60699.ndjson",
+   "path": "package.json",
+   "size": 50,
+   "final_size": 309
+  },
+  {
+   "manifest": "r1.1793177366885.60708.ndjson",
+   "path": "package.json",
+   "size": 50,
+   "final_size": 309
+  },
+  {
+   "manifest": "r1.1793177369587.60717.ndjson",
+   "path": "package.json",
+   "size": 50,
+   "final_size": 309
+  },
+  {
+   "manifest": "r1.1793177372488.60726.ndjson",
+   "path": "package.json",
+   "size": 50,
+   "final_size": 309
+  },
+  {
+   "manifest": "r1.1793177375505.60743.ndjson",
+   "path": "package.json",
+   "size": 50,
+   "final_size": 309
+  },
+  {
+   "manifest": "r1.1793177378525.60772.ndjson",
+   "path": "package.json",
+   "size": 50,
+   "final_size": 309
+  }
+ ]
+}

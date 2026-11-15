@@ -1,0 +1,13 @@
+{
+ "clean_hashes": 22856,
+ "compared": 22856,
+ "torn": 1,
+ "torn_examples": [
+  {
+   "manifest": "r2.1793177304154.60226.ndjson",
+   "path": "venv/lib/python3.12/site-packages/pandas-2.2.3.dist-info/RECORD",
+   "size": 146937,
+   "final_size": 243339
+  }
+ ]
+}
