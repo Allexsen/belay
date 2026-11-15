@@ -160,6 +160,44 @@ TEST(base64_decode_rejects_non_canonical_forms) {
     }
 }
 
+/* The decoder takes a digit's value from the byte itself (no table). Every
+ * one of the 256 bytes, as the last digit of a group: the 64 of the alphabet
+ * decode to their index, '=' pads, and the other 191 are refused. The
+ * alphabet is spelled out here, not read from the encoder. */
+TEST(base64_decode_accepts_exactly_the_alphabet) {
+    static const char alphabet[] =
+        "ABCDEFGHIJKLMNOPQRSTUVWXYZ" "abcdefghijklmnopqrstuvwxyz" "0123456789" "+/";
+    int accepted = 0;
+    for (int c = 1; c < 256; c++) {
+        const char in[5] = { 'A', 'A', 'A', (char)c, '\0' };
+        unsigned char out[3] = { 0xee, 0xee, 0xee };
+        size_t olen = 99;
+        const int rc = belay_base64_decode(out, sizeof out, &olen, in);
+        const char *at = strchr(alphabet, c);
+        if (at != NULL) {
+            ASSERT_EQ_INT(0, rc);
+            ASSERT_TRUE(olen == 3 && out[0] == 0 && out[1] == 0);
+            ASSERT_EQ_INT((int)(at - alphabet), (int)out[2]);
+            accepted++;
+        } else if (c == '=') {
+            ASSERT_EQ_INT(0, rc);
+            ASSERT_TRUE(olen == 2 && out[0] == 0 && out[1] == 0);
+        } else {
+            ASSERT_EQ_INT(-1, rc);
+        }
+    }
+    ASSERT_EQ_INT(64, accepted);
+    /* As a first digit too: the same 64, each to its index. */
+    for (int i = 0; i < 64; i++) {
+        const char in[5] = { alphabet[i], 'A', 'A', 'A', '\0' };
+        unsigned char out[3];
+        size_t olen = 0;
+        ASSERT_EQ_INT(0, belay_base64_decode(out, sizeof out, &olen, in));
+        ASSERT_TRUE(olen == 3 && out[0] == (unsigned char)(i << 2) && out[1] == 0 && out[2] == 0);
+    }
+    belay_err_clear();
+}
+
 TEST(base64_reports_small_output_buffer) {
     char tiny[4];
     ASSERT_EQ_INT(-1, belay_base64_encode(tiny, sizeof tiny, "foobar", 6));
@@ -184,6 +222,7 @@ int main(void) {
     RUN(base64_round_trips_arbitrary_bytes);
     RUN(base64_decode_rejects_malformed);
     RUN(base64_decode_rejects_non_canonical_forms);
+    RUN(base64_decode_accepts_exactly_the_alphabet);
     RUN(base64_reports_small_output_buffer);
     return belay_test_report();
 }
