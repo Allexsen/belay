@@ -321,7 +321,16 @@ int cap_read_extras(struct walk_ctx *wc, int fd, int pfd, const char *name,
             const ssize_t vl = ops->xattr_get(ops->ctx, &x, nm, wc->readbuf, READ_CHUNK);
             if (vl < 0) goto unknown;                /* removed meanwhile, or denied */
             if (strcmp(nm, "security.capability") == 0) {
-                if ((size_t)vl * 2 >= sizeof e->caps_hex) goto unknown;
+                /* `caps` holds a regular file's capability, 1 to 64 bytes of
+                 * it (manifest-v1 rule 4, addendum A5), and `xattrs` never
+                 * lists this name. The kernel puts one on a directory, a
+                 * link or a FIFO for a user namespace's root, and takes an
+                 * empty one; macOS takes any value from any owner. One the
+                 * format has no place for is recorded as unknown: never as a
+                 * field the reader refuses (one such entry stopped every
+                 * capture of the tree), and never left out. */
+                if (e->type != BELAY_T_REG || vl == 0 ||
+                    (size_t)vl * 2 >= sizeof e->caps_hex) goto unknown;
                 belay_hex_encode(e->caps_hex, wc->readbuf, (size_t)vl);
                 e->has_caps = true;
                 continue;

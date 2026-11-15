@@ -64,9 +64,10 @@ const struct entry_field_def ENTRY_FIELDS[F_COUNT] = {
         "held, so a set recorded inline in one manifest and by digest in another still "
         "compares." },
     [F_XATTRS_UNKNOWN] = { "xattrs_unknown", NULL, "bool", false,
-        "`true`: the attributes could not be read. An absent `xattrs` means \"none\", so "
-        "failing to read must say so. `diff` reports the entry's metadata as `unknown`, never "
-        "unchanged." },
+        "`true`: the attributes could not be read, or include a file capability `caps` cannot "
+        "hold (on anything but a regular file; empty, or longer than 64 bytes). An absent "
+        "`xattrs` means \"none\", so failing to read must say so. `diff` reports the entry's "
+        "metadata as `unknown`, never unchanged." },
     [F_SHA256] = { "sha256", NULL, "string", false,
         "Lowercase hex content digest, of a file within `hash_max_bytes` read in one stable "
         "pass (see \"What a hash, and a stored copy, prove\")." },
