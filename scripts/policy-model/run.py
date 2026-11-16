@@ -8,6 +8,12 @@ scenario's name and both lines. A coverage gate, as the oracle has: every flag k
 refusal must have been both expected and seen at least once, and each shape of a `writer_open`
 entry (manifest v4) on a protected path.
 
+Every capture here is a walk of a plain directory: there is no Docker, so every manifest's
+`source` is `null`, and `protected_path_touched`, which needs a container's, is then only ever
+absent, and listed in `not_emitted`. To see it raised the harness writes one container's `source`
+into both manifests by hand -- the bundle's, and a `check` checkpoint's that `--to` judges (the
+model's P63). The gate counts the kind like any other, so it holds only through those scenarios.
+
 A concurrent writer is real: the harness holds the scenario's files open for writing, or mapped
 shared-writable, across the capture. For those scenarios it also takes
 a `check` on each side and compares `belay diff --json`'s records and trailer with the model's,
@@ -54,6 +60,10 @@ F_SETLEASE = 1024
 F_RDLCK = 0
 F_UNLCK = 2
 WRITER_SHAPES = ("before only", "after only", "both sides", "one side, before", "one side, after")
+# A host reader's `source` (manifest-v3 V3-2, its example's form): no container stands behind
+# either; the harness writes them into manifests a walk made (the model's P63).
+SOURCES = {"container": {"docker": "4f1c" * 16, "image": "sha256:" + "91ef" * 16},
+           "other-container": {"docker": "7a2e" * 16, "image": "sha256:" + "91ef" * 16}}
 
 
 def workroot():
@@ -354,7 +364,7 @@ def rewrite_manifest(data, how, flags=None):
                 if how == "other-scope":
                     mh["scopes"] = [mh["scopes"][0] + "-other"]
                 else:
-                    mh["source"] = source = {"docker": "4f1c" * 16, "image": "sha256:" + "91ef" * 16}
+                    mh["source"] = source = SOURCES["container"]
                 content = model.enc(mh).encode() + b"\n" + rest
             msha = hashlib.sha256(content).hexdigest()
             hdr = {"member": "manifest", "size": len(content), "sha256": msha}
@@ -567,6 +577,7 @@ def _run(sc, rep, cov, vstate, tmp, answered, holds):
     holds.append(hold_a)
     raw_a, excl_a = snapshot(scope, excludes_after)
     to_id = None
+    after_source = None                     # a walk's, unless the scenario writes another (P63)
     after_sha = ANY_SHA
     hash_after = model.HASH_BOUND_SPEC if exp["spec"] is not None else model.HASH_DEFAULT
     if to == "check":
@@ -574,8 +585,13 @@ def _run(sc, rep, cov, vstate, tmp, answered, holds):
         to_id, mpath = newest_checkpoint(state)
         with open(mpath, "rb") as f:
             cdata_after = f.read()
+        as_written = cdata_after
         if v.get("after_flags"):
             cdata_after = model.flag_manifest(cdata_after, v["after_flags"])
+        if v.get("after_source"):
+            after_source = SOURCES[v["after_source"]]
+            cdata_after = model.source_manifest(cdata_after, after_source)
+        if cdata_after is not as_written:
             with open(mpath, "wb") as f:
                 f.write(cdata_after)
         after_sha = hashlib.sha256(cdata_after).hexdigest()
@@ -637,7 +653,8 @@ def _run(sc, rep, cov, vstate, tmp, answered, holds):
     refusal = model.verify_refusal(exp, vspec_raw, vdigest, vdigest_true, excl_a, to == "trusted",
                                    before_source,
                                    corrupt=bool(v.get("corrupt")) or str(v.get("manifest")).startswith("break:"),
-                                   other_scope=v.get("manifest") == "other-scope", after=A)
+                                   other_scope=v.get("manifest") == "other-scope", after=A,
+                                   after_source=after_source)
     lines = flags = None
     wkeys = {}
     if refusal is None:
@@ -646,6 +663,7 @@ def _run(sc, rep, cov, vstate, tmp, answered, holds):
                "after": model.Side(A, raw_a[b"."]["dev"], excl_a),
                "bundle_lines": exp["lines"], "outside_scope": exp["outside"],
                "before_sha256": before_sha, "after_sha256": after_sha,
+               "source": before_source,                         # not refused: the after's too (V3-R4)
                "walk_counts": (0, 0, sum(1 for e in exp["B"].values() if e["raced"]),      # V4-D6
                                0, 0, sum(1 for e in A.values() if e["raced"]))}
         lines, flags, _recs, _events = model.verify_lines(ctx)

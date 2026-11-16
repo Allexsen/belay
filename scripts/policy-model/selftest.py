@@ -55,7 +55,8 @@ class TestThing:
 '''
 
 ZERO_KINDS = ('"protected_path_written":0,"protected_path_deleted":0,"protected_path_created":0,'
-              '"protected_hash_mismatch":0,"protected_path_unverifiable":0,"package_changed":0,'
+              '"protected_hash_mismatch":0,"protected_path_unverifiable":0,"protected_path_touched":0,'
+              '"package_changed":0,'
               '"tampered_installed_package":0,"conffile_changed":0,"touches_tests":0,"tests_weakened":0,'
               '"edits_ci_config":0,"pytest_config_changed":0,"conftest_changed":0,'
               '"python_startup_hook_changed":0,"git_hook_changed":0,"git_history_rewritten":0,'
@@ -69,17 +70,23 @@ def kinds(**n):
     return s
 
 
-NOT_EMITTED = '"not_emitted":[{"flag":"writes_outside_workdir","why":"needs a scope wider than the workdir"}],"tests_counted":["python"]}'
+# P-H7: the header's end when the manifests' source is `null` (every fixture but the ones that
+# name a container), and when it is a container.
+NOT_EMITTED = ('"not_emitted":[{"flag":"protected_path_touched","why":"needs both captures read from a container\'s layers (--docker)"},'
+               '{"flag":"writes_outside_workdir","why":"needs a scope wider than the workdir"}],"tests_counted":["python"]}')
+NOT_EMITTED_CONTAINER = '"not_emitted":[{"flag":"writes_outside_workdir","why":"needs a scope wider than the workdir"}],"tests_counted":["python"]}'
+CONTAINER = {"docker": "4f1c0e8a9b7d6c5e4f3a2b1c0d9e8f7a6b5c4d3e2f1a0b9c8d7e6f5a4b3c2d1e",      # manifest-v3's example
+             "image": "sha256:91ef0af61f39ece4d6710e465df5ed6ca12112358344fd51ae6a3b886634148b"}
 
 
-def verify(spec_raw, before, after, lines=(), outside=0, wb=frozenset(), wa=frozenset()):
+def verify(spec_raw, before, after, lines=(), outside=0, wb=frozenset(), wa=frozenset(), source=None):
     spec = model.parse_spec(spec_raw) if spec_raw is not None else None
     hm = model.HASH_BOUND_SPEC if spec else model.HASH_DEFAULT
     ctx = {"scope": "/w", "bundle_sha256": "b" * 64, "spec": spec,
            "before": model.Side(model.view(before, hm, wb), 10, []),
            "after": model.Side(model.view(after, hm, wa), 10, []),
            "bundle_lines": list(lines), "outside_scope": outside,
-           "before_sha256": "1" * 64, "after_sha256": "2" * 64}
+           "before_sha256": "1" * 64, "after_sha256": "2" * 64, "source": source}
     out, flags, _r, _e = model.verify_lines(ctx)
     return [model.enc(o) for o in out], flags
 
@@ -546,6 +553,10 @@ def fixture_manifest_v4():
     check("v3 keeps source, loses both counts", (h3["belay_manifest"], "source" in h3, "writer_open" in t3, "unguarded" in t3), (3, True, False, False))
     h2, _e2, _t2 = model.read_manifest(model.downgrade_manifest(plain, 2))
     check("v2 loses source", (h2["belay_manifest"], "source" in h2), (2, False))
+    hs, es_, ts = model.read_manifest(model.source_manifest(data, CONTAINER))
+    check("a source written in: the header's last key, nothing else moved (V3-2)",
+          (list(hs)[-1], hs["source"], [hs[k] for k in head if k != "source"], es_, ts),
+          ("source", CONTAINER, [head[k] for k in head if k != "source"], [root, entry], tail))
     flagged = model.flag_manifest(plain, {b"data.bin": ["raced", "writer_open"]})
     _h, es, tr = model.read_manifest(flagged)
     check("flags keep their order, and the counts true", (list(es[1])[-2:], tr["raced"], tr["writer_open"]), (["raced", "writer_open"], 1, 1))
@@ -593,6 +604,101 @@ def fixture_protect_v2():
     other = {**base, b"g/x": raw("reg", F, b"three\n", ino=4, mtime=200)}
     check("no_delete allows writing (PV2-3)", gone(nd % "g/**", after=other), [])
     check("no_write writing stays written (PV2-2)", json.loads(gone(nw % "g/**", after=other)[0])["flag"], "protected_path_written")
+
+
+def fixture_protected_touched():
+    """policy-v1's protected_path_touched and P-H7, by hand. The inode numbers stand for layer
+    files' (host-reader H-U7): 4 the image's, 9 the one a copy-up or a rename left."""
+    spec = b'{"belay_protect":2,"protect":[{"path":"g/**","mode":["no_write"]}]}'
+    head = ('{"belay_policy":1,"scopes":["/w"],"baseline_sha256":"%s","protect_sha256":%s,"frozen_packages":false,'
+            '"before_excluded":[],"after_excluded":[],')
+    with_spec = head % ("b" * 64, '"%s"' % hashlib.sha256(spec).hexdigest())
+    tail = ',"unknown":0,"packages_outside_scope":0,"packages_no_hash":0,"provisional":false,"before_sha256":"%s","after_sha256":"%s"}' % (
+        "1" * 64, "2" * 64)
+    touched = ('{"flag":"protected_path_touched","level":"signal","path":"%s","rule":"%s","changed":%s,'
+               '"text":"%s: protected by %s (no_write), written and left the same","paths":["%s"]}')
+
+    def T(path, changed, rule="g/**"):
+        return touched % (path, rule, changed, path, rule, path)
+    base = {b".": raw("dir", D, ino=2), b"g": raw("dir", D, ino=3)}
+    x = raw("reg", F, b"one\n", ino=4)
+    B = {**base, b"g/x": x}
+    again = raw("reg", F, b"one\n", ino=9)                       # another file, everything else the same
+    moved = raw("reg", F, b"one\n", ino=9, mtime=200, nlink=2)   # and its mtime and link count moved
+
+    # the whole output, a container on both sides
+    got, flags = verify(spec, B, {**base, b"g/x": moved}, source=CONTAINER)
+    check("touched: a container's captures, the whole output", got, [
+        with_spec + NOT_EMITTED_CONTAINER,
+        T("g/x", '["mtime_ns","ino","nlink"]'),
+        '{"belay_policy_end":1,"violations":0,"signals":1,' + kinds(protected_path_touched=1) + tail])
+    check("touched: a signal never fails a run", model.verify_exit(flags, True), 0)
+    # the same two captures from a walk: no record, and the header says why
+    got, flags = verify(spec, B, {**base, b"g/x": moved})
+    check("touched: source null, the whole output", got, [
+        with_spec + NOT_EMITTED,
+        '{"belay_policy_end":0,"violations":0,"signals":0,' + ZERO_KINDS + tail])
+    # P-H7 follows the source alone (P60)
+    got, _f = verify(None, B, {**base, b"g/x": moved}, source=CONTAINER)
+    check("not_emitted: a container and no spec, not listed (P60)", got[:-1], [head % ("b" * 64, "null") + NOT_EMITTED_CONTAINER])
+    got, _f = verify(None, B, {**base, b"g/x": moved})
+    check("not_emitted: source null and no spec, listed", got[:-1], [head % ("b" * 64, "null") + NOT_EMITTED])
+    check("not_emitted: the table's order", [o["flag"] for o in model.not_emitted(None)], ["protected_path_touched", "writes_outside_workdir"])
+    # the table: the new row between protected_path_unverifiable and package_changed
+    table = [k.split('"')[1] for k in ZERO_KINDS.split(",")]
+    check("the flag table's order", list(model.KINDS), table)
+    check("the row's place", table[4:7], ["protected_path_unverifiable", "protected_path_touched", "package_changed"])
+
+    def C(after, spec_raw=spec, before=B):
+        return verify(spec_raw, before, after, source=CONTAINER)[0][1:-1]
+    written = ('{"flag":"protected_path_written","level":"violation","path":"g/x","rule":"g/**","outcome":"%s","changed":%s,'
+               '"text":"g/x: protected by g/** (no_write), %s","paths":["g/x"]}')
+    # raised
+    check("touched: only the inode", C({**base, b"g/x": again}), [T("g/x", '["ino"]')])
+    lnk = raw("lnk", 0o120777, ino=4, link=b"t")
+    check("touched: a symlink is not a directory", C({**base, b"g/x": dict(lnk, ino=9)}, before={**base, b"g/x": lnk}), [T("g/x", '["ino"]')])
+    rules = '{"belay_protect":2,"protect":[{"path":"g/x","mode":["no_create"]},{"path":"g/*","mode":["no_write"]},{"path":"g/**","mode":["no_write"]}]}'
+    check("touched: the first rule with no_write", C({**base, b"g/x": again}, rules.encode()), [T("g/x", '["ino"]', "g/*")])
+    check("touched: a path not UTF-8", C({**base, b"g/\xff": again}, before={**base, b"g/\xff": x}), [
+        '{"flag":"protected_path_touched","level":"signal","path_b64":"Zy//","rule":"g/**","changed":["ino"],'
+        '"text":"g/\\\\xff: protected by g/** (no_write), written and left the same","paths_b64":["Zy//"]}'])
+    unread = dict(again, xattrs_unknown=True)
+    check("touched: xattrs one capture could not read (P62)", C({**base, b"g/x": unread}), [T("g/x", '["ino"]')])
+    noflags = dict(again, iflags=None)
+    check("touched: inode flags read on one side only (P62)", C({**base, b"g/x": noflags}), [T("g/x", '["ino"]')])
+    # not raised: each condition of the row
+    check("not touched: a directory", C({**base, b"g": raw("dir", D, ino=9), b"g/x": x}), [])
+    check("not touched: the same inode, its mtime moved", C({**base, b"g/x": raw("reg", F, b"one\n", ino=4, mtime=200)}), [])
+    check("not touched: only the link count", C({**base, b"g/x": raw("reg", F, b"one\n", ino=4, nlink=2)}), [])
+    check("not touched: no no_write rule", C({**base, b"g/x": moved}, b'{"belay_protect":2,"protect":[{"path":"g/**","mode":["no_delete","no_create"]}]}'), [])
+    check("not touched: a rule that does not match", C({**base, b"g/x": moved}, b'{"belay_protect":2,"protect":[{"path":"h/**","mode":["no_write"]}]}'), [])
+    check("not touched: on one side only", [json.loads(ln)["flag"] for ln in C({**base, b"g/x": x, b"g/y": again})], [])
+    # what makes it protected_path_written makes it only that
+    check("written, not touched: the mode too", C({**base, b"g/x": raw("reg", 0o100600, b"one\n", ino=9)}),
+          [written % ("metadata_only", '["mode","ino"]', "metadata_only")])
+    check("written, not touched: other bytes", C({**base, b"g/x": raw("reg", F, b"two\n", ino=9, mtime=200)}),
+          [written % ("modified", '["mtime_ns","ino","sha256"]', "modified")])
+    check("written, not touched: a file's inode flags (IF-4)", C({**base, b"g/x": raw("reg", F, b"one\n", ino=9, iflags=0x40)}), [
+        written % ("metadata_only", '["ino","iflags"]', "metadata_only"),
+        '{"flag":"privilege_changed","level":"signal","path":"g/x","what":"iflags","before":"0","after":"64",'
+        '"text":"g/x: iflags 0 -> 64","paths":["g/x"]}'])
+    got, _f = verify(spec, B, {**base, b"g/x": again}, wa={(10, 9)}, source=CONTAINER)
+    check("unverifiable, not touched: a writer held it", [json.loads(ln)["flag"] for ln in got[1:-1]], ["protected_path_unverifiable"])
+    # P-F5: after the violations, first among the signals, by path within the kind
+    conf = raw("reg", F, b"import pytest\n", ino=5)
+    y = raw("reg", F, b"y\n", ino=6)
+    before = {**B, b"g/conftest.py": conf, b"g/y": y}
+    after = {**base, b"g/x": raw("reg", F, b"two\n", ino=4, mtime=200), b"g/conftest.py": dict(conf, ino=10), b"g/y": dict(y, ino=11)}
+    check("touched: its place in the order", [(o["flag"], o["paths"][0]) for o in map(json.loads, C(after, before=before))],
+          [("protected_path_written", "g/x"), ("protected_path_touched", "g/conftest.py"), ("protected_path_touched", "g/y"),
+           ("conftest_changed", "g/conftest.py")])
+    # V3-R4, which decides whether verify judges at all
+    other = dict(CONTAINER, docker="7a2e" * 16)
+    exported = {"protect_sha256": None}
+    check("V3-R4: equal sources compare, others are refused",
+          [model.verify_refusal(exported, None, "d", "d", [], False, before_source=b, after_source=a)
+           for b, a in ((None, None), (CONTAINER, dict(CONTAINER)), (CONTAINER, None), (None, CONTAINER), (CONTAINER, other))],
+          [None, None, 3, 3, 3])
 
 
 def tables():
@@ -657,7 +763,8 @@ def run():
     for f in (tables, fixture_protected_write, fixture_privilege_path, fixture_iflags_decision_163, fixture_inode_flags,
               fixture_text_cut,
               fixture_pip_reinstall_judged, fixture_pyc_decision_186, fixture_pip_bundle,
-              fixture_dpkg_bundle_and_tamper, fixture_git_reset, fixture_writer_open, fixture_manifest_v4, fixture_protect_v2):
+              fixture_dpkg_bundle_and_tamper, fixture_git_reset, fixture_writer_open, fixture_manifest_v4, fixture_protect_v2,
+              fixture_protected_touched):
         try:
             f()
         except Exception as e:  # a crash is a failure, named
