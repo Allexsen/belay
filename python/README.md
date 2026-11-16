@@ -67,11 +67,31 @@ a clean run shows a violation, and a deleted file shows as modified. One that re
 would hide a deletion altogether. `belay_verify` refuses to run after another scorer, unless given
 `after_scorers=True`.
 
-**How it reaches the sandbox.** Through Inspect's own sandbox calls, so it works with Docker and with
-Inspect's `local` sandbox, and should with others that can run a Linux binary. belay's `--docker` isn't
-used: it needs root on the host and refuses Docker Desktop. The binary, the spec and the bundle are in
-the sandbox only while belay runs, never while the agent does. The bundle is kept on the host, and
-only its sha256 goes in the log.
+**How it reaches the sandbox.** By default through Inspect's own sandbox calls, so it works with Docker
+and with Inspect's `local` sandbox, and should with others that can run a Linux binary. The binary, the
+spec and the bundle are in the sandbox only while belay runs, never while the agent does. The bundle is
+kept on the host, and only its sha256 goes in the log.
+
+**Keeping belay out of the sandbox: `belay_record(spec, where="host")`.** belay then runs on the machine
+the eval runs on and reads the sample's Docker container from there (`--docker`), paused for each
+reading. Nothing of belay's enters the sandbox, so nothing in it has to be trusted to run belay: not its
+`uname`, `chmod` or `rm`, and not a process the agent left behind. `belay_verify()` follows what
+`belay_record` did, and the score's metadata says `"where": "host"`.
+
+It needs:
+
+- a Docker sandbox, with the Docker daemon on this machine. Docker Desktop keeps containers in its own
+  VM, where belay cannot read them: on a Mac or on Windows, use the default mode;
+- Linux, and the wheel's own binary for this machine;
+- root for belay, which reads the daemon's layer directories: run the eval as root, or let
+  `sudo -n` work for it;
+- a container belay's host reader accepts: not `--privileged`, the scope not on a volume or a bind
+  mount ([docs/cli.md](../docs/cli.md) lists what it refuses).
+
+**When `where="host"` cannot run, the sample fails and says why.** A sandbox that is not a Docker
+container, a refused `sudo`, a container the reader refuses: each is an error, in `belay_record` as a
+failed sample and in `belay_verify` as a run belay could not judge. It never runs belay inside the
+sandbox instead: a verdict taken from where you asked it not to be taken would look the same in the log.
 
 **Known limits.**
 
