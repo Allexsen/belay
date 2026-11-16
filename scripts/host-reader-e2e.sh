@@ -98,6 +98,29 @@ set -e
 docker unpause "$C" >/dev/null
 [ $rc = 1 ] || fail "verify: exit $rc, expected 1 (a violation): $(cat "$T/err")"
 grep -q '"flag":"protected_path_written"' "$T/policy" || fail "the weakened test is not a violation: $(cat "$T/policy")"
+
+# ---- a protected file written and put back: another file in the upper, the same content ----
+# (policy-v1, protected_path_touched). tests/test_x.py is in the image; tests/late.py is made in the
+# container before the baseline, so it is in the upper layer already.
+TC=$(run)
+docker exec "$TC" sh -c 'echo "def test_late(): assert True" > /workspace/tests/late.py'
+docker pause "$TC" >/dev/null
+B baseline export --docker "$TC" --scope /workspace --out "$T/tb" --protect "$T/spec.json" --json > "$T/tb.json" || fail "export (touched)"
+docker unpause "$TC" >/dev/null
+TSHA=$(python3 -c 'import json,sys;print(json.load(open(sys.argv[1]))["sha256"])' "$T/tb.json")
+docker exec "$TC" sh -c 'cd /workspace/tests && for f in test_x.py late.py; do cp -p $f /tmp/keep && echo "def test_x(): pass" > $f && cat /tmp/keep > $f && touch -r /tmp/keep $f; done'
+docker pause "$TC" >/dev/null
+set +e
+B verify --docker "$TC" --scope /workspace --baseline "$T/tb" --baseline-sha256 "$TSHA" --protect "$T/spec.json" --exit-code > "$T/tpolicy" 2>"$T/err"
+rc=$?
+set -e
+docker unpause "$TC" >/dev/null
+[ $rc = 0 ] || fail "verify (touched): exit $rc, expected 0 (a signal never fails a run): $(cat "$T/err" "$T/tpolicy")"
+grep -q '"flag":"protected_path_touched","level":"signal","path":"tests/test_x.py","rule":"tests/\*\*","changed":\["ino"\]' "$T/tpolicy" \
+    || fail "a file of the image, changed and put back, is not reported touched: $(cat "$T/tpolicy")"
+grep -q '"violations":0,"signals":1,' "$T/tpolicy" || fail "touched is not the one signal: $(cat "$T/tpolicy")"
+if grep -q '"path":"tests/late.py"' "$T/tpolicy"; then fail "a file made after the container started carries no trace, and one was reported: $(cat "$T/tpolicy")"; fi
+if grep -q '"not_emitted":\[{"flag":"protected_path_touched"' "$T/tpolicy"; then fail "the header of a container run says the kind cannot be emitted"; fi
 # another container of the same image: refused (V3-R4, decision 198)
 O=$(run)
 docker pause "$O" >/dev/null

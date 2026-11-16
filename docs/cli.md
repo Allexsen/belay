@@ -249,8 +249,9 @@ is done: no state a policy prepared is ever read), diffs it against the bundle, 
 [policy.v1](../test/expect/policy-v1.md) to standard output: one record per flag, each a
 `violation` (a declared expectation broken: protected paths, frozen packages) or a `signal`
 (informational: tests touched or weakened, CI and pytest configuration, startup and git hooks,
-history rewritten, new executables on PATH, privilege changes). diff.v1 and the manifest are
-unchanged: judgement is apart from description.
+history rewritten, new executables on PATH, privilege changes, and with `--docker` a protected file
+written and left the same). diff.v1 and the manifest are unchanged: judgement is apart from
+description.
 
 The bundle is read only when its bytes hash to `--baseline-sha256` (exit 3 otherwise, or without
 it), and only for the scope it describes. verify's capture leaves out what the bundle's did --
@@ -305,6 +306,20 @@ walk inside the container would write. The scope is a path in the container, and
   as replaced, with its content unchanged, which is what happened on disk. Inside the container, the
   kernel keeps the old inode number. A manifest from the host and one from inside are therefore
   never compared: different sources are refused (exit 3), as are two containers, even of one image.
+- **A protected file that was written and put back.** Because a copied-up file is another file,
+  `verify --docker` can say what a walk inside cannot: a file on a `no_write` path that was
+  changed and restored, or only opened for writing, is reported as the signal
+  `protected_path_touched`. It is a signal and never fails a run by itself, because honest work
+  does the same: on 53 runs of ordinary repository work it was raised in 14, by checking out
+  another commit and coming back, by a recursive `chmod` or `chown` that changed nothing, and by an
+  edit that was then discarded. It does not say which of these happened.
+
+  **It is silent for a file that was not in the image.** A file put into the container after it
+  started (copied in, or created by a setup step) is in the upper layer from then on. Changing it
+  in place and putting the original bytes back leaves no trace: same file, same content. Only
+  replacing it (deleting and recreating, or renaming another file over it) still shows. It is
+  also not said for a directory, for anything on a volume or bind mount, or without `--docker`:
+  the header's `not_emitted` then names it.
 - **Mounts inside the scope** (volumes, bind mounts, the files Docker binds) are recorded as
   boundaries, with nothing below them read.
 
