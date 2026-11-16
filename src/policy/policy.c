@@ -383,6 +383,10 @@ struct state {
     struct ctx *c;
     const struct policy_in *in;
     struct belay_content *cs;
+    /* Both manifests were read from a container's layers by the host reader
+     * (manifest-v3 V3-2): an entry's `ino` is its layer file's, so a file that
+     * was copied up is another file. Only then is protected_path_touched said. */
+    bool layers;
     /* package lines of the bundle, by path; packages with an event */
     size_t *pk_ix;
     char **evpk;
@@ -479,7 +483,7 @@ static void protected(struct state *s, const char *p, size_t n, const struct bel
     const char *outcome = d != NULL ? d->outcome : "unchanged";
     const bool unknown = strcmp(outcome, "unknown") == 0;
     int first = -1;
-    bool read_before = false, read_after = false, wrote = false, deleted = false, created = false;
+    bool read_before = false, read_after = false, wrote = false, deleted = false, created = false, touched = false;
     for (size_t i = 0; i < sp->n_rules; i++) {
         const struct protect_rule *r = &sp->rules[i];
         const bool mb = b != NULL && protect_match(r->path, r->path_len, p, n);
@@ -517,6 +521,25 @@ static void protected(struct state *s, const char *p, size_t n, const struct bel
             }
             fpath(c, f, p, n);
             wrote = true;
+        }
+        /* Another file with the same content and privileges, in a container's
+         * layers: written, opened for writing or replaced, and the same
+         * afterwards. A signal (policy-v1): honest work does it too. A
+         * directory is another directory whenever anything is made in it. */
+        if (s->layers && (r->modes & PROTECT_NO_WRITE) && mb && a != NULL && b != NULL && !wrote && !touched &&
+            strcmp(outcome, "metadata_only") == 0 && has_str(jget(&d->v, "changed"), "ino") &&
+            b->type != BELAY_T_DIR && a->type != BELAY_T_DIR) {
+            struct flag *f = add(c, PK_PROTECTED_PATH_TOUCHED, false);
+            fs(c, f, "path", p, n);
+            fstr(c, f, "rule", r->path);
+            const struct jval *ch = jget(&d->v, "changed");
+            const char *ss[64];
+            size_t k = 0;
+            for (size_t j = 0; ch != NULL && ch->t == J_ARR && j < ch->n && k < 64; j++)
+                if (ch->kids[j].t == J_STR) ss[k++] = ch->kids[j].s;
+            fstrings(c, f, "changed", ss, k);
+            fpath(c, f, p, n);
+            touched = true;
         }
         /* no_write forbids deleting too (protect-spec-v2 PV2-2). */
         if ((r->modes & (PROTECT_NO_DELETE | PROTECT_NO_WRITE)) && mb && strcmp(outcome, "removed") == 0 && !deleted) {
@@ -1154,6 +1177,9 @@ int policy_run(const struct policy_in *in, FILE *out, struct policy_stats *st) {
     rewind(df);
     if (read_line(df, &line, &cap, &ln) != 1) { corrupt("the diff changed"); goto out; }
     if (belay_manifest_open(in->before, &rb) == -1 || belay_manifest_open(in->after, &ra) == -1) goto out;
+    /* The after manifest's source is the before one's too: the diff this pass
+     * reads was refused otherwise (manifest-v3 V3-R4), and a test holds it. */
+    s.layers = belay_manifest_header(ra)->source_docker[0] != '\0';
     int hb = belay_manifest_next(rb, &eb), ha = belay_manifest_next(ra, &ea), hd = 0;
     bool have_d = false;
     for (;;) {
@@ -1255,7 +1281,12 @@ int policy_run(const struct policy_in *in, FILE *out, struct policy_stats *st) {
     if (bx != NULL) jv_write(&w, bx); else JW_LIT(&w, "null");
     JW_LIT(&w, ",\"after_excluded\":");
     if (ax != NULL) jv_write(&w, ax); else JW_LIT(&w, "null");
-    static const char TAIL[] = ",\"not_emitted\":[{\"flag\":\"writes_outside_workdir\",\"why\":\"needs a scope wider "
+    /* P-H7, in the table's order */
+    JW_LIT(&w, ",\"not_emitted\":[");
+    if (!s.layers)
+        JW_LIT(&w, "{\"flag\":\"protected_path_touched\",\"why\":\"needs both captures read from a container's layers "
+                   "(--docker)\"},");
+    static const char TAIL[] = "{\"flag\":\"writes_outside_workdir\",\"why\":\"needs a scope wider "
                                "than the workdir\"}],\"tests_counted\":[\"python\"]}\n";
     jw_raw(&w, TAIL, sizeof TAIL - 1);
     size_t counts[PK_COUNT] = { 0 }, viol = 0;

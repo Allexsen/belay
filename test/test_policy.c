@@ -13,6 +13,9 @@
 #include "belay/manifest.h"
 #include "belay/error.h"
 #include "policy/policy.h"
+#include "policy/bundle.h"
+#include "policy/protect.h"
+#include "cli/state.h"
 #include "capture/fsops.h"
 #include "schema/iflags.h"
 
@@ -145,7 +148,9 @@ TEST(header_records_and_trailer_are_the_pins) {
     snprintf(want, sizeof want, "{\"belay_policy\":1,\"scopes\":[\"%s\"],\"baseline_sha256\":\"%s\",\"protect_sha256\":\"", real, g_sha);
     ASSERT_EQ_INT(0, strncmp(g_out, want, strlen(want)));
     ASSERT_TRUE(strstr(g_out, "\",\"frozen_packages\":false,\"before_excluded\":[],\"after_excluded\":[],\"not_emitted\":"
-                              "[{\"flag\":\"writes_outside_workdir\",\"why\":\"needs a scope wider than the workdir\"}],"
+                              "[{\"flag\":\"protected_path_touched\",\"why\":\"needs both captures read from a container's "
+                              "layers (--docker)\"},"
+                              "{\"flag\":\"writes_outside_workdir\",\"why\":\"needs a scope wider than the workdir\"}],"
                               "\"tests_counted\":[\"python\"]}\n") != NULL);
     /* P-F1 to P-F4 */
     HAS("protected_path_deleted", "keep", ",\"level\":\"violation\",\"path\":\"keep\",\"rule\":\"keep\","
@@ -160,6 +165,7 @@ TEST(header_records_and_trailer_are_the_pins) {
     REQUIRE(t != NULL);
     ASSERT_TRUE(strstr(t, ",\"violations\":1,") != NULL);
     ASSERT_TRUE(strstr(t, ",\"protected_path_written\":0,\"protected_path_deleted\":1,") != NULL);
+    ASSERT_TRUE(strstr(t, ",\"protected_path_unverifiable\":0,\"protected_path_touched\":0,\"package_changed\":0,") != NULL);
     ASSERT_TRUE(strstr(t, ",\"writes_outside_workdir\":0,\"unknown\":0,\"packages_outside_scope\":0,"
                           "\"packages_no_hash\":0,\"provisional\":false,\"before_sha256\":\"") != NULL);
     ASSERT_EQ_INT('\n', t[strlen(t) - 1]);
@@ -171,6 +177,161 @@ TEST(header_records_and_trailer_are_the_pins) {
     ASSERT_EQ_INT(EXIT_DONE, verify_(false));
     HAS("touches_tests", "tests/test_a.py", ",\"outcome\":\"modified\",");
     ASSERT_TRUE(strstr(g_out, "\"protect_sha256\":null,\"frozen_packages\":false,") != NULL);
+}
+
+/* ---- protected_path_touched: a container's layers as the source ---- */
+
+/* A manifest's header rewritten in place to name a container as its source
+ * (manifest-v3 V3-2), as the host reader writes it: the one fact the kind
+ * waits for. Everything else in the two manifests is a real capture's. */
+static int as_a_container_s(const char *manifest) {
+    FILE *f = fopen(manifest, "r");
+    if (f == NULL) return -1;
+    static char buf[1 << 22];
+    const size_t n = fread(buf, 1, sizeof buf - 1, f);
+    fclose(f);
+    buf[n] = '\0';
+    char *nl = strchr(buf, '\n'), *src = strstr(buf, "\"source\":null}");
+    if (nl == NULL || src == NULL || src > nl) return -1;
+    if ((f = fopen(manifest, "w")) == NULL) return -1;
+    fwrite(buf, 1, (size_t)(src - buf), f);
+    fputs("\"source\":{\"docker\":\"4f1c0e8a9b7d6c5e4f3a2b1c0d9e8f7a6b5c4d3e2f1a0b9c8d7e6f5a4b3c2d1e\","
+          "\"image\":\"sha256:91ef0af61f39ece4d6710e465df5ed6c91ef0af61f39ece4d6710e465df5ed6c\"}}", f);
+    fputs(nl, f);
+    return fclose(f);
+}
+
+/* verify's own steps (src/cli/verify.c), in the same order, on the scope and
+ * bundle of this test -- with both manifests' source made a container's when
+ * `layers` (ONE_SIDE: the after manifest's alone). policy.v1 lands in g_out.
+ * The violations counted; -1 when the diff refuses the pair, -2 on any other failure. */
+enum { PLAIN = 0, LAYERS = 1, ONE_SIDE = 2 };
+static int verify_steps(int layers) {
+    static struct protect_spec spec;
+    struct scope sc;
+    static struct state st;
+    static struct bundle bd;
+    memset(&st, 0, sizeof st);
+    memset(&bd, 0, sizeof bd);
+    st.dir_fd = st.cp_fd = st.lock_fd = -1;
+    char work[600], root[700], before[700], dpath[700], after[PATH_MAX + 256];
+    snprintf(work, sizeof work, "%s/steps.XXXXXX", g_tmp);
+    if (protect_load(g_spec, &spec) != 0 || scope_resolve(g_scope, &sc) == -1 || mkdtemp(work) == NULL) return -2;
+    snprintf(root, sizeof root, "%s/state", work);
+    snprintf(before, sizeof before, "%s/before.ndjson", work);
+    snprintf(dpath, sizeof dpath, "%s/diff.ndjson", work);
+    if (mkdir(root, 0700) == -1) return -2;
+    state_root_override = root;
+    int rc = -2;
+    free(g_out);
+    g_out = NULL;
+    size_t on;
+    FILE *out = open_memstream(&g_out, &on);
+    if (state_open(&sc, true, &st, stderr) == -1) goto done;
+    if (bundle_read(g_bundle, g_sha, work, before, st.store, &bd) == -1) goto done;
+    const struct capture_req req = { "check", false, false, 0, bd.meta.hash_max_bytes, false, false };
+    struct checkpoint c;
+    if (state_capture(&st, &req, &c) == -1) goto done;
+    state_manifest(&st, c.id, after, sizeof after);
+    if (layers == LAYERS && as_a_container_s(before) != 0) goto done;
+    if (layers != PLAIN && as_a_container_s(after) != 0) goto done;
+    const struct belay_diff_opts dopts = { .store_dir = st.store };
+    if (belay_diff(before, after, dpath, &dopts, NULL) == -1) { rc = -1; goto done; }
+    const struct policy_in pin = { before, after, dpath, st.store, st.scope.path, true, &bd, g_sha, &spec };
+    struct policy_stats ps;
+    rc = policy_run(&pin, out, &ps);
+    if (rc == 0) rc = (int)ps.violations;
+done:
+    fclose(out);
+    state_root_override = NULL;
+    if (st.dir_fd != -1 || st.lock_fd != -1) state_close(&st);
+    bundle_free(&bd);
+    protect_free(&spec);
+    return rc;
+}
+
+#define TOUCHED_SPEC "{\"belay_protect\":2,\"protect\":[{\"path\":\"tests/**\",\"mode\":[\"no_write\"]}]}"
+
+/* Another file with the same content at a protected path: what a copy-up
+ * leaves in a container's upper layer. `cp -p` keeps mode, owner and mtime. */
+static void same_bytes_another_file(const char *path) { sh("cp -p '%s' '%s.new' && mv '%s.new' '%s'", path, path, path, path); }
+
+TEST(a_protected_file_that_is_another_file_with_the_same_content_is_touched) {
+    fresh(TOUCHED_SPEC);
+    sh("mkdir -p tests/dir src && for f in same later written moded left stamped dir/inner; do printf 'def test(): assert 1\\n' > tests/$f.py; done"
+       " && printf 'x\\n' > src/a.py");
+    REQUIRE_MSG(export_(true) == EXIT_DONE, "%s", g_err);
+    same_bytes_another_file("tests/same.py");                       /* inode only */
+    sh("cat tests/later.py > tests/later.tmp && mv tests/later.tmp tests/later.py");   /* inode and mtime */
+    sh("printf 'def test(): pass\\n' > tests/written.py");            /* a real write */
+    same_bytes_another_file("tests/moded.py");
+    sh("chmod 600 tests/moded.py");                                 /* another file AND another mode: a write */
+    same_bytes_another_file("src/a.py");                            /* not protected */
+    sh("touch -d '2001-01-01' tests/stamped.py");                   /* the same file, another mtime: no trace of a copy */
+    sh("mv tests/dir tests/dir.old && mkdir tests/dir && mv tests/dir.old/inner.py tests/dir/ && rmdir tests/dir.old");  /* a directory that is another directory */
+    ASSERT_EQ_INT(2, verify_steps(LAYERS));                           /* the two writes; the signals do not count */
+    HAS("protected_path_touched", "tests/same.py", ",\"level\":\"signal\",\"path\":\"tests/same.py\",\"rule\":\"tests/**\","
+        "\"changed\":[\"ino\"],\"text\":\"tests/same.py: protected by tests/** (no_write), written and left the same\","
+        "\"paths\":[\"tests/same.py\"]}");
+    HAS("protected_path_touched", "tests/later.py", "\"changed\":[\"mtime_ns\",\"ino\"]");
+    ASSERT_EQ_INT(2, count("protected_path_touched"));
+    HAS("protected_path_written", "tests/written.py", "\"outcome\":\"modified\"");
+    HAS("protected_path_written", "tests/moded.py", "\"outcome\":\"metadata_only\"");
+    NONE("protected_path_touched", "tests/written.py");
+    NONE("protected_path_touched", "tests/moded.py");
+    NONE("protected_path_touched", "tests/left.py");
+    NONE("protected_path_touched", "tests/stamped.py");
+    NONE("protected_path_written", "tests/stamped.py");
+    NONE("protected_path_touched", "tests/dir");                    /* a directory is not judged */
+    NONE("protected_path_touched", "tests");
+    NONE("protected_path_touched", "src/a.py");
+    /* the header no longer says it cannot be emitted; the trailer counts it */
+    ASSERT_TRUE(strstr(g_out, "\"not_emitted\":[{\"flag\":\"writes_outside_workdir\",") != NULL);
+    ASSERT_TRUE(strstr(g_out, ",\"signals\":") != NULL && strstr(g_out, ",\"protected_path_touched\":2,") != NULL);
+    /* P-F5: a signal, after every violation */
+    ASSERT_TRUE(strstr(g_out, "\"flag\":\"protected_path_written\",\"level\":\"violation\",\"path\":\"tests/written.py\"") <
+                strstr(g_out, "\"flag\":\"protected_path_touched\""));
+}
+
+TEST(touched_alone_never_fails_a_run_and_is_not_said_without_layers) {
+    fresh(TOUCHED_SPEC);
+    sh("mkdir tests && printf 'def test(): assert 1\\n' > tests/a.py");
+    REQUIRE_MSG(export_(true) == EXIT_DONE, "%s", g_err);
+    same_bytes_another_file("tests/a.py");
+    /* a container's layers: one signal, no violation */
+    ASSERT_EQ_INT(0, verify_steps(LAYERS));
+    HAS("protected_path_touched", "tests/a.py", "\"changed\":[\"ino\"]");
+    ASSERT_TRUE(strstr(g_out, ",\"violations\":0,\"signals\":1,") != NULL);
+    /* the same steps where belay walked the directory itself: nothing, and the header says why */
+    ASSERT_EQ_INT(0, verify_steps(PLAIN));
+    NONE("protected_path_touched", NULL);                           /* no record (the header names the kind) */
+    ASSERT_TRUE(strstr(g_out, "\"not_emitted\":[{\"flag\":\"protected_path_touched\",\"why\":\"needs both captures read from a "
+                              "container's layers (--docker)\"},{\"flag\":\"writes_outside_workdir\",") != NULL);
+    /* one manifest from a container and one walked: never compared (manifest-v3 V3-R4),
+     * which is what lets the policy read the source off one of them */
+    ASSERT_EQ_INT(-1, verify_steps(ONE_SIDE));
+    belay_err_clear();
+    /* and through the command itself, with --exit-code: 0 */
+    ASSERT_EQ_INT(EXIT_DONE, verify_(true));
+    NONE("protected_path_touched", NULL);
+    ASSERT_TRUE(strstr(g_out, ",\"protected_path_touched\":0,") != NULL);
+}
+
+TEST(touched_needs_a_no_write_rule_and_an_entry_on_both_sides) {
+    fresh("{\"belay_protect\":2,\"protect\":[{\"path\":\"keep/**\",\"mode\":[\"no_delete\"]},"
+          "{\"path\":\"made/**\",\"mode\":[\"no_create\"]},{\"path\":\"tests/**\",\"mode\":[\"no_write\"]}]}");
+    sh("mkdir keep made tests && printf 'k\\n' > keep/k && printf 'm\\n' > made/m && printf 't\\n' > tests/t && ln -s t tests/link");
+    REQUIRE_MSG(export_(true) == EXIT_DONE, "%s", g_err);
+    same_bytes_another_file("keep/k");                              /* no_delete alone allows writing */
+    same_bytes_another_file("made/m");                              /* no_create says nothing of a file that was there */
+    sh("printf 'new\\n' > tests/new");                              /* added: not on both sides (and no no_create here) */
+    sh("ln -sfn t tests/link.new && mv -T tests/link.new tests/link");  /* a symlink that is another symlink, same target */
+    ASSERT_EQ_INT(0, verify_steps(LAYERS));
+    NONE("protected_path_touched", "keep/k");
+    NONE("protected_path_touched", "made/m");
+    NONE("protected_path_touched", "tests/new");
+    HAS("protected_path_touched", "tests/link", "\"rule\":\"tests/**\"");   /* not a directory: judged */
+    ASSERT_EQ_INT(1, count("protected_path_touched"));
 }
 
 /* ---- protected paths (PS-M1 to PS-M5) ---- */
@@ -893,6 +1054,9 @@ int main(void) {
     RUN(an_added_file_s_own_iflags_are_no_privilege);
     RUN(unverifiable_reasons_come_in_the_pinned_order);
     RUN(verify_refuses_what_it_must_never_judge);
+    RUN(a_protected_file_that_is_another_file_with_the_same_content_is_touched);
+    RUN(touched_alone_never_fails_a_run_and_is_not_said_without_layers);
+    RUN(touched_needs_a_no_write_rule_and_an_entry_on_both_sides);
     char cmd[600];
     snprintf(cmd, sizeof cmd, "chmod -R u+rwx '%s' 2>/dev/null; rm -rf '%s'", g_dir, g_dir);
     if (system(cmd) != 0) { /* nothing to report */ }
