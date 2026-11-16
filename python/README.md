@@ -78,7 +78,11 @@ only its sha256 goes in the log.
 - belay runs in the sandbox, beside anything the agent left running. A process that outlives the agent
   can still write while belay reads, or interfere with it if it runs as the same user. Inspect has no
   way to stop them first, as `belay verify` asks.
-- It sees the end state, within the scope: a file changed and restored is invisible.
+- It sees the end state, within the scope: a file changed and restored is invisible. belay's host
+  reader (`verify --docker`) can report one as the signal `protected_path_touched`, in the score's
+  `flags`, **but not for the files Inspect copies in**: a sample's `files=`, and anything a setup step
+  writes, enter the container after it starts, and for those an in-place change and restore leaves
+  no trace at all. Only files that were already in the image carry it.
 - The sandbox needs a writable, executable `/tmp`, and `uname`, `chmod` and `rm`.
 - The binary must suit the sandbox. Wheels carry Linux x86_64 and arm64 binaries and pick by the
   sandbox's architecture; v0.1.0-alpha.5's Linux wheels have only their own. For anything else, belay
