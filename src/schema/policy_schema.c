@@ -20,6 +20,8 @@ const struct policy_kind_def POLICY_KINDS[PK_COUNT] = {
         { BY("path"), S("expected"), S("why"), SO("actual") }, "{path}: {why}, expected sha256 {expected}", 0 },
     [PK_PROTECTED_PATH_UNVERIFIABLE] = { "protected_path_unverifiable", PL_VIOLATION,
         { BY("path"), S("rule"), SS("reasons") }, "{path}: protected by {rule}, cannot be verified: {reasons}", 0 },
+    [PK_PROTECTED_PATH_TOUCHED] = { "protected_path_touched", PL_SIGNAL,
+        { BY("path"), S("rule"), SS("changed") }, "{path}: protected by {rule} (no_write), written and left the same", 0 },
     [PK_PACKAGE_CHANGED] = { "package_changed", PL_FROZEN,
         { S("db"), S("package"), S("event"), S("change"), BO("self_consistent") }, "{db}: {change}", 0 },
     [PK_TAMPERED_INSTALLED_PACKAGE] = { "tampered_installed_package", PL_FROZEN,
