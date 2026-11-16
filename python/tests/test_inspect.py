@@ -273,17 +273,63 @@ class DockerHost(Evals):
         self.assertEqual(self.verdict(s).answer, "pass")
         self.assertEqual(s.scores["changes_the_sandbox"].value, 1.0)
 
-    def test_a_sandbox_that_is_no_container_is_refused_and_says_why(self):
-        task = Task(dataset=[Sample(input="x", target="", files=FILES)], solver=agent("true"),
+    def test_a_replaced_container_is_a_run_belay_could_not_judge_never_a_fallback(self):
+        @solver
+        def another_container():
+            async def solve(state, generate):
+                recorded = dict(state.store.get(pi._STORE_KEY))
+                recorded["container"] = "not-" + recorded["container"]
+                state.store.set(pi._STORE_KEY, recorded)
+                return state
+            return solve
+
+        @scorer(metrics=[mean()])
+        def looks():
+            async def score(state, target):
+                r = await sandbox().exec(["sh", "-c", "ls -a /tmp /work"])
+                return Score(value=1.0, answer=r.stdout)
+            return score
+        _, s = self.run_task(another_container(), scorers=[pi.belay_verify(), looks()],
+                             setup=pi.belay_record(SPEC, where="host"))
+        v = self.verdict(s)
+        self.assertEqual((v.value, v.answer), (INCORRECT, "error"))
+        self.assertEqual(v.metadata["where"], "host")
+        self.assertIn("not the one belay_record read", v.explanation)
+        self.assertNotIn("belay", s.scores["looks"].answer)     # nothing went into the sandbox instead
+
+
+
+
+class HostModeThatCannotRun(Evals):
+    """Asked for and unable to run, where="host" fails the sample and says why. It
+    never runs belay in the sandbox instead (pybelay.md PY-I6). No Docker needed."""
+
+    def refused(self):
+        d = tempfile.mkdtemp(prefix="pybelay-inspect-nofallback-")
+        files = dict(FILES)
+        task = Task(dataset=[Sample(input="x", target="", files=files)], solver=agent("ls -a . /tmp 2>/dev/null; true"),
                     setup=pi.belay_record(SPEC, where="host"), scorer=pi.belay_verify(), sandbox="local")
-        log = inspect_eval(task, model="mockllm/model", log_dir=tempfile.mkdtemp(), display="none")[0]
-        self.assertIn('where="host"', str(log.samples[0].error))
+        log = inspect_eval(task, model="mockllm/model", log_dir=d, display="none")[0]
+        return log, log.samples[0]
+
+    def test_a_sandbox_that_is_no_container_fails_the_sample_and_says_why(self):
+        log, s = self.refused()
+        self.assertIsNotNone(s.error)
+        self.assertIn('where="host"', str(s.error))
+        self.assertEqual(log.status, "error")
+
+    def test_it_does_not_fall_back_to_the_sandbox(self):
+        _, s = self.refused()
+        # Had belay run in the sandbox instead, there would be a record to judge
+        # against and a verdict. There is neither.
+        self.assertIsNone(s.store.get(pi._STORE_KEY))
+        self.assertFalse(s.scores)
 
     def test_where_must_be_one_of_the_two(self):
         with self.assertRaises(ValueError):
             pi.belay_record(SPEC, where="outside")
-
-
+        with self.assertRaises(ValueError):
+            pi.belay_record(SPEC, where="auto")
 
 
 class NoSandbox(Evals):
