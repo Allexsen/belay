@@ -3,6 +3,7 @@
 Written only from test/expect/policy-v1.md, protect-spec.md, protect-spec-v2.md, inode-flags.md
 and baseline-bundle.md, diff.v1's
 pins (diff-fields.md, diff-values.md, finding-kinds.md, diff-events.md), the manifest pins,
+host-reader.md (for what a container's `source` and a layer file's `ino` are),
 docs/spec prose outside its generated blocks, and docs/cli.md -- never from belay's code, the
 oracle, the reference, or a generated table. Where it and belay disagree, one of them misreads a
 pin, or the pin reads two ways: the harness (run.py) prints both lines.
@@ -315,10 +316,65 @@ P59 New with inode-flags.md. IF-6 and IF-7 together: a protected directory whose
     is no violation when the flag change does not count (PS-M1: "anything but timestamps ...
     and identity").
 
+P60 New with protected_path_touched. P-H7's `not_emitted`: "It lists `protected_path_touched`
+    before it ... whenever the manifests' `source` is `null`; with a container as the source it
+    does not." Read: the source alone decides. A run on a container with no spec, with a spec
+    that has no `no_write` rule, or whose scope root's `dev` differs between the manifests (O3:
+    `ino` is then compared for no entry) cannot raise the kind either, and the row's first
+    sentence ("each kind of the flag table this run cannot emit") would list it; but the row
+    gives one `why`, which names the captures, and says outright that with a container it is
+    not listed. "The manifests' source" is one value: V3-R4 lets verify judge only equal ones;
+    a v2 manifest's is `null` (V3-R3).
+
+P61 New with protected_path_touched. When it is raised is read from the row's condition, the
+    words before its colon: the source is a container; the entry is in both manifests and "is
+    not a directory in either" (any other type: a symlink, a FIFO, a device); "a `no_write`
+    rule matches"; the outcome is `metadata_only` with `ino` in `changed`; and "nothing there
+    that makes it `protected_path_written` (PS-M1)" -- exactly when PS-M1, as this model
+    applies it with inode-flags.md (IF-6), gives no protected_path_written for the record: none
+    of `mode`, `uid`, `gid`, `caps`, `xattrs` in `changed`, and no `iflags` change that counts
+    (IF-4: on a non-directory of one type every one counts). So a path gives one of the two,
+    never both. `rule`: the first rule with `no_write` that matches (the general paragraph's
+    "the mode concerned"; the text says `(no_write)`). `changed`: the diff record's whole list,
+    in the diff's order (`["mtime_ns","ino","nlink"]`). Never provisional: its outcome is not
+    `unknown` and it rests on no event (P-F3). The row's last sentence, "Not raised for a file
+    that was not in the image ... writing it in place leaves its inode as it was", is read as
+    what the condition gives for a write in place, as its own reason says, not as a further
+    condition: no manifest says which layer supplied an entry, and such a file renamed over
+    has another `ino` and is raised.
+
+P62 New with protected_path_touched. The row's consequence -- "it is another file than at the
+    baseline, with the same content, type, mode, owner, counted inode flags, capabilities and
+    xattrs" -- says more than its condition shows in one case. diff-v1's rule 4 gives
+    `metadata_only` as soon as an identity field differs, before it asks whether a side
+    carries `xattrs_unknown` or has `iflags` on one side only: a protected file with another
+    `ino` whose xattrs one capture could not read is `metadata_only`, `changed` `["ino"]`, and
+    PS-M5 does not name it (its outcome is not `unknown`, and `xattrs_unknown` is none of
+    PS-M5's entry flags). Read: the condition decides, so it is protected_path_touched, though
+    its xattrs (or inode flags) were not shown the same. The other reading -- no record where
+    a side could not read them -- has no words in the row.
+
+P63 New with protected_path_touched: how the harness reaches a container source with no
+    Docker. V3-R4: "Two manifests compare only when their sources are equal (`null` and
+    `null`, or the same container)"; B-R6: "after its own capture, a manifest of another
+    source"; docs/cli.md: "`--to ID` judges checkpoint `ID` of the scope's own state instead
+    of capturing now". Read: with `--to`, the checkpoint's manifest is the capture, and a
+    bundle whose manifest names a container is judged against a checkpoint whose manifest
+    names the same one, on a plain directory, with no `--docker`: no row has verify refuse a
+    manifest for a source its own command line would not have written (H-C8 says where a
+    container's checkpoints are kept, not that a reader checks it). The harness writes that
+    `source` into both manifests by hand (gen.py's `CT`); the entries are a walk's, whose
+    `ino` moves when a file is replaced, as a layer file's does (H-U7). The other reading --
+    without `--docker` a manifest with a source is refused -- would make every `CT` scenario a
+    refusal (exit 3): a disagreement there is this reading's, before it is the row's.
+
 Not modelled: IF-8 (the receipt's privilege section) -- this model produces policy.v1, not the
 receipt. IF-1's macOS flags: the harness measures Linux's FS_IOC_GETFLAGS, so only
 `FS_IMMUTABLE_FL` (0x10) and `FS_APPEND_FL` (0x20) are tested for. IF-9 needs no code: the
 model's manifest view and diff (`_both`) are as they were, and the self-test holds them there.
+The host reader (host-reader.md): no scenario reads a container. What protected_path_touched
+rests on there -- that an entry's `ino` is its layer file's, and that a copy-up shows as the file
+replaced (H-U7) -- is not checked here; the row's rule is, on manifests a walk wrote (P63).
 """
 
 import base64
@@ -336,14 +392,25 @@ REFLOG_MAX = 16 * 1024 * 1024          # diff-v1, git's reflog bound
 
 KINDS = (
     "protected_path_written", "protected_path_deleted", "protected_path_created",
-    "protected_hash_mismatch", "protected_path_unverifiable", "package_changed",
-    "tampered_installed_package", "conffile_changed", "touches_tests", "tests_weakened",
-    "edits_ci_config", "pytest_config_changed", "conftest_changed",
+    "protected_hash_mismatch", "protected_path_unverifiable", "protected_path_touched",
+    "package_changed", "tampered_installed_package", "conffile_changed", "touches_tests",
+    "tests_weakened", "edits_ci_config", "pytest_config_changed", "conftest_changed",
     "python_startup_hook_changed", "git_hook_changed", "git_history_rewritten",
     "new_executable_on_path", "privilege_changed", "writes_outside_workdir",
-)
+)                                      # the flag table's rows, in its order (P-F5, P-T3)
 KIND_INDEX = {k: i for i, k in enumerate(KINDS)}
-NOT_EMITTED = [{"flag": "writes_outside_workdir", "why": "needs a scope wider than the workdir"}]
+TOUCHED_WHY = "needs both captures read from a container's layers (--docker)"
+OUTSIDE_WHY = "needs a scope wider than the workdir"
+
+
+def not_emitted(source):
+    """P-H7: the kinds this run cannot emit, in the table's order. `source`: the manifests'
+    (manifest-v3 V3-2), None for `null`. The source alone decides (P60)."""
+    why = {"writes_outside_workdir": OUTSIDE_WHY}             # "Version 1 always lists" it
+    if source is None:
+        why["protected_path_touched"] = TOUCHED_WHY
+    return [{"flag": k, "why": why[k]} for k in KINDS if k in why]
+
 
 ENTRY_FLAGS = ("unverified", "unstable", "unreadable", "raced", "mount", "writer_open")   # V4-D7
 REASON_ORDER = ENTRY_FLAGS[:-1] + ("xattrs_unknown", "iflags_unknown", "not_captured",  # P2
@@ -1711,7 +1778,9 @@ def joined(xs):
     return ", ".join(xs) if xs else "none"
 
 
-def protected_flags(spec, recs, B, A):
+def protected_flags(spec, recs, B, A, source=None):
+    """The protect spec's flags. `source`: the two manifests' (None for `null`): only with a
+    container is protected_path_touched raised (P61)."""
     flags = []
     if spec is None:
         return flags
@@ -1739,6 +1808,13 @@ def protected_flags(spec, recs, B, A):
                                        ("changed", rec.get("changed"))],
                                       "%s: protected by %s (no_write), %s" % (show(p), r.pattern, outcome),
                                       [p], prov))
+                elif (source is not None and "ino" in ch                             # P61, P62
+                      and b["type"] != "dir" and a["type"] != "dir"):
+                    # `ch` is empty unless the outcome is metadata_only; nothing made it written
+                    flags.append(Flag("protected_path_touched", "signal",
+                                      [("path", p), ("rule", r.pattern), ("changed", rec["changed"])],
+                                      "%s: protected by %s (no_write), written and left the same"
+                                      % (show(p), r.pattern), [p], False))
             break
         # PS-M2 no_delete, PV2-2 no_write: one flag, whichever modes ask for it (PV2-3, PV2-4)
         for r in matching:
@@ -2076,15 +2152,17 @@ def verify_lines(ctx):
     """policy.v1's lines for one verify.
 
     ctx: scope (str), bundle_sha256, spec (Spec or None), before/after (Side), bundle_lines,
-    outside_scope, before_sha256, after_sha256, walk_counts (six ints).
+    outside_scope, before_sha256, after_sha256, walk_counts (six ints), and optionally source:
+    the two manifests' `source` (V3-2), which V3-R4 has equal -- None or absent for `null`.
     """
     spec = ctx["spec"]
     ctx["frozen"] = spec.frozen if spec else False
+    source = ctx.get("source")
     bs, as_ = ctx["before"], ctx["after"]
     B, A = bs.entries, as_.entries
     recs = diff(bs, as_)
     events = pip_events(recs, B, A) + dpkg_events(recs, B, A) + git_events(recs, B, A)
-    flags = protected_flags(spec, recs, B, A)
+    flags = protected_flags(spec, recs, B, A, source)
     flags += package_flags(ctx, recs, B, A, events)
     flags += other_flags(ctx, recs, B, A, events)
     flags.sort(key=Flag.sort_key)
@@ -2099,7 +2177,7 @@ def verify_lines(ctx):
     hdr["frozen_packages"] = ctx["frozen"]
     hdr["before_excluded"] = excluded_json(bs.excluded)
     hdr["after_excluded"] = excluded_json(as_.excluded)
-    hdr["not_emitted"] = NOT_EMITTED
+    hdr["not_emitted"] = not_emitted(source)                                         # P-H7, P60
     hdr["tests_counted"] = ["python"]
     lines = [hdr] + [f.obj() for f in flags]
     tr = {"belay_policy_end": len(flags),
@@ -2191,12 +2269,14 @@ def export_expect(scope, out_real, spec_raw, excluded, B_raw, writers=frozenset(
 
 
 def verify_refusal(exported, spec_raw, digest_given, digest_true, excluded_after, to_trusted,
-                   before_source=None, corrupt=False, other_scope=False, after=None):
+                   before_source=None, corrupt=False, other_scope=False, after=None, after_source=None):
     """The refusal verify gives before judging, or None. baseline-bundle B-R6 (decision 214):
     "verify refuses in this order, and the first refusal is the one said: no --baseline-sha256
     (exit 3); bytes that do not hash to it (B-R2, exit 3 ...); a row the bundle breaks (B-R3,
     exit 4); a bundle of another scope (exit 3); then, after its own capture, a manifest of
-    another source (manifest-v3 V3-R4, exit 3)". The spec's own refusals are placed by P40."""
+    another source (manifest-v3 V3-R4, exit 3)". The spec's own refusals are placed by P40.
+    `before_source`, `after_source`: the bundle's manifest's and the capture's (with `--to`, the
+    checkpoint's: P63), None for `null`."""
     spec = None
     if spec_raw is not None:
         try:
@@ -2220,7 +2300,7 @@ def verify_refusal(exported, spec_raw, digest_given, digest_true, excluded_after
             for r in spec.rules:
                 if covers(r.comps, x["path"]):
                     return 3                                                  # PS-C2
-    if before_source is not None:
+    if before_source != after_source:
         return 3                                                              # B-R6, V3-R4
     if after is not None and database_without_copy(after) is not None:
         return 4                                                              # V4-S1, P51
@@ -2335,6 +2415,15 @@ def flag_manifest(content, flags):
                     mt[f] += 1
         out.append(o)
     return b"".join(enc(o).encode("utf-8") + b"\n" for o in [mh] + out + [mt])
+
+
+def source_manifest(content, source):
+    """The manifest with this `source` in its header (V3-2), everything else as it was: the
+    header a host reader's capture of the same entries would carry (P63)."""
+    mh, entries, mt = read_manifest(content)
+    assert "source" in mh, "source_manifest: a manifest before v3"
+    mh["source"] = source
+    return b"".join(enc(o).encode("utf-8") + b"\n" for o in [mh] + entries + [mt])
 
 
 def unguarded_at_most(content):

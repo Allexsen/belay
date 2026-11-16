@@ -17,6 +17,9 @@ A scenario is a dict:
              reader's source; "v3": as v2, keeping `source`; "flags": the entries `flags` names
              given those flags; "break:<how>": a manifest V4-R2 or V4-R3 refuses), flags (path ->
              flag names), after_flags (the same, on a `to: check` checkpoint's manifest),
+             after_source ("container": that checkpoint's manifest given the host reader's
+             source `manifest: "container"` gives the bundle's, so the two compare (the
+             model's P63); "other-container": another container's),
              bundle_spec (raw bytes: the bundle's header given that spec's digest, as a release
              that took a version 1 spec wrote it),
              mark_writers ("first": with `to: trusted`, the hold ends before the second mark;
@@ -36,6 +39,7 @@ import base64
 import fcntl
 import hashlib
 import os
+import stat
 
 FS_IOC_GETFLAGS = 0x80086601
 FS_IOC_SETFLAGS = 0x40086602
@@ -121,6 +125,23 @@ def apply(root, ops):
             os.write(fd, data)
             os.close(fd)
             os.utime(p, ns=(st.st_atime_ns, st.st_mtime_ns))
+        elif k == "new_inode":                   # another inode under the name, all else the same
+            st = os.lstat(p)                     # (op[2] "mtime": its mtime a second later too)
+            tmp = p + b".tmp-new-inode"          # made beside the old one, so never its number
+            if stat.S_ISLNK(st.st_mode):
+                os.symlink(os.readlink(p), tmp)
+            elif stat.S_ISDIR(st.st_mode):       # an empty directory: rename(2) replaces it
+                os.mkdir(tmp)
+                os.chmod(tmp, stat.S_IMODE(st.st_mode))
+            else:
+                with open(p, "rb") as f:
+                    data = f.read()
+                with open(tmp, "wb") as f:
+                    f.write(data)
+                os.chmod(tmp, stat.S_IMODE(st.st_mode))
+            moved = 1_000_000_000 if len(op) > 2 and op[2] == "mtime" else 0
+            os.utime(tmp, ns=(st.st_atime_ns, st.st_mtime_ns + moved), follow_symlinks=False)
+            os.rename(tmp, p)
         elif k == "touch":                       # mtime only
             st = os.stat(p)
             os.utime(p, ns=(st.st_atime_ns, st.st_mtime_ns + 1_000_000_000))
@@ -858,6 +879,7 @@ def scenarios():
     out.extend(writer_scenarios())
     out.extend(version2_scenarios())
     out.extend(inode_flag_scenarios())
+    out.extend(touched_scenarios())
     names = [s["name"] for s in out]
     assert len(names) == len(set(names)), "duplicate scenario names"
     return out
@@ -1003,6 +1025,90 @@ def inode_flag_scenarios():
           tags=["P25", "P29"]))
     add(S("if-5-dir-unreadable-after-unprotected", BASE + [("dir", "src/sub")], [("chmod", "src/sub", 0o000)],
           tags=["P25", "P29"]))
+    return out
+
+
+# Both manifests given one container as their source, with no Docker: the bundle's rewritten, and
+# a `check` checkpoint's, which `--to` has verify judge (the model's P63).
+CT = {"manifest": "container", "to": "check", "after_source": "container"}
+
+
+def touched_scenarios():
+    """policy-v1's protected_path_touched, and P-H7's `not_emitted`.
+
+    The harness has no Docker: every capture here is a walk, its `source` `null`. So the first
+    half holds the row where every plain run stands: a protected file that is another inode with
+    everything else the same gives no record, neither protected_path_touched nor
+    protected_path_written, and `not_emitted` lists the kind, before writes_outside_workdir.
+    The second half writes one container into both manifests by hand (CT) and takes the rule
+    through its conditions. What that cannot show is the host reader itself: that a layer
+    file's `ino` is what a manifest holds, and that a copy-up moves it (host-reader H-U7)."""
+    out = []
+    add = out.append
+    G = "grader/check.py"
+    N = FS_NODUMP_FL
+    GW = spec_of(rule("grader/**", "no_write"))
+    TW = spec_of(rule("tests/**", "no_write"))
+    LINKED = BASE + [("hardlink", "elsewhere/check-link.py", G)]
+    SYM = BASE + [("symlink", "grader/link", "check.py")]
+
+    # -- source null: never raised, and nothing else speaks for it
+    add(S("touched-null-new-inode", BASE, [("new_inode", G)], GW))
+    add(S("touched-null-new-inode-mtime", BASE, [("new_inode", G, "mtime")], GW))
+    add(S("touched-null-symlink", SYM, [("new_inode", "grader/link", "mtime")], GW))
+    add(S("touched-null-hardlink", LINKED, [("new_inode", G, "mtime")], GW))
+    add(S("touched-null-conftest", BASE, [("new_inode", "tests/conftest.py"), ("new_inode", "tests/test_api.py", "mtime")], TW))
+    add(S("touched-null-to-check", BASE, [("new_inode", G)], GW, verify={"to": "check"}))
+    add(S("touched-null-v2-bundle", BASE, [("new_inode", G)], GW, verify={"manifest": "v2"}, tags=["P39"]))
+    add(S("touched-null-v3-bundle", BASE, [("new_inode", G)], GW, verify={"manifest": "v3"}, tags=["P41"]))
+    add(S("touched-null-nospec", BASE, [("new_inode", G)], None))
+    add(S("touched-null-noexitcode", BASE, [("new_inode", G, "mtime")], GW, verify={"exit_code": False}))
+
+    # -- one container on both sides (P63): raised
+    def ct(name, tree, episode, spec, *tags):
+        add(S("touched-ct-" + name, tree, episode, spec, verify=dict(CT), tags=["P63"] + list(tags)))
+    ct("new-inode", BASE, [("new_inode", G)], GW)
+    ct("new-inode-mtime", BASE, [("new_inode", G, "mtime")], GW)
+    ct("hardlink", LINKED, [("new_inode", G, "mtime")], GW)
+    ct("symlink", SYM, [("new_inode", "grader/link", "mtime")], GW)
+    ct("not-utf8", BASE + [("file", b"grader/\xff\\.txt", b"x\n")], [("new_inode", b"grader/\xff\\.txt")], GW)
+    ct("first-no-write-rule", BASE, [("new_inode", G)],
+       spec_of(rule("grader/**", "no_create"), rule("grader/*", "no_delete"), rule("grader/check.*", "no_write"),
+               rule("grader/**", "no_write")))
+    ct("with-other-modes", BASE, [("new_inode", G)], spec_of(rule("grader/**", "no_write", "no_delete", "no_create")))
+    ct("expected-holds", BASE, [("new_inode", G)], spec_of(rule(G, "no_write", expected=sha(GRADER))))
+    # a signal: among the signals in the table's place, after every violation, and never failing a run
+    ct("order", BASE + [("file", "src/test_x.py", TEST_UNIT)],
+       [("new_inode", "tests/test_api.py", "mtime"), ("new_inode", "tests/conftest.py"), ("write", G, GRADER + b"#\n"),
+        ("write", "src/test_x.py", TEST_UNIT + b"#\n")],
+       spec_of(rule("tests/**", "no_write"), rule("grader/**", "no_write")))
+    bar = pip_ops("bar", "2.0", {"bar/__init__.py": (b"X = 1\n", 0o644)})
+    for frozen in (False, True):
+        ct("packages" + ("-frozen" if frozen else "-free"), BASE + pip_ops("foo", "1.0", FOO_FILES),
+           bar + [("new_inode", G)], spec_of(rule("grader/**", "no_write"), frozen=frozen), "P10")
+    # -- one container on both sides: not raised
+    ct("nothing", BASE, [], GW)
+    ct("nospec", BASE, [("new_inode", G)], None, "P60")
+    ct("no-no-write-rule", BASE, [("new_inode", G)], spec_of(rule("grader/**", "no_delete", "no_create")), "P60")
+    ct("unprotected", BASE, [("new_inode", "src/app.py")], GW)
+    ct("directory", BASE + [("dir", "grader/data")], [("new_inode", "grader/data")], GW)
+    ct("mtime-only", BASE, [("touch", G)], GW)
+    ct("nlink-only", BASE, [("hardlink", "elsewhere/check-link.py", G)], GW)
+    ct("in-place-same-bytes", BASE, [("same_bytes_same_mtime", G)], GW, "P1")
+    # what makes it protected_path_written is that, and only that
+    ct("and-mode", BASE, [("new_inode", G), ("chmod", G, 0o664)], GW)
+    ct("and-nodump", BASE, [("new_inode", G), ("chattr", G, N)], GW)
+    ct("and-xattr", BASE, [("new_inode", G), ("setxattr", G, "user.note", b"x")], GW)
+    ct("other-bytes", BASE, [("replace", G, GRADER.replace(b"0", b"1"))], GW)
+    ct("to-symlink", BASE, [("rm", G), ("symlink", G, "/etc/hostname")], GW)
+    ct("removed", BASE, [("rm", G)], GW)
+
+    # -- V3-R4, which P63 leans on: only equal sources compare
+    add(S("verify-source-after-only", BASE, [], GW, verify={"to": "check", "after_source": "container"},
+          tags=["P63"], refusal="verify:source-after-only"))
+    add(S("verify-source-other-container", BASE, [], GW,
+          verify={"manifest": "container", "to": "check", "after_source": "other-container"},
+          tags=["P63"], refusal="verify:source-other-container"))
     return out
 
 
