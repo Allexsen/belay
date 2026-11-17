@@ -1,6 +1,6 @@
 """pybelay.inspect in real Inspect evals, with its mock model: no API calls.
 Docker and a static belay are needed: make inspect-test."""
-import errno, hashlib, json, os, platform, shutil, subprocess, sys, tempfile, time, unittest
+import asyncio, errno, hashlib, json, os, platform, shutil, subprocess, sys, tempfile, time, unittest
 from unittest import mock
 
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), ".."))
@@ -268,7 +268,7 @@ class DockerHost(Evals):
         self.assertEqual(self.verdict(s).metadata["flags"]["protected_path_deleted"], 1)
 
     def test_the_agent_sees_nothing_of_belays(self):
-        _, s = self.host("ls -a /tmp /work; ps -e 2>/dev/null | grep -c belay; true")
+        _, s = self.host("ls -a /tmp /work; ps -e 2>/dev/null | grep '[b]elay'; true")
         self.assertEqual(self.verdict(s).answer, "pass")
         self.assertNotIn("belay", s.store.get("agent_saw", ""))
 
@@ -283,7 +283,7 @@ class DockerHost(Evals):
         v = self.verdict(s)
         self.assertEqual((v.value, v.answer), (INCORRECT, "error"))
         self.assertEqual(v.metadata["where"], "host")
-        self.assertIn("not the one belay_record read", v.explanation)
+        self.assertIn("no longer holds what belay_record recorded", v.explanation)
 
 
 @solver
@@ -337,6 +337,11 @@ class HostModeThatCannotRun(Evals):
         with self.assertRaises(ValueError):
             pi.belay_record(SPEC, where="auto")
 
+    def test_a_timeout_root_could_not_keep_is_refused_with_host_mode(self):
+        for bad in (0, -1, None, 1.5, True):
+            with self.assertRaises(ValueError, msg=repr(bad)):
+                pi.belay_record(SPEC, where="host", timeout=bad)
+
     def test_binary_is_refused_with_host_mode(self):
         """binary= is only ever copied into a sandbox (PY-D5): the host runs the wheel's own."""
         with self.assertRaises(ValueError) as e:
@@ -377,6 +382,13 @@ if tool == "docker":
             sys.exit("Error response from daemon: Container c1 is already paused")
         if has("pause-never-arrives"):
             time.sleep(30)
+        if has("pause-lands-late"):     # the command is cut short; the daemon acts on it afterwards
+            if os.fork() == 0:
+                os.closerange(0, 3)     # or whoever reads this command's output waits for the child
+                time.sleep(3.4)         # after the command was given up on, TERM and its grace included
+                open(mark, "w").close()
+                os._exit(0)
+            time.sleep(30)
         open(mark, "w").close()
         if has("pause-hangs"):          # the daemon has the request; the command does not come back
             time.sleep(30)
@@ -391,10 +403,26 @@ assert args[:2] == ["-n", "--"], args
 cmd = args[2:]
 if has("sudo-allows") and not count_down("sudo-allows"):
     sys.exit("sudo: a password is required")
+if "mkdir" in cmd and has("mkdir-warned-and-failed"):
+    sys.exit("sudo: unable to resolve host here\\nmkdir: cannot create directory: No space left on device")
+if "mkdir" in cmd and has("mkdir-does-not-come-back"):
+    os.mkdir(cmd[-1], 0o700)
+    time.sleep(30)
 if "--docker" in cmd:
     i = cmd.index("env")
+    if has("something-else-unpauses"):
+        os.unlink(os.path.join(d, "paused"))
+    if has("belay-is-slow"):
+        time.sleep(1)
     if has("belay-sleeps"):
         cmd = cmd[:i] + ["sleep", "30"]
+    elif has("belay-ignores-term"):
+        cmd = cmd[:i] + ["sh", "-c", 'trap "" TERM; sleep 30']
+    elif has("belay-cannot-be-run"):
+        cmd = cmd[:i] + ["env", "/nonexistent/belay"]
+    elif has("belay-keeps-writing"):    # until its first file is gone, as belay does until its state is
+        cmd = cmd[:i + 3] + ["sh", "-c", 'd="$BELAY_STATE_DIR"; mkdir -p "$d"; : > "$d/first"; i=0; '
+                             'while [ -e "$d/first" ]; do : > "$d/f$i" 2>/dev/null; i=$((i+1)); done']
     elif has("belay-outlives-its-timeout"):
         cmd = ["sleep", "6"]
     elif has("belay-refuses"):
@@ -476,12 +504,16 @@ class HostTools(StandIns, unittest.TestCase):
         async def main():
             h = out["host"] = self.host(timeout)
             try:
+                try:
+                    await h.start()             # outside the limit: a limit is for the reading
+                except BaseException:
+                    await h.close()
+                    raise
                 with time_limit(limit):
                     try:
-                        await h.start()
                         out["lines"] = await self.reading(h)
                     finally:
-                        await h.close()
+                        await h.close()         # inside it: a cancelled sample still closes
             except BaseException as e:
                 out["error"] = e
         anyio.run(main)
@@ -528,7 +560,22 @@ class HostTools(StandIns, unittest.TestCase):
         out = self.whole(timeout=1)
         self.assertIsInstance(out["error"], TimeoutError)
         self.assertNotIn("paused", str(out["error"]))
-        self.assertEqual(len(self.asked("docker unpause")), 1)      # asked once: Docker says it is not paused
+        self.assertEqual(len(self.asked("docker unpause")), 2)      # and once more a moment later, in case
+
+    def test_a_pause_the_daemon_acts_on_late_is_still_undone(self):
+        self.given("pause-lands-late")
+        out = self.whole(timeout=1)
+        self.assertIsInstance(out["error"], TimeoutError)
+        time.sleep(1.5)                                             # past the moment the late pause lands
+        self.assertFalse(self.paused())
+        self.assertEqual(len(self.asked("docker unpause")), 2)      # the first found nothing to undo yet
+
+    def test_a_container_something_else_set_running_is_not_called_paused(self):
+        self.given("something-else-unpauses")
+        out = self.whole()
+        self.assertNotIn("error", out)
+        self.assertEqual(len(out["lines"][0]["sha256"]), 64)
+        self.assertEqual(len(self.asked("docker unpause")), 1)
 
     def test_a_pause_docker_refuses_is_said_and_nothing_is_unpaused(self):
         self.given("pause-refused")
@@ -542,6 +589,13 @@ class HostTools(StandIns, unittest.TestCase):
         out = self.whole()
         self.assertIsInstance(out["error"], Refused)
         self.assertIn("host-reader H-C3", str(out["error"]))
+        self.assertFalse(self.paused())
+
+    def test_a_belay_that_cannot_be_run_is_said_as_that(self):
+        self.given("belay-cannot-be-run")
+        out = self.whole()
+        self.assertIsInstance(out["error"], UsageError)
+        self.assertIn("belay could not be run as root (exit 127", str(out["error"]))
         self.assertFalse(self.paused())
 
     def test_an_unpause_that_fails_once_is_tried_again(self):
@@ -565,14 +619,32 @@ class HostTools(StandIns, unittest.TestCase):
         out = self.whole()
         self.assertIn("c1 is still paused", str(out["error"]))
         self.assertIn("host-reader H-C3", str(out["error"]))
+        self.assertIsInstance(out["error"], Refused)                # still the kind of error belay's was
+        self.assertEqual(out["error"].exit_code, 3)
+
+    def test_a_cancelled_reading_whose_container_stays_paused_is_a_warning(self):
+        self.given("belay-sleeps")
+        self.given("unpause-fails", 2)
+        with self.assertLogs("pybelay.inspect", "WARNING") as logs:
+            out = self.whole(limit=1)
+        self.assertIsInstance(out["error"], LimitExceededError)
+        self.assertIn("c1 is still paused", logs.output[0])
 
     def test_a_reading_that_outlasts_the_timeout_is_ended_by_roots_own_timeout(self):
         self.given("belay-sleeps")
         t = time.monotonic()
         out = self.whole(timeout=1)
         self.assertIsInstance(out["error"], TimeoutError)
-        self.assertIn("did not finish within 1 s", str(out["error"]))
+        self.assertIn("belay did not finish within 1 s", str(out["error"]))
         self.assertLess(time.monotonic() - t, 10)
+        self.assertFalse(self.paused())
+
+    def test_a_reading_roots_timeout_had_to_kill_is_a_timeout_too(self):
+        self.given("belay-ignores-term")
+        with mock.patch.object(pi, "_KILL_AFTER", 1):
+            out = self.whole(timeout=1)
+        self.assertIsInstance(out["error"], TimeoutError)
+        self.assertIn("signal 9", str(out["error"]))
         self.assertFalse(self.paused())
 
     def unkillable(self):
@@ -595,6 +667,7 @@ class HostTools(StandIns, unittest.TestCase):
         self.assertIsInstance(out["error"], TimeoutError)
         self.assertNotIsInstance(out["error"], PermissionError)
         self.assertIn("cannot be stopped from here", str(out["error"]))
+        self.assertEqual(len(self.asked("docker pause")), 1)        # it was the reading that was not stopped
         self.assertFalse(self.paused())
 
     def test_a_cancelled_reading_root_cannot_be_told_to_stop_is_still_a_cancellation(self):
@@ -603,6 +676,89 @@ class HostTools(StandIns, unittest.TestCase):
         out = self.whole(timeout=3, limit=1)
         self.assertIsInstance(out["error"], LimitExceededError)
         self.assertFalse(self.paused())
+
+    @unittest.skipUnless(sys.version_info >= (3, 11), "asyncio says whether a task is being cancelled from 3.11")
+    def test_a_reading_cancelled_by_asyncio_itself_is_still_a_cancellation(self):
+        self.unkillable()
+        self.given("belay-sleeps")
+        out = {}
+
+        async def main():
+            h = self.host(3)
+            await h.start()
+            task = asyncio.ensure_future(self.reading(h))
+            await asyncio.sleep(1)
+            task.cancel()
+            try:
+                await task
+            except BaseException as e:
+                out["error"] = e
+            await h.close()
+        asyncio.run(main())
+        self.assertIsInstance(out["error"], asyncio.CancelledError)
+        self.assertFalse(self.paused())
+
+    def test_a_cancelled_reading_that_goes_on_writing_still_leaves_nothing_of_roots(self):
+        """Root's belay cannot be stopped from here, and writes on while its directory is
+        removed: one removal is not enough."""
+        self.unkillable()
+        self.given("belay-keeps-writing")
+        out = self.whole(timeout=6, limit=1)
+        self.assertIsInstance(out["error"], LimitExceededError)
+        self.assertGreater(len(self.asked("sudo")) - 5, 0)          # the removal was asked for
+        self.assertEqual(self.roots_directories(), [])
+
+    def test_a_directory_whose_making_was_cut_short_is_removed_all_the_same(self):
+        self.given("mkdir-does-not-come-back")
+        with mock.patch.object(pi, "_BEHIND", 1):
+            out = self.whole(timeout=1)
+        self.assertIsInstance(out["error"], TimeoutError)
+        self.assertEqual(self.roots_directories(), [])
+
+    def test_a_directory_that_was_already_there_is_refused_and_left_alone(self):
+        out = {}
+
+        async def main():
+            h = self.host()
+            os.mkdir(h.priv)
+            open(os.path.join(h.priv, "theirs"), "w").close()
+            try:
+                await h.start()
+            except UsageError as e:
+                out["error"] = e
+            finally:
+                await h.close()
+            out["kept"] = os.path.exists(os.path.join(h.priv, "theirs"))
+        anyio.run(main)
+        self.assertIn("could not be made", str(out["error"]))
+        self.assertTrue(out["kept"])
+
+    def test_a_helper_that_fails_after_a_warning_of_sudos_is_not_a_refused_sudo(self):
+        self.given("mkdir-warned-and-failed")
+        out = self.whole()
+        self.assertIsInstance(out["error"], UsageError)
+        self.assertIn("could not be made", str(out["error"]))
+        self.assertNotIn("refused", str(out["error"]))
+
+    def test_readings_take_turns_and_a_container_is_paused_only_in_its_turn(self):
+        self.given("belay-is-slow")
+
+        async def one(n):
+            h = pi._Host("c%d" % n, pi._host_binary(), json.dumps(SPEC), 20)
+            try:
+                await h.start()
+                await h.run("baseline", "export", "--docker", h.container, "--scope", self.scope,
+                            "--out", self.kept + str(n), "--protect", h.protect, "--json")
+            finally:
+                await h.close()
+
+        async def main():
+            async with anyio.create_task_group() as tg:
+                for n in (1, 2, 3):
+                    tg.start_soon(one, n)
+        with mock.patch.object(pi, "_SLOT", "pybelay-host-turns"), mock.patch.object(pi, "_READINGS", 1):
+            anyio.run(main)
+        self.assertEqual([x.split()[1] for x in self.asked("docker")], ["pause", "unpause"] * 3)
 
     def test_a_refused_sudo_is_said_and_nothing_is_left_to_remove(self):
         self.given("sudo-allows", 0)
@@ -669,6 +825,7 @@ class ScratchCancelled(unittest.TestCase):
 class Spy(LocalSandboxEnvironment):
     """The local sandbox, saying it is the Docker container c1, and keeping what was asked of it."""
     asked = []
+    container = "c1"
 
     @classmethod
     async def sample_init(cls, task_name, config, metadata):
@@ -685,7 +842,7 @@ class Spy(LocalSandboxEnvironment):
         return await super().write_file(file, contents, **kw)
 
     async def connection(self, *, user=None):
-        return SandboxConnection(type="docker", command="docker exec -it c1 sh", container="c1")
+        return SandboxConnection(type="docker", command="docker exec -it c1 sh", container=Spy.container)
 
 
 @unittest.skipUnless(CAN_STAND_IN, STANDS_IN)
@@ -695,7 +852,7 @@ class HostModeStandIn(StandIns, Evals):
 
     def setUp(self):
         super().setUp()
-        Spy.asked = []
+        Spy.asked, Spy.container = [], "c1"
 
     def host(self, steps, scorers=None):
         return self.run_task(steps, scorers=scorers, setup=pi.belay_record(SPEC, where="host"))
@@ -755,12 +912,39 @@ class HostModeStandIn(StandIns, Evals):
         self.assertFalse(os.path.exists(mark))
         self.assertFalse([x for x in self.asked() if "not-belay" in x])
 
-    def test_a_store_naming_another_container_is_a_run_belay_could_not_judge(self):
-        _, s = self.host(edit_store(container="another"))
+    def test_a_sandbox_whose_container_was_replaced_is_a_run_belay_could_not_judge(self):
+        _, s = self.host(then(lambda: setattr(Spy, "container", "c2")))
         v = self.verdict(s)
         self.assertEqual((v.value, v.answer), (INCORRECT, "error"))
         self.assertIn("not the one belay_record read", v.explanation)
         self.assertEqual(len(self.asked("docker pause")), 1)       # the record's, and no other
+
+    def changed_store(self, **changes):
+        """The verdict after something wrote the sample's store, and what was asked of root for it."""
+        if os.path.exists(os.path.join(self.standin, "log")):
+            os.unlink(os.path.join(self.standin, "log"))            # each eval's own askings
+        _, s = self.host(edit_store(**changes))
+        v = self.verdict(s)
+        self.assertEqual((v.value, v.answer), (INCORRECT, "error"))
+        self.assertIn("no longer holds what belay_record recorded", v.explanation)
+        self.assertEqual(len(self.asked("docker pause")), 1)       # the record's: no reading for the verdict
+        return v
+
+    def test_the_store_does_not_choose_the_container_the_bundle_or_the_time_root_is_given(self):
+        secret = os.path.join(self.standin, "not-a-bundle")
+        with open(secret, "w") as f:
+            f.write("something of the host's\n")
+        self.changed_store(container="another")
+        self.changed_store(timeout=7)
+        self.changed_store(scope="/")
+        self.changed_store(bundle=secret)
+        self.assertFalse([x for x in self.asked() if "not-a-bundle" in x])
+
+    def test_a_record_of_the_default_mode_cannot_be_made_a_host_one_by_the_store(self):
+        _, s = self.run_task(edit_store(where="host", container="c1"), setup=pi.belay_record(SPEC))
+        v = self.verdict(s)
+        self.assertEqual((v.value, v.answer, v.metadata["where"]), (INCORRECT, "error", "sandbox"))
+        self.assertEqual(self.asked(), [])                          # neither sudo nor docker was asked anything
 
     def test_a_store_without_its_container_is_an_error_not_a_crash(self):
         @solver
