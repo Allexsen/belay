@@ -25,7 +25,8 @@ module Inspect imports, so every eval fails with `No module named 'acp.helpers'`
 without it, `pip install "agent-client-protocol<1"` repairs the environment. Drop it once an Inspect
 release fixes this.
 
-Nothing is needed in the sandbox image or on the Docker host: pybelay copies its own binary in.
+In the default mode nothing is needed in the sandbox image or on the Docker host: pybelay copies its own
+binary in. (`where="host"`, below, asks more of the host.)
 
 **Use.** Two additions to a Task. This is the
 [EvilGenie](https://github.com/wiser-human-experimental/evilgenie-escalation) harness's, whose scorer
@@ -75,25 +76,51 @@ kept on the host, and only its sha256 goes in the log.
 **Keeping belay out of the sandbox: `belay_record(spec, where="host")`.** belay then runs on the machine
 the eval runs on and reads the sample's Docker container from there (`--docker`), paused for each
 reading. Nothing of belay's enters the sandbox, so nothing in it has to be trusted to run belay: not its
-`uname`, `chmod` or `rm`, and not a process the agent left behind. `belay_verify()` follows what
-`belay_record` did, and the score's metadata says `"where": "host"`.
+`uname`, `chmod` or `rm`, and not a process the agent left behind. One thing is still asked of the
+sandbox, before the agent runs: its working directory (`pwd`), unless you give `scope=`.
+`belay_verify()` follows what `belay_record` did, and the score's metadata says `"where": "host"`.
 
 It needs:
 
 - a Docker sandbox, with the Docker daemon on this machine. Docker Desktop keeps containers in its own
   VM, where belay cannot read them: on a Mac or on Windows, use the default mode;
-- Linux, and the wheel's own binary for this machine;
-- root for belay, which reads the daemon's layer directories: run the eval as root, or let
-  `sudo -n` work for it;
+- Linux, and the wheel's own binary for this machine: `binary=` is refused with `where="host"`, since
+  nothing but the binary the wheel vouches for is run on the host;
+- root for belay, which reads the daemon's layer directories: run the eval as root, or let its user
+  run `timeout` through `sudo -n` without a password. **That is passwordless root for the account the
+  eval runs as.** sudo is asked for `timeout` and nothing else, but with `mkdir`, `install`, `env` and
+  `rm` as its command, and belay under `env`: a rule that allows that allows anything. If that is more
+  than the account should have, run the eval as root in a place made for it, or use the default mode;
+- `docker` for the eval's user (it pauses and unpauses the container) and for root (belay asks the
+  daemon about the container), both reaching the same daemon. `DOCKER_HOST` is passed on to root's
+  belay; a Docker context is not;
 - a container belay's host reader accepts: not `--privileged`, the scope not on a volume or a bind
   mount ([docs/cli.md](../docs/cli.md) lists what it refuses).
 
 **When `where="host"` cannot run, the sample fails and says why.** A sandbox that is not a Docker
-container, a refused `sudo`, a container the reader refuses: each is an error, in `belay_record` as a
-failed sample and in `belay_verify` as a run belay could not judge. It never runs belay inside the
-sandbox instead: a verdict taken from where you asked it not to be taken would look the same in the log.
+container, a refused `sudo` (at the record or later: a sudo timestamp can lapse during a long run), a
+container the reader refuses: each is an error, in `belay_record` as a failed sample and in
+`belay_verify` as a run belay could not judge. It never runs belay inside the sandbox instead: a
+verdict taken from where you asked it not to be taken would look the same in the log.
 
-**Known limits.**
+**What `where="host"` does on the host, and what it can leave there.**
+
+- Each reading gets a directory of root's own, `/tmp/pybelay-host.<random>`: a copy of the binary (the
+  very bytes whose digest was checked), the spec and belay's state. It is removed after the reading; if
+  that fails, a warning names it. A reading also copies the baseline bundle there, so the host's `/tmp`
+  needs room for one bundle per sample being read.
+- The container is paused for the reading, which anything else that uses it will notice, and is set
+  running again whatever became of the reading: an answer, a refusal, a timeout, a cancelled sample.
+  If `docker unpause` fails twice, the error says so together with belay's answer, and the container
+  stays paused until you run `docker unpause` yourself.
+- `timeout=` is kept by root's own `timeout`, because the eval's user cannot signal a process sudo
+  started. For the same reason a reading whose sample was cancelled cannot be stopped from the eval:
+  the container is set running at once, and root's belay ends by itself within `timeout=` seconds.
+- At most one reading per CPU runs at a time, and a container is paused only when its turn has come.
+- An eval that is killed outright in the middle of a reading leaves its container paused and its
+  directory in `/tmp`.
+
+**Known limits.** The first and the third are the default mode's; `where="host"` has its own, above.
 
 - belay runs in the sandbox, beside anything the agent left running. A process that outlives the agent
   can still write while belay reads, or interfere with it if it runs as the same user. Inspect has no
@@ -109,7 +136,7 @@ sandbox instead: a verdict taken from where you asked it not to be taken would l
   refuses and says so, and `belay_record(..., binary=path)` takes a static binary for it.
 - With several epochs and a reducer, a sample with both judged and unjudged epochs counts as a
   violation, not an error: a reduced score keeps an answer only if all its epochs agree.
-- The bundle holds a copy of what the scope contains. Inspect reads at most 100 MiB from a sandbox by
-  default: a larger one is refused, with what to do. A sample's bundle is removed from the host when
+- The bundle holds a copy of what the scope contains. In the default mode Inspect reads at most
+  100 MiB from a sandbox unless told otherwise: a larger one is refused, with what to do. A sample's bundle is removed from the host when
   it is scored.
 - `inspect score` on a finished log can't judge: the sandbox is gone.

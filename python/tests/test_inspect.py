@@ -1,6 +1,7 @@
 """pybelay.inspect in real Inspect evals, with its mock model: no API calls.
 Docker and a static belay are needed: make inspect-test."""
-import hashlib, json, os, platform, shutil, sys, tempfile, unittest
+import errno, hashlib, json, os, platform, shutil, subprocess, sys, tempfile, time, unittest
+from unittest import mock
 
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), ".."))
 from inspect_ai import Epochs, Task, eval as inspect_eval  # noqa: E402
@@ -8,11 +9,13 @@ from inspect_ai.dataset import Sample  # noqa: E402
 from inspect_ai.scorer import CORRECT, INCORRECT, SampleScore, Score, Target, mean, scorer  # noqa: E402
 from inspect_ai.scorer import score as inspect_score  # noqa: E402
 from inspect_ai.solver import solver  # noqa: E402
-from inspect_ai.util import sandbox  # noqa: E402
+from inspect_ai.util import LimitExceededError, SandboxConnection, sandbox, sandboxenv, time_limit  # noqa: E402
+from inspect_ai.util._sandbox.local import LocalSandboxEnvironment  # noqa: E402
+import anyio  # noqa: E402
 
 from pybelay import inspect as pi  # noqa: E402
 from pybelay import _binary  # noqa: E402
-from pybelay._errors import BinaryMismatch, UsageError  # noqa: E402
+from pybelay._errors import BelayError, BinaryMismatch, Refused, UsageError  # noqa: E402
 
 SPEC = {"belay_protect": 2, "protect": [{"path": "test.py", "mode": ["no_write"]},
                                         {"path": "cases.json", "mode": ["no_write"]}]}
@@ -106,6 +109,7 @@ class Scenarios:
         v = self.verdict(s)
         self.assertEqual((v.value, v.answer), (CORRECT, "pass"))
         self.assertEqual(v.metadata["violations"], 0)
+        self.assertEqual(v.metadata["where"], "sandbox")
         m = {k: x.value for k, x in log.results.scores[0].metrics.items()}
         self.assertEqual((m["pass_rate"], m["violations"]), (1.0, 0))
 
@@ -164,6 +168,7 @@ class Scenarios:
         v = self.verdict(s)
         self.assertEqual((v.value, v.answer), (INCORRECT, "error"))
         self.assertEqual(v.metadata["error"]["type"], "FileNotFoundError")
+        self.assertEqual(v.metadata["where"], "sandbox")
         self.assertEqual(s.scores["changes_the_sandbox"].value, 1.0)
         m = {k: x.value for k, x in log.results.scores[0].metrics.items()}
         self.assertEqual((m["pass_rate"], m["violations"], m["errors"]), (0.0, 0, 1))
@@ -213,7 +218,6 @@ def host_mode_works_here():
     that is a requirement, never a skip."""
     if os.environ.get("CI"):
         return True
-    import subprocess
     try:
         sudo = os.geteuid() == 0 or subprocess.run(["sudo", "-n", "true"], capture_output=True).returncode == 0
         info = subprocess.run(["docker", "info", "--format", "{{.OperatingSystem}}"], capture_output=True, text=True)
@@ -222,16 +226,25 @@ def host_mode_works_here():
     return sudo and info.returncode == 0 and "Docker Desktop" not in info.stdout
 
 
-@unittest.skipUnless(host_mode_works_here(), "needs a local Docker daemon and root for belay")
 class DockerHost(Evals):
     """belay on this machine, reading the sample's container: where="host"."""
 
     @classmethod
     def setUpClass(cls):
+        # Asked here, not when the module is read: sudo and docker are run only for this class.
+        if not host_mode_works_here():
+            raise unittest.SkipTest("needs a local Docker daemon and root for belay")
         d = tempfile.mkdtemp(prefix="pybelay-inspect-compose-")
         cls.sandbox_spec = ("docker", os.path.join(d, "compose.yaml"))
         with open(cls.sandbox_spec[1], "w") as f:
             f.write(COMPOSE)
+
+    def setUp(self):
+        # Sandbox mode cleans up after itself, so looking into the sandbox afterwards
+        # shows nothing either way: any use of its scratch directory fails the sample.
+        p = mock.patch.object(pi, "_Scratch", side_effect=AssertionError("belay went into the sandbox"))
+        p.start()
+        self.addCleanup(p.stop)
 
     def host(self, cmd, scorers=None):
         return self.run_task(agent(cmd), scorers=scorers, setup=pi.belay_record(SPEC, where="host"))
@@ -242,6 +255,7 @@ class DockerHost(Evals):
         self.assertEqual((v.value, v.answer), (INCORRECT, "violation"))
         self.assertEqual(v.metadata["flags"]["protected_path_written"], 1)
         self.assertEqual(v.metadata["where"], "host")
+        self.assertTrue(v.metadata["belay_version"])
 
     def test_writing_only_the_solution_passes(self):
         _, s = self.host("echo 'print(1)' > solution.py")
@@ -253,19 +267,10 @@ class DockerHost(Evals):
         _, s = self.host("rm cases.json")
         self.assertEqual(self.verdict(s).metadata["flags"]["protected_path_deleted"], 1)
 
-    def test_nothing_of_belays_ever_enters_the_sandbox(self):
-        # The agent looks after the record; a scorer looks after the verdict.
-        @scorer(metrics=[mean()])
-        def looks():
-            async def score(state, target):
-                r = await sandbox().exec(["sh", "-c", "ls -a /tmp /work; ls /belay* 2>/dev/null; true"])
-                return Score(value=1.0, answer=r.stdout)
-            return score
-        _, s = self.host("ls -a /tmp /work; ps -e 2>/dev/null | grep -c belay; true",
-                         scorers=[pi.belay_verify(), looks()])
+    def test_the_agent_sees_nothing_of_belays(self):
+        _, s = self.host("ls -a /tmp /work; ps -e 2>/dev/null | grep -c belay; true")
         self.assertEqual(self.verdict(s).answer, "pass")
         self.assertNotIn("belay", s.store.get("agent_saw", ""))
-        self.assertNotIn("belay", s.scores["looks"].answer)
 
     def test_the_container_runs_again_after_each_reading(self):
         _, s = self.host("echo ran > solution.py && cat solution.py", scorers=[pi.belay_verify(), changes_the_sandbox()])
@@ -273,31 +278,31 @@ class DockerHost(Evals):
         self.assertEqual(self.verdict(s).answer, "pass")
         self.assertEqual(s.scores["changes_the_sandbox"].value, 1.0)
 
-    def test_a_replaced_container_is_a_run_belay_could_not_judge_never_a_fallback(self):
-        @solver
-        def another_container():
-            async def solve(state, generate):
-                recorded = dict(state.store.get(pi._STORE_KEY))
-                recorded["container"] = "not-" + recorded["container"]
-                state.store.set(pi._STORE_KEY, recorded)
-                return state
-            return solve
-
-        @scorer(metrics=[mean()])
-        def looks():
-            async def score(state, target):
-                r = await sandbox().exec(["sh", "-c", "ls -a /tmp /work"])
-                return Score(value=1.0, answer=r.stdout)
-            return score
-        _, s = self.run_task(another_container(), scorers=[pi.belay_verify(), looks()],
-                             setup=pi.belay_record(SPEC, where="host"))
+    def test_a_store_naming_another_container_is_a_run_belay_could_not_judge(self):
+        _, s = self.run_task(edit_store(container="not-the-one"), setup=pi.belay_record(SPEC, where="host"))
         v = self.verdict(s)
         self.assertEqual((v.value, v.answer), (INCORRECT, "error"))
         self.assertEqual(v.metadata["where"], "host")
         self.assertIn("not the one belay_record read", v.explanation)
-        self.assertNotIn("belay", s.scores["looks"].answer)     # nothing went into the sandbox instead
 
 
+@solver
+def edit_store(**changes):
+    """What code with the sample's store could do to what belay_record kept there."""
+    async def solve(state, generate):
+        recorded = dict(state.store.get(pi._STORE_KEY))
+        recorded.update(changes)
+        state.store.set(pi._STORE_KEY, recorded)
+        return state
+    return solve
+
+
+@solver
+def then(fn):
+    async def solve(state, generate):
+        fn()
+        return state
+    return solve
 
 
 class HostModeThatCannotRun(Evals):
@@ -315,7 +320,8 @@ class HostModeThatCannotRun(Evals):
     def test_a_sandbox_that_is_no_container_fails_the_sample_and_says_why(self):
         log, s = self.refused()
         self.assertIsNotNone(s.error)
-        self.assertIn('where="host"', str(s.error))
+        # The words of this refusal alone: on a machine that is not Linux it is still the one given.
+        self.assertIn("needs a Docker sandbox, and this one gives no container", str(s.error))
         self.assertEqual(log.status, "error")
 
     def test_it_does_not_fall_back_to_the_sandbox(self):
@@ -330,6 +336,464 @@ class HostModeThatCannotRun(Evals):
             pi.belay_record(SPEC, where="outside")
         with self.assertRaises(ValueError):
             pi.belay_record(SPEC, where="auto")
+
+    def test_binary_is_refused_with_host_mode(self):
+        """binary= is only ever copied into a sandbox (PY-D5): the host runs the wheel's own."""
+        with self.assertRaises(ValueError) as e:
+            pi.belay_record(SPEC, where="host", binary="/usr/bin/true")
+        self.assertIn("binary=", str(e.exception))
+
+
+STAND_IN = '''#!%s -I
+"""Stand-ins for docker and sudo: no daemon and no root. Each logs what it was asked.
+sudo runs its command as this user, and a reading without `--docker NAME`, so the real
+belay reads the stand-in sandbox's own directory."""
+import os, sys, time
+d = os.environ["PYBELAY_STANDIN"]
+tool, args = os.path.basename(sys.argv[0]), sys.argv[1:]
+
+
+def has(name):
+    return os.path.exists(os.path.join(d, name))
+
+
+def count_down(name):
+    """True while the number in the file is above zero; one less each time."""
+    if not has(name):
+        return False
+    with open(os.path.join(d, name)) as f:
+        n = int(f.read())
+    with open(os.path.join(d, name), "w") as f:
+        f.write(str(max(n - 1, 0)))
+    return n > 0
+
+
+with open(os.path.join(d, "log"), "a") as f:
+    f.write(tool + " " + " ".join(args) + "\\n")
+if tool == "docker":
+    mark = os.path.join(d, "paused")
+    if args[0] == "pause":
+        if has("pause-refused"):
+            sys.exit("Error response from daemon: Container c1 is already paused")
+        if has("pause-never-arrives"):
+            time.sleep(30)
+        open(mark, "w").close()
+        if has("pause-hangs"):          # the daemon has the request; the command does not come back
+            time.sleep(30)
+    elif args[0] == "unpause":
+        if count_down("unpause-fails"):
+            sys.exit("Error response from daemon: cannot unpause")
+        if not os.path.exists(mark):
+            sys.exit("Error response from daemon: Container c1 is not paused")
+        os.unlink(mark)
+    sys.exit(0)
+assert args[:2] == ["-n", "--"], args
+cmd = args[2:]
+if has("sudo-allows") and not count_down("sudo-allows"):
+    sys.exit("sudo: a password is required")
+if "--docker" in cmd:
+    i = cmd.index("env")
+    if has("belay-sleeps"):
+        cmd = cmd[:i] + ["sleep", "30"]
+    elif has("belay-outlives-its-timeout"):
+        cmd = ["sleep", "6"]
+    elif has("belay-refuses"):
+        cmd = cmd[:i] + ["sh", "-c", 'echo "belay: --docker c1: the scope is a volume (host-reader H-C3)" >&2; exit 3']
+    else:
+        j = cmd.index("--docker")
+        cmd = cmd[:j] + cmd[j + 2:]
+os.execvp(cmd[0], cmd)
+'''
+
+STANDS_IN = "the stand-in sudo needs Linux and a user who is not root"
+CAN_STAND_IN = platform.system() == "Linux" and os.geteuid() != 0
+
+
+class StandIns:
+    """`docker` and `sudo` first on PATH that are neither, and root's /tmp somewhere of ours."""
+
+    def setUp(self):
+        d = self.standin = tempfile.mkdtemp(prefix="pybelay-standin-")
+        self.addCleanup(shutil.rmtree, d, ignore_errors=True)
+        os.mkdir(os.path.join(d, "bin"))
+        os.mkdir(os.path.join(d, "tmp"))
+        for name in ("docker", "sudo"):
+            with open(os.path.join(d, "bin", name), "w") as f:
+                f.write(STAND_IN % sys.executable)
+            os.chmod(os.path.join(d, "bin", name), 0o755)
+        env = {"PATH": os.path.join(d, "bin") + os.pathsep + os.environ["PATH"], "PYBELAY_STANDIN": d}
+        p = mock.patch.dict(os.environ, env)
+        p.start()
+        self.addCleanup(p.stop)
+        os.environ.pop("DOCKER_HOST", None)
+        p = mock.patch.object(pi, "_HOST_TMP", os.path.join(d, "tmp"))
+        p.start()
+        self.addCleanup(p.stop)
+
+    def given(self, name, value=""):
+        with open(os.path.join(self.standin, name), "w") as f:
+            f.write(str(value))
+
+    def asked(self, tool=None):
+        try:
+            with open(os.path.join(self.standin, "log")) as f:
+                lines = f.read().splitlines()
+        except FileNotFoundError:
+            return []
+        return [x for x in lines if tool is None or x.startswith(tool + " ")]
+
+    def paused(self):
+        return os.path.exists(os.path.join(self.standin, "paused"))
+
+    def roots_directories(self):
+        return os.listdir(os.path.join(self.standin, "tmp"))
+
+
+@unittest.skipUnless(CAN_STAND_IN, STANDS_IN)
+class HostTools(StandIns, unittest.TestCase):
+    """One reading by pybelay.inspect's host runner, with the stand-ins: what it asks of
+    docker and of root, in what order, and what it leaves when things go wrong."""
+
+    def setUp(self):
+        super().setUp()
+        self.scope = tempfile.mkdtemp(prefix="pybelay-standin-scope-")
+        self.addCleanup(shutil.rmtree, self.scope, ignore_errors=True)
+        with open(os.path.join(self.scope, "test.py"), "w") as f:
+            f.write("assert True\n")
+        self.kept = os.path.join(self.standin, "bundle")
+
+    def host(self, timeout=20):
+        return pi._Host("c1", pi._host_binary(), json.dumps(SPEC), timeout)
+
+    async def reading(self, h):
+        return await h.run("baseline", "export", "--docker", "c1", "--scope", self.scope, "--out", self.kept,
+                           "--protect", h.protect, "--json")
+
+    def whole(self, timeout=20, limit=None):
+        """start, one reading, close: as belay_record does. Returns what came of the reading."""
+        out = {}
+
+        async def main():
+            h = out["host"] = self.host(timeout)
+            try:
+                with time_limit(limit):
+                    try:
+                        await h.start()
+                        out["lines"] = await self.reading(h)
+                    finally:
+                        await h.close()
+            except BaseException as e:
+                out["error"] = e
+        anyio.run(main)
+        return out
+
+    def test_a_reading_pauses_the_container_and_sets_it_running_again(self):
+        out = self.whole()
+        self.assertNotIn("error", out)
+        self.assertEqual(len(out["lines"][0]["sha256"]), 64)
+        asked = [" ".join(x.split()[:2]) if x.startswith("docker") else "sudo " + x.split()[7] for x in self.asked()]
+        priv = out["host"].priv
+        self.assertEqual(asked, ["sudo mkdir", "sudo install", "sudo install", "sudo " + priv + "/belay",
+                                 "docker pause", "sudo env", "docker unpause", "sudo rm"])
+        self.assertFalse(self.paused())
+        self.assertEqual(self.roots_directories(), [])
+
+    def test_root_is_asked_only_for_timeout_and_runs_a_copy_of_the_checked_binary(self):
+        out = self.whole()
+        for line in self.asked("sudo"):
+            self.assertTrue(line.startswith("sudo -n -- timeout -k 5 20 "), line)
+        reading = [x for x in self.asked("sudo") if " baseline export " in x][0].split()
+        ran = reading[reading.index("baseline") - 1]
+        self.assertEqual(ran, out["host"].priv + "/belay")
+        self.assertNotEqual(ran, _binary.binary_path())
+        self.assertIn("BELAY_STATE_DIR=" + out["host"].priv + "/state", reading)
+
+    def test_a_cancelled_reading_leaves_the_container_running_and_nothing_of_roots(self):
+        self.given("belay-sleeps")
+        out = self.whole(limit=1)
+        self.assertIsInstance(out["error"], LimitExceededError)
+        self.assertEqual(len(self.asked("docker pause")), 1)
+        self.assertFalse(self.paused())
+        self.assertEqual(self.roots_directories(), [])
+
+    def test_a_pause_that_does_not_come_back_is_undone(self):
+        self.given("pause-hangs")
+        out = self.whole(timeout=1)
+        self.assertIsInstance(out["error"], TimeoutError)
+        self.assertFalse(self.paused())
+        self.assertFalse([x for x in self.asked("sudo") if " baseline " in x])
+
+    def test_a_pause_that_never_reached_the_daemon_is_only_a_timeout(self):
+        self.given("pause-never-arrives")
+        out = self.whole(timeout=1)
+        self.assertIsInstance(out["error"], TimeoutError)
+        self.assertNotIn("paused", str(out["error"]))
+        self.assertEqual(len(self.asked("docker unpause")), 1)      # asked once: Docker says it is not paused
+
+    def test_a_pause_docker_refuses_is_said_and_nothing_is_unpaused(self):
+        self.given("pause-refused")
+        out = self.whole()
+        self.assertIsInstance(out["error"], UsageError)
+        self.assertIn("already paused", str(out["error"]))
+        self.assertEqual(self.asked("docker unpause"), [])
+
+    def test_what_belay_refuses_is_refused_with_its_reason(self):
+        self.given("belay-refuses")
+        out = self.whole()
+        self.assertIsInstance(out["error"], Refused)
+        self.assertIn("host-reader H-C3", str(out["error"]))
+        self.assertFalse(self.paused())
+
+    def test_an_unpause_that_fails_once_is_tried_again(self):
+        self.given("unpause-fails", 1)
+        out = self.whole()
+        self.assertNotIn("error", out)
+        self.assertEqual(len(self.asked("docker unpause")), 2)
+        self.assertFalse(self.paused())
+
+    def test_a_container_left_paused_is_said_together_with_belays_answer(self):
+        self.given("unpause-fails", 2)
+        out = self.whole()
+        self.assertIsInstance(out["error"], UsageError)
+        self.assertIn("c1 is still paused", str(out["error"]))
+        self.assertIn('"sha256"', str(out["error"]))
+        self.assertTrue(self.paused())
+
+    def test_a_container_left_paused_is_said_together_with_belays_refusal(self):
+        self.given("unpause-fails", 2)
+        self.given("belay-refuses")
+        out = self.whole()
+        self.assertIn("c1 is still paused", str(out["error"]))
+        self.assertIn("host-reader H-C3", str(out["error"]))
+
+    def test_a_reading_that_outlasts_the_timeout_is_ended_by_roots_own_timeout(self):
+        self.given("belay-sleeps")
+        t = time.monotonic()
+        out = self.whole(timeout=1)
+        self.assertIsInstance(out["error"], TimeoutError)
+        self.assertIn("did not finish within 1 s", str(out["error"]))
+        self.assertLess(time.monotonic() - t, 10)
+        self.assertFalse(self.paused())
+
+    def unkillable(self):
+        """As sudo's processes are to the user who started them: a signal is EPERM."""
+        real = subprocess.Popen.send_signal
+
+        def send_signal(proc, sig):
+            if os.path.basename(list(proc.args)[0]) == "sudo":
+                raise PermissionError(errno.EPERM, "Operation not permitted")
+            return real(proc, sig)
+        p = mock.patch.object(subprocess.Popen, "send_signal", send_signal)
+        p.start()
+        self.addCleanup(p.stop)
+
+    def test_a_root_process_inspect_cannot_stop_is_a_timeout_not_a_permission_error(self):
+        self.unkillable()
+        self.given("belay-outlives-its-timeout")
+        with mock.patch.object(pi, "_BEHIND", 1):
+            out = self.whole(timeout=1)
+        self.assertIsInstance(out["error"], TimeoutError)
+        self.assertNotIsInstance(out["error"], PermissionError)
+        self.assertIn("cannot be stopped from here", str(out["error"]))
+        self.assertFalse(self.paused())
+
+    def test_a_cancelled_reading_root_cannot_be_told_to_stop_is_still_a_cancellation(self):
+        self.unkillable()
+        self.given("belay-sleeps")
+        out = self.whole(timeout=3, limit=1)
+        self.assertIsInstance(out["error"], LimitExceededError)
+        self.assertFalse(self.paused())
+
+    def test_a_refused_sudo_is_said_and_nothing_is_left_to_remove(self):
+        self.given("sudo-allows", 0)
+        out = self.whole()
+        self.assertIsInstance(out["error"], UsageError)
+        self.assertIn("`sudo -n` was refused (sudo: a password is required)", str(out["error"]))
+        self.assertEqual(len(self.asked("sudo")), 1)
+        self.assertEqual(self.asked("docker"), [])
+
+    def test_sudo_refused_at_the_reading_is_said_as_that(self):
+        self.given("sudo-allows", 4)        # the directory, the two files and the version: then no more
+        with self.assertLogs("pybelay.inspect", "WARNING") as logs:
+            out = self.whole()
+        self.assertIsInstance(out["error"], UsageError)
+        self.assertIn("`sudo -n` was refused", str(out["error"]))
+        self.assertFalse(self.paused())
+        # Its directory could not be removed either, and that is said, not swallowed.
+        self.assertIn(out["host"].priv, logs.output[0])
+        self.assertIn("could not be removed", logs.output[0])
+
+    def test_the_daemon_the_eval_uses_is_the_one_roots_belay_asks(self):
+        with mock.patch.dict(os.environ, {"DOCKER_HOST": "unix:///run/user/1000/docker.sock"}):
+            out = self.whole()
+        self.assertNotIn("error", out)
+        reading = [x for x in self.asked("sudo") if " baseline export " in x][0]
+        self.assertIn(" DOCKER_HOST=unix:///run/user/1000/docker.sock ", reading)
+
+    def test_an_eval_that_is_root_asks_nothing_of_sudo(self):
+        # The real belay then gets --docker as it is, finds it is not root, and says so.
+        with mock.patch.object(pi.os, "geteuid", return_value=0):
+            out = self.whole()
+        self.assertEqual(self.asked("sudo"), [])
+        self.assertEqual([x.split()[1] for x in self.asked("docker")], ["pause", "unpause"])
+        self.assertIsInstance(out["error"], BelayError)
+        self.assertIn("root", str(out["error"]))
+        self.assertEqual(self.roots_directories(), [])
+
+
+class ScratchCancelled(unittest.TestCase):
+    def test_a_cancelled_step_still_takes_belay_out_of_the_sandbox(self):
+        ran = []
+
+        class Result:
+            success, returncode, stdout, stderr = True, 0, "belay 0", ""
+
+        class Env:
+            async def exec(self, cmd, **kw):
+                await anyio.sleep(0.01)
+                ran.append(cmd[0])
+                return Result
+
+            async def write_file(self, path, contents, **kw):
+                await anyio.sleep(0)
+
+        async def main():
+            with anyio.move_on_after(0.5):
+                async with pi._Scratch(Env(), b"x", "{}", None, 5):
+                    await anyio.sleep(30)
+        anyio.run(main)
+        self.assertEqual(ran[-1], "rm")
+
+
+@sandboxenv(name="pybelay-spy")
+class Spy(LocalSandboxEnvironment):
+    """The local sandbox, saying it is the Docker container c1, and keeping what was asked of it."""
+    asked = []
+
+    @classmethod
+    async def sample_init(cls, task_name, config, metadata):
+        return {"default": Spy()}
+
+    async def exec(self, cmd, *args, **kw):
+        # Inspect asks a new sandbox who it runs as; that one is its own.
+        if "inspect_image_path" not in " ".join(cmd):
+            Spy.asked.append(["exec"] + list(cmd))
+        return await super().exec(cmd, *args, **kw)
+
+    async def write_file(self, file, contents, **kw):
+        Spy.asked.append(["write", file])
+        return await super().write_file(file, contents, **kw)
+
+    async def connection(self, *, user=None):
+        return SandboxConnection(type="docker", command="docker exec -it c1 sh", container="c1")
+
+
+@unittest.skipUnless(CAN_STAND_IN, STANDS_IN)
+class HostModeStandIn(StandIns, Evals):
+    """where="host" through whole evals, with the stand-ins and the real belay. No Docker."""
+    sandbox_spec = "pybelay-spy"
+
+    def setUp(self):
+        super().setUp()
+        Spy.asked = []
+
+    def host(self, steps, scorers=None):
+        return self.run_task(steps, scorers=scorers, setup=pi.belay_record(SPEC, where="host"))
+
+    def test_editing_a_protected_file_is_a_violation_and_the_score_says_where_and_which_belay(self):
+        _, s = self.host(agent("echo '# edited' >> test.py"))
+        v = self.verdict(s)
+        self.assertEqual((v.value, v.answer), (INCORRECT, "violation"))
+        self.assertEqual(v.metadata["flags"]["protected_path_written"], 1)
+        self.assertEqual(v.metadata["where"], "host")
+        says = subprocess.run([_binary.binary_path(), "--version"], capture_output=True, text=True).stdout.strip()
+        self.assertEqual(v.metadata["belay_version"], says)
+
+    def test_nothing_is_asked_of_the_sandbox_but_its_directory_and_the_agents_own_command(self):
+        _, s = self.host(agent("echo 'print(1)' > solution.py"))
+        self.assertEqual(self.verdict(s).answer, "pass")
+        writes = sorted(x[1] for x in Spy.asked if x[0] == "write")
+        execs = [x[1:] for x in Spy.asked if x[0] == "exec"]
+        self.assertEqual(writes, sorted(FILES))
+        self.assertEqual(execs, [["pwd"], ["sh", "-c", "echo 'print(1)' > solution.py"]])
+
+    def test_each_reading_has_its_pause_and_nothing_of_roots_stays(self):
+        _, s = self.host(agent("true"))
+        self.assertEqual(self.verdict(s).answer, "pass")
+        self.assertEqual([x.split()[1] for x in self.asked("docker")], ["pause", "unpause", "pause", "unpause"])
+        self.assertFalse(self.paused())
+        self.assertEqual(self.roots_directories(), [])
+
+    def test_a_score_before_the_end_and_the_last_one(self):
+        _, s = self.host([score_midway(), agent("rm cases.json")])
+        self.assertEqual(s.store["midway"], ["pass"])
+        self.assertEqual(self.verdict(s).answer, "violation")
+        self.assertFalse(os.path.exists(s.store[pi._STORE_KEY]["bundle"]))
+
+    def test_what_belay_refuses_is_an_error_with_its_reason(self):
+        _, s = self.host(then(lambda: self.given("belay-refuses")))
+        v = self.verdict(s)
+        self.assertEqual((v.value, v.answer, v.metadata["where"]), (INCORRECT, "error", "host"))
+        self.assertIn("host-reader H-C3", v.explanation)
+        self.assertFalse(self.paused())
+
+    def test_on_error_raise_fails_the_sample(self):
+        _, s = self.host(then(lambda: self.given("belay-refuses")), scorers=pi.belay_verify(on_error="raise"))
+        self.assertIn("host-reader H-C3", str(s.error))
+
+    def test_the_store_does_not_choose_what_runs_as_root(self):
+        mark = os.path.join(self.standin, "ran-as-root")
+        other = os.path.join(self.standin, "not-belay")
+        with open(other, "w") as f:
+            f.write("#!/bin/sh\ntouch %s\n" % mark)
+        os.chmod(other, 0o755)
+        with open(other, "rb") as f:
+            digest = hashlib.sha256(f.read()).hexdigest()
+        _, s = self.host(edit_store(binary=other, binary_sha256=digest))
+        v = self.verdict(s)
+        self.assertEqual((v.value, v.answer), (INCORRECT, "error"))
+        self.assertFalse(os.path.exists(mark))
+        self.assertFalse([x for x in self.asked() if "not-belay" in x])
+
+    def test_a_store_naming_another_container_is_a_run_belay_could_not_judge(self):
+        _, s = self.host(edit_store(container="another"))
+        v = self.verdict(s)
+        self.assertEqual((v.value, v.answer), (INCORRECT, "error"))
+        self.assertIn("not the one belay_record read", v.explanation)
+        self.assertEqual(len(self.asked("docker pause")), 1)       # the record's, and no other
+
+    def test_a_store_without_its_container_is_an_error_not_a_crash(self):
+        @solver
+        def drop():
+            async def solve(state, generate):
+                recorded = dict(state.store.get(pi._STORE_KEY))
+                del recorded["container"]
+                state.store.set(pi._STORE_KEY, recorded)
+                return state
+            return solve
+        _, s = self.host(drop())
+        self.assertEqual(self.verdict(s).answer, "error")
+
+    def test_sudo_refused_at_the_verdict_is_said_as_that(self):
+        _, s = self.host(then(lambda: self.given("sudo-allows", 0)))
+        v = self.verdict(s)
+        self.assertEqual((v.value, v.answer), (INCORRECT, "error"))
+        self.assertIn("`sudo -n` was refused", v.explanation)
+
+    def test_a_container_left_paused_is_said_in_the_verdict(self):
+        _, s = self.host(then(lambda: self.given("unpause-fails", 2)))
+        v = self.verdict(s)
+        self.assertEqual((v.value, v.answer), (INCORRECT, "error"))
+        self.assertIn("c1 is still paused", v.explanation)
+
+    def test_it_never_uses_the_sandbox_instead_when_root_cannot_be_had(self):
+        self.given("sudo-allows", 0)
+        log, s = self.host(agent("true"))
+        self.assertIn("`sudo -n` was refused", str(s.error))
+        self.assertIsNone(s.store.get(pi._STORE_KEY))
+        self.assertFalse(s.scores)
+        self.assertEqual([x for x in Spy.asked if x[0] == "exec" and x[1] not in ("pwd", "sh")], [])
+        self.assertEqual(sorted(x[1] for x in Spy.asked if x[0] == "write"), sorted(FILES))
 
 
 class NoSandbox(Evals):
@@ -430,6 +894,51 @@ class Selection(Layout, unittest.TestCase):
         with self.assertRaises(UsageError) as e:
             pi._pick_binary(given, "Linux", "aarch64")
         self.assertIn("binary=", str(e.exception))
+
+
+class HostBinary(Layout, unittest.TestCase):
+    """What where="host" will run on this machine: the wheel's own binary, as checked."""
+
+    def other(self):
+        return ARM if platform.machine() == "x86_64" else X86
+
+    def own(self):
+        return X86 if platform.machine() == "x86_64" else ARM
+
+    @unittest.skipUnless(platform.system() == "Linux", "the machine is asked what it is")
+    def test_the_wheels_own_binary_for_this_machine_as_bytes(self):
+        self.lay(self.own() + b"the rest")
+        self.assertEqual(pi._host_binary(), self.own() + b"the rest")
+
+    @unittest.skipUnless(platform.system() == "Linux", "the machine is asked what it is")
+    def test_a_binary_for_another_architecture_is_refused(self):
+        self.lay(self.other())
+        with self.assertRaises(UsageError) as e:
+            pi._host_binary()
+        self.assertIn("built for", str(e.exception))
+
+    def test_a_machine_that_is_not_linux_is_refused(self):
+        self.lay(MACHO)
+        with mock.patch.object(pi.platform, "system", return_value="Darwin"):
+            with self.assertRaises(UsageError) as e:
+                pi._host_binary()
+        self.assertIn("needs Linux", str(e.exception))
+
+    @unittest.skipUnless(platform.system() == "Linux", "the machine is asked what it is")
+    def test_a_file_too_short_to_say_is_refused_as_any_other(self):
+        self.lay(b"\x7fELF\x02\x01")
+        with self.assertRaises(UsageError):
+            pi._host_binary()
+        self.assertIsNone(pi._built_for(b"\x7fELF"))
+
+    def test_bytes_that_do_not_hash_to_the_wheels_digest_are_not_run(self):
+        d = self.lay(self.own())
+        _binary.checked_binary()                    # checked once, as a process does: then it changes
+        with open(os.path.join(d, "belay"), "ab") as f:
+            f.write(b"x")
+        with mock.patch.object(pi.platform, "system", return_value="Linux"):
+            with self.assertRaises(BinaryMismatch):
+                pi._host_binary()
 
 
 class MacWheelInDocker(Layout, Evals):

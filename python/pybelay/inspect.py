@@ -18,8 +18,9 @@ the Docker host.
 With `belay_record(..., where="host")` belay never enters the sandbox: it reads
 the sample's Docker container from this machine (`--docker`), with the container
 paused for each reading. That needs a Docker daemon on this machine (not Docker
-Desktop's VM) and root for belay itself: the eval runs as root, or `sudo -n`
-works for the belay binary.
+Desktop's VM) and root for belay itself: the eval runs as root, or its user may
+run `timeout` through `sudo -n` without a password, which is as much as being
+root (python/README.md says what is run).
 
 Nothing of belay's stays in the sandbox while the agent runs: the binary goes in
 for each step and comes out again, and the baseline bundle is kept on the host,
@@ -27,28 +28,31 @@ as `belay baseline export` says it must be. The same goes for the spec, so an
 agent can't read what is protected.
 """
 import atexit
+import errno
 import hashlib
 import json
+import logging
 import os
 import platform
 import shutil
 import struct
-import subprocess
 import tempfile
 import uuid
 from typing import Any, Dict, List, Optional, Union
 
 try:
+    import anyio
     from inspect_ai.scorer import (CORRECT, INCORRECT, Metric, SampleScore, Score, Scorer, Target, metric, scorer,
                                    value_to_float)
     from inspect_ai.solver import Generate, Solver, TaskState, solver
     from inspect_ai.util import OutputLimitExceededError, SandboxEnvironment, sandbox as inspect_sandbox
+    from inspect_ai.util import concurrency as inspect_concurrency
     from inspect_ai.util import subprocess as inspect_subprocess
 except ImportError as e:
     raise ImportError('pybelay.inspect needs Inspect: pip install "pybelay[inspect]" (%s)' % e) from None
 
 from . import _parsed, _policy
-from ._binary import carried_binary, checked_binary
+from ._binary import binary_path, carried_binary, checked_binary, checked_bytes
 from ._errors import BelayError, FormatError, UsageError
 from .reward import _NOT_KINDS
 
@@ -58,6 +62,17 @@ _STORE_KEY = "pybelay.inspect"
 _ELF_MACHINES = {62: "x86_64", 183: "aarch64"}
 _ARCH_NAMES = {"arm64": "aarch64", "amd64": "x86_64"}
 _ASSET_NAMES = {"aarch64": "arm64"}
+
+_log = logging.getLogger(__name__)
+# Where root's directory for one reading is made. /tmp is root's and sticky, which is
+# what belay asks of every directory above its state.
+_HOST_TMP = "/tmp"
+# How many containers are read at once: a reading hashes every file of its scope.
+_READINGS = max(1, os.cpu_count() or 1)
+# timeout(1): it ended the command (TERM, or KILL after it); it, or env(1), could not run it.
+_ENDED, _NOT_RUN = (124, 137), (125, 126, 127)
+# Seconds Inspect's own limit stands behind root's: time for timeout(1) to end its command.
+_BEHIND = 15
 
 _bundles: Optional[str] = None
 
@@ -87,7 +102,7 @@ def _read(path: str) -> bytes:
 
 def _built_for(head: bytes) -> Optional[str]:
     """The architecture of an ELF binary, by its header, or None for anything else."""
-    if head[:4] != b"\x7fELF":
+    if len(head) < 20 or head[:4] != b"\x7fELF":
         return None
     return _ELF_MACHINES.get(struct.unpack_from("<H", head, 18)[0], "an unknown architecture")
 
@@ -151,7 +166,9 @@ class _Scratch:
         return self
 
     async def __aexit__(self, *exc) -> None:
-        await self.sh("rm", "-rf", self.dir)
+        # Shielded: a step that was cancelled still takes belay out of the sandbox (PY-I4).
+        with anyio.move_on_after(60, shield=True):
+            await self.sh("rm", "-rf", self.dir)
 
     async def run(self, *args: str) -> List[dict]:
         r = await self.sh(self.belay, *args)
@@ -167,62 +184,147 @@ async def _sandbox_platform(env: SandboxEnvironment, user: Optional[str], timeou
 
 
 class _Host:
-    """belay on this machine, reading a paused container. Nothing goes into the sandbox."""
+    """belay on this machine, reading a paused container. Nothing goes into the sandbox.
 
-    def __init__(self, container: str, belay: str, spec: str, timeout: int):
-        self.container, self.belay, self.timeout = container, belay, timeout
-        self.dir = tempfile.mkdtemp(prefix="host-", dir=_bundle_dir())
-        self.protect = os.path.join(self.dir, "protect.json")
-        with open(self.protect, "w") as f:
-            f.write(spec)
+    One reading has a directory of root's own: a copy of the binary, the spec and belay's
+    state, removed afterwards. Every command of root's runs under timeout(1): a process
+    sudo started is root's, the eval's user cannot signal it, so root ends it itself and
+    Inspect's own limit only stands behind that."""
+
+    def __init__(self, container: str, binary: bytes, spec: str, timeout: int):
+        self.container, self.binary, self.spec, self.timeout = container, binary, spec, timeout
         # belay refuses to read a container's layers unless it is root.
         self.root = [] if os.geteuid() == 0 else ["sudo", "-n", "--"]
-        # Where root's belay keeps its state: a directory of root's own. belay refuses
-        # a state directory below one that belongs to another user, as this one's would.
-        self.priv = self.dir
+        # The name is made here, not read back from a tool: it is known before anything is
+        # asked of root, so close() can remove it whatever became of the request.
+        self.priv = os.path.join(_HOST_TMP, "pybelay-host." + uuid.uuid4().hex)
+        self.belay = self.priv + "/belay"
+        self.protect = self.priv + "/protect.json"
+        self.made = False
+        self.version = ""
+
+    async def _as_root(self, cmd: List[str], input: Union[str, bytes, None] = None, queue: bool = True):
+        argv = self.root + ["timeout", "-k", "5", str(self.timeout)] + cmd
+        try:
+            r = await inspect_subprocess(argv, input=input, timeout=self.timeout + _BEHIND, concurrency=queue)
+        except FileNotFoundError as e:
+            raise UsageError('where="host" needs `%s` on this machine (%s)' % (argv[0], e)) from None
+        except PermissionError as e:
+            if e.errno != errno.EPERM:
+                raise
+            # Inspect tried to stop root's process and may not. A cancellation goes on as
+            # one; root's own timeout ends the process.
+            await anyio.lowlevel.checkpoint()
+            raise TimeoutError("%s, run as root, did not end within %d s and cannot be stopped from here"
+                               % (cmd[0], self.timeout + _BEHIND)) from None
+        if r.returncode in _ENDED:
+            raise TimeoutError("%s did not finish within %d s (or was killed)" % (cmd[0], self.timeout))
+        if self.root and r.returncode == 1 and not r.stdout and r.stderr.lstrip().startswith("sudo:"):
+            raise UsageError("reading a container from this machine needs root for belay, and `sudo -n` was "
+                             "refused (%s). Run the eval as root, or let its user run `timeout` through sudo "
+                             "without a password." % r.stderr.strip()[:160])
+        if r.returncode in _NOT_RUN:
+            raise UsageError("%s could not be run as root (exit %d: %s)"
+                             % (cmd[0], r.returncode, r.stderr.strip()[:200]))
+        return r
 
     async def start(self) -> "_Host":
-        if self.root:
-            r = await inspect_subprocess(self.root + ["mktemp", "-d", "/tmp/pybelay-host.XXXXXXXX"], timeout=self.timeout)
-            if not r.success:
-                raise UsageError("reading a container from this machine needs root for belay, and `sudo -n` was "
-                                 "refused (%s). Run the eval as root, or allow sudo without a password."
-                                 % r.stderr.strip()[:160])
-            self.priv = r.stdout.strip()
-        return self
-
-    async def _docker(self, verb: str) -> None:
-        r = await inspect_subprocess(["docker", verb, self.container], timeout=self.timeout)
-        if not r.success:
-            raise UsageError("docker %s %s failed: %s" % (verb, self.container, r.stderr.strip()[:200]))
-
-    async def run(self, *args: str) -> List[dict]:
-        """One belay command with the container paused for it, and running again after."""
-        cmd = self.root + ["env", "BELAY_STATE_DIR=" + os.path.join(self.priv, "state"), "TMPDIR=" + self.priv,
-                           self.belay] + list(args)
-        await self._docker("pause")
+        # Until mkdir says otherwise: a request that was cut short may have been carried out.
+        self.made = True
         try:
-            r = await inspect_subprocess(cmd, timeout=self.timeout)
-        finally:
-            await self._docker("unpause")
-        return _parsed(r.stdout.encode("utf-8", "surrogateescape"), r.returncode, r.stderr)[0]
-
-    async def version(self) -> str:
-        r = await inspect_subprocess([self.belay, "--version"], timeout=self.timeout)
+            r = await self._as_root(["mkdir", "-m", "700", "--", self.priv])
+        except UsageError:
+            self.made = False
+            raise
+        if not r.success:
+            self.made = False
+            raise UsageError("root's directory for this reading could not be made: %s" % r.stderr.strip()[:200])
+        # The bytes that were checked are the bytes root runs, and no path of the eval
+        # user's is run as root.
+        for path, mode, data in ((self.belay, "700", self.binary), (self.protect, "600", self.spec)):
+            r = await self._as_root(["install", "-m", mode, "/dev/stdin", path], input=data)
+            if not r.success:
+                raise UsageError("root's directory for this reading could not be filled: %s" % r.stderr.strip()[:200])
+        r = await self._as_root([self.belay, "--version"])
         if not r.success:
             raise UsageError("the belay binary doesn't run on this machine (exit %d: %s)"
                              % (r.returncode, r.stderr.strip()[:200]))
-        return r.stdout.strip()
+        self.version = r.stdout.strip()
+        return self
 
-    def close(self) -> None:
-        # belay ran as root and left its state in root's directory: remove it the same way.
-        if self.root and self.priv != self.dir and self.priv.startswith("/tmp/pybelay-host."):
+    async def _unpause(self, sure: bool) -> Optional[str]:
+        """Sets the container running again, whatever is going on around it. None, or
+        why it is not. `sure` is False when the pause itself was cut short."""
+        why = ""
+        with anyio.CancelScope(shield=True):
+            for _ in range(2):
+                try:
+                    r = await inspect_subprocess(["docker", "unpause", self.container],
+                                                 timeout=min(self.timeout, 60), concurrency=False)
+                except OSError as e:        # a TimeoutError is one
+                    why = str(e) or type(e).__name__
+                    continue
+                if r.success or (not sure and "is not paused" in r.stderr):
+                    return None
+                why = r.stderr.strip()[:200]
+        return ("the container %s %s paused: `docker unpause` failed twice (%s). Set it running by hand: "
+                "docker unpause %s" % (self.container, "is still" if sure else "may still be", why, self.container))
+
+    async def run(self, *args: str) -> List[dict]:
+        """One belay command with the container paused for it, and running again after,
+        whatever became of the command."""
+        env = ["BELAY_STATE_DIR=" + self.priv + "/state", "TMPDIR=" + self.priv]
+        if os.environ.get("DOCKER_HOST"):
+            # sudo resets the environment, and root's belay asks the same daemon.
+            env.append("DOCKER_HOST=" + os.environ["DOCKER_HOST"])
+        cmd = ["env"] + env + [self.belay] + list(args)
+        # Waited for before the pause, so that a paused container never waits in a queue:
+        # none of the three commands below queues again.
+        async with inspect_concurrency("pybelay-host", _READINGS):
+            asked = sure = False
             try:
-                subprocess.run(self.root + ["rm", "-rf", self.priv], timeout=self.timeout,
-                               stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-            except (OSError, ValueError, subprocess.SubprocessError):
-                pass
-        shutil.rmtree(self.dir, ignore_errors=True)
+                asked = True
+                try:
+                    p = await inspect_subprocess(["docker", "pause", self.container], timeout=self.timeout,
+                                                 concurrency=False)
+                except FileNotFoundError as e:
+                    asked = False
+                    raise UsageError('where="host" needs the `docker` command on this machine (%s)' % e) from None
+                if not p.success:
+                    asked = False       # Docker said no: nothing of ours to undo
+                    raise UsageError("docker pause %s failed: %s" % (self.container, p.stderr.strip()[:200]))
+                sure = True
+                r = await self._as_root(cmd, queue=False)
+                # What belay refuses is raised here, so that it is said even if the
+                # container then cannot be set running.
+                lines = _parsed(r.stdout.encode("utf-8", "surrogateescape"), r.returncode, r.stderr)[0]
+            except BaseException as e:
+                left = await self._unpause(sure) if asked else None
+                if left:
+                    if isinstance(e, Exception):
+                        raise UsageError("%s. And %s" % (e, left)) from e
+                    _log.warning("pybelay: %s", left)     # a cancellation stays one
+                raise
+            left = await self._unpause(True)
+            if left:
+                last = (r.stdout.strip().splitlines() or [""])[-1][:300]
+                raise UsageError("belay finished its reading (exit %d, last line %s), but %s"
+                                 % (r.returncode, last or "none", left))
+        return lines
+
+    async def close(self) -> None:
+        """Removes root's directory. Shielded: a cancelled sample leaves none behind."""
+        if not self.made:
+            return
+        with anyio.CancelScope(shield=True):
+            try:
+                r = await self._as_root(["rm", "-rf", "--", self.priv], queue=False)
+                left = "" if r.success else r.stderr.strip()[:200] or "exit %d" % r.returncode
+            except (BelayError, OSError) as e:
+                left = str(e) or type(e).__name__
+        if left:
+            _log.warning("pybelay: root's directory %s could not be removed (%s). It holds belay's state for "
+                         "one reading; remove it by hand.", self.priv, left)
 
 
 async def _container(env: SandboxEnvironment) -> str:
@@ -238,18 +340,19 @@ async def _container(env: SandboxEnvironment) -> str:
     return name
 
 
-def _host_binary(given: Optional[str]) -> str:
-    """The belay that runs on this machine: it reads the container, whatever is inside it."""
-    path = given if given is not None else checked_binary()
+def _host_binary() -> bytes:
+    """The belay that runs on this machine, as bytes: the wheel's own, checked as it is
+    read (PY-D5). It reads the container, whatever is inside it."""
     if platform.system() != "Linux":
         raise UsageError('where="host" needs Linux with a local Docker daemon: belay reads the container\'s '
                          "layers from this machine, and Docker Desktop keeps them in its own VM.")
-    built = _built_for(_read(path)[:20])
+    data = checked_bytes()
+    built = _built_for(data[:20])
     here = _ARCH_NAMES.get(platform.machine(), platform.machine())
     if built != here:
-        raise UsageError("the belay binary %s is built for %s, and this machine is Linux %s"
-                         % (path, built or "another system", here))
-    return path
+        raise UsageError("this wheel's belay binary is built for %s, and this machine is Linux %s"
+                         % (built or "another system", here))
+    return data
 
 
 def _env(name: Optional[str]) -> SandboxEnvironment:
@@ -273,42 +376,53 @@ def belay_record(protect: Union[str, "os.PathLike[str]", Dict[str, Any]], *, sco
         user: The sandbox user to run as. By default the sandbox's own.
         binary: A static Linux belay on this machine, for a sandbox no binary in the
             wheel suits. By default the wheel's own, or the Linux one it carries
-            for the sandbox's architecture.
-        timeout: Seconds for each sandbox command.
+            for the sandbox's architecture. Only copied into a sandbox, never run
+            on this machine: with where="host" it is a ValueError.
+        timeout: Seconds for each command: in the sandbox, or on this machine with
+            where="host" (there root's own `timeout` enforces it).
         where: "sandbox" runs belay inside the sandbox, for the record and for
             belay_verify. "host" runs it on this machine instead and reads the
             sample's Docker container from outside, paused for each reading:
             nothing of belay's enters the sandbox. It needs a Docker daemon on
-            this machine and root for belay (the eval as root, or `sudo -n`);
-            `binary`, if given, is then a belay for this machine.
+            this machine and root for belay (the eval as root, or `sudo -n`),
+            and runs only the wheel's own binary. When it cannot run, the sample
+            fails: belay is never run in the sandbox instead.
     """
     spec = _spec_text(protect)
     if where not in ("sandbox", "host"):
         raise ValueError("where is 'sandbox' or 'host'")
+    if where == "host" and binary is not None:
+        raise ValueError('binary= names a binary to copy into a sandbox; where="host" runs only the wheel\'s '
+                         "own on this machine")
 
     async def solve_host(state: TaskState, env: SandboxEnvironment) -> TaskState:
-        path = _host_binary(binary)
-        data = _read(path)
+        name = await _container(env)
+        data = _host_binary()
         root = scope
         if root is None:
             r = await env.exec(["pwd"], user=user, timeout=timeout)
             if not r.success:
                 raise UsageError("the sandbox's working directory could not be read: %s" % r.stderr.strip())
             root = r.stdout.strip()
-        h = _Host(await _container(env), path, spec, timeout)
+        h = _Host(name, data, spec, timeout)
+        kept = os.path.join(_bundle_dir(), uuid.uuid4().hex)
         try:
             await h.start()
-            version = await h.version()
-            kept = os.path.join(_bundle_dir(), uuid.uuid4().hex)
             lines = await h.run("baseline", "export", "--docker", h.container, "--scope", root, "--out", kept,
                                 "--protect", h.protect, "--json")
             if len(lines) != 1 or "sha256" not in lines[0]:
                 raise FormatError("baseline export printed %r" % (lines,))
+        except BaseException:
+            try:
+                os.unlink(kept)
+            except OSError:
+                pass
+            raise
         finally:
-            h.close()
+            await h.close()
         state.store.set(_STORE_KEY, {
-            "scope": root, "sandbox": sandbox, "user": user, "binary": path, "timeout": timeout,
-            "spec": spec, "bundle": kept, "baseline_sha256": lines[0]["sha256"], "version": version,
+            "scope": root, "sandbox": sandbox, "user": user, "binary": binary_path(), "timeout": timeout,
+            "spec": spec, "bundle": kept, "baseline_sha256": lines[0]["sha256"], "version": h.version,
             "binary_sha256": hashlib.sha256(data).hexdigest(),
             "baseline_integrity": lines[0].get("baseline_integrity", []),
             "where": "host", "container": h.container,
@@ -433,25 +547,31 @@ def belay_verify(*, on_error: str = "fail_closed", after_scorers: bool = False) 
                              "or pass after_scorers=True if they leave the sandbox alone." % sorted(state.scores))
         try:
             env = _env(recorded["sandbox"])
-            # The binary belay_record chose: the sandbox isn't asked again, since the
-            # agent has had it since.
-            data = _read(recorded["binary"])
-            if hashlib.sha256(data).hexdigest() != recorded["binary_sha256"]:
-                raise UsageError("the belay binary changed between belay_record and belay_verify")
             if recorded.get("where") == "host":
+                # What runs as root here is the wheel's own binary, never a path the
+                # sample's store names.
+                data = _host_binary()
+                if hashlib.sha256(data).hexdigest() != recorded["binary_sha256"]:
+                    raise UsageError("the belay binary changed between belay_record and belay_verify")
                 # The container belay_record read, by the name Inspect gives it now:
                 # a sandbox that was replaced is not the one recorded.
-                if await _container(env) != recorded["container"]:
+                name = await _container(env)
+                if name != recorded.get("container"):
                     raise UsageError("the sandbox's container is not the one belay_record read")
-                h = _Host(recorded["container"], recorded["binary"], recorded["spec"], recorded["timeout"])
+                h = _Host(name, data, recorded["spec"], recorded["timeout"])
                 try:
                     await h.start()
                     lines = await h.run("verify", "--docker", h.container, "--scope", recorded["scope"],
                                         "--baseline", recorded["bundle"],
                                         "--baseline-sha256", recorded["baseline_sha256"], "--protect", h.protect)
                 finally:
-                    h.close()
-                return _score(recorded, lines, recorded["version"])
+                    await h.close()
+                return _score(recorded, lines, h.version)
+            # The binary belay_record chose: the sandbox isn't asked again, since the
+            # agent has had it since.
+            data = _read(recorded["binary"])
+            if hashlib.sha256(data).hexdigest() != recorded["binary_sha256"]:
+                raise UsageError("the belay binary changed between belay_record and belay_verify")
             with open(recorded["bundle"], "rb") as f:
                 bundle = f.read()
             async with _Scratch(env, data, recorded["spec"], recorded["user"], recorded["timeout"]) as s:
