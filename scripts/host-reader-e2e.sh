@@ -116,7 +116,9 @@ rc=$?
 set -e
 docker unpause "$TC" >/dev/null
 [ $rc = 0 ] || fail "verify (touched): exit $rc, expected 0 (a signal never fails a run): $(cat "$T/err" "$T/tpolicy")"
-grep -q '"flag":"protected_path_touched","level":"signal","path":"tests/test_x.py","rule":"tests/\*\*","changed":\["ino"\]' "$T/tpolicy" \
+# `changed` always has ino, and here mtime_ns too: the image's `touch -r` puts the second back, not the
+# nanosecond (seen on the first run under real Docker: ["mtime_ns","ino"]).
+grep -q '"flag":"protected_path_touched","level":"signal","path":"tests/test_x.py","rule":"tests/\*\*","changed":\[[^]]*"ino"\]' "$T/tpolicy" \
     || fail "a file of the image, changed and put back, is not reported touched: $(cat "$T/tpolicy")"
 grep -q '"violations":0,"signals":1,' "$T/tpolicy" || fail "touched is not the one signal: $(cat "$T/tpolicy")"
 if grep -q '"path":"tests/late.py"' "$T/tpolicy"; then fail "a file made after the container started carries no trace, and one was reported: $(cat "$T/tpolicy")"; fi

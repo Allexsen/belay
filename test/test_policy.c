@@ -267,7 +267,7 @@ TEST(a_protected_file_that_is_another_file_with_the_same_content_is_touched) {
     same_bytes_another_file("tests/moded.py");
     sh("chmod 600 tests/moded.py");                                 /* another file AND another mode: a write */
     same_bytes_another_file("src/a.py");                            /* not protected */
-    sh("touch -d '2001-01-01' tests/stamped.py");                   /* the same file, another mtime: no trace of a copy */
+    sh("touch -t 200101010000 tests/stamped.py");                   /* the same file, another mtime: no trace of a copy */
     sh("mv tests/dir tests/dir.old && mkdir tests/dir && mv tests/dir.old/inner.py tests/dir/ && rmdir tests/dir.old");  /* a directory that is another directory */
     ASSERT_EQ_INT(2, verify_steps(LAYERS));                           /* the two writes; the signals do not count */
     HAS("protected_path_touched", "tests/same.py", ",\"level\":\"signal\",\"path\":\"tests/same.py\",\"rule\":\"tests/**\","
@@ -325,7 +325,9 @@ TEST(touched_needs_a_no_write_rule_and_an_entry_on_both_sides) {
     same_bytes_another_file("keep/k");                              /* no_delete alone allows writing */
     same_bytes_another_file("made/m");                              /* no_create says nothing of a file that was there */
     sh("printf 'new\\n' > tests/new");                              /* added: not on both sides (and no no_create here) */
-    sh("ln -sfn t tests/link.new && mv -T tests/link.new tests/link");  /* a symlink that is another symlink, same target */
+    /* a symlink that is another symlink, same target. The target is a file, so mv renames over the link
+     * itself: no GNU-only -T, which macOS's mv does not have. */
+    sh("ln -s t tests/link.new && mv -f tests/link.new tests/link");
     ASSERT_EQ_INT(0, verify_steps(LAYERS));
     NONE("protected_path_touched", "keep/k");
     NONE("protected_path_touched", "made/m");
