@@ -43,6 +43,24 @@ def checked_binary():
         return _checked
 
 
+def checked_bytes():
+    """The binary's bytes, checked against the recorded digest as they are read:
+    for a caller that runs a copy of them (pybelay.inspect's where="host"), so
+    what was checked is what runs."""
+    path = checked_binary()
+    try:
+        with open(os.path.join(_HERE, "SHA256"), encoding="ascii") as f:
+            want = f.read().strip()
+        with open(path, "rb") as f:
+            data = f.read()
+    except OSError as e:
+        raise BinaryMismatch("the vendored belay binary cannot be read: %s" % e) from None
+    got = hashlib.sha256(data).hexdigest()
+    if len(want) != 64 or got != want:
+        raise BinaryMismatch("the vendored belay binary hashes to %s, not the recorded %s: nothing runs" % (got, want))
+    return data
+
+
 def carried_binary(arch):
     """A Linux binary the wheel carries for sandboxes (PY-D4), after its digest
     was checked, or None. `arch` is x86_64 or arm64, as release assets name
