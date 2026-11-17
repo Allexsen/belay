@@ -33,7 +33,9 @@ Tested against 2,115 published agent runs: [results](bench/replay/RESULTS.md).
   pinned in [test/expect/watch-v1.md](test/expect/watch-v1.md)); and a
   [Claude Code plugin](claude-plugin/README.md) around it.
 - pybelay, Python bindings around the binary, with a reward helper and an
-  [Inspect integration](python/README.md#using-belay-with-inspect).
+  [Inspect integration](python/README.md#using-belay-with-inspect). The integration runs belay inside
+  the sample's sandbox, or with `where="host"` on the eval's machine, reading the sample's Docker
+  container from outside; that mode needs root for belay.
 - The manifest format, version 4 ([test/expect/manifest-v4.md](test/expect/manifest-v4.md), built on
   [version 2](docs/spec/manifest-v2.md) and [version 1](docs/spec/manifest-v1.md), all of which belay
   still reads) and the diff format (diff.v1, a draft).
