@@ -55,7 +55,8 @@ Task(
 `belay_record(protect)` takes the spec as a dict or a path. Paths in it are relative to the scope: the
 sandbox's working directory, or `scope=`. `belay_verify` uses the same spec, so they can't disagree.
 It judges against what `belay_record` recorded in the same process. The copy in the sample's store is
-for the log: if anything changed it since, the run is one belay could not judge.
+for the log, and changing it changes nothing. Without that record (another process, as with
+`inspect score` on a finished log) the run is one belay could not judge.
 
 **The score** is `C` with the answer `pass`, or `I` with the answer `violation`, so Inspect's reducers
 and viewer read it as usual. The explanation says what was broken, and the metadata has `violations`,
@@ -113,8 +114,10 @@ verdict taken from where you asked it not to be taken would look the same in the
 - Each reading gets a directory of root's own, `/tmp/pybelay-host.<random>`: a copy of the binary (the
   very bytes whose digest was checked), the spec and belay's state. It is removed after the reading,
   in up to three tries; if they fail, a warning names it. That can happen after a cancelled reading,
-  which may go on writing there for a while (see below). A reading also copies the baseline bundle
-  there, so the host's `/tmp` needs room for one bundle per sample being read.
+  which may go on writing there for a while (see below), or make the directory again after it was
+  removed: after such a reading it is removed once more two seconds later. What belay makes later
+  still stays, without a warning: an empty state directory. A reading also copies the baseline
+  bundle there, so the host's `/tmp` needs room for one bundle per sample being read.
 - The container is paused for the reading, which anything else that uses it will notice, and is set
   running again whatever became of the reading: an answer, a refusal, a timeout, a cancelled sample.
   If `docker unpause` fails twice, the error says so together with belay's answer (for a sample that

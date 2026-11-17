@@ -51,11 +51,28 @@ def score_midway():
 
 @solver
 def break_scope():
-    """belay can't judge a scope that isn't the one recorded."""
+    """belay can't judge against a bundle that is not the one it made: a byte more on the host's copy."""
     async def solve(state, generate):
-        recorded = dict(state.store.get(pi._STORE_KEY))
-        recorded["baseline_sha256"] = "0" * 64
-        state.store.set(pi._STORE_KEY, recorded)
+        with open(state.store.get(pi._STORE_KEY)["bundle"], "ab") as f:
+            f.write(b"x")
+        return state
+    return solve
+
+
+@solver
+def forget_record():
+    """As when belay_record ran in another process: the store has its copy, this process has none."""
+    async def solve(state, generate):
+        pi._records.pop(state.uuid)
+        return state
+    return solve
+
+
+@solver
+def write_in_the_stores_copy():
+    """What code with the store can do without setting anything: change a list in place."""
+    async def solve(state, generate):
+        state.store.get(pi._STORE_KEY)["baseline_integrity"].append("written by the store's writer")
         return state
     return solve
 
@@ -188,7 +205,23 @@ class Scenarios:
         _, s = self.run_task([break_scope(), agent("true")])
         v = self.verdict(s)
         self.assertEqual((v.value, v.answer), (INCORRECT, "error"))
+        self.assertEqual(v.metadata["error"]["type"], "Refused")    # belay's own refusal, not ours
         self.assertFalse(os.path.exists(s.store[pi._STORE_KEY]["bundle"]))
+
+    def test_without_its_own_record_it_is_an_error_whatever_the_store_holds(self):
+        _, s = self.run_task([forget_record(), agent("true")], scorers=[pi.belay_verify(), changes_the_sandbox()])
+        v = self.verdict(s)
+        self.assertEqual((v.value, v.answer), (INCORRECT, "error"))
+        self.assertIn("no record of this sample in this process", v.explanation)
+        self.assertEqual(s.scores["changes_the_sandbox"].value, 1.0)
+
+    def test_the_stores_copy_is_not_what_is_judged_against(self):
+        before = set(pi._records)
+        _, s = self.run_task([write_in_the_stores_copy(), agent("true")])
+        v = self.verdict(s)
+        self.assertEqual(v.answer, "pass")
+        self.assertNotIn("written by the store's writer", v.metadata["baseline_integrity"])
+        self.assertEqual(set(pi._records), before)                  # and its record went with the final score
 
     def test_on_error_raise_fails_the_sample(self):
         _, s = self.run_task([lose_bundle()], scorers=pi.belay_verify(on_error="raise"))
@@ -278,12 +311,11 @@ class DockerHost(Evals):
         self.assertEqual(self.verdict(s).answer, "pass")
         self.assertEqual(s.scores["changes_the_sandbox"].value, 1.0)
 
-    def test_a_store_naming_another_container_is_a_run_belay_could_not_judge(self):
+    def test_a_store_naming_another_container_changes_nothing(self):
         _, s = self.run_task(edit_store(container="not-the-one"), setup=pi.belay_record(SPEC, where="host"))
         v = self.verdict(s)
-        self.assertEqual((v.value, v.answer), (INCORRECT, "error"))
+        self.assertEqual((v.value, v.answer), (CORRECT, "pass"))
         self.assertEqual(v.metadata["where"], "host")
-        self.assertIn("no longer holds what belay_record recorded", v.explanation)
 
 
 @solver
@@ -382,17 +414,24 @@ if tool == "docker":
             sys.exit("Error response from daemon: Container c1 is already paused")
         if has("pause-never-arrives"):
             time.sleep(30)
-        if has("pause-lands-late"):     # the command is cut short; the daemon acts on it afterwards
-            if os.fork() == 0:
+        if has("pause-lands-late"):     # the command is cut short; the daemon acts on it afterwards:
+            if os.fork() == 0:          # a moment after it was first asked to unpause
                 os.closerange(0, 3)     # or whoever reads this command's output waits for the child
-                time.sleep(3.4)         # after the command was given up on, TERM and its grace included
-                open(mark, "w").close()
+                for _ in range(400):
+                    if has("asked-to-unpause"):
+                        time.sleep(0.3)
+                        open(mark, "w").close()
+                        break
+                    time.sleep(0.05)
                 os._exit(0)
             time.sleep(30)
         open(mark, "w").close()
         if has("pause-hangs"):          # the daemon has the request; the command does not come back
             time.sleep(30)
     elif args[0] == "unpause":
+        open(os.path.join(d, "asked-to-unpause"), "w").close()
+        if has("unpause-is-slow"):
+            time.sleep(1)
         if count_down("unpause-fails"):
             sys.exit("Error response from daemon: cannot unpause")
         if not os.path.exists(mark):
@@ -408,6 +447,8 @@ if "mkdir" in cmd and has("mkdir-warned-and-failed"):
 if "mkdir" in cmd and has("mkdir-does-not-come-back"):
     os.mkdir(cmd[-1], 0o700)
     time.sleep(30)
+if "rm" in cmd and has("rm-does-not-come-back"):
+    time.sleep(6)
 if "--docker" in cmd:
     i = cmd.index("env")
     if has("something-else-unpauses"):
@@ -418,6 +459,8 @@ if "--docker" in cmd:
         cmd = cmd[:i] + ["sleep", "30"]
     elif has("belay-ignores-term"):
         cmd = cmd[:i] + ["sh", "-c", 'trap "" TERM; sleep 30']
+    elif has("belay-crashes"):
+        cmd = cmd[:i] + ["sh", "-c", "kill -SEGV $$"]
     elif has("belay-cannot-be-run"):
         cmd = cmd[:i] + ["env", "/nonexistent/belay"]
     elif has("belay-keeps-writing"):    # until its first file is gone, as belay does until its state is
@@ -566,7 +609,7 @@ class HostTools(StandIns, unittest.TestCase):
         self.given("pause-lands-late")
         out = self.whole(timeout=1)
         self.assertIsInstance(out["error"], TimeoutError)
-        time.sleep(1.5)                                             # past the moment the late pause lands
+        time.sleep(1)                                               # past the moment the late pause lands
         self.assertFalse(self.paused())
         self.assertEqual(len(self.asked("docker unpause")), 2)      # the first found nothing to undo yet
 
@@ -628,7 +671,15 @@ class HostTools(StandIns, unittest.TestCase):
         with self.assertLogs("pybelay.inspect", "WARNING") as logs:
             out = self.whole(limit=1)
         self.assertIsInstance(out["error"], LimitExceededError)
-        self.assertIn("c1 is still paused", logs.output[0])
+        self.assertIn("paused: `docker unpause` failed twice", logs.output[0])
+
+    def test_a_reading_that_timed_out_is_still_a_timeout_when_the_container_stays_paused(self):
+        self.given("belay-sleeps")
+        self.given("unpause-fails", 2)
+        out = self.whole(timeout=1)
+        self.assertIsInstance(out["error"], TimeoutError)
+        self.assertIn("belay did not finish within 1 s", str(out["error"]))
+        self.assertIn("c1 is still paused", str(out["error"]))
 
     def test_a_reading_that_outlasts_the_timeout_is_ended_by_roots_own_timeout(self):
         self.given("belay-sleeps")
@@ -644,7 +695,14 @@ class HostTools(StandIns, unittest.TestCase):
         with mock.patch.object(pi, "_KILL_AFTER", 1):
             out = self.whole(timeout=1)
         self.assertIsInstance(out["error"], TimeoutError)
-        self.assertIn("signal 9", str(out["error"]))
+        self.assertRegex(str(out["error"]), "signal 9|exit 137")
+        self.assertFalse(self.paused())
+
+    def test_a_reading_that_died_by_another_signal_failed_and_did_not_time_out(self):
+        self.given("belay-crashes")
+        out = self.whole()
+        self.assertIsInstance(out["error"], pi.Failed)
+        self.assertIn("belay was ended by signal 11", str(out["error"]))
         self.assertFalse(self.paused())
 
     def unkillable(self):
@@ -687,7 +745,9 @@ class HostTools(StandIns, unittest.TestCase):
             h = self.host(3)
             await h.start()
             task = asyncio.ensure_future(self.reading(h))
-            await asyncio.sleep(1)
+            while not [x for x in self.asked("sudo") if " baseline export " in x]:
+                await asyncio.sleep(0.05)       # not before the reading itself is under way
+            await asyncio.sleep(0.2)
             task.cancel()
             try:
                 await task
@@ -698,6 +758,29 @@ class HostTools(StandIns, unittest.TestCase):
         self.assertIsInstance(out["error"], asyncio.CancelledError)
         self.assertFalse(self.paused())
 
+    def test_asyncios_own_cancellation_during_the_unpause_waits_for_the_container(self):
+        """No shield of anyio's holds off task.cancel(): the unpause is finished first."""
+        self.given("unpause-is-slow")
+        out = {}
+
+        async def main():
+            h = self.host()
+            await h.start()
+            task = asyncio.ensure_future(self.reading(h))
+            while not self.asked("docker unpause"):
+                await asyncio.sleep(0.05)
+            task.cancel()
+            try:
+                await task
+            except BaseException as e:
+                out["error"] = e
+            out["paused"] = self.paused()
+            await h.close()
+        asyncio.run(main())
+        self.assertIsInstance(out["error"], asyncio.CancelledError)
+        self.assertFalse(out["paused"])
+        self.assertEqual(len(self.asked("docker unpause")), 2)      # the one that was cut off, and one more
+
     def test_a_cancelled_reading_that_goes_on_writing_still_leaves_nothing_of_roots(self):
         """Root's belay cannot be stopped from here, and writes on while its directory is
         removed: one removal is not enough."""
@@ -707,6 +790,27 @@ class HostTools(StandIns, unittest.TestCase):
         self.assertIsInstance(out["error"], LimitExceededError)
         self.assertGreater(len(self.asked("sudo")) - 5, 0)          # the removal was asked for
         self.assertEqual(self.roots_directories(), [])
+
+    def test_a_cancelled_reading_that_makes_its_directory_again_is_removed_again(self):
+        """Cancelled before belay had made anything: the first removal finds all there was,
+        and belay then makes its state, parents and all."""
+        self.unkillable()
+        self.given("belay-is-slow")
+        self.given("belay-keeps-writing")
+        out = self.whole(timeout=6, limit=0.5)
+        self.assertIsInstance(out["error"], LimitExceededError)
+        time.sleep(1)
+        self.assertEqual(self.roots_directories(), [])
+
+    def test_a_removal_root_cannot_be_made_to_finish_is_a_warning_and_the_time_limit_stays_one(self):
+        self.unkillable()
+        self.given("belay-sleeps")
+        self.given("rm-does-not-come-back")
+        with mock.patch.object(pi, "_BEHIND", 0), self.assertLogs("pybelay.inspect", "WARNING") as logs:
+            out = self.whole(timeout=1, limit=1)
+        self.assertIsInstance(out["error"], LimitExceededError)     # not a bare CancelledError
+        self.assertIn("could not be removed", logs.output[-1])
+        self.assertEqual(len([x for x in self.asked("sudo") if " rm -rf " in x]), 6)
 
     def test_a_directory_whose_making_was_cut_short_is_removed_all_the_same(self):
         self.given("mkdir-does-not-come-back")
@@ -820,6 +924,40 @@ class ScratchCancelled(unittest.TestCase):
         anyio.run(main)
         self.assertEqual(ran[-1], "rm")
 
+    def scratch_that_does_not_get_in(self, version_ok, delay):
+        ran = []
+
+        class Env:
+            async def exec(self, cmd, **kw):
+                await anyio.sleep(delay if cmd[0] == "chmod" else 0.01)
+                ran.append(cmd[0])
+                return type("R", (), dict(success=version_ok or "--version" not in cmd, stdout="belay 0",
+                                          returncode=0 if version_ok else 126, stderr="cannot execute"))
+
+            async def write_file(self, path, contents, **kw):
+                await anyio.sleep(0)
+        out = {}
+
+        async def main():
+            with anyio.move_on_after(0.5):
+                try:
+                    async with pi._Scratch(Env(), b"x", "{}", None, 5):
+                        out["entered"] = True
+                except UsageError as e:
+                    out["error"] = e
+        anyio.run(main)
+        return ran, out
+
+    def test_a_binary_that_does_not_run_in_the_sandbox_is_taken_out_of_it(self):
+        ran, out = self.scratch_that_does_not_get_in(version_ok=False, delay=0.01)
+        self.assertIn("doesn't run in this sandbox", str(out["error"]))
+        self.assertEqual(ran[-1], "rm")
+
+    def test_a_step_cancelled_while_belay_was_going_in_takes_it_out(self):
+        ran, out = self.scratch_that_does_not_get_in(version_ok=True, delay=30)
+        self.assertNotIn("entered", out)
+        self.assertEqual(ran, ["rm"])
+
 
 @sandboxenv(name="pybelay-spy")
 class Spy(LocalSandboxEnvironment):
@@ -898,20 +1036,6 @@ class HostModeStandIn(StandIns, Evals):
         _, s = self.host(then(lambda: self.given("belay-refuses")), scorers=pi.belay_verify(on_error="raise"))
         self.assertIn("host-reader H-C3", str(s.error))
 
-    def test_the_store_does_not_choose_what_runs_as_root(self):
-        mark = os.path.join(self.standin, "ran-as-root")
-        other = os.path.join(self.standin, "not-belay")
-        with open(other, "w") as f:
-            f.write("#!/bin/sh\ntouch %s\n" % mark)
-        os.chmod(other, 0o755)
-        with open(other, "rb") as f:
-            digest = hashlib.sha256(f.read()).hexdigest()
-        _, s = self.host(edit_store(binary=other, binary_sha256=digest))
-        v = self.verdict(s)
-        self.assertEqual((v.value, v.answer), (INCORRECT, "error"))
-        self.assertFalse(os.path.exists(mark))
-        self.assertFalse([x for x in self.asked() if "not-belay" in x])
-
     def test_a_sandbox_whose_container_was_replaced_is_a_run_belay_could_not_judge(self):
         _, s = self.host(then(lambda: setattr(Spy, "container", "c2")))
         v = self.verdict(s)
@@ -919,44 +1043,34 @@ class HostModeStandIn(StandIns, Evals):
         self.assertIn("not the one belay_record read", v.explanation)
         self.assertEqual(len(self.asked("docker pause")), 1)       # the record's, and no other
 
-    def changed_store(self, **changes):
-        """The verdict after something wrote the sample's store, and what was asked of root for it."""
-        if os.path.exists(os.path.join(self.standin, "log")):
-            os.unlink(os.path.join(self.standin, "log"))            # each eval's own askings
-        _, s = self.host(edit_store(**changes))
-        v = self.verdict(s)
-        self.assertEqual((v.value, v.answer), (INCORRECT, "error"))
-        self.assertIn("no longer holds what belay_record recorded", v.explanation)
-        self.assertEqual(len(self.asked("docker pause")), 1)       # the record's: no reading for the verdict
-        return v
+    def test_what_the_store_says_changes_nothing_root_is_asked_or_runs(self):
+        mark = os.path.join(self.standin, "ran-as-root")
+        other = os.path.join(self.standin, "not-belay")
+        with open(other, "w") as f:
+            f.write("#!/bin/sh\ntouch %s\n" % mark)
+        os.chmod(other, 0o755)
+        with open(other, "rb") as f:
+            digest = hashlib.sha256(f.read()).hexdigest()
+        for changes in (dict(binary=other, binary_sha256=digest), dict(container="another"), dict(timeout=7),
+                        dict(scope="/"), dict(bundle=other), dict(where="sandbox"), dict(container=None)):
+            if os.path.exists(os.path.join(self.standin, "log")):
+                os.unlink(os.path.join(self.standin, "log"))        # each eval's own askings
+            Spy.asked = []
+            _, s = self.host(edit_store(**changes))
+            v = self.verdict(s)
+            self.assertEqual((v.answer, v.metadata["where"]), ("pass", "host"), changes)
+            self.assertEqual([x.split()[1:3] for x in self.asked("docker")], [["pause", "c1"], ["unpause", "c1"]] * 2)
+            asked = "\n".join(self.asked("sudo"))
+            for never in ("not-belay", " -k 5 7 ", "--scope / "):
+                self.assertNotIn(never, asked, changes)
+            self.assertEqual(sorted(x[1] for x in Spy.asked if x[0] == "write"), sorted(FILES), changes)
+        self.assertFalse(os.path.exists(mark))
 
-    def test_the_store_does_not_choose_the_container_the_bundle_or_the_time_root_is_given(self):
-        secret = os.path.join(self.standin, "not-a-bundle")
-        with open(secret, "w") as f:
-            f.write("something of the host's\n")
-        self.changed_store(container="another")
-        self.changed_store(timeout=7)
-        self.changed_store(scope="/")
-        self.changed_store(bundle=secret)
-        self.assertFalse([x for x in self.asked() if "not-a-bundle" in x])
-
-    def test_a_record_of_the_default_mode_cannot_be_made_a_host_one_by_the_store(self):
+    def test_a_record_of_the_default_mode_is_not_made_a_host_one_by_the_store(self):
         _, s = self.run_task(edit_store(where="host", container="c1"), setup=pi.belay_record(SPEC))
         v = self.verdict(s)
-        self.assertEqual((v.value, v.answer, v.metadata["where"]), (INCORRECT, "error", "sandbox"))
+        self.assertEqual((v.answer, v.metadata["where"]), ("pass", "sandbox"))
         self.assertEqual(self.asked(), [])                          # neither sudo nor docker was asked anything
-
-    def test_a_store_without_its_container_is_an_error_not_a_crash(self):
-        @solver
-        def drop():
-            async def solve(state, generate):
-                recorded = dict(state.store.get(pi._STORE_KEY))
-                del recorded["container"]
-                state.store.set(pi._STORE_KEY, recorded)
-                return state
-            return solve
-        _, s = self.host(drop())
-        self.assertEqual(self.verdict(s).answer, "error")
 
     def test_sudo_refused_at_the_verdict_is_said_as_that(self):
         _, s = self.host(then(lambda: self.given("sudo-allows", 0)))
