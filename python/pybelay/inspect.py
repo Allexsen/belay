@@ -29,6 +29,7 @@ agent can't read what is protected.
 """
 import atexit
 import errno
+import glob
 import hashlib
 import json
 import logging
@@ -67,14 +68,24 @@ _log = logging.getLogger(__name__)
 # Where root's directory for one reading is made. /tmp is root's and sticky, which is
 # what belay asks of every directory above its state.
 _HOST_TMP = "/tmp"
-# How many containers are read at once: a reading hashes every file of its scope.
-_READINGS = max(1, os.cpu_count() or 1)
-# timeout(1): it ended the command (TERM, or KILL after it); it, or env(1), could not run it.
+# How many containers are read at once: a reading hashes every file of its scope. One for
+# each CPU this process may use.
+_READINGS = max(1, len(os.sched_getaffinity(0)) if hasattr(os, "sched_getaffinity") else os.cpu_count() or 1)
+# timeout(1): it ended the command; it, or env(1), could not run it. A command it had to
+# KILL is not seen as an exit code: timeout kills its own group, itself included.
 _ENDED, _NOT_RUN = (124, 137), (125, 126, 127)
+# The name of that limit among Inspect's.
+_SLOT = "pybelay-host"
+# Seconds root's timeout gives a command between TERM and KILL.
+_KILL_AFTER = 5
 # Seconds Inspect's own limit stands behind root's: time for timeout(1) to end its command.
 _BEHIND = 15
 
 _bundles: Optional[str] = None
+# What belay_record recorded, by the sample run's id, in this process only. The sample's
+# store holds a copy for the log; belay_verify judges against this one, so nothing that can
+# write the store chooses what belay_verify runs or reads.
+_records: Dict[str, Dict[str, Any]] = {}
 
 
 def _bundle_dir() -> str:
@@ -183,6 +194,17 @@ async def _sandbox_platform(env: SandboxEnvironment, user: Optional[str], timeou
     return system, machine
 
 
+def _cancel_pending() -> bool:
+    """A cancellation asyncio itself asked of this task (task.cancel(), wait_for): one
+    that anyio's checkpoint does not raise again."""
+    try:
+        import asyncio
+        task = asyncio.current_task()
+    except RuntimeError:
+        return False
+    return task is not None and bool(getattr(task, "cancelling", lambda: 0)())
+
+
 class _Host:
     """belay on this machine, reading a paused container. Nothing goes into the sandbox.
 
@@ -203,10 +225,12 @@ class _Host:
         self.made = False
         self.version = ""
 
-    async def _as_root(self, cmd: List[str], input: Union[str, bytes, None] = None, queue: bool = True):
-        argv = self.root + ["timeout", "-k", "5", str(self.timeout)] + cmd
+    async def _as_root(self, cmd: List[str], input: Union[str, bytes, None] = None, queue: bool = True,
+                       what: Optional[str] = None, limit: Optional[int] = None):
+        what, limit = what or cmd[0], self.timeout if limit is None else limit
+        argv = self.root + ["timeout", "-k", str(_KILL_AFTER), str(limit)] + cmd
         try:
-            r = await inspect_subprocess(argv, input=input, timeout=self.timeout + _BEHIND, concurrency=queue)
+            r = await inspect_subprocess(argv, input=input, timeout=limit + _BEHIND, concurrency=queue)
         except FileNotFoundError as e:
             raise UsageError('where="host" needs `%s` on this machine (%s)' % (argv[0], e)) from None
         except PermissionError as e:
@@ -215,17 +239,21 @@ class _Host:
             # Inspect tried to stop root's process and may not. A cancellation goes on as
             # one; root's own timeout ends the process.
             await anyio.lowlevel.checkpoint()
+            if _cancel_pending():
+                raise anyio.get_cancelled_exc_class()() from None
             raise TimeoutError("%s, run as root, did not end within %d s and cannot be stopped from here"
-                               % (cmd[0], self.timeout + _BEHIND)) from None
-        if r.returncode in _ENDED:
-            raise TimeoutError("%s did not finish within %d s (or was killed)" % (cmd[0], self.timeout))
-        if self.root and r.returncode == 1 and not r.stdout and r.stderr.lstrip().startswith("sudo:"):
+                               % (what, limit + _BEHIND)) from None
+        if r.returncode in _ENDED or r.returncode < 0:
+            how = "signal %d" % -r.returncode if r.returncode < 0 else "exit %d" % r.returncode
+            raise TimeoutError("%s did not finish within %d s, or was killed (%s)" % (what, limit, how))
+        said = [x for x in r.stderr.splitlines() if x.strip()]
+        if self.root and r.returncode == 1 and not r.stdout and said and all(x.startswith("sudo:") for x in said):
             raise UsageError("reading a container from this machine needs root for belay, and `sudo -n` was "
                              "refused (%s). Run the eval as root, or let its user run `timeout` through sudo "
                              "without a password." % r.stderr.strip()[:160])
         if r.returncode in _NOT_RUN:
             raise UsageError("%s could not be run as root (exit %d: %s)"
-                             % (cmd[0], r.returncode, r.stderr.strip()[:200]))
+                             % (what, r.returncode, r.stderr.strip()[:200]))
         return r
 
     async def start(self) -> "_Host":
@@ -245,7 +273,7 @@ class _Host:
             r = await self._as_root(["install", "-m", mode, "/dev/stdin", path], input=data)
             if not r.success:
                 raise UsageError("root's directory for this reading could not be filled: %s" % r.stderr.strip()[:200])
-        r = await self._as_root([self.belay, "--version"])
+        r = await self._as_root([self.belay, "--version"], what="belay")
         if not r.success:
             raise UsageError("the belay binary doesn't run on this machine (exit %d: %s)"
                              % (r.returncode, r.stderr.strip()[:200]))
@@ -257,15 +285,22 @@ class _Host:
         why it is not. `sure` is False when the pause itself was cut short."""
         why = ""
         with anyio.CancelScope(shield=True):
-            for _ in range(2):
+            for again in (False, True):
                 try:
                     r = await inspect_subprocess(["docker", "unpause", self.container],
                                                  timeout=min(self.timeout, 60), concurrency=False)
-                except OSError as e:        # a TimeoutError is one
+                except Exception as e:
                     why = str(e) or type(e).__name__
                     continue
-                if r.success or (not sure and "is not paused" in r.stderr):
+                if r.success:
                     return None
+                if "is not paused" in r.stderr:
+                    # Nothing to undo, unless the pause was cut short and the daemon has
+                    # yet to act on it: asked once more, a moment later.
+                    if sure or again:
+                        return None
+                    await anyio.sleep(1)
+                    continue
                 why = r.stderr.strip()[:200]
         return ("the container %s %s paused: `docker unpause` failed twice (%s). Set it running by hand: "
                 "docker unpause %s" % (self.container, "is still" if sure else "may still be", why, self.container))
@@ -280,7 +315,7 @@ class _Host:
         cmd = ["env"] + env + [self.belay] + list(args)
         # Waited for before the pause, so that a paused container never waits in a queue:
         # none of the three commands below queues again.
-        async with inspect_concurrency("pybelay-host", _READINGS):
+        async with inspect_concurrency(_SLOT, _READINGS):
             asked = sure = False
             try:
                 asked = True
@@ -294,15 +329,18 @@ class _Host:
                     asked = False       # Docker said no: nothing of ours to undo
                     raise UsageError("docker pause %s failed: %s" % (self.container, p.stderr.strip()[:200]))
                 sure = True
-                r = await self._as_root(cmd, queue=False)
+                r = await self._as_root(cmd, queue=False, what="belay")
                 # What belay refuses is raised here, so that it is said even if the
                 # container then cannot be set running.
                 lines = _parsed(r.stdout.encode("utf-8", "surrogateescape"), r.returncode, r.stderr)[0]
             except BaseException as e:
                 left = await self._unpause(sure) if asked else None
                 if left:
+                    both = "%s. And %s" % (str(e) or type(e).__name__, left)
+                    if isinstance(e, BelayError):       # what belay said, as the kind of error it was
+                        raise type(e)(both, e.exit_code, e.stderr) from e
                     if isinstance(e, Exception):
-                        raise UsageError("%s. And %s" % (e, left)) from e
+                        raise (TimeoutError if isinstance(e, TimeoutError) else UsageError)(both) from e
                     _log.warning("pybelay: %s", left)     # a cancellation stays one
                 raise
             left = await self._unpause(True)
@@ -313,15 +351,22 @@ class _Host:
         return lines
 
     async def close(self) -> None:
-        """Removes root's directory. Shielded: a cancelled sample leaves none behind."""
+        """Removes root's directory, under a shield. A reading that was cancelled may still
+        be writing there, since root's belay cannot be stopped from here: it ends once its
+        files are gone, so the removal is tried three times. What is left is said."""
         if not self.made:
             return
+        left = ""
         with anyio.CancelScope(shield=True):
-            try:
-                r = await self._as_root(["rm", "-rf", "--", self.priv], queue=False)
-                left = "" if r.success else r.stderr.strip()[:200] or "exit %d" % r.returncode
-            except (BelayError, OSError) as e:
-                left = str(e) or type(e).__name__
+            for last in (False, False, True):
+                try:
+                    r = await self._as_root(["rm", "-rf", "--", self.priv], queue=False, limit=min(self.timeout, 60))
+                    left = "" if r.success else r.stderr.strip()[:200] or "exit %d" % r.returncode
+                except (BelayError, OSError) as e:
+                    left = str(e) or type(e).__name__
+                if not left or last:
+                    break
+                await anyio.sleep(1)
         if left:
             _log.warning("pybelay: root's directory %s could not be removed (%s). It holds belay's state for "
                          "one reading; remove it by hand.", self.priv, left)
@@ -362,6 +407,12 @@ def _env(name: Optional[str]) -> SandboxEnvironment:
         raise UsageError("belay needs a sandbox, and this sample has none: set Task(sandbox=...). (%s)" % e) from None
 
 
+def _keep(state: TaskState, record: Dict[str, Any]) -> None:
+    """The record, for belay_verify (in this process) and for the log (in the store)."""
+    _records[state.uuid] = dict(record)
+    state.store.set(_STORE_KEY, record)
+
+
 @solver
 def belay_record(protect: Union[str, "os.PathLike[str]", Dict[str, Any]], *, scope: Optional[str] = None,
                  sandbox: Optional[str] = None, user: Optional[str] = None, binary: Optional[str] = None,
@@ -391,6 +442,9 @@ def belay_record(protect: Union[str, "os.PathLike[str]", Dict[str, Any]], *, sco
     spec = _spec_text(protect)
     if where not in ("sandbox", "host"):
         raise ValueError("where is 'sandbox' or 'host'")
+    if where == "host" and not (isinstance(timeout, int) and not isinstance(timeout, bool) and timeout > 0):
+        raise ValueError('with where="host", timeout is a whole number of seconds above 0: root\'s own '
+                         "`timeout` keeps it")
     if where == "host" and binary is not None:
         raise ValueError('binary= names a binary to copy into a sandbox; where="host" runs only the wheel\'s '
                          "own on this machine")
@@ -413,14 +467,15 @@ def belay_record(protect: Union[str, "os.PathLike[str]", Dict[str, Any]], *, sco
             if len(lines) != 1 or "sha256" not in lines[0]:
                 raise FormatError("baseline export printed %r" % (lines,))
         except BaseException:
-            try:
-                os.unlink(kept)
-            except OSError:
-                pass
+            for left in [kept] + glob.glob(glob.escape(kept) + ".tmp-*"):
+                try:
+                    os.unlink(left)
+                except OSError:
+                    pass
             raise
         finally:
             await h.close()
-        state.store.set(_STORE_KEY, {
+        _keep(state, {
             "scope": root, "sandbox": sandbox, "user": user, "binary": binary_path(), "timeout": timeout,
             "spec": spec, "bundle": kept, "baseline_sha256": lines[0]["sha256"], "version": h.version,
             "binary_sha256": hashlib.sha256(data).hexdigest(),
@@ -455,7 +510,7 @@ def belay_record(protect: Union[str, "os.PathLike[str]", Dict[str, Any]], *, sco
             kept = os.path.join(_bundle_dir(), uuid.uuid4().hex)
             with open(kept, "wb") as f:
                 f.write(bundle)
-            state.store.set(_STORE_KEY, {
+            _keep(state, {
                 "scope": root, "sandbox": sandbox, "user": user, "binary": path, "timeout": timeout,
                 "spec": spec, "bundle": kept, "baseline_sha256": sha, "version": s.version,
                 "binary_sha256": hashlib.sha256(data).hexdigest(),
@@ -538,16 +593,23 @@ def belay_verify(*, on_error: str = "fail_closed", after_scorers: bool = False) 
         raise ValueError("on_error is 'fail_closed' or 'raise'")
 
     async def score(state: TaskState, target: Target) -> Score:
-        recorded = state.store.get(_STORE_KEY)
-        if recorded is None:
+        stored = state.store.get(_STORE_KEY)
+        if stored is None:
             raise UsageError("belay_verify has nothing to judge against: add setup=belay_record(...) to the Task.")
+        recorded = _records.get(state.uuid)
+        if recorded is None:
+            raise UsageError("belay_verify has only the sample's store to go by: belay_record did not run in "
+                             "this process for this sample, and a store is not judged against.")
         if state.scores and not after_scorers:
             raise UsageError("belay_verify ran after %s. Scorers run in order and can change the sandbox, which "
                              "can hide a change or invent one: put belay_verify() first in the Task's scorers, "
                              "or pass after_scorers=True if they leave the sandbox alone." % sorted(state.scores))
         try:
+            if stored != recorded:
+                raise UsageError("the sample's store no longer holds what belay_record recorded: something "
+                                 "changed it since")
             env = _env(recorded["sandbox"])
-            if recorded.get("where") == "host":
+            if recorded["where"] == "host":
                 # What runs as root here is the wheel's own binary, never a path the
                 # sample's store names.
                 data = _host_binary()
@@ -556,7 +618,7 @@ def belay_verify(*, on_error: str = "fail_closed", after_scorers: bool = False) 
                 # The container belay_record read, by the name Inspect gives it now:
                 # a sandbox that was replaced is not the one recorded.
                 name = await _container(env)
-                if name != recorded.get("container"):
+                if name != recorded["container"]:
                     raise UsageError("the sandbox's container is not the one belay_record read")
                 h = _Host(name, data, recorded["spec"], recorded["timeout"])
                 try:
@@ -592,6 +654,7 @@ def belay_verify(*, on_error: str = "fail_closed", after_scorers: bool = False) 
             # Inspect's score() can run the scorers before the end too, and
             # they will need it again: only the final scoring is the last.
             if state.completed:
+                _records.pop(state.uuid, None)
                 try:
                     os.unlink(recorded["bundle"])
                 except OSError:

@@ -54,6 +54,8 @@ Task(
 
 `belay_record(protect)` takes the spec as a dict or a path. Paths in it are relative to the scope: the
 sandbox's working directory, or `scope=`. `belay_verify` uses the same spec, so they can't disagree.
+It judges against what `belay_record` recorded in the same process. The copy in the sample's store is
+for the log: if anything changed it since, the run is one belay could not judge.
 
 **The score** is `C` with the answer `pass`, or `I` with the answer `violation`, so Inspect's reducers
 and viewer read it as usual. The explanation says what was broken, and the metadata has `violations`,
@@ -88,9 +90,12 @@ It needs:
   nothing but the binary the wheel vouches for is run on the host;
 - root for belay, which reads the daemon's layer directories: run the eval as root, or let its user
   run `timeout` through `sudo -n` without a password. **That is passwordless root for the account the
-  eval runs as.** sudo is asked for `timeout` and nothing else, but with `mkdir`, `install`, `env` and
-  `rm` as its command, and belay under `env`: a rule that allows that allows anything. If that is more
-  than the account should have, run the eval as root in a place made for it, or use the default mode;
+  eval runs as.** sudo is asked for `timeout` and nothing else, but `timeout` is given `mkdir`,
+  `install`, `rm`, belay itself, and `env` with belay as its command: a rule that allows that allows
+  anything. If that is more than the account should have, run the eval as root in a place made for it,
+  or use the default mode;
+- a `/tmp` on the host that allows execution, since the copy of the binary runs from there, and GNU
+  coreutils (`timeout`, `install`, `mkdir`, `rm`, `env`);
 - `docker` for the eval's user (it pauses and unpauses the container) and for root (belay asks the
   daemon about the container), both reaching the same daemon. `DOCKER_HOST` is passed on to root's
   belay; a Docker context is not;
@@ -106,27 +111,30 @@ verdict taken from where you asked it not to be taken would look the same in the
 **What `where="host"` does on the host, and what it can leave there.**
 
 - Each reading gets a directory of root's own, `/tmp/pybelay-host.<random>`: a copy of the binary (the
-  very bytes whose digest was checked), the spec and belay's state. It is removed after the reading; if
-  that fails, a warning names it. A reading also copies the baseline bundle there, so the host's `/tmp`
-  needs room for one bundle per sample being read.
+  very bytes whose digest was checked), the spec and belay's state. It is removed after the reading,
+  in up to three tries; if they fail, a warning names it. That can happen after a cancelled reading,
+  which may go on writing there for a while (see below). A reading also copies the baseline bundle
+  there, so the host's `/tmp` needs room for one bundle per sample being read.
 - The container is paused for the reading, which anything else that uses it will notice, and is set
   running again whatever became of the reading: an answer, a refusal, a timeout, a cancelled sample.
-  If `docker unpause` fails twice, the error says so together with belay's answer, and the container
-  stays paused until you run `docker unpause` yourself.
+  If `docker unpause` fails twice, the error says so together with belay's answer (for a sample that
+  was cancelled there is no error to carry it: a warning in the log says it), and the container stays
+  paused until you run `docker unpause` yourself.
 - `timeout=` is kept by root's own `timeout`, because the eval's user cannot signal a process sudo
   started. For the same reason a reading whose sample was cancelled cannot be stopped from the eval:
-  the container is set running at once, and root's belay ends by itself within `timeout=` seconds.
+  the container is set running at once, and root's belay ends by itself: when its directory is
+  removed under it, or after `timeout=` seconds, and five more if it has to be killed.
 - At most one reading per CPU runs at a time, and a container is paused only when its turn has come.
 - An eval that is killed outright in the middle of a reading leaves its container paused and its
   directory in `/tmp`.
 
-**Known limits.** The first and the third are the default mode's; `where="host"` has its own, above.
+**Known limits.** The first, third and fourth are the default mode's; `where="host"` has its own, above.
 
 - belay runs in the sandbox, beside anything the agent left running. A process that outlives the agent
   can still write while belay reads, or interfere with it if it runs as the same user. Inspect has no
   way to stop them first, as `belay verify` asks.
-- It sees the end state, within the scope: a file changed and restored is invisible. belay's host
-  reader (`verify --docker`) can report one as the signal `protected_path_touched`, in the score's
+- It sees the end state, within the scope: a file changed and restored is invisible. With
+  `where="host"` belay's host reader can report one as the signal `protected_path_touched`, in the score's
   `flags`, **but not for the files Inspect copies in**: a sample's `files=`, and anything a setup step
   writes, enter the container after it starts, and for those an in-place change and restore leaves
   no trace at all. Only files that were already in the image carry it.
