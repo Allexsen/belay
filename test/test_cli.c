@@ -268,8 +268,8 @@ TEST(mark_says_when_it_reads_every_file) {
     ASSERT_EQ_INT(0, belay("mark", "--scope", g_scope, "--json", NULL));
     ASSERT_TRUE(strstr(g_out, "\"full_reason\":\"no checkpoint before\"") != NULL);
     /* checkpoint.v1 CK-16 (decision 210): the manifest's source, a walk here is null;
-     * checkpoint.v3 C3-4 to C3-6: basis and carried before it, runtime_sha256 last */
-    static const char end[] = ",\"basis\":\"walk\",\"carried\":0,\"source\":null,\"stored\":\"whole\",\"kept\":false,\"runtime_sha256\":null}\n";
+     * checkpoint.v3 C3-4 to C3-6b: basis and carried before it, three more last */
+    static const char end[] = ",\"basis\":\"walk\",\"carried\":0,\"source\":null,\"stored\":\"whole\",\"kept\":false,\"runtime_sha256\":null,\"journal_seq\":null,\"shadow_lines_sha256\":null}\n";
     const size_t ol = strlen(g_out), el = sizeof end - 1;
     ASSERT_TRUE(ol > el && strcmp(g_out + ol - el, end) == 0);
     ASSERT_EQ_INT(0, belay("mark", "--scope", g_scope, "--json", NULL));
@@ -1066,7 +1066,7 @@ TEST(a_capture_that_read_everything_adds_nothing_to_its_line) {
     ASSERT_EQ_INT(0, belay("mark", "--scope", g_scope, "--json", NULL));
     ASSERT_TRUE(strstr(g_out, "\"vanished\":0,\"unreadable\":0,\"sealing\":0,\"provisional\":false,\"excluded\":0,") != NULL);
     ASSERT_TRUE(strstr(g_out, "\"full_reason\":\"\"},\"basis\":\"walk\",\"carried\":0,\"source\":null,"
-                              "\"stored\":\"whole\",\"kept\":false,\"runtime_sha256\":null}\n") != NULL);
+                              "\"stored\":\"whole\",\"kept\":false,\"runtime_sha256\":null,\"journal_seq\":null,\"shadow_lines_sha256\":null}\n") != NULL);
     ASSERT_EQ_INT(0, belay("diff", "--scope", g_scope, "--since", "1", NULL));
     ASSERT_TRUE(strstr(g_out, "nothing seen") == NULL);
 }
@@ -1093,9 +1093,10 @@ TEST(a_checkpoint_made_before_v3_prints_as_it_did) {
     ASSERT_EQ_INT(0, belay("log", "--scope", g_scope, "--json", NULL));
     char *two = strstr(g_out, "{\"id\":2,");
     REQUIRE(two != NULL);
-    ASSERT_TRUE(strstr(two, "\"unreadable\":") != NULL && strstr(two, "\"runtime_sha256\":null}\n") != NULL);
+    ASSERT_TRUE(strstr(two, "\"unreadable\":") != NULL && strstr(two, "\"runtime_sha256\":null,\"journal_seq\":null,\"shadow_lines_sha256\":null}\n") != NULL);
     two[0] = '\0';                               /* the first line alone */
-    static const char *const NEW[] = { "\"unreadable\"", "\"sealing\"", "\"basis\"", "\"carried\"", "\"runtime_sha256\"" };
+    static const char *const NEW[] = { "\"unreadable\"", "\"sealing\"", "\"basis\"", "\"carried\"", "\"runtime_sha256\"",
+                                       "\"journal_seq\"", "\"shadow_lines_sha256\"" };
     for (size_t i = 0; i < sizeof NEW / sizeof NEW[0]; i++)
         if (strstr(g_out, NEW[i]) != NULL) BELAY_FAIL("a checkpoint made before v3 prints %s", NEW[i]);
     ASSERT_TRUE(strstr(g_out, "\"unstable\":0,\"vanished\":0,\"provisional\":false,\"excluded\":0,\"excluded_paths\":[],"

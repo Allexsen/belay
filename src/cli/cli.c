@@ -273,9 +273,10 @@ static void json_checkpoint(FILE *out, const struct state *st, const struct chec
     if (have) manifest_release(&mf);
     belay_err_clear();
     snprintf(xs + xw, sizeof xs - xw, "]");
-    /* checkpoint.v3 (C3-2 to C3-6). A checkpoint made before it prints as it
-     * did, without the five keys (C3-8). No capture is from events yet, and
-     * none has a runtime record: `walk`, 0 and null. */
+    /* checkpoint.v3 (C3-2 to C3-6b). A checkpoint made before it prints as it
+     * did, without the seven keys (C3-8). No capture is from events yet, and
+     * none has a runtime record, a kernel record or a per-line digest file:
+     * `walk`, 0 and three nulls. */
     char unread[96] = "";
     if (c->counts_unread)
         snprintf(unread, sizeof unread, "\"unreadable\":%llu,\"sealing\":%llu,",
@@ -290,7 +291,7 @@ static void json_checkpoint(FILE *out, const struct state *st, const struct chec
             state_reference(c), (unsigned long long)c->trusted, (unsigned long long)c->racy, why,
             c->counts_unread ? "\"basis\":\"walk\",\"carried\":0," : "", src,
             delta ? "delta" : "whole", c->kept ? "true" : "false",
-            c->counts_unread ? ",\"runtime_sha256\":null" : "");
+            c->counts_unread ? ",\"runtime_sha256\":null,\"journal_seq\":null,\"shadow_lines_sha256\":null" : "");
 }
 
 /* What a manifest's header says was not walked, one line each (Q6;

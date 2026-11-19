@@ -2,7 +2,7 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "belay/checkpoint.v3",
   "title": "A checkpoint, as `belay check --json`, `belay mark --json` and `belay log --json` print it",
-  "description": "A checkpoint made before checkpoint.v3 stays as stored: `belay log --json` prints it as the checkpoint.v2 record it printed before, without `unreadable`, `sealing`, `basis`, `carried` and `runtime_sha256` (not recorded is not zero), and this schema does not describe that line.",
+  "description": "A checkpoint made before checkpoint.v3 stays as stored: `belay log --json` prints it as the checkpoint.v2 record it printed before, without `unreadable`, `sealing`, `basis`, `carried`, `runtime_sha256`, `journal_seq` and `shadow_lines_sha256` (not recorded is not zero), and this schema does not describe that line.",
   "type": "object",
   "additionalProperties": false,
   "required": [
@@ -24,7 +24,9 @@
     "source",
     "stored",
     "kept",
-    "runtime_sha256"
+    "runtime_sha256",
+    "journal_seq",
+    "shadow_lines_sha256"
   ],
   "properties": {
     "id": {
@@ -226,6 +228,30 @@
         }
       ],
       "description": "the sha256 of the checkpoint's runtime record, or null when it has none; always null in this release"
+    },
+    "journal_seq": {
+      "oneOf": [
+        {
+          "type": "null"
+        },
+        {
+          "type": "integer",
+          "minimum": 0
+        }
+      ],
+      "description": "the kernel record's journal sequence number of this checkpoint's barrier, or null when it was not taken under a kernel record; always null in this release"
+    },
+    "shadow_lines_sha256": {
+      "oneOf": [
+        {
+          "type": "null"
+        },
+        {
+          "type": "string",
+          "pattern": "^[0-9a-f]{64}$"
+        }
+      ],
+      "description": "the sha256 of the checkpoint's per-line digest file for shadow/gshadow, or null when it has none; always null in this release"
     }
   },
   "allOf": [

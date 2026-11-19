@@ -72,9 +72,12 @@ class Calls(Base):
         self.assertFalse(os.path.exists(os.path.join(self.t, "state", "scopes")))   # nothing ran
 
     def test_a_checkpoint_says_what_was_not_read(self):
-        """checkpoint-v3 C3-2 to C3-7: the five fields."""
+        """checkpoint-v3 C3-2 to C3-7: the seven fields."""
         c = pybelay.check(self.scope)
         self.assertEqual((c.unreadable, c.sealing, c.basis, c.carried, c.runtime_sha256), (0, 0, "walk", 0, None))
+        self.assertEqual((c.journal_seq, c.shadow_lines_sha256), (None, None))
+        self.assertEqual(list(pybelay._run(["log", "--scope", self.scope, "--json"])[0][0])[-3:],
+                         ["runtime_sha256", "journal_seq", "shadow_lines_sha256"])
         if os.geteuid() == 0:
             self.skipTest("root reads anything: the counts stay 0")
         os.mkdir(os.path.join(self.scope, "secret"))
@@ -103,10 +106,11 @@ class Calls(Base):
         new = pybelay.mark(self.scope)
         old = pybelay.log(self.scope)[0]
         self.assertEqual((old.id, old.entries), (1, new.entries))
-        self.assertEqual((old.unreadable, old.sealing, old.basis, old.carried, old.runtime_sha256), (None,) * 5)
+        self.assertEqual((old.unreadable, old.sealing, old.basis, old.carried, old.runtime_sha256,
+                          old.journal_seq, old.shadow_lines_sha256), (None,) * 7)
         self.assertEqual((new.unreadable, new.sealing, new.basis), (0, 0, "walk"))
         line = pybelay._run(["log", "--scope", self.scope, "--json"])[0][1]
-        del line["sealing"]                                         # some of the five is neither version
+        del line["journal_seq"]                                     # some of the seven is neither version
         with self.assertRaises(pybelay.FormatError):
             pybelay._checkpoint(line)
 
