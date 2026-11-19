@@ -15,6 +15,7 @@
 #include <limits.h>
 #include <fcntl.h>
 #include <ftw.h>
+#include <glob.h>
 #include <setjmp.h>
 #include <signal.h>
 #include <stdarg.h>
@@ -1037,8 +1038,16 @@ TEST(a_capture_says_what_it_could_not_read) {
     /* a file added where belay cannot look: one line, which says so */
     sh("chmod 700 '%s/secret' && printf 'b\\n' > '%s/secret/b' && chmod 000 '%s/secret'", g_scope, g_scope, g_scope);
     ASSERT_EQ_INT(0, belay("diff", "--scope", g_scope, "--since", "2", NULL));
-    ASSERT_TRUE(strstr(g_out, "  ? secret   unknown: unreadable, nothing below it was seen\n") != NULL);
-    ASSERT_TRUE(strstr(g_out, "\n  nothing seen below 1 directory\n") != NULL);
+    /* G3-1: the directory's line is unknown, for unreadable, and ends with the
+     * suffix. A platform may add a reason of its own between them (where
+     * attributes are read through a descriptor, a directory that cannot be
+     * opened is xattrs_unknown too). */
+    const char *row = strstr(g_out, "\n  ? secret   unknown: unreadable");
+    const char *eol = row != NULL ? strchr(row + 1, '\n') : NULL;
+    static const char suffix[] = ", nothing below it was seen";
+    if (eol == NULL || (size_t)(eol - row) < sizeof suffix || strncmp(eol - (sizeof suffix - 1), suffix, sizeof suffix - 1) != 0)
+        BELAY_FAIL("no line for secret that is unknown: unreadable and ends \"%s\" in:\n%s", suffix, g_out);
+    if (strstr(g_out, "\n  nothing seen below 1 directory\n") == NULL) BELAY_FAIL("no summary line in:\n%s", g_out);
     ASSERT_EQ_INT(0, belay("diff", "--scope", g_scope, "--since", "2", "--to", "3", "--json", NULL));
     ASSERT_TRUE(strstr(g_out, ",\"before_sealing\":1,\"after_sealing\":1}\n") != NULL);
     sh("mkdir '%s/vault' && chmod 000 '%s/vault'", g_scope, g_scope);
@@ -1072,9 +1081,13 @@ TEST(a_rewritten_file_that_cannot_be_read_says_so) {
  * past either: `unverified` alone. */
 TEST(a_rewritten_file_over_the_hash_limit_says_so) {
     fresh();
-    sh("truncate -s 67108865 '%s/big'", g_scope);
+    char big[600];
+    snprintf(big, sizeof big, "%s/big", g_scope);
+    const int fd = open(big, O_WRONLY | O_CREAT, 0644);                /* sparse */
+    REQUIRE(fd >= 0 && ftruncate(fd, (off_t)67108865) == 0);
     ASSERT_EQ_INT(0, belay("check", "--scope", g_scope, NULL));
-    sh("truncate -s 67108866 '%s/big'", g_scope);
+    REQUIRE(ftruncate(fd, (off_t)67108866) == 0);
+    close(fd);
     ASSERT_EQ_INT(0, belay("diff", "--scope", g_scope, "--since", "1", NULL));
     ASSERT_TRUE(strstr(g_out, "  M big   size 67108865 -> 67108866, mtime_ns; content not read (unverified)\n") != NULL);
     ASSERT_EQ_INT(0, belay("diff", "--scope", g_scope, "--since", "1", "--to", "2", "--json", NULL));
@@ -1084,9 +1097,29 @@ TEST(a_rewritten_file_over_the_hash_limit_says_so) {
 /* Rewrites checkpoint 1's two counts in its meta.json, as text: what a
  * capture that met a mount, or a damaged record, would hold. */
 static bool counts_are(const char *unreadable, const char *sealing) {
-    return holds("sed -i 's/,\"unreadable\":[^,}]*,\"sealing\":[^,}]*/%s%s%s%s/' \"$d/checkpoints/1/meta.json\"",
+    char pat[600];
+    static char old[8192], new[8400];
+    snprintf(pat, sizeof pat, "%s/scopes/*/checkpoints/1/meta.json", g_state);
+    glob_t g;
+    if (glob(pat, 0, NULL, &g) != 0 || g.gl_pathc != 1) return false;
+    bool ok = false;
+    FILE *f = fopen(g.gl_pathv[0], "r");
+    const size_t n = f != NULL ? fread(old, 1, sizeof old - 1, f) : 0;
+    if (f != NULL) fclose(f);
+    old[n] = '\0';
+    /* ,"unreadable":N,"sealing":M as belay wrote it: up to what follows M */
+    char *from = strstr(old, ",\"unreadable\":"), *seal = from != NULL ? strstr(from, ",\"sealing\":") : NULL;
+    if (seal != NULL) {
+        const char *to = seal + 11 + strcspn(seal + 11, ",}");
+        snprintf(new, sizeof new, "%.*s%s%s%s%s%s", (int)(from - old), old,
                  unreadable ? ",\"unreadable\":" : "", unreadable ? unreadable : "",
-                 sealing ? ",\"sealing\":" : "", sealing ? sealing : "");
+                 sealing ? ",\"sealing\":" : "", sealing ? sealing : "", to);
+        f = fopen(g.gl_pathv[0], "w");
+        ok = f != NULL && fputs(new, f) != EOF;
+        if (f != NULL && fclose(f) != 0) ok = false;
+    }
+    globfree(&g);
+    return ok;
 }
 
 /* G1-2 where every entry was read: a capture that met only a mount root has
