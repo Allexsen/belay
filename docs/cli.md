@@ -27,6 +27,14 @@ that container, read from its layers on the host (below).
   it is now -- that capture is kept as a new checkpoint, prefiltered as a mark is. Without `--json`
   it prints a receipt; with `--json`, the diff in [diff.v1](spec/diff-v1.md).
 - **log** lists the scope's checkpoints: id, kind, time, number of entries.
+
+`check`, `mark` and `log` say on a checkpoint's line what the capture could not read, when there is
+any: `check 1  <time>  5 entries, 2 could not be read, nothing seen below 1 directory`. The first
+count is the entries whose content or listing could not be read (a file or a directory without
+read permission); the second, the directories below which nothing was looked at -- one that could
+not be listed, one past the depth limit, a mount root. The exit status is unchanged: such a
+capture is complete as far as belay could look, and says how far that was. A checkpoint made
+by a belay before checkpoint.v3 recorded neither count and its line has neither: not recorded is not zero.
 - **watch** keeps a running record of `DIR` while an agent works in it, one line a step (below).
 
 belay only reads `DIR`. It writes only under its state directory: `$BELAY_STATE_DIR` (an absolute
@@ -126,7 +134,7 @@ repository's reflogs, changing between marks, grow it by up to their size each t
 `belay manifest --scope DIR --id ID` prints a checkpoint's manifest. Only the newest checkpoint and
 every 256th are kept whole; the others are deltas, rebuilt here, and every rebuild is checked byte
 for byte against the sha256 recorded when it was written: one that doesn't match is corrupt state
-(exit 4), and nothing of it is printed. checkpoint.v2's `manifest` is null for a delta, so use this,
+(exit 4), and nothing of it is printed. A checkpoint's `manifest` is null for a delta, so use this,
 not the state directory.
 
 ## prune: what to keep
@@ -406,7 +414,10 @@ reports there (a reflog, a ref) stays on its own line unless git's events in the
 that only moved a ref where it was folds with the moves counted -- `(1 reset in place)`: a reset
 in place can discard uncommitted work. A record shows at most 15 of its findings, then "and N
 more". An entry belay could not capture reliably is named on its own line with the reason
-(`raced`, `unstable`, `unverified`, ...). There is no "provisional" banner; when entries changed
+(`raced`, `unstable`, `unverified`, ...). A directory belay could not list, or a mount root it did
+not enter, is that one line whatever changed below it, and the line says so (`? secret   unknown:
+unreadable, nothing below it was seen`); when the newer side has such directories, one line under
+the counts says how many (`nothing seen below 2 directories`). There is no "provisional" banner; when entries changed
 while they were read (raced, unstable or vanished), one line counts them for each side: those of
 the newer side are settled by running belay again; those of an earlier checkpoint stay in any diff
 from it. Past 50 events, or 50 untracked changes (or changes by path, without git), the rest fold
@@ -421,5 +432,9 @@ as `\xNN`, a backslash as `\\`. A type change that is also a privilege change sa
 ## --json
 
 `check`, `mark` and `log` print checkpoints as JSON objects, one a line, described by
-[schema/checkpoint.v2.json](../schema/checkpoint.v2.json). A path that is not UTF-8 is given in
-base64 as `scope_b64` or `manifest_b64` in place of `scope` or `manifest`.
+[schema/checkpoint.v3.json](../schema/checkpoint.v3.json). A path that is not UTF-8 is given in
+base64 as `scope_b64` or `manifest_b64` in place of `scope` or `manifest`. checkpoint.v3 adds
+`unreadable` and `sealing` (the two counts of the checkpoint's line, 0 included), `basis` (`walk`),
+`carried` (`0`) and `runtime_sha256` (`null`): the last three have one value in this release. A
+checkpoint made before it is printed by `log` as the checkpoint.v2 record it was, without the five
+keys.
