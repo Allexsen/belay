@@ -96,13 +96,13 @@ static void schema_invariants(const struct belay_manifest_header *h, const struc
     /* 2 */ if (P_XATTRS && P_XSHA) abort();
     /* 3 */ if (P_XUNK && (P_XATTRS || P_XSHA || P_CAPS)) abort();
     /* 4 */ if (!reg && P_CAPS) abort();
-    /* 5 */ if (reg && (int)P_SHA + (int)P_UNVER != 1) abort();
+    /* 5, as V5-E1 amends it */ if (reg && (int)P_SHA + (int)P_UNVER + (int)e->meta != 1) abort();
     /* 6 */ if (reg && (P_UNSTAB || P_UNREAD) && !P_UNVER) abort();
     /* 7 */ if (reg && P_UNSTAB && P_UNREAD) abort();
     /* 8 */ if (reg && P_MOUNT && (P_UNSTAB || P_UNREAD)) abort();
     /* 9 */ if (dir && (P_SHA || P_UNVER || P_STORED)) abort();
-    /* 10 */ if (dir && P_RACED && !(P_UNREAD || P_MOUNT)) abort();
-    /* 11 */ if (dir && (int)P_UNREAD + (int)P_UNSTAB + (int)P_MOUNT > 1) abort();
+    /* 10, as V5-E2 amends it */ if (dir && P_RACED && !(P_UNREAD || P_MOUNT || e->not_read)) abort();
+    /* 11, likewise */ if (dir && (int)P_UNREAD + (int)P_UNSTAB + (int)P_MOUNT + (int)e->not_read > 1) abort();
     /* 12 */ if (lnk && (P_SHA || P_UNVER || P_STORED || P_UNSTAB)) abort();
     /* 13 */ if (node && (P_SHA || P_UNVER || P_STORED || P_UNSTAB || P_UNREAD)) abort();
     /* 14 */ if (P_STORED && (!P_SHA || strcmp(e->stored_hex, e->sha256_hex) != 0)) abort();
@@ -114,6 +114,23 @@ static void schema_invariants(const struct belay_manifest_header *h, const struc
     /* 20 */ if (P_OUTSIDE && e->link_target_len == 0) abort();
     /* 21 */ if (P_MOUNT && P_SHA) abort();
     /* 22 */ if (P_MOUNT && (P_IFLAGS || P_CAPS || P_XATTRS || P_XSHA || P_XUNK)) abort();
+    /* Version 5, by hand from test/expect/manifest-v5.md (V5-4, V5-4b, V5-5,
+     * V5-6, V5-R1, V5-3): the four flags only in a v5 manifest and only on
+     * their type; what each excludes; a sealed entry only under a header
+     * that names the key. (V5-E8's absent keys are not visible in a decoded
+     * entry; the reader's tests hold them.) */
+    if ((e->not_read || e->partial || e->meta || e->sealed) && h->version < 5) abort();
+    if (!dir && (e->not_read || e->partial)) abort();
+    if (e->partial && (e->not_read || P_UNREAD || P_MOUNT)) abort();
+    if (!reg && (e->meta || e->sealed)) abort();
+    if (e->meta && (P_SHA || P_UNVER || P_STORED)) abort();
+    if (e->sealed && (!P_SHA || P_STORED)) abort();
+    if (e->sealed && h->sealed_key[0] == '\0') abort();
+    if (h->version < 5 && (h->n_roots != 0 || h->basis_events || h->sealed_key[0] != '\0')) abort();
+    for (size_t i = 0; i < h->n_roots; i++) {
+        const char *rp = h->roots[i].path;
+        if (rp == NULL || rp[0] == '\0' || rp[0] == '/' || (i > 0 && strcmp(h->roots[i - 1].path, rp) >= 0)) abort();
+    }
     /* header 1 */
     if (reg && P_SHA && e->size > h->hash_max_bytes) abort();
     if (reg && P_UNVER && !P_UNSTAB && !P_UNREAD && !P_MOUNT && e->size <= h->hash_max_bytes) abort();
