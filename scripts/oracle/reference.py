@@ -79,6 +79,95 @@ Never the generated blocks of the spec, never src/ or include/: every check
 that quotes a spec reads it through spec_prose(), which withholds them
 (decision 119); a check that quotes a pin reads that pin.
 
+Manifest version 5 (test/expect/manifest-v5.md, READ AT RUN TIME, the words
+relied on checked at start-up, V5_WORDS): V5-R2 (an earlier manifest reads as
+`roots` empty, no entry flagged), V5-D1 to V5-D6, V5-E2 and V5-E8 (what a
+`not_read` directory records), with checkpoint-v3 C3-3 (the sealing counts).
+The rows the pin says diff-fields.md gains are not in that file: the rules
+are V5-D1 to V5-D4b's own words. Ambiguities, where they are decided:
+  M1 V5-D1's "any difference": a compared field that differs, `ctime_ns`
+     included when nothing else does (rule 5; the struck V5-D7 says so: "a
+     write moves `ctime_ns`, so a `meta` entry ... already differs and is
+     V5-D1's `unknown`"). `meta` gives the reason `not_read` exactly where it
+     makes content unknown: on one side only, or on both with a difference.
+     The row has two cases for two `meta` entries, "All equal: no record"
+     and "Otherwise any difference: `unknown`, reason `not_read`": `iflags`
+     recorded on one side only (V5-E7: a `meta` file that cannot be opened)
+     is a difference -- the entries are not equal, and there is a record --
+     so it gives `not_read` beside `iflags_unknown`, though no field is in
+     `changed` for it (O6). (This file first read that case as
+     `iflags_unknown` alone, a third case the row does not have.) The two
+     cases are of the entries' fields, whatever else decides the outcome:
+     under `raced` (rule 1) a field that differs still gives `not_read`
+     beside `raced`, `ctime_ns` too, though rule 1 keeps it out of
+     `changed`. A flag with every field equal (`xattrs_unknown`, `raced`)
+     is no difference between the entries' fields: its own reason alone.
+     belay lists `not_read` there too -- the row read as "every record of
+     two `meta` entries that is not `modified`": compare.py's one OPEN
+     question, printed every run and not counted;
+  M2 V5-D2 names "a hash on the other" side. `meta` against `unverified`
+     (or `unstable`, `unreadable`, a mount) is read the same way: `unknown`
+     for both sides' reasons unless `size` differs. Against a `sealed` hash:
+     both `not_read` and `sealed_key` (each rule gives its own);
+  M3 `content_not_read` on a `modified` record with `meta` on a side is
+     O9's "from v5 `not_read`": after the other four, on either side;
+  M4 V5-D3, "A record for a `sealed` entry never carries `sha256` in
+     `before` or `after`", against diff-values V2, "the two are never both
+     empty". Read: V1 stands (a record with `changed` carries both objects)
+     and `sha256` stays in `changed` ("the hashes are compared like any");
+     the value is left out of both objects, so two sealed hashes that
+     differ alone give `"before":{},"after":{}`. V2's sentence is a
+     consequence it draws ("since a field in `changed` is recorded on at
+     least one side"), which V5-D3 ends. The other reading: no `before`
+     and `after` at all;
+  M5 V5-D3 when the hashes do not compare (one side sealed, or two keys)
+     and `size` differs: the row says `unknown`, reason `sealed_key`, with
+     no "unless". Read with diff-fields' `size` row ("a difference proves
+     `modified`") and rule 3, which asks for proof first -- as V5-D1 says of
+     its own case ("diff-fields' `size` row stands: a different size proves
+     it") and O1 of `unverified`: `modified`. It carries no
+     `content_not_read` for the seal: the content was read, and O9 lists
+     no `sealed_key`. `sealed_key` equal: both manifests' header values;
+  M6 V5-D4, "`not_read` on both sides and equal type, mode, owner: no
+     record": nothing else of such a directory is compared -- not `ino`,
+     `dev`, `iflags` or the xattrs -- on both sides or on one (the other
+     side's `size` and `nlink` have nothing to compare with, V5-E8).
+     `changed` lists those of `mode`, `uid`, `gid` that differ. A flag on
+     either entry still gives its reason (`unreadable` on the other side);
+     a field's (`iflags_unknown`) does not;
+  M7 V5-D4b's "ordinary rules" are the rest of the one-sided rules: a
+     `raced` or `writer_open` entry is still `unknown`. Where the nearest
+     ancestor is `partial`, C "a link directly under the scope root" is a
+     symlink whose parent is `.`; any other non-directory is "a file";
+  M8 V5-D5 ("`not_read` comes after `writer_open` in policy-v1's order;
+     `sealed_key` after it") is in the diff's section: read as the order of
+     the diff's own `unknown` too, amending V4-D4's "last". compare.py
+     holds `unknown` to `writer_open`, `not_read`, `sealed_key` at its end;
+  M9 V5-D6: `roots_differ` is the header's last key ("gains"), `true` when
+     the two `roots` arrays are not equal as written (a manifest before v5
+     has `[]`), absent otherwise;
+  M10 the sealing counts: diff-fields G3-2 says "`unreadable` or `mount`
+     (checkpoint-v3 C3-3)", and C3-3 "directories carrying `unreadable`,
+     `mount` or (v5) `not_read`". Read: C3-3's three;
+  M11 O10 and an added directory carrying `not_read`: O10 names
+     "`unreadable` or `mount`: that reason" and no other; V5-E2 extends
+     manifest-v1's rules 10 and 11 only. Read: no `content_not_read`. An
+     added regular file carrying `meta` is "by O9's rule for a side", which
+     has "from v5 `not_read`": `["not_read"]`. An added `sealed` file: none.
+
+The addendum (test/expect/manifest-v5-addendum.md, V5-A1 to V5-A3, its words
+checked at start-up): a root is a line of its own after the header, `roots`
+their number; a racy path a line of its own before the trailer, `racy` their
+number. load() reads those lines; "V5-D4b reads the root lines; V5-D6 compares
+the two sets of them".
+  M12 O11 ("placed as O10 places it", which is "after `type`, before
+     `findings`"): a `type_changed` record has `type_before`, `changed` and
+     its values between those two; read with O9's "where `unknown` would,
+     after the values". A directory after carrying `not_read` (v5) gives
+     none: O11 names `unreadable` or `mount`, as O10 does (M11). The record
+     must be `type_changed`: a raced type change is `unknown` and carries
+     none ("no record has both").
+
 Ambiguities in O9 and G3-2 (N1-N6), where they are decided:
   N1 `content_not_read`'s order is "the order of the `unknown` array",
      which no pin gives in words (the reasons table is generated): it is
@@ -118,13 +207,6 @@ Ambiguities in O9 and G3-2 (N1-N6), where they are decided:
      `xattrs_unknown` gives none, as under O9 (N2);
   N9 O10, "No other type": an added symlink carrying `unreadable` (its
      target not read) carries no `content_not_read`.
-
-  N10 O11 ("placed as O10 places it", which is "after `type`, before
-     `findings`"): a `type_changed` record has `type_before`, `changed` and
-     its values between those two; read with O9's "where `unknown` would,
-     after the values". The record must be `type_changed`: a raced type
-     change is `unknown` and carries none ("no record has both"). The
-     reason is the directory's one flag (manifest-v1 rule 11).
 
 Ambiguities this file resolves one way (questions for the author) are
 marked "ambiguity I<n>" where they are decided (VA<n> for diff-values.md,
@@ -323,6 +405,9 @@ HEADER_KEYS_SHAPE = ['belay_diff', 'scopes', 'before_created_ns', 'after_created
                      'identity_compared', 'before_manifest_version', 'after_manifest_version']
 EXCLUDED_KEYS = ['before_excluded', 'after_excluded']
 HEADER_KEYS = HEADER_KEYS_SHAPE + EXCLUDED_KEYS
+# V5-D6: "The diff header gains `roots_differ`: `true` when the two manifests'
+# `roots` are not equal, absent otherwise." (ambiguity M9: last.)
+ROOTS_DIFFER = 'roots_differ'
 # The trailer's from the "### Trailer" paragraph: "`belay_diff_end` is the
 # number of records written. Then come one count per outcome, named as the
 # outcome, ... `unchanged` included" (in the example's order) ...
@@ -354,6 +439,87 @@ TRAILER_KEYS_SHAPE = (['belay_diff_end'] + OUTCOMES + [DIR_TIMESTAMPS_ONLY, EVEN
                       + ['after_' + c for c in INPUT_COUNTS]
                       + ['provisional', 'before_sha256', 'after_sha256'] + V4_TRAILER_KEYS)
 TRAILER_KEYS = TRAILER_KEYS_SHAPE + SEALING_TRAILER_KEYS
+# Manifest v5 (manifest-v5.md): the entry flags the diff reads, and the two
+# reasons V5-D1 to V5-D5 name.
+NOT_READ, PARTIAL, META, SEALED = 'not_read', 'partial', 'meta', 'sealed'
+SEALED_KEY = 'sealed_key'
+V5_REASONS = [NOT_READ, SEALED_KEY]         # V5-D5: in this order, after `writer_open`
+MANIFEST_V5_PIN = os.path.join(REPO, 'test', 'expect', 'manifest-v5.md')
+V5_WORDS = {
+    'V5-D1': ['`meta` on both sides: `sha256` is not compared; every other field is. All equal: '
+              'no record (`unchanged`). `size` differs: `modified`, with `content_not_read: '
+              '["not_read"]`',
+              'Otherwise any difference: `unknown`, reason `not_read`, `changed` listing the '
+              'fields; never `metadata_only`.'],
+    'V5-D2': ['`meta` on one side and a hash on the other: `unknown`, reason `not_read`, unless '
+              '`size` differs (`modified`, with `content_not_read: ["not_read"]`) or the type '
+              'differs (`type_changed`).'],
+    'V5-D3': ['`sealed` on both sides with equal `sealed_key`: the hashes are compared like any. '
+              'On one side only, or with different keys: `unknown`, reason `sealed_key`. A '
+              'record for a `sealed` entry never carries `sha256` in `before` or `after`.'],
+    'V5-D4': ['A directory with `not_read` on both sides and equal type, mode, owner: no record. '
+              '`not_read` on one side only, or those fields differ: `unknown`, reason '
+              '`not_read`. A path on one side only that lies below a `not_read` directory on '
+              'the other: `unknown`, `not_captured`'],
+    'V5-D4b': ['A path P on one side only whose nearest ancestor with an entry on the other '
+               'side, A, carries `partial` there. Let C be A\'s child on the way to P (or P). If '
+               'C is a directory or a link directly under the scope root on P\'s side: the '
+               'ordinary rules (`added`, `removed`)',
+               'Otherwise C is P, a file: `added` or `removed` when the other side\'s `roots` '
+               'lists P (`found: false`: looked for, not there), and `unknown`, `not_captured` '
+               'when it does not. `partial` itself is not compared.'],
+    'V5-D5': ['The reason `not_read` comes after `writer_open` in policy-v1\'s order; '
+              '`sealed_key` after it.'],
+    'V5-D6': ['The diff header gains `roots_differ`: `true` when the two manifests\' `roots` are '
+              'not equal, absent otherwise.'],
+    'V5-R2': ['A manifest of an earlier version reads as `roots` empty, no entry flagged, '
+              '`basis` `walk`.'],
+    'V5-E8': ['`size`, `mtime_ns`, `ctime_ns` and `nlink` are required on every entry except one '
+              'carrying `not_read`, where they are absent.'],
+}
+C3_3_WORDS = ('Entries nothing below which was looked at: directories carrying `unreadable`, '
+              '`mount` or (v5) `not_read`.')
+
+
+V5_ADDENDUM_PIN = os.path.join(REPO, 'test', 'expect', 'manifest-v5-addendum.md')
+V5A_WORDS = {
+    'V5-A1': ['The header\'s `roots` is an int: the number of root lines. Each root is a line of '
+              'its own, directly after the header and before the first entry: `{"root": <path '
+              'relative to the scope>, "class": "content" \\| "metadata", "found": true \\| '
+              'false}`, sorted bytewise by path, each once; `root_b64` in place of `root` when '
+              'the path is not UTF-8. A capture of a whole scope has `"roots":0` and no such '
+              'line.',
+              'V5-D4b reads the root lines; V5-D6 compares the two sets of them.'],
+    'V5-A2': ['The trailer\'s `racy` is an int: the number of racy lines. Each is a line of its '
+              'own after the last entry and before the trailer: `{"racy": <path>}`, sorted '
+              'bytewise, each once; `racy_b64` when not UTF-8.'],
+}
+
+
+def v5_pin():
+    rows = {}
+    for l in open(MANIFEST_V5_PIN, encoding='utf-8').read().splitlines():
+        m = re.match(r'\| (V5-[A-Z]?[0-9]+b?) \|', l)
+        if m:
+            rows.setdefault(m.group(1), l)      # the first: a later table says how each was established
+    for r, words in V5_WORDS.items():
+        for w in words:
+            if w not in rows.get(r, ''):
+                raise SystemExit('pin: manifest-v5.md %s no longer says what reference.py '
+                                 'assumes: %r' % (r, w))
+    add = {l.split(' | ')[0][2:]: l for l in open(V5_ADDENDUM_PIN, encoding='utf-8').read()
+           .splitlines() if l.startswith('| V5-A')}
+    for r, words in V5A_WORDS.items():
+        for w in words:
+            if w not in add.get(r, ''):
+                raise SystemExit('pin: manifest-v5-addendum.md %s no longer says what '
+                                 'reference.py assumes: %r' % (r, w))
+    if C3_3_WORDS not in open(os.path.join(REPO, 'test', 'expect', 'checkpoint-v3.md'),
+                              encoding='utf-8').read():
+        raise SystemExit('pin: checkpoint-v3.md C3-3 no longer says what reference.py assumes')
+
+
+v5_pin()
 # One-sided reasons, from "Present on one side only".
 NOT_CAPTURED, LISTING_INCOMPLETE, RACED = 'not_captured', 'listing_incomplete', 'raced'
 WRITER_OPEN = 'writer_open'
@@ -849,6 +1015,27 @@ def load(path, raw=None):
     header, body = objs[0], objs[1:-1]
     if 'belay_manifest' not in header or 'belay_manifest_end' not in objs[-1]:
         raise ValueError('%s: not a manifest' % path)
+    # V5-A1, V5-A2: the root lines, "directly after the header and before the
+    # first entry", and the racy lines, "after the last entry and before the
+    # trailer"; `roots` and `racy` are their numbers.
+    spelled = lambda d, k: b64(d[k + '_b64']) if k + '_b64' in d else d[k].encode('utf-8')
+    if 'roots' in header:
+        n = 0
+        while n < len(body) and ('root' in body[n] or 'root_b64' in body[n]):
+            n += 1
+        m = len(body)
+        while m > n and ('racy' in body[m - 1] or 'racy_b64' in body[m - 1]):
+            m -= 1
+        racy = [spelled(d, 'racy') for d in body[m:]]
+        header['root_lines'] = [{'path': spelled(d, 'root'), 'class': d['class'],
+                                 'found': d['found']} for d in body[:n]]
+        if n != header['roots'] or (len(body) - m) != objs[-1].get('racy') or \
+                sorted(set(racy)) != racy or \
+                [r['path'] for r in header['root_lines']] != sorted(
+                    {r['path'] for r in header['root_lines']}):
+            raise ValueError('%s: corpus error: root or racy lines the addendum has a reader '
+                             'reject' % path)
+        body = body[n:m]
     entries = {}
     for d in body:
         e = dict(d)
@@ -877,7 +1064,20 @@ def nearest_ancestor(entries, p):
     return entries[b'.']
 
 
-def one_sided(p, present, lacking_entries, added, lacking_excluded):
+def roots_of(header):
+    """A manifest's roots as load() read them, [{'path': bytes, 'class',
+    'found'}] (V5-A1: its root lines); V5-R2: "A manifest of an earlier
+    version reads as `roots` empty"."""
+    return header.get('root_lines', [])
+
+
+def root_set(header):
+    """V5-A1: "V5-D6 compares the two sets of them"."""
+    return {(r['path'], r['class'], r['found']) for r in roots_of(header)}
+
+
+def one_sided(p, present, lacking_entries, added, lacking_excluded, present_entries=None,
+              lacking_roots=()):
     """The bullets of "Present on one side only", in their order: "The first
     of these that applies decides". The first: "The side that lacks it
     excluded the path, or a path above it (manifest v2's `excluded`,
@@ -891,9 +1091,31 @@ def one_sided(p, present, lacking_entries, added, lacking_excluded):
     if covering(lacking_excluded, p) is not None:
         return 'unknown', [NOT_CAPTURED], trace + ['excluded']
     anc = nearest_ancestor(lacking_entries, p)
-    if anc['type'] == 'dir' and (anc.get('unreadable') or anc.get('mount')):
+    # V5-D4: "the existing one-sided rule, which names `unreadable` and
+    # `mount`, gains `not_read`".
+    if anc['type'] == 'dir' and (anc.get('unreadable') or anc.get('mount') or anc.get(NOT_READ)):
         return 'unknown', [NOT_CAPTURED], trace + [
-            'not_captured', 'not_captured:' + ('unreadable' if anc.get('unreadable') else 'mount')]
+            'not_captured', 'not_captured:' + ('unreadable' if anc.get('unreadable') else
+                                               'mount' if anc.get('mount') else NOT_READ)]
+    # V5-D4b: the nearest ancestor with an entry on the other side carries
+    # `partial` there (ambiguity M7).
+    if anc['type'] == 'dir' and anc.get(PARTIAL):
+        ap = anc['path']
+        first = (p if ap == b'.' else p[len(ap) + 1:]).split(b'/')[0]
+        cp = first if ap == b'.' else ap + b'/' + first
+        c = present_entries[cp]
+        if c['type'] == 'dir':
+            trace.append('partial:directory')
+        elif c['type'] == 'lnk' and ap == b'.':
+            trace.append('partial:link-under-the-scope-root')
+        else:
+            assert cp == p, (cp, p)             # "Otherwise C is P, a file"
+            listed = [r for r in lacking_roots if r['path'] == p]
+            if not listed:
+                return 'unknown', [NOT_CAPTURED], trace + ['not_captured', 'partial:not-a-root']
+            if listed[0]['found'] is not False:
+                raise ValueError('corpus error: %r is a root found on the side that lacks it' % p)
+            trace.append('partial:root-not-found')
     if anc['type'] == 'dir' and anc.get('unstable'):
         return 'unknown', [LISTING_INCOMPLETE], trace + ['listing_incomplete']
     # "It is not a directory and carries `raced`: `unknown`, reason `raced`.
@@ -1009,6 +1231,8 @@ def content_not_read(b, a, out, trace):
         return bool(side.get(f)) and not (f == UNVERIFIED
                                           and any(side.get(x) for x in UNVERIFIED_BECAUSE_OF))
     why = [f for f in NOT_READ_FLAGS if gives(b, f) or gives(a, f)]
+    if b.get(META) or a.get(META):              # O9: "and from v5 `not_read`" (M3)
+        why.append(NOT_READ)
     if why:
         trace.append('O9')
         for side in (b, a):
@@ -1027,6 +1251,8 @@ def added_not_read(e, trace):
         why = [f for f in NOT_READ_FLAGS if f != UNVERIFIED and e.get(f)]
         if not why and e.get(UNVERIFIED):
             why = [UNVERIFIED]
+        if e.get(META):                         # "by O9's rule for a side" (M11)
+            why = [NOT_READ]
     elif e['type'] == 'dir':
         why = [f for f in NOT_READ_FLAGS if f in SEALING_FLAGS and e.get(f)]
     else:
@@ -1039,8 +1265,9 @@ def added_not_read(e, trace):
 def sealing(entries):
     """G3-2: "its directories carrying `unreadable` or `mount` ..., counted
     from its entries" (ambiguity N5)."""
-    return sum(1 for e in entries.values()
-               if e['type'] == 'dir' and (e.get('unreadable') or e.get('mount')))
+    return sum(1 for e in entries.values()      # checkpoint-v3 C3-3: "or (v5) `not_read`" (M10)
+               if e['type'] == 'dir' and (e.get('unreadable') or e.get('mount')
+                                          or e.get(NOT_READ)))
 
 
 def both_sides(b, a, ctx):
@@ -1092,6 +1319,23 @@ def both_sides(b, a, ctx):
         return 'type_changed', ['type'], [], trace + ['rule2']
 
     t = a['type']
+    # V5-D4: a directory carrying `not_read` on either side (ambiguity M6).
+    if t == 'dir' and (b.get(NOT_READ) or a.get(NOT_READ)):
+        changed = [f for f in ('mode', 'uid', 'gid') if b[f] != a[f]]
+        both = bool(b.get(NOT_READ) and a.get(NOT_READ))
+        trace.append('v5:not_read-both' if both else 'v5:not_read-one-side')
+        why = flag_why + ([NOT_READ] if changed or not both else [])
+        if 'everything' in scopes or why:
+            return 'unknown', changed, why, trace + ['V5-D4']
+        return 'unchanged', [], [], trace + ['V5-D4-equal']
+    # V5-D1, V5-D2: `meta`; V5-D3: `sealed` (ambiguities M1, M2, M5).
+    meta_sides = [bool(b.get(META)), bool(a.get(META))] if t == 'reg' else [False, False]
+    unsealed = t == 'reg' and (b.get(SEALED) or a.get(SEALED)) and not (
+        b.get(SEALED) and a.get(SEALED) and ctx.get('sealed_key_b') == ctx.get('sealed_key_a'))
+    if any(meta_sides):
+        trace.append('v5:meta-both' if all(meta_sides) else 'v5:meta-one-side')
+    if t == 'reg' and (b.get(SEALED) or a.get(SEALED)):
+        trace.append('v5:sealed-not-compared' if unsealed else 'v5:sealed-compared')
     changed, proof, meta = [], False, False
     unk_fields = one_sided_unknown({t})
     if unk_fields:
@@ -1112,6 +1356,8 @@ def both_sides(b, a, ctx):
         if f == 'sha256' and marked:                             # V4-D2
             if raw_differs:
                 trace.append('writer-open-hash-not-compared')
+            continue
+        if f == 'sha256' and (any(meta_sides) or unsealed):      # V5-D1, V5-D2, V5-D3
             continue
         if s.absent == 'unknown':
             if vb is None or va is None:
@@ -1165,13 +1411,29 @@ def both_sides(b, a, ctx):
     # a field's reason too.
     reasons = ([r for r in flag_why if r != WRITER_OPEN] + [f + '_unknown' for f in unk_fields]
                + [r for r in flag_why if r == WRITER_OPEN])
-    content_unknown = 'content' in scopes or CONTENT in unk_scopes
+    # V5: `meta` where it makes content unknown (on one side only, or with a
+    # field that differs: M1), a seal that does not compare; V5-D5's order.
+    ctime_differs = any(s.cls == CTIME and s.applies(t) and b[f] != a[f]
+                        and not (mount_root and not s.on_mount_roots) for f, s in FIELDS.items())
+    if all(meta_sides) and (changed or unk_fields or ctime_differs):
+        trace.append('v5:meta-difference')
+    v5_why = ([NOT_READ] if any(meta_sides) and (not all(meta_sides) or changed or unk_fields
+                                                 or ctime_differs) else []) + \
+        ([SEALED_KEY] if unsealed else [])
+    reasons += v5_why
+    content_unknown = 'content' in scopes or CONTENT in unk_scopes or bool(v5_why)
     meta_unknown = 'metadata' in scopes or (unk_scopes - {CONTENT})
     if 'everything' in scopes:                                   # rule 1
         return 'unknown', changed, reasons, trace + ['rule1']
     if proof:                                                    # rule 3
         return 'modified', changed, [], trace + ['rule3-proof']
     if content_unknown:
+        # V5-D1, two `meta` entries whose `ctime_ns` alone differs: "`unknown`,
+        # reason `not_read`, `changed` listing the fields" -- rule 5's field,
+        # which is named when nothing else differs (M1).
+        if all(meta_sides) and not changed and ctime_differs:
+            changed = [f for f, s in FIELDS.items() if s.cls == CTIME and b[f] != a[f]]
+            trace.append('V5-D1-ctime')
         return 'unknown', changed, reasons, trace + ['rule3-unknown']
     if meta:                                                     # rule 4
         return 'metadata_only', changed, [], trace + ['rule4-differs']
@@ -1188,6 +1450,8 @@ def both_sides(b, a, ctx):
         if mount_root and not s.on_mount_roots:
             trace.append('not-on-mount-root:' + f)
             continue
+        if all(meta_sides):                     # V5-D1: "never `metadata_only`" (M1)
+            return 'unknown', [f], [NOT_READ], trace + ['V5-D1-ctime']
         return 'metadata_only', [f], [], trace + ['rule5']
     return 'unchanged', [], [], trace + ['rule6']
 
@@ -1391,6 +1655,16 @@ def record_values(rb, ra, changed, trace):
             trace.append('values:V2-one-side')
     else:
         return None
+    # V5-D3: "A record for a `sealed` entry never carries `sha256` in `before`
+    # or `after`" -- V1's and V6's alike (ambiguity M4).
+    if rb.get(SEALED) or ra.get(SEALED):
+        if any(k == 'sha256' for k, _ in vb + va):
+            trace.append('values:V5-D3')
+        vb = [(k, x) for k, x in vb if k != 'sha256']
+        va = [(k, x) for k, x in va if k != 'sha256']
+        if not vb and not va:
+            trace.append('values:V5-D3-both-empty')
+            return vb, va
     # V2: "the two are never both empty".
     if not vb and not va:
         raise AssertionError('reference bug: both value objects empty (%s)' % changed)
@@ -3214,7 +3488,8 @@ def diff(before, after, store=None):
             raise ValueError('corpus error: %r recorded at or below an excluded path' % bad[0])
     root_b, root_a = eb[b'.']['dev'], ea[b'.']['dev']
     remounted = root_b != root_a
-    ctx = dict(root_dev_b=root_b, root_dev_a=root_a, identity_compared=not remounted)
+    ctx = dict(root_dev_b=root_b, root_dev_a=root_a, identity_compared=not remounted,
+               sealed_key_b=hb.get(SEALED_KEY), sealed_key_a=ha.get(SEALED_KEY))
     scopes_key = 'scopes_b64' if 'scopes_b64' in hb else 'scopes'   # ambiguity A9
     header = [('belay_diff', 1), (scopes_key, hb[scopes_key]),
               ('before_created_ns', hb['created_ns']), ('after_created_ns', ha['created_ns']),
@@ -3228,6 +3503,8 @@ def diff(before, after, store=None):
               ('before_excluded', header_excluded(before)[0]),
               ('after_excluded', header_excluded(after)[0])]
     assert [('scopes' if k == 'scopes_b64' else k) for k, _ in header] == HEADER_KEYS
+    if root_set(hb) != root_set(ha):            # V5-D6 (M9), V5-A1
+        header.append((ROOTS_DIFFER, True))
     records, counts, traces = [], collections.Counter(), {}
     states = {i: {'unavailable': [], 'moved': [], 'unnamed': [], 'reinstalled': [],
                   'unknown': set(), 'store': store, 'git': {}, 'cni': []}
@@ -3238,10 +3515,10 @@ def diff(before, after, store=None):
         if b is not None and a is not None:
             out, changed, why, trace = both_sides(b, a, ctx)
         elif a is not None:
-            out, why, trace = one_sided(p, a, eb, True, xb)
+            out, why, trace = one_sided(p, a, eb, True, xb, ea, roots_of(hb))
             changed = []
         else:
-            out, why, trace = one_sided(p, b, ea, False, xa)
+            out, why, trace = one_sided(p, b, ea, False, xa, eb, roots_of(ha))
             changed = []
         check_o4(out, b, a)
         if out == 'unknown' and not why:
@@ -3253,7 +3530,7 @@ def diff(before, after, store=None):
         # record means "for a directory, possibly with its own timestamps
         # changed": every `unchanged` directory whose O5 timestamps differ.
         if out == 'unchanged' and b['type'] == 'dir' and \
-                any(b[f] != a[f] for f in DIR_TIMESTAMPS):
+                any(b.get(f) != a.get(f) for f in DIR_TIMESTAMPS):
             counts[DIR_TIMESTAMPS_ONLY] += 1
             trace = trace + ['dir-timestamps-counted']
         traces[p] = trace + (['remount'] if remounted else [])
@@ -3294,7 +3571,7 @@ def diff(before, after, store=None):
                 rec[CONTENT_NOT_READ] = cnr
         if out == 'type_changed' and a['type'] == 'dir':
             # O11: "whose entry after is a directory carrying `unreadable` or
-            # `mount` carries `content_not_read` with that reason" (N10).
+            # `mount` carries `content_not_read` with that reason" (M12).
             cnr = [f for f in NOT_READ_FLAGS if f in SEALING_FLAGS and a.get(f)]
             if cnr:
                 traces[p].append('O11')
