@@ -243,6 +243,12 @@ int cli_system_scope(bool system, const char *system_root, const char **scope, c
     return 0;
 }
 
+int cli_refuse_root(const char *resolved, bool system, const char *docker, FILE *err) {
+    if (system || docker != NULL || strcmp(resolved, "/") != 0) return 0;
+    fputs("belay: refused: not capturing /: too wide. --system reads the machine by its roots\n", err);
+    return EXIT_REFUSED;
+}
+
 int cli_refuse_system(const struct state *st, long id, const char *what, FILE *err) {
     if (id == 0) {
         struct checkpoint *list = NULL;
@@ -536,6 +542,10 @@ static int cmd_capture(const struct opts *o, const char *kind, FILE *out, FILE *
     struct state st;
     int rc = open_scope(o, true, &st, err);
     if (rc) return rc;
+    if ((rc = cli_refuse_root(st.scope.path, o->system, o->docker, err)) != 0) {
+        state_close(&st);
+        return rc;
+    }
     const struct capture_req req = { kind, strcmp(kind, "mark") == 0, o->full, o->full_every, 0, o->keep, false, o->system };
     struct checkpoint c;
     if (state_capture(&st, &req, &c) == -1) {
@@ -602,6 +612,10 @@ static int cmd_diff(const struct opts *o, FILE *out, FILE *err) {
      * a diff of a scope never captured leaves no state behind (D8). */
     int rc = open_scope(o, false, &st, err);
     if (rc) return rc;
+    if ((rc = cli_refuse_root(st.scope.path, o->system, o->docker, err)) != 0) {     /* WS-1 */
+        state_close(&st);
+        return rc;
+    }
     struct checkpoint *list = NULL, now = { 0 };
     size_t n = 0;
     struct manifest_file mf_a = { .temporary = false }, mf_b = { .temporary = false };
@@ -619,7 +633,7 @@ static int cmd_diff(const struct opts *o, FILE *out, FILE *err) {
     if (!have_from || !have_to) {
         fprintf(err, "belay: no checkpoint %ld of ", have_from ? to : from);
         receipt_fputs(err, st.scope.path);
-        fputs(" (belay log --scope lists them)\n", err);
+        fputs(o->system ? " (belay log --system lists them)\n" : " (belay log --scope lists them)\n", err);
         rc = EXIT_USAGE;
         goto done;
     }

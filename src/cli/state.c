@@ -854,6 +854,31 @@ int state_capture(struct state *st, const struct capture_req *req, struct checkp
         belay_err_set(BELAY_ERR_RANGE, 0, "%s: no checkpoint ids left", st->dir);
         return -1;
     }
+    /* "System" is the state's, not one command line's (manifest-v5 V5-R4's
+     * "a scope whose manifest has roots", for every capture): a scope whose
+     * latest checkpoint has roots is captured only as a system scope -- a
+     * capture of the whole of it would keep in the store what those sealed --
+     * and a scope captured whole does not become a system watch in silence.
+     * Refused before anything is made or stored. */
+    if (n > 0) {
+        struct manifest_file mf;
+        struct belay_manifest_reader *lr = NULL;
+        if (manifest_acquire_header(st, list[n - 1].id, &mf) == -1) { free(list); return -1; }
+        const int opened = belay_manifest_open_header(mf.path, &lr);
+        const bool has_roots = opened == 0 && belay_manifest_header(lr)->n_roots > 0;
+        belay_manifest_close(lr);
+        manifest_release(&mf);
+        if (opened == -1) { free(list); return -1; }
+        if (has_roots != req->system) {
+            free(list);
+            belay_err_set(BELAY_ERR_INVALID, 0, has_roots
+                          ? "this scope is a system watch's (its checkpoints were taken with --system): "
+                            "capture it with --system, not --scope"
+                          : "this scope is not a system watch's (its checkpoints were taken with --scope): "
+                            "--system starts on a scope with no checkpoint");
+            return -1;
+        }
+    }
     const long id = hi + 1;
     char name[16], dir[PATH_MAX + 128], manifest[PATH_MAX + 160], prev[PATH_MAX + 160];
     snprintf(name, sizeof name, "%ld", id);

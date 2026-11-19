@@ -16,6 +16,7 @@
 #include "belay/error.h"
 #include "belay/manifest.h"
 #include "cli/cli.h"
+#include "cli/cli_internal.h"
 #include "policy/bundle.h"
 
 #include <stdarg.h>
@@ -24,6 +25,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <sys/stat.h>
+#include <sys/wait.h>
 #include <time.h>
 #include <unistd.h>
 
@@ -64,9 +66,9 @@ static void fresh(void) {
        g_tree, g_state, g_tree, g_state, g_tree, g_state, g_state, g_tree);
     sh("cd '%s' && mkdir -p etc usr/bin usr/local/bin var/log var/lib root home/u/Documents proc && "
        "printf 'root:x:0:0:root:/root:/bin/sh\\nu:x:1000:1000::/home/u:/bin/sh\\n' > etc/passwd && "
-       "printf 'root:*:1::::::\\n' > etc/shadow && chmod 640 etc/shadow && "
+       "printf 'root:SHADOWSECRET:1::::::\\n' > etc/shadow && chmod 640 etc/shadow && "
        "printf 'tool\\n' > usr/bin/tool && printf 'local\\n' > usr/local/bin/l && printf 'log\\n' > var/log/syslog && "
-       "printf 'x\\n' > var/lib/x && printf 's\\n' > root/secret && chmod 700 root && "
+       "printf 'x\\n' > var/lib/x && printf 'ROOTNOTESECRET\\n' > root/secret && chmod 700 root && "
        "printf 'export A=1\\n' > home/u/.bashrc && printf 'private\\n' > home/u/notes.txt && "
        "printf 'd\\n' > home/u/Documents/d.txt && printf 't\\n' > top.txt && ln -s usr/bin bin && chmod 755 . etc usr var home home/u",
        g_tree);
@@ -127,8 +129,9 @@ TEST(check_captures_the_roots) {
     REQUIRE(belay("check", "--system-root", g_tree, NULL) == 0);
     ASSERT_TRUE(strstr(g_out, "check 2  ") == g_out && strstr(g_out, " entries, nothing seen below 3 directories\n") != NULL);
     /* a scope captured without it is a whole scope, as before: no roots, no key use */
+    sh("rm -rf '%s' && mkdir '%s' && chmod 700 '%s'", g_state, g_state, g_state);
     REQUIRE(belay("check", "--scope", g_tree, NULL) == 0);
-    REQUIRE(belay("manifest", "--scope", g_tree, "--id", "3", NULL) == 0);
+    REQUIRE(belay("manifest", "--scope", g_tree, "--id", "1", NULL) == 0);
     ASSERT_TRUE(strstr(mline(""), ",\"roots\":0,\"basis\":\"walk\"}") != NULL);
     ASSERT_TRUE(mline("top.txt")[0] != '\0' && strstr(mline("etc/shadow"), "sealed") == NULL);
 }
@@ -164,6 +167,9 @@ TEST(mark_diff_and_log_take_it) {
     REQUIRE(belay("diff", "--system-root", g_tree, "--since", "1", NULL) == 0);
     ASSERT_TRUE(strstr(g_out, "etc/passwd") != NULL);
     ASSERT_TRUE(strstr(g_out, "  nothing seen below 3 directories\n") != NULL);
+    /* a checkpoint that is not there: the hint names the flag the command was given */
+    ASSERT_TRUE(belay("diff", "--system-root", g_tree, "--since", "1", "--to", "99", NULL) != 0);
+    ASSERT_TRUE(strstr(g_err, "(belay log --system lists them)") != NULL);
     REQUIRE(belay("log", "--system-root", g_tree, NULL) == 0);
     ASSERT_TRUE(strstr(g_out, "check 1  ") != NULL && strstr(g_out, "mark 2  ") != NULL);
     ASSERT_TRUE(strstr(g_out, ", nothing seen below 3 directories") != NULL);
@@ -196,6 +202,76 @@ TEST(usage) {
     ASSERT_TRUE(strstr(g_out, "no checkpoints of the scope") != NULL);
 }
 
+static int count_checkpoints(void) {
+    char cmd[700];
+    snprintf(cmd, sizeof cmd, "exit $(find '%s' -path '*/checkpoints/*' -prune -type d | wc -l)", g_state);
+    const int r = system(cmd);
+    return WIFEXITED(r) ? WEXITSTATUS(r) : -1;
+}
+static int state_holds(const char *text) {
+    char cmd[700];
+    snprintf(cmd, sizeof cmd, "grep -rl '%s' '%s' >/dev/null 2>&1", text, g_state);
+    return system(cmd) == 0;
+}
+
+/* "System" is the scope's state's, not one command line's: once a scope has
+ * a checkpoint with roots, a capture without the flag is refused -- it would
+ * read the whole scope and keep in the store what the system captures
+ * sealed. And the reverse: a scope captured whole does not become a system
+ * watch in silence. */
+TEST(a_system_scope_is_captured_only_with_the_flag) {
+    fresh();
+    REQUIRE(belay("check", "--system-root", g_tree, NULL) == 0);
+    REQUIRE(belay("mark", "--system-root", g_tree, NULL) == 0);
+    ASSERT_TRUE(!state_holds("ROOTNOTESECRET") && !state_holds("SHADOWSECRET"));
+    static const char *const CMD[] = { "check", "mark", "diff" };
+    for (int i = 0; i < 3; i++) {
+        const int rc = i == 2 ? belay("diff", "--scope", g_tree, "--since", "1", NULL) : belay(CMD[i], "--scope", g_tree, NULL);
+        if (rc != 3) BELAY_FAIL("%s --scope on a system scope: exit %d, want 3", CMD[i], rc);
+        if (strstr(g_err, "a system watch's") == NULL || strstr(g_err, "--system") == NULL)
+            BELAY_FAIL("%s: %s", CMD[i], g_err);
+        ASSERT_EQ_STR("", g_out);
+    }
+    ASSERT_EQ_INT(2, count_checkpoints());
+    ASSERT_TRUE(!state_holds("ROOTNOTESECRET") && !state_holds("SHADOWSECRET"));
+    /* what reads the state and captures nothing still works without it */
+    ASSERT_EQ_INT(0, belay("log", "--scope", g_tree, NULL));
+    ASSERT_EQ_INT(0, belay("diff", "--scope", g_tree, "--since", "1", "--to", "2", NULL));
+    /* the reverse */
+    sh("rm -rf '%s' && mkdir '%s' && chmod 700 '%s'", g_state, g_state, g_state);
+    REQUIRE(belay("check", "--scope", g_tree, NULL) == 0);
+    for (int i = 0; i < 3; i++) {
+        const int rc = i == 2 ? belay("diff", "--system-root", g_tree, "--since", "1", NULL) : belay(CMD[i], "--system-root", g_tree, NULL);
+        if (rc != 3) BELAY_FAIL("%s --system-root on a whole scope: exit %d, want 3", CMD[i], rc);
+        if (strstr(g_err, "not a system watch's") == NULL) BELAY_FAIL("%s: %s", CMD[i], g_err);
+    }
+    ASSERT_EQ_INT(1, count_checkpoints());
+    char cmd[700];
+    snprintf(cmd, sizeof cmd, "[ -z \"$(find '%s' -name sealing.key)\" ]", g_state);
+    ASSERT_EQ_INT(0, system(cmd));
+}
+
+/* WS-1: `--scope /` without --system is refused for check, mark and diff.
+ * The refusing function is called here, never the commands: were it to
+ * regress, a command on `/` would walk the machine. */
+TEST(the_root_directory_is_refused_without_the_flag) {
+    FILE *err = open_memstream(&g_err, &(size_t){ 0 });
+    free(g_out);
+    g_out = NULL;
+    ASSERT_EQ_INT(3, cli_refuse_root("/", false, NULL, err));
+    fclose(err);
+    ASSERT_TRUE(strstr(g_err, "--system") != NULL && strstr(g_err, "refused") != NULL);
+    free(g_err);
+    g_err = NULL;
+    err = open_memstream(&g_err, &(size_t){ 0 });
+    ASSERT_EQ_INT(0, cli_refuse_root("/", true, NULL, err));            /* with the flag: the system scope */
+    ASSERT_EQ_INT(0, cli_refuse_root("/", false, "container", err));    /* a container's own / (host-reader.md) */
+    ASSERT_EQ_INT(0, cli_refuse_root("/srv", false, NULL, err));
+    ASSERT_EQ_INT(0, cli_refuse_root(g_tree, false, NULL, err));
+    fclose(err);
+    ASSERT_EQ_STR("", g_err);
+}
+
 #define SHA64 "0000000000000000000000000000000000000000000000000000000000000000"
 
 /* WS-5, V5-R4: baseline export, verify and a protect spec are refused for a
@@ -223,6 +299,7 @@ TEST(baseline_verify_and_protect_are_refused) {
     ASSERT_EQ_INT(0, belay("baseline", "export", "--scope", g_tree, "--out", out, NULL));
     ASSERT_TRUE(access(out, F_OK) == 0);
     unlink(out);
+    sh("rm -rf '%s' && mkdir '%s' && chmod 700 '%s'", g_state, g_state, g_state);
     /* the same scope once its latest manifest has roots: refused without the flag too */
     REQUIRE(belay("check", "--system-root", g_tree, NULL) == 0);
     ASSERT_EQ_INT(3, belay("baseline", "export", "--scope", g_tree, "--out", out, NULL));
@@ -230,7 +307,7 @@ TEST(baseline_verify_and_protect_are_refused) {
     ASSERT_TRUE(access(out, F_OK) != 0);
     ASSERT_EQ_INT(3, belay("verify", "--scope", g_tree, "--baseline", out, "--baseline-sha256", SHA64, NULL));
     ASSERT_TRUE(strstr(g_err, "not designed for a system watch") != NULL);
-    ASSERT_EQ_INT(3, belay("verify", "--scope", g_tree, "--baseline", out, "--baseline-sha256", SHA64, "--to", "2", NULL));
+    ASSERT_EQ_INT(3, belay("verify", "--scope", g_tree, "--baseline", out, "--baseline-sha256", SHA64, "--to", "1", NULL));
     ASSERT_TRUE(strstr(g_err, "not designed for a system watch") != NULL);
 }
 
@@ -279,6 +356,8 @@ int main(void) {
     RUN(check_captures_the_roots);
     RUN(mark_diff_and_log_take_it);
     RUN(usage);
+    RUN(a_system_scope_is_captured_only_with_the_flag);
+    RUN(the_root_directory_is_refused_without_the_flag);
     RUN(baseline_verify_and_protect_are_refused);
     RUN(a_bundle_whose_manifest_has_roots_is_rejected);
     sh("chmod -R u+rwx '%s' 2>/dev/null; rm -rf '%s'", g_dir, g_dir);
