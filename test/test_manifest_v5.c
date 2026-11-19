@@ -294,7 +294,21 @@ static void wr(const char *rel, const char *data, mode_t mode) {
     if (fd == -1) { perror(p); return; }
     if (write(fd, data, strlen(data)) < 0) perror(p);
     close(fd);
+    /* setgid: an owner who is not root may set it only when the file's group
+     * is one of theirs, and on BSD a new file takes its directory's group
+     * (wheel under /tmp), where chmod then drops the bit in silence. So the
+     * file is given the caller's own group first. */
+    if ((mode & S_ISGID) && chown(p, (uid_t)-1, getegid()) != 0) perror(p);
     if (chmod(p, mode) != 0) perror(p);
+}
+
+/* Whether the setgid bit asked for usr/bin/wall is there: what the test may
+ * expect of it is read back, never assumed. */
+static bool wall_is_setgid(void) {
+    char p[1200];
+    struct stat st;
+    snprintf(p, sizeof p, "%s/usr/bin/wall", g_tree);
+    return stat(p, &st) == 0 && (st.st_mode & S_ISGID) != 0;
 }
 
 static void rm_rf(const char *path) {
@@ -529,13 +543,16 @@ TEST(a_metadata_root_reads_only_what_grants_privilege) {
     sha_hex("su\n", 3, want);
     ASSERT_TRUE(!ent("usr/bin/su")->meta && !ent("usr/bin/su")->sealed);
     ASSERT_EQ_STR(want, ent("usr/bin/su")->sha256_hex);
+    /* setgid: read, where the filesystem let the bit be set (wr); a file without it is meta */
+    const bool setgid = wall_is_setgid();
     sha_hex("wall\n", 5, want);
-    ASSERT_EQ_STR(want, ent("usr/bin/wall")->sha256_hex);
+    if (setgid) ASSERT_EQ_STR(want, ent("usr/bin/wall")->sha256_hex);
+    ASSERT_TRUE(ent("usr/bin/wall")->meta == !setgid);
     REQUIRE(ent("usr/local/bin/l") != NULL);
     sha_hex("local\n", 6, want);
     ASSERT_TRUE(!ent("usr/local/bin/l")->meta);
     ASSERT_EQ_STR(want, ent("usr/local/bin/l")->sha256_hex);
-    ASSERT_EQ_INT(2, (int)st.meta);
+    ASSERT_EQ_INT(setgid ? 2 : 3, (int)st.meta);
 }
 
 /* V5-E5, V5-6, V5-3, V5-R3: under a content root a file others cannot read
@@ -642,7 +659,7 @@ TEST(mark_trusts_by_class_and_by_key) {
     REQUIRE(capture_roots(g_m2, first, &st) == 0);
     REQUIRE_MSG(st.prefilter, "the prefilter was not used: %s", st.prefilter_skipped ? st.prefilter_skipped : "?");
     const size_t all = st.trusted;
-    ASSERT_TRUE(all >= 9);                          /* passwd, shadow, sub/x, su, wall, l, secret, 2 x .bashrc, keys */
+    ASSERT_TRUE(all >= 9);                          /* passwd, shadow, sub/x, su, (wall), l, secret, 2 x .bashrc, keys */
     ASSERT_TRUE(ent("etc/shadow")->sealed);
     ASSERT_EQ_STR(sealed0, ent("etc/shadow")->sha256_hex);
     ASSERT_TRUE(ent("usr/bin/tool")->meta);
@@ -994,6 +1011,7 @@ TEST(system_roots_capture) {
 
 int main(void) {
     snprintf(g_dir, sizeof g_dir, "/tmp/belay_v5_%d_%ld", (int)getpid(), (long)time(NULL));
+    umask(022);                         /* modes are set explicitly; nothing here follows the caller's umask */
     mkdir(g_dir, 0700);
     snprintf(g_tree, sizeof g_tree, "%s/tree", g_dir);
     snprintf(g_m, sizeof g_m, "%s/m.ndjson", g_dir);

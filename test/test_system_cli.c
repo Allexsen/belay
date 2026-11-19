@@ -245,7 +245,7 @@ TEST(a_bundle_whose_manifest_has_roots_is_rejected) {
     snprintf(bundle, sizeof bundle, "%s/roots.bundle", g_dir);
     snprintf(work, sizeof work, "%s/work", g_dir);
     snprintf(mout, sizeof mout, "%s/work/m.ndjson", g_dir);
-    sh("rm -rf '%s'; mkdir -p '%s/store'", work, work);
+    sh("rm -rf '%s'; mkdir -p '%s/store' && chmod 700 '%s' '%s/store'", work, work, work, work);
     REQUIRE(realpath(g_tree, real) != NULL);
     struct bundle_meta meta = { .created_ns = 1, .hash_max_bytes = BELAY_HASH_MAX_BYTES_DEFAULT };
     snprintf(meta.scope, sizeof meta.scope, "%s", real);
@@ -257,6 +257,7 @@ TEST(a_bundle_whose_manifest_has_roots_is_rejected) {
     char sdir[600];
     snprintf(sdir, sizeof sdir, "%s/store", work);
     ASSERT_EQ_INT(-1, bundle_read(bundle, sha, work, mout, sdir, &bd));
+    if (belay_err_code() != BELAY_ERR_CORRUPT) BELAY_FAIL("refused for another reason: %s", belay_err_msg());
     ASSERT_EQ_INT(BELAY_ERR_CORRUPT, (int)belay_err_code());
     ASSERT_TRUE(strstr(belay_err_msg(), "roots") != NULL);
     bundle_free(&bd);
@@ -266,6 +267,11 @@ int main(void) {
     snprintf(g_dir, sizeof g_dir, "/tmp/belay_sys_%d_%ld", (int)getpid(), (long)time(NULL));
     snprintf(g_tree, sizeof g_tree, "%s/tree", g_dir);
     snprintf(g_state, sizeof g_state, "%s/state", g_dir);
+    /* The trees are made by the shell: which files others can read decides
+     * what is sealed, and a store must not be group-writable. Neither may
+     * depend on the umask the suite was started with (002 for a user with a
+     * private group, as in CI's docker job; 077 elsewhere). */
+    umask(022);
     mkdir(g_dir, 0700);
     setenv("BELAY_STATE_DIR", g_state, 1);
     RUN(check_captures_the_roots);
