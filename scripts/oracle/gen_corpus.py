@@ -52,8 +52,8 @@ marked entry has no counterpart before v4 (V4-R2), so it is written in v4 only.
 (Tree.unguarded); it counts files read, so it stays within the hashed, unmarked
 files less `trusted` (V4-4). writer_open() builds the gate's v4 items.
 
-`content_not_read` and the sealing counts (test/expect/diff-fields.md O9 and
-"The trailer", G3-2): not_read() builds the gate's items -- a regular file in
+`content_not_read` and the sealing counts (test/expect/diff-fields.md O9, O10
+and "The trailer", G3-2): not_read() builds the gate's items -- a regular file in
 each state of its content before against each after, with its size different
 or the same, and trees with and without sealing directories.
 
@@ -4982,6 +4982,86 @@ def not_read(w, rng):
                             in_state(e, 'mount', t, rng, 1))
     w.targeted(rng, 'a regular file not read, its path not UTF-8, its size different (O9)',
                build, nr=['content_not_read on a path that is not UTF-8'])
+
+    # O10: an `added` record, "from its one entry"; written both ways round,
+    # so the `removed` record, which never carries it, comes with each.
+    for x in NR.NR_STATES:
+        def build(rng):
+            t, e = base(rng)
+            a = t.copy()
+            a.e[e['path']] = in_state(e, x, a, rng, 0)
+            return t, a
+        w.targeted(rng, 'a regular file %s, on one side only (O10)' % x, build,
+                   nr=[NR.NR_ADDED % x]
+                   + ['a removed regular file not read: no content_not_read'] * (x != 'hashed'))
+    for how, item in ((None, 'an added directory with no flag: no content_not_read'),
+                      ('unreadable', 'an added directory unreadable: content_not_read'),
+                      ('mount', 'an added directory that is a mount: content_not_read'),
+                      ('unstable', 'an added directory unstable: no content_not_read')):
+        def build(rng):
+            t, _ = base(rng)
+            a = t.copy()
+            d = clear_flags(subject(rng, a, 'dir', extras=False), a, rng)
+            if how:
+                d[how] = True
+            if how == 'mount':
+                d['dev'] = other_dev(a, rng)
+            a.e[d['path']] = d
+            return t, a
+        w.targeted(rng, 'a directory %s, on one side only (O10)' % (how or 'with no flag'), build,
+                   nr=[item] + ['a removed sealing directory: no content_not_read']
+                   * (how in ('unreadable', 'mount')))
+    def build(rng):
+        t, _ = base(rng)
+        a = t.copy()
+        l = clear_flags(subject(rng, a, 'lnk', extras=False), a, rng)
+        l.pop('target_outside_scope', None)
+        l['unreadable'] = True
+        a.e[l['path']] = l
+        return t, a
+    w.targeted(rng, 'an unreadable symlink, on one side only (O10: no other type)', build,
+               nr=['an added symlink unreadable: no content_not_read'])
+    def build(rng):
+        t, e = base(rng)
+        a = t.copy()
+        x = in_state(e, 'unreadable', a, rng, 0)
+        x['raced'] = True
+        a.e[e['path']] = x
+        return t, a
+    w.targeted(rng, 'a regular file unreadable and raced, on one side only (O10: unknown)', build,
+               nr=['a regular file not read on one side only and raced: unknown, no '
+                   'content_not_read'])
+    def build(rng):                             # a directory sealed before, listed after
+        t, e = base(rng)
+        d = clear_flags(subject(rng, t, 'dir', extras=False), t, rng)
+        t.e[d['path']] = d
+        a = t.copy()
+        t.e[d['path']]['unreadable'] = True
+        f = clear_flags(new_entry(rng, a, d['path'] + b'/f', 'reg', extras=False), a, rng)
+        a.e[f['path']] = in_state(f, 'unreadable', a, rng, 0)
+        return t, a
+    w.targeted(rng, 'a regular file unreadable, below a directory sealed on the other side '
+                    '(O10: unknown)', build,
+               nr=['a regular file not read on one side only, below a sealed directory on the '
+                   'other: unknown, no content_not_read'])
+    def build(rng):                             # the index: its finding needs no copy
+        t = interp_tree(rng)
+        path = rng.choice(REPOS) + b'.git/index'
+        ensure_dirs(t, rng, path)
+        a = t.copy()
+        e = file_at(rng, a, path, stored=False)
+        a.e[path] = in_state(e, 'unreadable', a, rng, 0)
+        return t, a
+    w.targeted(rng, 'a git index unreadable, on one side only (O10, before findings)', build,
+               nr=['an added regular file not read, with findings'])
+    def build(rng):
+        t, e = base(rng)
+        e['path'] = unlike(b'\xffadded', e['path'])
+        a = t.copy()
+        a.e[e['path']] = in_state(e, 'unstable', a, rng, 0)
+        return t, a
+    w.targeted(rng, 'a regular file unstable, its path not UTF-8, on one side only (O10)', build,
+               nr=['an added regular file not read, its path not UTF-8'])
 
     # G3-2: each manifest's directories carrying `unreadable` or `mount`.
     def sealed(rng, t, how):
