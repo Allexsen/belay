@@ -1077,6 +1077,23 @@ TEST(a_rewritten_file_that_cannot_be_read_says_so) {
     ASSERT_TRUE(strstr(g_out, "},\"content_not_read\":[\"unreadable\"]}\n") != NULL);
 }
 
+/* O10, G2-5, G3-4 end to end: a new file and a new directory belay cannot
+ * read are added, and both outputs say what was not read. */
+TEST(an_added_file_or_directory_that_cannot_be_read_says_so) {
+    if (geteuid() == 0) SKIP("root reads anything");
+    fresh();
+    ASSERT_EQ_INT(0, belay("check", "--scope", g_scope, NULL));
+    sh("printf 'k\\n' > '%s/newfile' && chmod 000 '%s/newfile'", g_scope, g_scope);
+    sh("mkdir '%s/newdir' && printf 'a\\n' > '%s/newdir/a' && chmod 000 '%s/newdir'", g_scope, g_scope, g_scope);
+    ASSERT_EQ_INT(0, belay("diff", "--scope", g_scope, "--since", "1", NULL));
+    ASSERT_TRUE(strstr(g_out, "  A newfile   content not read (unreadable)\n") != NULL);
+    ASSERT_TRUE(strstr(g_out, "  A newdir   nothing below it was seen\n") != NULL);
+    ASSERT_EQ_INT(0, belay("diff", "--scope", g_scope, "--since", "1", "--to", "2", "--json", NULL));
+    sh("chmod 700 '%s/newdir'", g_scope);
+    ASSERT_TRUE(strstr(g_out, "{\"path\":\"newdir\",\"outcome\":\"added\",\"type\":\"dir\",\"content_not_read\":[\"unreadable\"]}\n") != NULL);
+    ASSERT_TRUE(strstr(g_out, "{\"path\":\"newfile\",\"outcome\":\"added\",\"type\":\"reg\",\"content_not_read\":[\"unreadable\"]}\n") != NULL);
+}
+
 /* The same for a file over the hash limit (64 MiB), which root cannot read
  * past either: `unverified` alone. */
 TEST(a_rewritten_file_over_the_hash_limit_says_so) {
@@ -2132,6 +2149,7 @@ int main(void) {
     RUN(keeping_a_checkpoint_keeps_what_it_says_was_not_read);
     RUN(a_record_whose_counts_are_not_belays_is_corrupt);
     RUN(a_rewritten_file_that_cannot_be_read_says_so);
+    RUN(an_added_file_or_directory_that_cannot_be_read_says_so);
     RUN(a_rewritten_file_over_the_hash_limit_says_so);
     RUN(a_capture_that_read_everything_adds_nothing_to_its_line);
     RUN(a_checkpoint_made_before_v3_prints_as_it_did);
