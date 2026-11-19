@@ -538,9 +538,20 @@ static int read_meta(const struct state *st, const char *name, long id, struct c
     c->vanished = (uint64_t)jint(&v, "vanished", 0);
     c->excluded = (uint64_t)jint(&v, "excluded", 0);
     /* checkpoint.v3: both or neither; a checkpoint made before it has neither
-     * and stays so (C3-8). */
+     * and stays so (C3-8). One of the two, or a value that is not a
+     * non-negative integer, is not what belay wrote: corrupt, as an id is,
+     * never read as "not recorded". */
     const struct jval *ur = jget(&v, "unreadable"), *sl = jget(&v, "sealing");
-    c->counts_unread = ur != NULL && ur->t == J_NUM && sl != NULL && sl->t == J_NUM;
+    const struct jval *const counts[2] = { ur, sl };
+    bool counts_bad = (ur == NULL) != (sl == NULL);
+    for (int i = 0; i < 2 && ur != NULL && sl != NULL; i++)
+        counts_bad = counts_bad || counts[i]->t != J_NUM || counts[i]->num != (double)counts[i]->i || counts[i]->i < 0;
+    if (counts_bad) {
+        jsonr_free(&v);
+        belay_err_set(BELAY_ERR_CORRUPT, 0, "%s is not a checkpoint's meta.json", shown);
+        return -1;
+    }
+    c->counts_unread = ur != NULL;
     c->unreadable = c->counts_unread ? (uint64_t)ur->i : 0;
     c->sealing = c->counts_unread ? (uint64_t)sl->i : 0;
     const struct jval *p = jget(&v, "provisional");
