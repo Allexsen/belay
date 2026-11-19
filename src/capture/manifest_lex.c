@@ -127,6 +127,7 @@ static int object(const char *s, size_t len, struct obj *o, bool flat);
 
 /* Parses one whole line into `o`. Duplicate keys are rejected. */
 int lex_object(const char *s, size_t len, struct obj *o) { return object(s, len, o, false); }
+int lex_root_line(const char *s, size_t len, struct obj *o) { return object(s, len, o, true); }
 
 /* `flat`: an array's element or a nested object, where `false` is a value
  * (version 5: a root's `found`). On a line of its own it never is: a flag

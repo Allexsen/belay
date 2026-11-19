@@ -76,18 +76,10 @@ static int format_header(FILE *f, long long created, const char *scope_real,
         belay_err_set(BELAY_ERR_IO, errno, "manifest: header write failed");
         return -1;
     }
-    /* Version 5 (test/expect/manifest-v5.md, V5-2, V5-3, V5-10): every root
-     * looked for, in the order given (sorted: capture_write_root checks),
-     * the sealing key's id when an entry is sealed, and the basis: a walk. */
-    w = fprintf(f, ",\"%s\":[", HEADER5_FIELDS[H5_ROOTS].name);
-    for (size_t i = 0; v5 != NULL && i < v5->n && w >= 0; i++) {
-        const char *rp = v5->roots[i].path;
-        if (belay_json_escape(buf, LINE_CAP, rp, strlen(rp)) == -1) return -1;
-        w = fprintf(f, "%s{\"%s\":\"%s\",\"%s\":\"%s\",\"%s\":%s}", i ? "," : "", ROOT_FIELDS[RT_PATH].name, buf,
-                    ROOT_FIELDS[RT_CLASS].name, ROOT_CLASSES[v5->roots[i].cls], ROOT_FIELDS[RT_FOUND].name,
-                    v5->found[i] ? "true" : "false");
-    }
-    if (w >= 0) w = fputs("]", f) == EOF ? -1 : 0;
+    /* Version 5 (manifest-v5.md V5-3, V5-10; its addendum V5-A1): how many
+     * root lines follow (cap_write_roots), the sealing key's id when an
+     * entry is sealed, and the basis: a walk. */
+    w = fprintf(f, ",\"%s\":%zu", HEADER5_FIELDS[H5_ROOTS].name, v5 != NULL ? v5->n : (size_t)0);
     if (w >= 0 && v5 != NULL && v5->sealed_key != NULL)
         w = fprintf(f, ",\"%s\":\"%s\"", HEADER5_FIELDS[H5_SEALED_KEY].name, v5->sealed_key);
     if (w < 0 || fprintf(f, ",\"%s\":\"walk\"}", HEADER5_FIELDS[H5_BASIS].name) < 0) {
@@ -129,11 +121,6 @@ int cap_write_header(const struct fsops *ops, FILE *f, const char *scope_real,
     if (len > BELAY_MANIFEST_LINE_MAX) {
         size_t bytes = 0;
         for (size_t i = 0; i < nx; i++) bytes += xs[i].path_len;
-        if (v5 != NULL && v5->n > 0)
-            belay_err_set(BELAY_ERR_RANGE, 0, "manifest: the header line would be %zu bytes, over the %d-byte "
-                          "line limit: %zu roots (the home directories of etc/passwd, 14 each) and %zu excluded "
-                          "paths", len, BELAY_MANIFEST_LINE_MAX, v5->n, nx);
-        else
         belay_err_set(BELAY_ERR_RANGE, 0, "manifest: the header line would be %zu bytes, over the %d-byte "
                       "line limit: %zu excluded paths, %zu bytes of names -- fewer or shorter excludes",
                       len, BELAY_MANIFEST_LINE_MAX, nx, bytes);
@@ -145,6 +132,25 @@ int cap_write_header(const struct fsops *ops, FILE *f, const char *scope_real,
     if (!ok) {
         belay_err_set(BELAY_ERR_IO, errno, "manifest: header write failed");
         return -1;
+    }
+    return 0;
+}
+
+/* One line per root, directly after the header, in the order given (sorted:
+ * roots_check): {"root": path, "class": ..., "found": ...}, root_b64 for a
+ * path that is not UTF-8 (manifest-v5-addendum V5-A1). */
+int cap_write_roots(FILE *f, const struct header5 *v5, char *buf) {
+    for (size_t i = 0; i < v5->n; i++) {
+        const char *rp = v5->roots[i].path;
+        const size_t rl = strlen(rp);
+        const bool utf8 = belay_utf8_valid(rp, rl);
+        if ((utf8 ? belay_json_escape(buf, LINE_CAP, rp, rl) : belay_base64_encode(buf, LINE_CAP, rp, rl)) == -1) return -1;
+        if (fprintf(f, "{\"%s\":\"%s\",\"%s\":\"%s\",\"%s\":%s}\n", utf8 ? ROOT_FIELDS[RT_PATH].name : ROOT_FIELDS[RT_PATH].alt,
+                    buf, ROOT_FIELDS[RT_CLASS].name, ROOT_CLASSES[v5->roots[i].cls], ROOT_FIELDS[RT_FOUND].name,
+                    v5->found[i] ? "true" : "false") < 0) {
+            belay_err_set(BELAY_ERR_IO, errno, "manifest: write failed");
+            return -1;
+        }
     }
     return 0;
 }

@@ -190,5 +190,6 @@ struct header5 { const struct belay_root *roots; const bool *found; size_t n; co
 int  cap_write_header(const struct fsops *ops, FILE *f, const char *scope_real,
                       const struct belay_excluded *xs, size_t nx, int64_t walk_start_ns,
                       const struct belay_manifest_opts *opts, const struct header5 *v5, char *buf);
+int  cap_write_roots(FILE *f, const struct header5 *v5, char *buf);
 
 #endif

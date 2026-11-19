@@ -127,6 +127,7 @@ extern const struct line_field_def TRAILER5_FIELDS[TR5_COUNT];
 enum root_field { RT_PATH, RT_CLASS, RT_FOUND, RT_COUNT };
 extern const struct line_field_def ROOT_FIELDS[RT_COUNT];
 extern const char *const ROOT_CLASSES[2];       /* by enum belay_root_class */
+extern const struct line_field_def RACY_FIELD;  /* a racy line's one key (V5-A2) */
 /* The keys of one `excluded` element, in order. */
 enum excluded_field { EX_PATH, EX_REASON, EX_DEV, EX_INO, EX_COUNT };
 extern const struct line_field_def EXCLUDED_FIELDS[EX_COUNT];

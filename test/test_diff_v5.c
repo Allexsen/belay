@@ -39,7 +39,7 @@ static void m_new(const char *roots, const char *sealed_key) {
 }
 
 /* A root for m_new's list: "path:c" content, "path:m" metadata, with "!" when not found. */
-#define RT(p, cls, found) "{\"path\":\"" p "\",\"class\":\"" cls "\",\"found\":" found "}"
+#define RT(p, cls, found) "{\"root\":\"" p "\",\"class\":\"" cls "\",\"found\":" found "}\n"
 
 static void count(const char *flags) {
     M.n++;
@@ -92,12 +92,14 @@ static void m_write(const char *name) {
     snprintf(p, sizeof p, "%s/%s", g_dir, name);
     FILE *f = fopen(p, "wb");
     if (f == NULL) return;
+    size_t nroots = 0;                  /* V5-A1: the count, then one line per root */
+    for (const char *c = M.roots; *c; c++) nroots += *c == '\n';
     fprintf(f, "{\"belay_manifest\":5,\"created_ns\":0,\"scopes\":[\"/s\"],\"hash\":\"sha256\",\"hash_max_bytes\":67108864,"
-               "\"store_max_bytes\":65536,\"excluded\":[],\"walk_start_ns\":0,\"source\":null,\"roots\":[%s]%s,"
-               "\"basis\":\"walk\"}\n%s", M.roots, M.key, M.body);
+               "\"store_max_bytes\":65536,\"excluded\":[],\"walk_start_ns\":0,\"source\":null,\"roots\":%zu%s,"
+               "\"basis\":\"walk\"}\n%s%s", nroots, M.key, M.roots, M.body);
     fprintf(f, "{\"belay_manifest_end\":%zu,\"vanished\":0,\"unreadable\":%zu,\"unstable\":%zu,\"mounts\":%zu,\"raced\":%zu,"
                "\"trusted\":0,\"reference\":\"none\",\"read_all\":\"check\",\"writer_open\":%zu,\"unguarded\":0,"
-               "\"not_read\":%zu,\"meta\":%zu,\"sealed\":%zu,\"carried\":0,\"racy\":[]}\n",
+               "\"not_read\":%zu,\"meta\":%zu,\"sealed\":%zu,\"carried\":0,\"racy\":0}\n",
             M.n, M.unread, M.unstable, M.mounts, M.raced, M.wopen, M.nr, M.meta, M.sealed);
     fclose(f);
 }
@@ -262,7 +264,7 @@ TEST(not_read_directories) {
     IS("{\"path\":\"d\",\"outcome\":\"unknown\",\"type\":\"dir\",\"unknown\":[\"raced\",\"not_read\"]}", rec("d"));
 }
 
-#define HOME_ROOTS RT("home/u/.bashrc", "content", "false") "," RT("home/u/.config/systemd/user", "content", "false") "," \
+#define HOME_ROOTS RT("home/u/.bashrc", "content", "false") RT("home/u/.config/systemd/user", "content", "false") \
                    RT("home/u/.ssh", "content", "false")
 #define P ",\"partial\":true"
 
@@ -278,7 +280,7 @@ static void home_before(void) {
  * home is added. */
 TEST(a_first_ssh_directory_in_a_home_is_added) {
     home_before();
-    m_new(RT("home/u/.bashrc", "content", "false") "," RT("home/u/.config/systemd/user", "content", "false") ","
+    m_new(RT("home/u/.bashrc", "content", "false") RT("home/u/.config/systemd/user", "content", "false")
           RT("home/u/.ssh", "content", "true"), K1);
     dir(".", P); dir("home", P); dir("home/u", P); dir("home/u/.config", P); dir_m("home/u/.ssh", 0700, "");
     reg_x("home/u/.ssh/authorized_keys", 0600, 3, 5, 5, SEALED(HA));
@@ -295,7 +297,7 @@ TEST(a_first_ssh_directory_in_a_home_is_added) {
  * home that had .config and no systemd below it is added. */
 TEST(a_first_user_unit_in_a_home_is_added) {
     home_before();
-    m_new(RT("home/u/.bashrc", "content", "false") "," RT("home/u/.config/systemd/user", "content", "true") ","
+    m_new(RT("home/u/.bashrc", "content", "false") RT("home/u/.config/systemd/user", "content", "true")
           RT("home/u/.ssh", "content", "false"), NULL);
     dir(".", P); dir("home", P); dir("home/u", P); dir("home/u/.config", P); dir("home/u/.config/systemd", P);
     dir("home/u/.config/systemd/user", ""); reg("home/u/.config/systemd/user/x.service", SHA(HA));
@@ -395,7 +397,7 @@ TEST(the_header_says_when_the_roots_differ) {
     m_new(RT("etc", "metadata", "true"), NULL); dir(".", P); m_write("after");
     REQUIRE(run() == 0);
     ASSERT_TRUE(strstr(first_line(), ",\"roots_differ\":true}") != NULL);
-    m_new(RT("etc", "content", "true") "," RT("usr", "metadata", "true"), NULL); dir(".", P); m_write("after");
+    m_new(RT("etc", "content", "true") RT("usr", "metadata", "true"), NULL); dir(".", P); m_write("after");
     REQUIRE(run() == 0);
     ASSERT_TRUE(strstr(first_line(), ",\"roots_differ\":true}") != NULL);
     m_new(NULL, NULL); dir(".", ""); m_write("after");

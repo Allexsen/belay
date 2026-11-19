@@ -92,6 +92,10 @@ int stream_entry(struct stream *s, const struct belay_entry *e) {
 
 int stream_end(const struct stream *s, const uint64_t v[TR_COUNT], const struct belay_manifest_stats *t) {
     const size_t writer_open = t->writer_open;
+    if (t->racy_listed != s->n_racy) {              /* manifest-v5-addendum V5-A2 */
+        belay_err_set(BELAY_ERR_CORRUPT, 0, "manifest: trailer says %zu racy, read %zu", t->racy_listed, s->n_racy);
+        return -1;
+    }
     if (t->not_read != s->n_not_read || t->meta != s->n_meta || t->sealed != s->n_sealed_flag) {
         belay_err_set(BELAY_ERR_CORRUPT, 0, "manifest: trailer says %zu not_read / %zu meta / %zu sealed, "
                       "read %zu / %zu / %zu", t->not_read, t->meta, t->sealed, s->n_not_read, s->n_meta,

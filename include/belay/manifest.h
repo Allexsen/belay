@@ -392,8 +392,10 @@ struct belay_manifest_header {
      * walker was all they had -- manifest-v3 V3-R3): */
     char     source_docker[65];  /* the container's id */
     char     source_image[72];   /* "sha256:" and its image's id */
-    /* Version 5 (empty, "" and false before it: V5-R2). `roots` is the
-     * reader's, n_roots of them, sorted; each path NUL-terminated. */
+    /* Version 5 (0, "" and false before it: V5-R2). n_roots is the header's
+     * count (manifest-v5-addendum V5-A1); `roots` the root lines read after
+     * it, the reader's, sorted, each path NUL-terminated -- NULL from
+     * belay_manifest_open_header, which reads no line but the header. */
     const struct belay_root *roots;
     size_t   n_roots;
     char     sealed_key[BELAY_SEALED_KEY_HEX + 1];   /* "" when absent */
@@ -449,7 +451,15 @@ int belay_manifest_digest(const struct belay_manifest_reader *r, char hex[65]);
 int belay_manifest_rewind(struct belay_manifest_reader *r);
 
 int  belay_manifest_open(const char *path, struct belay_manifest_reader **out);
+/* The header line alone, of a file that may hold no more (a delta keeps a
+ * manifest's header as it is): header->n_roots is its count and
+ * header->roots NULL; belay_manifest_next fails. 0, or -1. */
+int  belay_manifest_open_header(const char *path, struct belay_manifest_reader **out);
 int  belay_manifest_next(struct belay_manifest_reader *r, struct belay_entry *e);
+/* The `i`th racy path (V5-A2), in byte order, once belay_manifest_next has
+ * returned 0: its length with *path set (NUL-terminated, the reader's), or
+ * 0 past the last. The trailer's racy_listed is how many there are. */
+size_t belay_manifest_racy(const struct belay_manifest_reader *r, size_t i, const char **path);
 void belay_manifest_close(struct belay_manifest_reader *r);
 
 #endif /* BELAY_MANIFEST_H */

@@ -126,11 +126,11 @@ static bool home_usable(const struct fsops *ops, int root_fd, uint64_t root_dev,
 
 /* A passwd home as a path relative to the scope, canonical, into `out`:
  * false when it is not absolute, is "/", or has an empty, "." or ".."
- * component, a control byte, or bytes that are not UTF-8 (a root's path is
- * a JSON string in the manifest's header). Trailing slashes are dropped. */
+ * component. Any other bytes are a path's (a root line writes what is not
+ * UTF-8 as root_b64). Trailing slashes are dropped. */
 static bool home_rel(const char *home, size_t len, char *out, size_t cap) {
     while (len > 1 && home[len - 1] == '/') len--;
-    if (len < 2 || home[0] != '/' || len - 1 >= cap || !belay_utf8_valid(home, len)) return false;
+    if (len < 2 || home[0] != '/' || len - 1 >= cap) return false;
     memcpy(out, home + 1, len - 1);
     out[len - 1] = '\0';
     for (const char *c = out; ; ) {
@@ -140,8 +140,6 @@ static bool home_rel(const char *home, size_t len, char *out, size_t cap) {
         if (e == NULL) break;
         c = e + 1;
     }
-    for (const unsigned char *c = (const unsigned char *)out; *c; c++)
-        if (*c < 0x20 || *c == 0x7f) return false;
     return true;
 }
 

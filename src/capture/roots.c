@@ -69,9 +69,9 @@ static bool canonical(const char *p) {
 int roots_check(const struct belay_manifest_opts *o) {
     for (size_t i = 0; i < o->n_roots; i++) {
         const char *p = o->roots[i].path;
-        if (!canonical(p) || strlen(p) >= PATH_CAP || !belay_utf8_valid(p, strlen(p)) ||
+        if (!canonical(p) || strlen(p) >= PATH_CAP ||
             (i > 0 && strcmp(o->roots[i - 1].path, p) >= 0)) {
-            belay_err_set(BELAY_ERR_INVALID, 0, "manifest: the roots are not canonical relative UTF-8 paths, "
+            belay_err_set(BELAY_ERR_INVALID, 0, "manifest: the roots are not canonical relative paths, "
                           "sorted, each once (at \"%s\")", p != NULL ? p : "");
             return -1;
         }

@@ -181,9 +181,10 @@ const struct line_field_def TRAILER4_FIELDS[TR4_COUNT] = {
 };
 
 const struct line_field_def HEADER5_FIELDS[H5_COUNT] = {
-    [H5_ROOTS] = { "roots", NULL, "array",
-        "Every root this capture looked for, one object each, sorted by path bytes, each once; "
-        "`[]` for a capture of a whole scope." },
+    [H5_ROOTS] = { "roots", NULL, "int",
+        "The number of root lines (manifest-v5-addendum V5-A1): every root this capture looked for "
+        "is a line of its own directly after the header, sorted by path bytes, each once; `0` and "
+        "no such line for a capture of a whole scope." },
     [H5_SEALED_KEY] = { "sealed_key", NULL, "string",
         "The first 16 hex digits of the sha256 of the state's sealing key; absent when no entry is "
         "`sealed`. Two manifests compare `sealed` hashes only when it is equal." },
@@ -191,7 +192,8 @@ const struct line_field_def HEADER5_FIELDS[H5_COUNT] = {
 };
 
 const struct line_field_def ROOT_FIELDS[RT_COUNT] = {
-    [RT_PATH] = { "path", NULL, "string", "Relative to the scope, as entry paths are." },
+    [RT_PATH] = { "root", "root_b64", "string",
+        "Relative to the scope, as entry paths are; `root_b64` when it is not valid UTF-8." },
     [RT_CLASS] = { "class", NULL, "string", "`content` or `metadata`." },
     [RT_FOUND] = { "found", NULL, "bool", "`false`: looked for and not there." },
 };
@@ -203,10 +205,14 @@ const struct line_field_def TRAILER5_FIELDS[TR5_COUNT] = {
     [TR5_SEALED] = { "sealed", NULL, "int", "Entries carrying `sealed`." },
     [TR5_CARRIED] = { "carried", NULL, "int",
         "Entries taken from the previous manifest without a stat; `0` for a walk." },
-    [TR5_RACY] = { "racy", "racy_b64", "array",
-        "Paths of entries looked at in this capture whose `ctime_ns` was not older than its "
-        "barrier, sorted, each once; `racy_b64` when any is not UTF-8. Empty for a walk." },
+    [TR5_RACY] = { "racy", NULL, "int",
+        "The number of racy lines (V5-A2): each path of an entry looked at in this capture whose "
+        "`ctime_ns` was not older than its barrier is a line of its own after the last entry, "
+        "sorted, each once. `0` for a walk." },
 };
+/* A racy line's one key. */
+const struct line_field_def RACY_FIELD = { "racy", "racy_b64", "string",
+    "An entry's path; `racy_b64` when it is not valid UTF-8." };
 
 const struct line_field_def HEADER2_FIELDS[H2_COUNT] = {
     [H2_EXCLUDED] = { "excluded", NULL, "array",

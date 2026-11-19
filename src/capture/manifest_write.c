@@ -278,7 +278,8 @@ int capture_write_root(const struct fsops *ops, const char *out_path, const char
      * re-check, so the entries are counted as they will be written. */
     const struct header5 v5 = { opts->roots, wc->root_found, opts->n_roots,
                                 wc->sealed_entries > 0 ? wc->sealed_key_id : NULL };
-    if (cap_write_header(ops, out, real, wc->xs, wc->excluded, walk_start_ns, opts, &v5, wc->line) == -1)
+    if (cap_write_header(ops, out, real, wc->xs, wc->excluded, walk_start_ns, opts, &v5, wc->line) == -1 ||
+        cap_write_roots(out, &v5, wc->line) == -1)
         goto cleanup;
 
     /* The output pass: each entry with its re-check verdict applied, counted
@@ -367,10 +368,10 @@ int capture_write_root(const struct fsops *ops, const char *out_path, const char
     if (tw >= 0)
         tw = fprintf(out, ",\"%s\":%zu,\"%s\":%zu", TRAILER4_FIELDS[TR4_WRITER_OPEN].name, tally.writer_open,
                      TRAILER4_FIELDS[TR4_UNGUARDED].name, wc->unguarded);
-    /* Version 5 (V5-7 to V5-12): the flags counted, and a walk's constants:
-     * nothing carried, no racy path. */
+    /* Version 5 (V5-7 to V5-12, V5-A2): the flags counted, and a walk's
+     * constants: nothing carried, no racy line. */
     if (tw >= 0)
-        tw = fprintf(out, ",\"%s\":%zu,\"%s\":%zu,\"%s\":%zu,\"%s\":0,\"%s\":[]", TRAILER5_FIELDS[TR5_NOT_READ].name,
+        tw = fprintf(out, ",\"%s\":%zu,\"%s\":%zu,\"%s\":%zu,\"%s\":0,\"%s\":0", TRAILER5_FIELDS[TR5_NOT_READ].name,
                      tally.not_read, TRAILER5_FIELDS[TR5_META].name, tally.meta, TRAILER5_FIELDS[TR5_SEALED].name,
                      tally.sealed, TRAILER5_FIELDS[TR5_CARRIED].name, TRAILER5_FIELDS[TR5_RACY].name);
     if (tw >= 0 && tally.sealed != wc->sealed_entries) {

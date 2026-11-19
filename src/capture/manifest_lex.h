@@ -71,6 +71,9 @@ int lex_line(FILE *f, char *line, size_t *len, size_t *lineno);
 /* One whole line into `o`, by the grammar above. Duplicate keys rejected. */
 int lex_object(const char *s, size_t len, struct obj *o);
 
+/* The same for a version 5 root line, the one line where `false` is a
+ * value (its `found`): manifest-v5-addendum V5-A1. */
+int lex_root_line(const char *s, size_t len, struct obj *o);
 /* Known keys in the order of `order`; unknown keys only after every known one. */
 int lex_order(const struct obj *o, const char *const *order, size_t n);
 

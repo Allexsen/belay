@@ -354,8 +354,9 @@ against the kernel.
 
 `--system` takes the place of `--scope` on `check`, `mark`, `diff`, `log` and `manifest`, and on no
 other command yet. The scope is `/`; giving `--scope` too is a usage error. A capture does not read
-all of `/`: it reads a list of roots, and says in its manifest what it looked for and how it looked
-at every entry. The format is manifest version 5, pinned in
+all of `/`: it reads a list of roots, and says in its manifest what it looked for (one line per
+root after the header, found or not, with the header's `roots` their number) and how it looked at
+every entry. The format is manifest version 5, pinned in
 [manifest-v5.md](../test/expect/manifest-v5.md); the roots are pinned in
 [watch-system.md](../test/expect/watch-system.md) (WS-6 to WS-9). It runs as any user: what that
 user cannot read is recorded as could not be read, as in any scope.

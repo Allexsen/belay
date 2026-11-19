@@ -43,6 +43,7 @@
 struct stream {
     size_t n_entries, n_unreadable, n_unstable, n_mounts, n_raced, n_writer_open;
     size_t n_not_read, n_meta, n_sealed_flag;   /* version 5's flags */
+    size_t n_racy;              /* racy lines read (V5-A2); the reader counts them */
     size_t n_sealing;           /* directories nothing below which was read, the root included */
     bool   have_root;
     bool   root_unreadable;
