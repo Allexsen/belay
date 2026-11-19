@@ -17,7 +17,8 @@ the driver's diff and reference.diff() must agree on
   - every record's `content_not_read` (test/expect/diff-fields.md O9, and O10
     for an `added` record: a regular file not read, a sealing directory): present
     exactly where the reference says, its reasons as a set, and where it
-    stands ("after the values and before `findings`"); its order is "the
+    stands ("after the values and before `findings`"; O11's on a
+    `type_changed` record whose entry after is a sealing directory); its order is "the
     order of the `unknown` array", so it is held to the one order below
     together with every `unknown` array;
   - every record's `findings`, exactly: each finding's keys in order, values
@@ -230,6 +231,7 @@ G_TYPE_BEFORE = 'type_before on every path whose types differ, raced or not'
 G_DIGEST = 'xattrs: an inline set against a digest, by the formula (manifest-v1)'
 G_O8 = 'unverified on a side that also carries mount: no reason; on the other side its own (O8)'
 G_O9 = 'content_not_read on a modified regular file whose content was not read on a side (O9)'
+G_O11 = 'content_not_read on a type change into an unreadable or mount directory (O11)'
 G_O10 = 'content_not_read on an added regular file not read or sealing directory (O10)'
 G_O9_UNVERIFIED = ('content_not_read: unverified gives no reason beside unreadable, unstable or '
                    'mount on its side (O9)')
@@ -312,16 +314,19 @@ def contradicts_itself(g):
         cn = g[ref.CONTENT_NOT_READ]
         # O10: "An `added` record carries `content_not_read` too ... A regular
         # file ... A directory ... No other type, and never a `removed` record."
-        ok = (o in ('modified', 'metadata_only') and g.get('type') == 'reg') or \
-            (o == 'added' and g.get('type') in ('reg', 'dir'))
-        if not ok or 'type_before' in g:
+        # O11: "A `type_changed` record whose entry after is a directory ..."
+        ok = (o in ('modified', 'metadata_only') and g.get('type') == 'reg'
+              and 'type_before' not in g) or \
+            (o == 'added' and g.get('type') in ('reg', 'dir')) or \
+            (o == 'type_changed' and g.get('type') == 'dir')
+        if not ok:
             return 'content_not_read on a %s record of a %s%s' % (
                 o, g.get('type'), ' with type_before' if 'type_before' in g else '')
         if isinstance(cn, list) and g.get('type') == 'dir' and \
                 (len(cn) != 1 or cn[0] not in ref.SEALING_FLAGS):
             return 'content_not_read of a directory is %r' % (cn,)
-        if isinstance(cn, list) and o == 'added' and len(cn) != 1:
-            return 'content_not_read of an added record is %r' % (cn,)
+        if isinstance(cn, list) and o in ('added', 'type_changed') and len(cn) != 1:
+            return 'content_not_read of an %s record is %r' % (o, cn)
         if not isinstance(cn, list) or not cn or len(set(map(str, cn))) != len(cn) or \
                 any(r not in ref.NOT_READ_FLAGS for r in cn):
             return 'content_not_read is %r' % (cn,)
@@ -400,7 +405,8 @@ def compare_record(path, exp, got, trace, orders):
         # O9: "It stands where `unknown` would, after the values and before
         # `findings`".
         # O10: "after `type`, before `findings`" (an `added` record has no values).
-        at = [k for k in ('type', 'after', ref.CONTENT_NOT_READ, 'findings') if k in keys]
+        at = [k for k in ('type', 'type_before', 'changed', 'before', 'after',
+                          ref.CONTENT_NOT_READ, 'findings') if k in keys]
         if ref.CONTENT_NOT_READ in keys and [k for k in keys if k in at] != at:
             groups.append('OTHER: record key order %s (O9: after the values, before findings)'
                           % keys)
@@ -450,6 +456,8 @@ def compare_record(path, exp, got, trace, orders):
     if set(ne) != set(map(str, ng)) or (ref.CONTENT_NOT_READ in exp) != (ref.CONTENT_NOT_READ in g):
         if exp['outcome'] == g.get('outcome') == 'added':
             groups.append(G_O10)
+        elif exp['outcome'] == g.get('outcome') == 'type_changed':
+            groups.append(G_O11)
         elif exp['outcome'] == g.get('outcome'):
             groups.append(G_O9_UNVERIFIED if 'O9-unverified-because-of' in trace
                           and set(ne) ^ set(map(str, ng)) == {'unverified'} else G_O9)
@@ -2130,6 +2138,12 @@ NOT_READ_SCENARIOS = (
        'a regular file not read on one side only and raced: unknown, no content_not_read',
        'a regular file not read on one side only, below a sealed directory on the other: '
        'unknown, no content_not_read',
+       'a type change into an unreadable directory: content_not_read (O11)',
+       'a type change into a mount directory: content_not_read (O11)',
+       'a type change into a directory with no flag: no content_not_read',
+       'a type change from an unreadable directory: no content_not_read',
+       'a raced type change into an unreadable directory: unknown, no content_not_read',
+       'a type change into a sealing directory, on a record with findings (O11)',
        'an added regular file not read, with findings',
        'an added regular file not read, its path not UTF-8',
        'sealing: 0 on both sides', 'sealing: not 0 before', 'sealing: not 0 after',
@@ -2167,6 +2181,23 @@ def not_read_coverage(stem, tags):
                 tags.add('a regular file not read becomes another type: no content_not_read'
                          if b['type'] == 'reg' else
                          'another type becomes a regular file not read: no content_not_read')
+            marked = b.get(ref.WRITER_OPEN) or a.get(ref.WRITER_OPEN)
+            if a['type'] == 'dir' and not marked:                       # O11
+                how = ('an unreadable directory' if a.get('unreadable') else
+                       'a mount directory' if a.get('mount') else
+                       'a directory with no flag' if not any(a.get(f) for f in ref.FLAGS) else None)
+                if how == 'an unreadable directory' and raced:
+                    tags.add('a raced type change into an unreadable directory: unknown, no '
+                             'content_not_read')
+                elif how and not raced:
+                    tags.add('a type change into %s: %scontent_not_read%s'
+                             % (how, 'no ' if 'no flag' in how else '',
+                                '' if 'no flag' in how else ' (O11)'))
+                    if 'findings' in recs.get(p, {}) and ref.CONTENT_NOT_READ in recs[p]:
+                        tags.add('a type change into a sealing directory, on a record with '
+                                 'findings (O11)')
+            if b['type'] == 'dir' and b.get('unreadable') and not raced and not marked:
+                tags.add('a type change from an unreadable directory: no content_not_read')
             continue
         if b['type'] == 'lnk' and (b.get('unreadable') or a.get('unreadable')) and \
                 b['size'] != a['size'] and not raced:
