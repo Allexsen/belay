@@ -406,6 +406,37 @@ TEST(an_added_entry_that_was_not_read_says_why) {
     }
 }
 
+/* O11 (checkpoint-v3 G3-5): a path that became a directory nothing was seen
+ * below says so in its type_changed record. No other type change does:
+ * across one no content is compared, so nothing else was left unread. */
+TEST(a_type_change_into_a_directory_nothing_was_seen_below_says_why) {
+    static const struct { struct me b, a; const char *want; } C[] = {
+        { { .type = "reg", .size = 3, .sha = HA }, { .type = "dir", .unreadable = true }, "\"content_not_read\":[\"unreadable\"]}" },
+        { { .type = "lnk", .target = "t" }, { .type = "dir", .mount = true, .dev = 2 }, "\"content_not_read\":[\"mount\"]}" },
+        { { .type = "reg", .size = 3, .sha = HA }, { .type = "dir" }, NULL },
+        { { .type = "reg", .size = 3, .sha = HA }, { .type = "dir", .unstable = true }, NULL },
+        { { .type = "dir", .unreadable = true }, { .type = "reg", .size = 3, .sha = HA }, NULL },      /* the side before */
+        { { .type = "lnk", .target = "t" }, { .type = "reg", .size = 3, .unreadable = true }, NULL },  /* a file: O7 */
+        { { .type = "dir" }, { .type = "reg", .size = 3000 }, NULL },
+    };
+    for (size_t i = 0; i < sizeof C / sizeof C[0]; i++) {
+        struct me b = C[i].b, a = C[i].a;
+        b.path = a.path = "t";
+        m_begin("before", "/s", 1000); ROOT(); m_entry(b); m_end();
+        m_begin("after", "/s", 1000); ROOT(); m_entry(a); m_end();
+        REQUIRE(run() == 0);
+        const char *r = record("t");
+        if (r == NULL || strstr(r, "\"outcome\":\"type_changed\"") == NULL ||
+            (C[i].want != NULL ? strstr(r, C[i].want) == NULL : strstr(r, "content_not_read") != NULL))
+            BELAY_FAIL("case %zu: want %s in %s", i, C[i].want ? C[i].want : "no content_not_read", r ? r : "(no record)");
+    }
+    /* raced: unknown, with its own reasons and no new key */
+    m_begin("before", "/s", 1000); ROOT(); E(.path = "t", .type = "reg", .size = 3, .sha = HA); m_end();
+    m_begin("after", "/s", 1000); ROOT(); E(.path = "t", .type = "dir", .unreadable = true, .raced = true); m_end();
+    REQUIRE(run() == 0);
+    ASSERT_TRUE(has("t", "\"outcome\":\"unknown\"") && !has("t", "content_not_read"));
+}
+
 /* Decided F2: a tree that changed while it was walked makes the whole result
  * provisional (manifest-v1, obligations on a consumer), and only the trailers
  * say so for `vanished`, which leaves no record. */
@@ -1665,6 +1696,7 @@ int main(void) {
     RUN(the_trailer_counts_each_sides_sealed_directories);
     RUN(a_modified_file_whose_content_was_not_read_says_why);
     RUN(an_added_entry_that_was_not_read_says_why);
+    RUN(a_type_change_into_a_directory_nothing_was_seen_below_says_why);
     RUN(a_tree_that_changed_while_walked_makes_the_diff_provisional);
     RUN(the_output_is_never_an_input_however_spelled);
     RUN(the_trailer_names_both_inputs_by_their_digest);

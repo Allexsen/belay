@@ -363,12 +363,13 @@ static int record(const struct jval *r, struct ctx *x, const struct receipt_opts
     if (ign_edit) sbf(&b, "   (git-ignored)");
     const size_t said = b.n;            /* the line up to its path */
     /* A directory belay could not list or did not enter is this one line,
-     * whatever changed below it (checkpoint-v3, G3-1, G3-4): unknown for
-     * that, or added so (O10). */
+     * whatever changed below it (checkpoint-v3, G3-1, G3-4, G3-5): unknown
+     * for that, added so (O10), or what a path of another type became (O11). */
     const struct jval *cnr = jget(r, "content_not_read");
     const bool not_read = cnr != NULL && cnr->t == J_ARR && cnr->n > 0;
     const bool sealed = is_dir && (has(jget(r, "unknown"), "unreadable") || has(jget(r, "unknown"), "mount") ||
-                                   (strcmp(outcome, "added") == 0 && (has(cnr, "unreadable") || has(cnr, "mount"))));
+                                   ((strcmp(outcome, "added") == 0 || strcmp(outcome, "type_changed") == 0) &&
+                                    (has(cnr, "unreadable") || has(cnr, "mount"))));
     bool sealed_said = false;
     if (why.n) {
         sbf(&b, "   ");

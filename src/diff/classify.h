@@ -25,7 +25,8 @@ struct verdict {
     uint32_t not_read;          /* DRBIT: why a regular file's content was not read on a side,
                                    when the outcome is modified or metadata_only (pin O9);
                                    for an added file the same, for an added directory why
-                                   its listing was not (pin O10) */
+                                   its listing was not (pin O10), and so for a path that
+                                   became such a directory (pin O11) */
     bool dir_timestamps;        /* unchanged, a directory whose own timestamps differ (F5) */
 };
 
