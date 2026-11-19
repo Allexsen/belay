@@ -28,8 +28,13 @@ BELAY_BIN names the binary (default: the repository's bin/belay); PM_WORKDIR the
 scenarios are built in (default: /dev/shm when it is a directory, else $TMPDIR); PM_DISKDIR the
 one for scenarios built on disk (default: $TMPDIR, else /tmp).
 
-Exit: 0 every line agreed and the gate holds; 1 a disagreement, a self-test failed, or the gate
-failed; 3 `belay verify` is not built yet (export was checked; nothing else failed), or
+Open questions (gen.OPEN_QUESTIONS): scenarios whose result the pins do not determine. Their
+disagreements are not counted; the list is printed on every run under `OPEN:`, each with the
+model's lines and belay's. An entry with no scenario, one whose scenario agrees, or one that
+disagrees otherwise than the entry records fails the run.
+
+Exit: 0 every line agreed (open questions apart) and the gate holds; 1 a disagreement, a self-test
+failed, the gate failed, or an open question no longer stands as listed; 3 `belay verify` is not built yet (export was checked; nothing else failed), or
 `belay baseline export` is not either.
 """
 
@@ -254,11 +259,18 @@ def fill_wildcards(mp, ap):
 
 
 class Report:
-    def __init__(self):
+    def __init__(self, open_names=()):
         self.disagreements = 0
         self.notes = []
+        self.open = {n: [] for n in open_names}     # an open question's scenario -> what it disagreed on
 
     def disagree(self, sc, what, model_line, belay_line):
+        if sc["name"] in self.open:                 # held for open_questions(), not counted here
+            self.open[sc["name"]].append((what, model_line, belay_line))
+            return
+        self.count(sc, what, model_line, belay_line)
+
+    def count(self, sc, what, model_line, belay_line):
         self.disagreements += 1
         tags = sc.get("tags") or []
         print("DISAGREE %s: %s%s" % (sc["name"], what, (" [rests on %s]" % ", ".join(tags)) if tags else ""))
@@ -785,6 +797,56 @@ def gate(cov, verify_ran, probe):
     return bad
 
 
+def open_questions(rep, all_scs, ran, verify_ran):
+    """Prints gen.OPEN_QUESTIONS and what each one's scenario gave. -> the reasons the list fails
+    the run: an entry with no scenario, a scenario that agrees, one that does not disagree as its
+    entry records (what it holds besides is then counted as any disagreement)."""
+    bad = []
+    by_name = {s["name"]: s for s in all_scs}
+    names = [q["name"] for q in gen.OPEN_QUESTIONS]
+    print("=" * 100)
+    print("OPEN: %d scenario(s) the pins do not determine (questions for the author; not counted as disagreements)"
+          % len(names))
+    for q in gen.OPEN_QUESTIONS:
+        name = q["name"]
+        print("OPEN %s" % name)
+        print("  pin rows in tension: %s" % "; ".join(q["rows"]))
+        print("  the model's reading: %s" % q["model"])
+        print("  the other reading:   %s" % q["other"])
+        print("  what belay does:     %s" % q["binary"])
+        if names.count(name) > 1:
+            bad.append("%s: listed %d times" % (name, names.count(name)))
+        sc = by_name.get(name)
+        if sc is None:
+            bad.append("%s: no scenario of that name" % name)
+            continue
+        if name not in ran:
+            print("  (not run: the names given select other scenarios)")
+            continue
+        if not verify_ran and all(w.startswith("verify") for w, _ in q["belay"]):
+            print("  (not judged: belay verify is not built)")
+            continue
+        held = rep.open.get(name, [])
+        for what, m, b in held:
+            print("  this run, %s" % what)
+            if m is not None:
+                print("    model: %s" % m)
+            if b is not None:
+                print("    belay: %s" % b)
+        if not held:
+            bad.append("%s: the model and belay now agree; a pin row or a change answered it, so remove the entry" % name)
+            continue
+        whats = {w for w, _ in q["belay"]}
+        for what, words in q["belay"]:
+            if not any(w == what and words in str(b) for w, _m, b in held):
+                bad.append("%s: belay no longer answers as listed (%s: %s)" % (name, what, words))
+        for what, m, b in held:
+            if what not in whats:                   # another disagreement of the same scenario: an ordinary one
+                rep.count(sc, what, m, b)
+    print("=" * 100)
+    return bad
+
+
 def main(argv):
     fails = selftest.run()
     if fails:
@@ -795,7 +857,7 @@ def main(argv):
         print("no binary at %s (make bin/belay, or set BELAY_BIN)" % BIN)
         return 1
     scs = [s for s in gen.scenarios() if not argv or any(a in s["name"] for a in argv)]
-    rep = Report()
+    rep = Report([q["name"] for q in gen.OPEN_QUESTIONS])
     cov = Coverage()
     vstate = {}
     for sc in scs:
@@ -805,12 +867,15 @@ def main(argv):
             return 3
     for n in rep.notes:
         print("note: " + n)
-    print("%d scenarios; %d verified end to end; %d disagreements" % (len(scs), vstate.get("ran", 0),
-                                                                    rep.disagreements))
+    open_bad = open_questions(rep, gen.scenarios(), {s["name"] for s in scs}, not vstate.get("missing"))
+    print("%d scenarios; %d verified end to end; %d disagreements; %d open question(s), not counted"
+          % (len(scs), vstate.get("ran", 0), rep.disagreements, len(gen.OPEN_QUESTIONS)))
     bad = gate(cov, not vstate.get("missing"), not vstate.get("no_probe")) if not argv else []
     for b in bad:
         print("GATE " + b)
-    if rep.disagreements or bad:
+    for b in open_bad:
+        print("OPEN FAILS " + b)
+    if rep.disagreements or bad or open_bad:
         return 1
     if vstate.get("missing"):
         print("verify pending: exit 3")
