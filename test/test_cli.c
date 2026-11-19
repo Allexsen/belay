@@ -1081,6 +1081,62 @@ TEST(a_rewritten_file_over_the_hash_limit_says_so) {
     ASSERT_TRUE(strstr(g_out, "},\"content_not_read\":[\"unverified\"]}\n") != NULL);
 }
 
+/* Rewrites checkpoint 1's two counts in its meta.json, as text: what a
+ * capture that met a mount, or a damaged record, would hold. */
+static bool counts_are(const char *unreadable, const char *sealing) {
+    return holds("sed -i 's/,\"unreadable\":[^,}]*,\"sealing\":[^,}]*/%s%s%s%s/' \"$d/checkpoints/1/meta.json\"",
+                 unreadable ? ",\"unreadable\":" : "", unreadable ? unreadable : "",
+                 sealing ? ",\"sealing\":" : "", sealing ? sealing : "");
+}
+
+/* G1-2 where every entry was read: a capture that met only a mount root has
+ * no unreadable entry and one directory it saw nothing below. A real mount
+ * needs privilege, so the record is written by hand. */
+TEST(a_capture_that_only_met_a_mount_says_nothing_was_seen_below_it) {
+    fresh();
+    ASSERT_EQ_INT(0, belay("check", "--scope", g_scope, NULL));
+    ASSERT_TRUE(counts_are("0", "1"));
+    ASSERT_EQ_INT(0, belay("log", "--scope", g_scope, NULL));
+    ASSERT_TRUE(strstr(g_out, "  4 entries, nothing seen below 1 directory\n") != NULL);
+    ASSERT_EQ_INT(0, belay("log", "--scope", g_scope, "--json", NULL));
+    ASSERT_TRUE(strstr(g_out, "\"unreadable\":0,\"sealing\":1,") != NULL);
+}
+
+/* `prune --keep-id` rewrites a checkpoint's record to mark it kept (KP-2):
+ * the counts it recorded stay. */
+TEST(keeping_a_checkpoint_keeps_what_it_says_was_not_read) {
+    fresh();
+    ASSERT_EQ_INT(0, belay("check", "--scope", g_scope, NULL));
+    ASSERT_TRUE(counts_are("3", "2"));
+    ASSERT_EQ_INT(0, belay("prune", "--scope", g_scope, "--keep-last", "1", "--keep-id", "1", NULL));
+    ASSERT_EQ_INT(0, belay("log", "--scope", g_scope, NULL));
+    ASSERT_TRUE(strstr(g_out, "  4 entries, 3 could not be read, nothing seen below 2 directories, kept\n") != NULL);
+    ASSERT_EQ_INT(0, belay("log", "--scope", g_scope, "--json", NULL));
+    ASSERT_TRUE(strstr(g_out, "\"unreadable\":3,\"sealing\":2,") != NULL && strstr(g_out, "\"kept\":true,") != NULL);
+}
+
+/* A record whose counts are not two non-negative integers is not one belay
+ * wrote: corrupt (exit 4), never printed, never read as "not recorded". */
+TEST(a_record_whose_counts_are_not_belays_is_corrupt) {
+    static const struct { const char *unreadable, *sealing; } BAD[] = {
+        { "-1", "0" }, { "0", "-2" }, { "1.5", "0" }, { "0", "0.25" }, { "\"1\"", "0" }, { "0", "null" },
+        { "1", NULL }, { NULL, "1" },
+    };
+    for (size_t i = 0; i < sizeof BAD / sizeof BAD[0]; i++) {
+        fresh();
+        ASSERT_EQ_INT(0, belay("check", "--scope", g_scope, NULL));
+        ASSERT_TRUE(counts_are(BAD[i].unreadable, BAD[i].sealing));
+        const int rc = belay("log", "--scope", g_scope, NULL);
+        if (rc != 4 || g_out[0] != '\0' || strstr(g_err, "is not a checkpoint's meta.json") == NULL)
+            BELAY_FAIL("case %zu: exit %d, out %s, err %s", i, rc, g_out, g_err);
+    }
+    fresh();                                    /* neither: a checkpoint made before v3 (C3-8) */
+    ASSERT_EQ_INT(0, belay("check", "--scope", g_scope, NULL));
+    ASSERT_TRUE(counts_are(NULL, NULL));
+    ASSERT_EQ_INT(0, belay("log", "--scope", g_scope, NULL));
+    ASSERT_TRUE(strstr(g_out, "  4 entries\n") != NULL);
+}
+
 /* G1-1: nothing is added when everything was read. C3-2 to C3-6: the keys
  * are there all the same, each in its place. */
 TEST(a_capture_that_read_everything_adds_nothing_to_its_line) {
@@ -2039,6 +2095,9 @@ int main(void) {
     RUN(prune_reports_exactly_what_it_frees_through_a_chain);
     RUN(checkpoint_v2_says_how_it_is_stored);
     RUN(a_capture_says_what_it_could_not_read);
+    RUN(a_capture_that_only_met_a_mount_says_nothing_was_seen_below_it);
+    RUN(keeping_a_checkpoint_keeps_what_it_says_was_not_read);
+    RUN(a_record_whose_counts_are_not_belays_is_corrupt);
     RUN(a_rewritten_file_that_cannot_be_read_says_so);
     RUN(a_rewritten_file_over_the_hash_limit_says_so);
     RUN(a_capture_that_read_everything_adds_nothing_to_its_line);

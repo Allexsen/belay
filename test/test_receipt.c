@@ -589,6 +589,21 @@ TEST(a_changed_file_whose_content_was_not_read_says_so) {
     ASSERT_TRUE(strstr(g_text, "  M plain   size 530 -> 542, mtime_ns\n") != NULL);
 }
 
+/* The same where the line says nothing else: a record with findings shows
+ * no values (they are under it), so the note follows the path directly. A
+ * package database belay could not read is such a record (run 2026-11-19:
+ * var/lib/dpkg/status, mode 000, rewritten). */
+TEST(the_note_follows_the_path_when_the_line_says_nothing_else) {
+    ASSERT_EQ_INT(0, render(HEAD
+        "{\"path\":\"var/lib/dpkg/status\",\"outcome\":\"modified\",\"type\":\"reg\",\"changed\":[\"size\",\"mtime_ns\"],"
+        "\"before\":{\"size\":52,\"mtime_ns\":1},\"after\":{\"size\":54,\"mtime_ns\":2},\"content_not_read\":[\"unreadable\"],"
+        "\"findings\":[{\"kind\":\"content_unavailable\",\"reason\":\"missing\",\"side\":\"after\","
+        "\"text\":\"content unavailable (after): missing\"}]}\n"
+        TRAIL("1", "0", "0", "0", "0", "0", "0"), false));
+    ASSERT_TRUE(strstr(g_text, "  M var/lib/dpkg/status   content not read (unreadable)\n"
+                               "      content unavailable (after): missing\n") != NULL);
+}
+
 /* G3-2: the summary says how many directories of the after side nothing was
  * seen below; nothing when there is none, or when the trailer has no count. */
 TEST(the_summary_counts_the_directories_nothing_was_seen_below) {
@@ -621,6 +636,7 @@ int main(void) {
     RUN(unknown_records_never_fold);
     RUN(an_unknown_directory_nothing_was_seen_below_says_so);
     RUN(a_changed_file_whose_content_was_not_read_says_so);
+    RUN(the_note_follows_the_path_when_the_line_says_nothing_else);
     RUN(the_summary_counts_the_directories_nothing_was_seen_below);
     RUN(a_diff_of_another_version_is_rejected_and_b64_scopes_shown);
     RUN(a_line_of_many_strings_is_read_in_linear_memory);
