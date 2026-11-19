@@ -19,6 +19,9 @@ belay help [command]  |  belay <command> --help  |  belay --version
 Every command that takes `--scope` also takes `--docker CONTAINER`: the scope is then a path inside
 that container, read from its layers on the host (below).
 
+`check`, `mark`, `diff`, `log` and `manifest` take `--system` in the place of `--scope DIR`: the
+scope is the machine's `/`, read by a fixed list of roots ("--system", below).
+
 - **check** records `DIR` as a new checkpoint, reading every file (no prefilter) up to the hash
   limit: a file over 64 MiB is recorded `unverified`, without its hash.
 - **mark** records a new checkpoint after the scope's latest one, reading only the files that may
@@ -98,6 +101,8 @@ writes is corrupt state (exit 4). Protected paths (a later milestone) will never
     checkpoints/<id>/diff-from-<since>.ndjson   what diff --since computed for this checkpoint
     checkpoints/<id>/meta.json  written last: a checkpoint exists once it does
     excludes                    the scope's excludes, one a line (belay exclude)
+    sealing.key                 the key of `--system`'s sealed hashes (below): 32 random bytes,
+                                mode 600, made by the first capture that seals a file
     watch/                      the record `belay watch` keeps (below; state-retention-watch.md)
     lock                        one writer at a time
 ```
@@ -340,6 +345,79 @@ walk inside the container would write. The scope is a path in the container, and
 The rules are pinned in [host-reader.md](../test/expect/host-reader.md). `make union-model` checks
 belay's reading of the layers against an independent model of overlayfs, which is itself checked
 against the kernel.
+
+## --system: a whole machine, by its roots
+
+    belay check --system
+    belay mark  --system
+    belay diff  --system --since 1
+
+`--system` takes the place of `--scope` on `check`, `mark`, `diff`, `log` and `manifest`, and on no
+other command yet. The scope is `/`; giving `--scope` too is a usage error. A capture does not read
+all of `/`: it reads a list of roots, and says in its manifest what it looked for and how it looked
+at every entry. The format is manifest version 5, pinned in
+[manifest-v5.md](../test/expect/manifest-v5.md); the roots are pinned in
+[watch-system.md](../test/expect/watch-system.md) (WS-6 to WS-9). It runs as any user: what that
+user cannot read is recorded as could not be read, as in any scope.
+
+**Read** (hashed; small text kept in the store): `etc`, `usr/local`, `root`, `var/spool/cron`,
+`var/lib/dpkg`, `var/lib/apt/extended_states`, `usr/lib/systemd`, `lib/systemd` when `lib` is a
+directory, `boot/grub/grub.cfg`; and for every home directory named in `etc/passwd` as it is when
+the capture starts: `.ssh`, `.config/systemd/user`, and the shell startup files `.profile`,
+`.bash_profile`, `.bash_login`, `.bashrc`, `.bash_logout`, `.zshenv`, `.zprofile`, `.zshrc`,
+`.zlogin`, `.cshrc`, `.login`, `.config/fish/config.fish`. A home is used only when it is an
+absolute path other than `/`, every part of it is a directory and not a symbolic link, it is on a
+filesystem the capture enters, and it is not in one of the directories not read below.
+
+**Looked at, not read**: `usr`, `var`, `opt`, `srv`, `boot`, and `bin`, `sbin`, `lib`, `lib32`,
+`lib64`, `libx32` where they are directories. A file there is statted and opened for its
+attributes and inode flags, and its content is not read: its entry carries `meta` and no hash. A
+file that is setuid or setgid or carries a file capability is read and hashed all the same. A
+longer root wins over a shorter: `usr/local` is read inside `usr`.
+
+**Not read**: every other directory directly under `/` (`proc`, `sys`, `dev`, `run`, `tmp`, `home`
+itself, ...), and `var/log`, `var/cache`, `var/tmp`, `var/lib/docker`, `var/lib/containerd`,
+`var/lib/snapd`, `var/snap`. Such a directory has an entry carrying `not_read`, with its type,
+mode and owner and nothing of what is inside. `/` and the directories on the way to a home's roots
+(`home`, `home/you`, `home/you/.config`) carry `partial`: of what they hold, only the roots, the
+directories (as `not_read`) and, directly under `/`, the symbolic links (`bin`, `lib` on a
+merged-`/usr` machine) are recorded. A file in your home directory outside the list above is not
+recorded at all, not even its name.
+
+**Sealed.** Under the roots that are read, a file others cannot read -- its mode has no read bit
+for others, or a directory above it has no search bit for others, as everything in `/root` -- is
+recorded with a keyed hash (HMAC-SHA256) and `sealed`; its content is never kept, and no
+interpreter is given it. The shell startup files above are the exception: they are kept as
+ordinary content wherever they are. The key is `sealing.key` in the scope's state directory. It is
+made by the first capture that seals a file and never rewritten; each manifest's header carries the
+first 16 hex digits of its sha256 as `sealed_key`. Two sealed hashes compare only under one key:
+if the key file is lost a new one is made, and every sealed entry of the older checkpoints is
+`unknown` (reason `sealed_key`) against the newer ones. A file that is not such a key at that path
+fails the capture (exit 4); belay does not replace it.
+
+**Mount points.** Under a root, a mount point is entered when its filesystem is ext2, ext3, ext4,
+xfs, btrfs, vfat, f2fs or zfs; any other is recorded as a `mount` entry and not entered, as in
+every other scope. On macOS no filesystem is on that list, so every mount point stays a `mount`
+entry.
+
+**In a diff.** A `meta` file whose size differs is `modified`; any other difference in it is
+`unknown` (reason `not_read`), never `metadata_only`, since nothing shows its content intact. Such
+records, and an added `meta` file, carry `content_not_read: ["not_read"]`. A `not_read` directory
+gives no record unless its type, mode or owner differs. A path only one side has, under a
+directory the other side did not enter or recorded in part, is `unknown` (`not_captured`) unless
+that side would have recorded it -- a directory, or a path its roots list as looked for and not
+found: a first `~/.ssh/authorized_keys` is `added`. The diff's header carries
+`roots_differ: true` when the two captures' roots are not the same (a home directory appeared, a
+root was found on one side only). `mark` trusts a file only in the class it has now (read, sealed
+under the same key, or not read).
+
+On a checkpoint's line and in the receipt, the directories not read are counted with those that
+could not be listed: `nothing seen below 37 directories`.
+
+**Refused.** `baseline export`, `verify` and a protect spec are not designed for a system watch:
+with `--system`, or for a scope whose latest checkpoint was taken with it, they exit 3. A bundle
+whose manifest has roots is rejected by every reader. `--system` with `--docker` is not implemented
+in this version and is refused (exit 3). `exclude`, `prune` and `watch` do not take `--system`.
 
 ## A file being written while it is read
 

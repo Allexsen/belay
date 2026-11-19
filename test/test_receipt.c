@@ -647,6 +647,25 @@ TEST(a_row_whose_content_was_not_read_never_folds) {
     g_class_fails = false;
 }
 
+/* G3-1 for manifest v5: a directory not entered by rule (`not_read`) is one
+ * nothing was seen below, as an unreadable one is. A file whose content was
+ * not read by its root's class has nothing below it. */
+TEST(a_not_read_directory_says_nothing_was_seen_below_it) {
+    static char diff[4096];
+    snprintf(diff, sizeof diff, HEAD
+        "{\"path\":\"home/other\",\"outcome\":\"unknown\",\"type\":\"dir\",\"changed\":[\"mode\"],"
+        "\"before\":{\"mode\":16877},\"after\":{\"mode\":16832},\"unknown\":[\"not_read\"]}\n"
+        "{\"path\":\"usr/bin/tool\",\"outcome\":\"unknown\",\"type\":\"reg\",\"changed\":[\"mtime_ns\"],"
+        "\"before\":{\"mtime_ns\":5},\"after\":{\"mtime_ns\":6},\"unknown\":[\"not_read\"]}\n"
+        "%s", TRAIL("0", "0", "0", "2", "0", "0", "0"));
+    ASSERT_EQ_INT(0, render(diff, false));
+    ASSERT_TRUE(strstr(g_text, "home/other   ") != NULL && strstr(g_text, "nothing below it was seen\n") != NULL);
+    const char *t = strstr(g_text, "usr/bin/tool   ");
+    REQUIRE(t != NULL);
+    ASSERT_TRUE(strstr(t, "not_read") != NULL);
+    ASSERT_TRUE(strstr(t, "nothing below it was seen") == NULL || strstr(t, "nothing below it was seen") > strchr(t, '\n'));
+}
+
 /* G3-4: every line naming a directory nothing was seen below says so --
  * a privilege row, an added directory, and a git-ignored one, which is
  * named and not counted into its directory's line. G2-5: an added file. */
@@ -739,6 +758,7 @@ int main(void) {
     RUN(an_unknown_directory_nothing_was_seen_below_says_so);
     RUN(a_changed_file_whose_content_was_not_read_says_so);
     RUN(a_row_whose_content_was_not_read_never_folds);
+    RUN(a_not_read_directory_says_nothing_was_seen_below_it);
     RUN(every_line_for_a_directory_nothing_was_seen_below_says_so);
     RUN(a_type_change_into_a_sealed_directory_says_so_and_never_folds);
     RUN(the_note_follows_the_path_when_the_line_says_nothing_else);
