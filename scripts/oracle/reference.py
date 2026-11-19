@@ -14,8 +14,9 @@ Its only sources:
     and, under "Field rules a reader MUST enforce", what `xattrs_sha256` is;
   - test/expect/diff-fields.md, READ AT RUN TIME: for each field its
     `compared as`, `for types`, `on mount roots` and `absent means`, and the
-    outcome rules O1-O8 (the text of O2, O5, O6, O7 and O8 checked at
-    start-up where this file relies on it);
+    outcome rules O1-O9 (the text of O2, O5, O6, O7, O8 and O9 checked at
+    start-up where this file relies on it), and "The trailer", G3-2 (its
+    words checked at start-up): `before_sealing` and `after_sealing`;
   - test/expect/manifest-v1.md, read at run time for the entry types;
   - docs/spec/diff-v1.md "Interpreters" and "What each interpreter reports",
     PROSE ONLY, with test/expect/finding-kinds.md (the kinds, read at run
@@ -68,10 +69,43 @@ Its only sources:
     V4-R4 (an earlier version reads as absent and `0`); with diff-v1's rule 1,
     and the prose's sentences on v4 (the trailer's keys, `type_before`, a
     one-sided path's reasons), which say the same (SPEC_V4_WORDS, checked too).
-    V4-D7 to D9 and V4-S1 to S3 are outside the diff.
+    V4-D7 to D9 and V4-S1 to S3 are outside the diff;
+  - test/expect/checkpoint-v3.md, "The lines", G2-1 and G3-2, READ AT RUN
+    TIME (their words checked at start-up, G_WORDS): they say what
+    diff-fields.md O9 and its trailer row G3-2 say, and are held to it. The
+    receipt's lines (G2-2, G3-1, the second sentence of G3-2) are outside
+    the diff.
 Never the generated blocks of the spec, never src/ or include/: every check
 that quotes a spec reads it through spec_prose(), which withholds them
 (decision 119); a check that quotes a pin reads that pin.
+
+Ambiguities in O9 and G3-2 (N1-N6), where they are decided:
+  N1 `content_not_read`'s order is "the order of the `unknown` array",
+     which no pin gives in words (the reasons table is generated): it is
+     not predicted. compare.py compares it as a set and holds it to the one
+     order every `unknown` array of the run respects. O9's own list
+     ("`unstable`, `unverified`, `unreadable`, `mount`") is the order this
+     file writes it in, for messages only;
+  N2 "whose content was not read on a side" is exactly: a side carrying one
+     of the four flags O9 lists. `raced` and `writer_open` are not among
+     them and make the outcome `unknown` anyway (rule 1, V4-D1);
+     `xattrs_unknown` and a one-sided `iflags` say nothing of content and
+     give no reason here;
+  N3 `metadata_only` with `content_not_read` cannot be produced: each of
+     the four flags makes content unknown (the fields table), and rule 3
+     gives `unknown` before rule 4 is reached unless a content field proves
+     `modified`. O9 names it; content_not_read() would write it, and
+     diff() stops if it ever does (a rule changed without this file);
+  N4 "from the flags of either side", `unverified` judged per side: a bare
+     `unverified` on one side beside `unreadable` (with its `unverified`)
+     on the other gives both reasons;
+  N5 G3-2 counts directories only: a mounted regular file, an unreadable
+     regular file or symlink and an unstable directory are not counted, and
+     the count is of the entries, never the manifest trailer's own
+     `unreadable`. The scope root counts when it is unreadable;
+  N6 the "Shape" example of docs/spec/diff-v1.md does not show the two
+     keys, though the "### Trailer" paragraph under it names them: the pin
+     is followed, and the example is accepted with or without them (as X2).
 
 Ambiguities this file resolves one way (questions for the author) are
 marked "ambiguity I<n>" where they are decided (VA<n> for diff-values.md,
@@ -293,9 +327,14 @@ EVENTS = 'events'
 # same, "in that order, after every key it has".
 V4_COUNTS = ['writer_open', 'unguarded']
 V4_TRAILER_KEYS = [w + c for c in V4_COUNTS for w in ('before_', 'after_')]
-TRAILER_KEYS = (['belay_diff_end'] + OUTCOMES + [DIR_TIMESTAMPS_ONLY, EVENTS]
-                + ['before_' + c for c in INPUT_COUNTS] + ['after_' + c for c in INPUT_COUNTS]
-                + ['provisional', 'before_sha256', 'after_sha256'] + V4_TRAILER_KEYS)
+# diff-fields.md, "The trailer", G3-2: "`before_sealing`, `after_sealing` ...
+# In that order, after every key the trailer has." (sealing_pin(), below).
+SEALING_TRAILER_KEYS = ['before_sealing', 'after_sealing']
+TRAILER_KEYS_SHAPE = (['belay_diff_end'] + OUTCOMES + [DIR_TIMESTAMPS_ONLY, EVENTS]
+                      + ['before_' + c for c in INPUT_COUNTS]
+                      + ['after_' + c for c in INPUT_COUNTS]
+                      + ['provisional', 'before_sha256', 'after_sha256'] + V4_TRAILER_KEYS)
+TRAILER_KEYS = TRAILER_KEYS_SHAPE + SEALING_TRAILER_KEYS
 # One-sided reasons, from "Present on one side only".
 NOT_CAPTURED, LISTING_INCOMPLETE, RACED = 'not_captured', 'listing_incomplete', 'raced'
 WRITER_OPEN = 'writer_open'
@@ -338,8 +377,11 @@ def shape_example_keys():
 
 
 _shape_header, _shape_trailer = shape_example_keys()
+# Ambiguity N6: the example's trailer with G3-2's two keys or, as it stands,
+# without them (compare.py says so when it is the latter).
+SHAPE_LACKS_SEALING = _shape_trailer == TRAILER_KEYS_SHAPE
 if _shape_header not in (HEADER_KEYS_SHAPE, HEADER_KEYS) or \
-        _shape_trailer != TRAILER_KEYS:
+        _shape_trailer not in (TRAILER_KEYS_SHAPE, TRAILER_KEYS):
     raise SystemExit('spec: the "Shape" example\'s header or trailer keys are not the ones '
                      'reference.py writes: %r' % (shape_example_keys(),))
 
@@ -553,7 +595,7 @@ def load_fields():
     for name, ok in need.items():
         if name not in fields or not ok(fields[name]):
             raise SystemExit('pin: row %r no longer says what reference.py assumes' % name)
-    for r in ('O1', 'O2', 'O3', 'O4', 'O5', 'O6', 'O7', 'O8'):
+    for r in ('O1', 'O2', 'O3', 'O4', 'O5', 'O6', 'O7', 'O8', 'O9'):
         if r not in rules:
             raise SystemExit('pin: outcome rule %s missing' % r)
     # The words of each rule that both_sides() relies on.
@@ -575,6 +617,9 @@ def load_fields():
         # on the other side it gives its own.
         'O8': ['`unverified` on a side that also carries `mount` adds no reason',
                '`unverified` on the other side still gives its own'],
+        # O9, in content_not_read(): which records, which flags, `unverified`
+        # per side, where the key stands, and that nothing else moves.
+        'O9': O9_WORDS,
     }
     for r, words in said.items():
         for w in words:
@@ -582,6 +627,74 @@ def load_fields():
                 raise SystemExit('pin: %s no longer says what reference.py assumes: %r'
                                  % (r, w))
     return fields, rules
+
+
+# test/expect/diff-fields.md O9, the words content_not_read() and diff() rely on.
+O9_WORDS = ['A `modified` or `metadata_only` record of a regular file (`reg` on both sides) '
+            'whose content was not read on a side carries `content_not_read`: an array of the '
+            'reasons, in the order of the `unknown` array, from the flags of either side: '
+            '`unstable`, `unverified`, `unreadable`, `mount`, and from v5 `not_read`.',
+            '`unverified` adds no reason on a side that also carries `unreadable`, `unstable` or '
+            '`mount`',
+            'So an unreadable file gives `["unreadable"]`.',
+            'Absent when both sides were hashed.',
+            'It stands where `unknown` would, after the values and before `findings`; no record '
+            'has both.',
+            'The `unknown` key and the outcome are unchanged']
+CONTENT_NOT_READ = 'content_not_read'
+# O9's reasons, as it lists them (ambiguity N1); `not_read` is manifest v5's,
+# which no manifest of versions 1 to 4 can carry.
+NOT_READ_FLAGS = ['unstable', 'unverified', 'unreadable', 'mount']
+# "`unverified` adds no reason on a side that also carries `unreadable`,
+# `unstable` or `mount` (it is there because of them)".
+UNVERIFIED_BECAUSE_OF = ['unreadable', 'unstable', 'mount']
+# test/expect/checkpoint-v3.md, "The lines": the two rows that send the diff to
+# O9 and to the trailer's row, held to the same words.
+CHECKPOINT_V3_PIN = os.path.join(REPO, 'test', 'expect', 'checkpoint-v3.md')
+G_WORDS = {
+    'G2-1': ['The record gains `content_not_read` (`diff-fields.md`, O9): the reasons, in the '
+             'order of the diff\'s own `unknown` array, from the flags of either side; '
+             '`unverified` adds no reason on a side that also carries `unreadable`, `unstable` '
+             'or `mount`. An unreadable file gives `["unreadable"]`.'],
+    'G3-2': ['The diff trailer gains `before_sealing`, `after_sealing`, ints, after every key '
+             'it has (`diff-fields.md`, "The trailer").'],
+}
+# diff-fields.md, "The trailer", row G3-2: its key cell, its type and the words
+# of its rule that sealing() and diff()'s trailer rely on.
+SEALING_RULE = ['Each manifest\'s entries nothing below which was looked at: its directories '
+                'carrying `unreadable` or `mount` (checkpoint-v3 C3-3), counted from its '
+                'entries.',
+                'In that order, after every key the trailer has.']
+# docs/spec/diff-v1.md, the "### Trailer" paragraph: the same, in prose.
+SPEC_SEALING_WORDS = ('After those, `before_sealing` and `after_sealing` are each manifest\'s '
+                      'directories carrying `unreadable` or `mount`, counted from its entries')
+
+
+def sealing_pin():
+    text = open(FIELDS_PIN, encoding='utf-8').read()
+    rows = [r for r in md_table(text, 'id') if r['id'] == 'G3-2']
+    if len(rows) != 1 or rows[0]['key'] != ', '.join('`%s`' % k for k in SEALING_TRAILER_KEYS) \
+            or rows[0]['type'] != 'int':
+        raise SystemExit('pin: diff-fields.md, "The trailer", has no one G3-2 row of the two '
+                         'sealing keys, ints')
+    for w in SEALING_RULE:
+        if w not in rows[0]['rule']:
+            raise SystemExit('pin: diff-fields.md G3-2 no longer says what reference.py '
+                             'assumes: %r' % w)
+    others = [r['id'] for r in md_table(text, 'id') if r['id'] != 'G3-2']
+    if others:
+        raise SystemExit('pin: diff-fields.md, "The trailer", has rows reference.py does not '
+                         'write: %s' % others)
+    lines = open(CHECKPOINT_V3_PIN, encoding='utf-8').read().splitlines()
+    for r, words in G_WORDS.items():
+        row = [l for l in lines if l.startswith('| %s |' % r)]
+        for w in words:
+            if len(row) != 1 or w not in row[0]:
+                raise SystemExit('pin: checkpoint-v3.md %s no longer says what reference.py '
+                                 'assumes: %r' % (r, w))
+    if SPEC_SEALING_WORDS not in ' '.join(spec_prose(SPEC).split()):
+        raise SystemExit('spec: docs/spec/diff-v1.md no longer says what reference.py '
+                         'assumes: %r' % SPEC_SEALING_WORDS)
 
 
 def prose_unknown_carveout():
@@ -609,6 +722,7 @@ def o5_timestamps(fields, rules):
 
 
 FIELDS, RULES = load_fields()
+sealing_pin()
 v2_r7()
 prose_unknown_carveout()
 DIR_TIMESTAMPS = o5_timestamps(FIELDS, RULES)
@@ -838,6 +952,36 @@ def flag_reasons(b, a, trace):
             trace.append('O8' if not other.get(UNVERIFIED) or other.get(MOUNT)
                          else 'O8-other-side-gives-unverified')
     return [f for f in FLAGS if gives(b, f) or gives(a, f)]
+
+
+def content_not_read(b, a, out, trace):
+    """O9: the reasons a `modified` or `metadata_only` record of a regular file
+    carries in `content_not_read`, [] for none (the key is then absent):
+    "from the flags of either side: `unstable`, `unverified`, `unreadable`,
+    `mount` ... `unverified` adds no reason on a side that also carries
+    `unreadable`, `unstable` or `mount` (it is there because of them); alone
+    it means the file was over the hash limit." Per side (ambiguity N4); in
+    O9's own order (N1). Never on another outcome: "no record has both" it
+    and `unknown`, and O9 names two outcomes only."""
+    if out not in ('modified', 'metadata_only') or b['type'] != 'reg' or a['type'] != 'reg':
+        return []
+    def gives(side, f):
+        return bool(side.get(f)) and not (f == UNVERIFIED
+                                          and any(side.get(x) for x in UNVERIFIED_BECAUSE_OF))
+    why = [f for f in NOT_READ_FLAGS if gives(b, f) or gives(a, f)]
+    if why:
+        trace.append('O9')
+        for side in (b, a):
+            if side.get(UNVERIFIED) and not gives(side, UNVERIFIED):
+                trace.append('O9-unverified-because-of')
+    return why
+
+
+def sealing(entries):
+    """G3-2: "its directories carrying `unreadable` or `mount` ..., counted
+    from its entries" (ambiguity N5)."""
+    return sum(1 for e in entries.values()
+               if e['type'] == 'dir' and (e.get('unreadable') or e.get('mount')))
 
 
 def both_sides(b, a, ctx):
@@ -3073,6 +3217,15 @@ def diff(before, after, store=None):
             rec['before'], rec['after'] = dict(vals[0]), dict(vals[1])
         if out == 'unknown':
             rec['unknown'] = why
+        elif b is not None and a is not None:
+            # O9: "It stands where `unknown` would, after the values and
+            # before `findings`; no record has both."
+            cnr = content_not_read(b, a, out, traces[p])
+            if cnr:
+                if out != 'modified' or 'before' not in rec:
+                    raise AssertionError('reference bug: content_not_read on a %s record at '
+                                         '%r (ambiguity N3)' % (out, p))
+                rec[CONTENT_NOT_READ] = cnr
         # "For a path that is not `unchanged`, the interpreter that claims it
         # adds **findings** to its record" -- `findings` "absent when none".
         interp, what = interpreter_of(sb, p, b, a)
@@ -3112,6 +3265,9 @@ def diff(before, after, store=None):
     # V4-D5, V4-R4; none of them in `inputs`, so none in `provisional` (V4-D6).
     trailer += [(w + c, t.get(c, 0)) for c in V4_COUNTS
                 for w, t in (('before_', tb), ('after_', ta))]
+    # G3-2: each manifest's sealing directories, "counted from its entries";
+    # "In that order, after every key the trailer has." Not among `inputs`.
+    trailer += [(k, sealing(es)) for k, es in zip(SEALING_TRAILER_KEYS, (eb, ea))]
     assert [k for k, _ in trailer] == TRAILER_KEYS
     return header, records, events, trailer, traces
 

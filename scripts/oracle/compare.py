@@ -14,6 +14,11 @@ the driver's diff and reference.diff() must agree on
   - every record: path and its spelling (path / path_b64), outcome, type,
     type_before, `changed` exactly (order included), `unknown` as a set, the
     records' order;
+  - every record's `content_not_read` (test/expect/diff-fields.md O9): present
+    exactly where the reference says, its reasons as a set, and where it
+    stands ("after the values and before `findings`"); its order is "the
+    order of the `unknown` array", so it is held to the one order below
+    together with every `unknown` array;
   - every record's `findings`, exactly: each finding's keys in order, values
     and JSON types, and the bytes `"findings":[...]` in the record's line;
   - every record's `before` and `after` (test/expect/diff-values.md), exactly:
@@ -24,7 +29,9 @@ the driver's diff and reference.diff() must agree on
     byte for byte against the reference's rendering;
   - the trailer: every key, its value and their order (belay_diff_end, the
     outcome counts, dir_timestamps_only, events, each manifest's vanished,
-    unstable and raced, provisional, the two sha256); and, whatever the
+    unstable and raced, provisional, the two sha256, V4-D5's four counts and
+    then `before_sealing` and `after_sealing`: diff-fields.md, "The trailer",
+    G3-2); and, whatever the
     reference says, the driver's trailer against the "### Trailer"
     paragraph: the outcome counts add up to the paths, dir_timestamps_only
     is among unchanged, provisional is exactly "one of the six is not 0",
@@ -35,7 +42,10 @@ the driver's diff and reference.diff() must agree on
   Every record of the driver is also checked against itself, whatever the
   reference says: `modified` needs a content field in `changed`,
   `metadata_only` a non-content one, `type_changed` is exactly ["type"],
-  `unknown` appears only on an `unknown` outcome (rules 3 and 4), `before`
+  `unknown` appears only on an `unknown` outcome (rules 3 and 4),
+  `content_not_read` only on a `modified` or `metadata_only` record of a
+  regular file with no `type_before`, never empty, each reason once and one
+  of O9's four, `before`
   and `after` appear together exactly on a record with `changed` (V1),
   each naming only what V1 allows, or V6 on a record with `type_before`
   (`unknown` too), under a key the manifest uses, never both `{}` (V2).
@@ -103,6 +113,18 @@ the generator's labels (coverage(), required(), gate()):
     both sides against what else differs, beside `raced` and each other
     reason, on one side only, on a claimed path; the trailer's counts; v4
     against v3, v2 and v1;
+  - every item of O9 and G3-2 (NOT_READ_SCENARIOS): a regular file in each
+    of its states (hashed, over the hash limit, unstable, unreadable, a
+    mount root) before against each after, its size different (the reasons,
+    `unverified` per side); the same with the size the same or `raced`
+    (`unknown`, no `content_not_read`); a type change from and to a file not
+    read, an unreadable symlink (not a regular file); beside a metadata
+    change, `xattrs_unknown` and a one-sided `iflags` (no reason of theirs);
+    on a record with findings; and the two sealing counts: 0 and not, equal
+    and not, by an unreadable and by a mount directory, the scope root,
+    what is not counted (a mounted or unreadable regular file, an unreadable
+    symlink, an unstable directory), with every entry the same, and beside
+    walk counts that are all 0;
   - every manifest-version item (VERSION_SCENARIOS): the four combinations
     of versions, identical entries in two versions (V2-R4) and in v2 with
     only the v2 statements different (V2-R6), each kind of walk a v2
@@ -205,6 +227,9 @@ G_RACED_ANC = 'one side only, below a raced non-directory: unknown, raced'
 G_TYPE_BEFORE = 'type_before on every path whose types differ, raced or not'
 G_DIGEST = 'xattrs: an inline set against a digest, by the formula (manifest-v1)'
 G_O8 = 'unverified on a side that also carries mount: no reason; on the other side its own (O8)'
+G_O9 = 'content_not_read on a modified regular file whose content was not read on a side (O9)'
+G_O9_UNVERIFIED = ('content_not_read: unverified gives no reason beside unreadable, unstable or '
+                   'mount on its side (O9)')
 # diff-values.md: the values of a record that otherwise agrees, by what the
 # reference's trace says about them.
 G_VALUES = {'values:V6': 'VALUES: a record with type_before, mode and content fields (V6)',
@@ -277,6 +302,17 @@ def contradicts_itself(g):
         return 'unknown with no reason'
     if o != 'unknown' and 'unknown' in g:
         return '%s with reasons' % o
+    # O9: "A `modified` or `metadata_only` record of a regular file (`reg` on
+    # both sides) ... carries `content_not_read`: an array of the reasons";
+    # "no record has both" it and `unknown`.
+    if ref.CONTENT_NOT_READ in g:
+        cn = g[ref.CONTENT_NOT_READ]
+        if o not in ('modified', 'metadata_only') or g.get('type') != 'reg' or 'type_before' in g:
+            return 'content_not_read on a %s record of a %s%s' % (
+                o, g.get('type'), ' with type_before' if 'type_before' in g else '')
+        if not isinstance(cn, list) or not cn or len(set(map(str, cn))) != len(cn) or \
+                any(r not in ref.NOT_READ_FLAGS for r in cn):
+            return 'content_not_read is %r' % (cn,)
     # diff-values V1: `before` and `after` together, exactly on a record with
     # `changed` (every record with `type_before` has ["type"], above); each a
     # JSON object whose keys are, in order, the fields V6 names on a record
@@ -340,7 +376,8 @@ def compare_record(path, exp, got, trace, orders):
         if keys[:3] != [want_spelling, 'outcome', 'type'] or len(set(keys)) != len(keys):
             groups.append('OTHER: record keys %s' % keys)
         extra = set(keys) - {want_spelling, 'outcome', 'type', 'type_before', 'changed',
-                             'before', 'after', 'unknown', 'findings'}
+                             'before', 'after', 'unknown', ref.CONTENT_NOT_READ,
+                             'findings'}
         if extra:
             groups.append('OTHER: record has %s' % sorted(extra))
         # V1: "after `changed` and before `unknown`"; V6: "after
@@ -348,6 +385,12 @@ def compare_record(path, exp, got, trace, orders):
         at = [k for k in ('type_before', 'changed', 'before', 'after', 'unknown') if k in keys]
         if [k for k in keys if k in at] != at:
             groups.append('OTHER: record key order %s (diff-values V1, V6)' % keys)
+        # O9: "It stands where `unknown` would, after the values and before
+        # `findings`".
+        at = [k for k in ('after', ref.CONTENT_NOT_READ, 'findings') if k in keys]
+        if ref.CONTENT_NOT_READ in keys and [k for k in keys if k in at] != at:
+            groups.append('OTHER: record key order %s (O9: after the values, before findings)'
+                          % keys)
         if not same(exp.get('type'), g.get('type')):
             groups.append('OTHER: type')
         if not same(exp.get('type_before'), g.get('type_before')):
@@ -386,6 +429,19 @@ def compare_record(path, exp, got, trace, orders):
                 unexplained.append('reason ' + r)
     elif ug:
         orders.append(ug)
+    # O9: the reasons as a set (run_pair's caller holds their order to the one
+    # order of the `unknown` arrays: ambiguity N1 of reference.py).
+    ne, ng = exp.get(ref.CONTENT_NOT_READ, []), g.get(ref.CONTENT_NOT_READ, [])
+    if not isinstance(ng, list):
+        ng = [ng]
+    if set(ne) != set(map(str, ng)) or (ref.CONTENT_NOT_READ in exp) != (ref.CONTENT_NOT_READ in g):
+        if exp['outcome'] == g.get('outcome'):
+            groups.append(G_O9_UNVERIFIED if 'O9-unverified-because-of' in trace
+                          and set(ne) ^ set(map(str, ng)) == {'unverified'} else G_O9)
+        else:
+            unexplained.append('content_not_read')
+    elif ng:
+        orders.append(ng)
     # Findings: exactly -- every finding, its keys in order, its values and
     # their JSON types (run_pair checks the bytes too).
     if not missing and not same(exp.get('findings'), g.get('findings')):
@@ -2023,8 +2079,129 @@ def v4_coverage(stem, tags):
             tags.add('versions: v3 against v4, every entry the same')
 
 
+# test/expect/diff-fields.md O9 and "The trailer", G3-2. A regular file's
+# state on a side is what the manifest says of its content: hashed, or the one
+# flag that says why not (manifest-v1 rules 6 to 8: `unstable`, `unreadable`
+# and `mount` exclude one another on a regular file, and each comes with
+# `unverified`; a bare `unverified` is a file over the hash limit).
+NR_STATES = ('hashed', 'unverified', 'unstable', 'unreadable', 'mount')
+NR_PAIRS = [(x, y) for x in NR_STATES for y in NR_STATES if (x, y) != ('hashed', 'hashed')]
+NR_SIZE = 'a regular file %s before, %s after, the size differs'
+NR_SAME = 'a regular file %s on a side, the size the same: unknown, no content_not_read'
+NOT_READ_SCENARIOS = (
+    [NR_SIZE % xy for xy in NR_PAIRS]
+    + [NR_SAME % x for x in NR_STATES[1:]]
+    + ['a regular file hashed on both sides, the size differs: no content_not_read',
+       'a regular file not read on a side and raced, the size differs: unknown',
+       'a regular file not read becomes another type: no content_not_read',
+       'another type becomes a regular file not read: no content_not_read',
+       'an unreadable symlink, the size differs: modified, no content_not_read',
+       'content_not_read beside a metadata field in changed',
+       'content_not_read beside xattrs_unknown, which gives no reason',
+       'content_not_read beside iflags on one side only, which gives no reason',
+       'content_not_read on a record with findings',
+       'content_not_read on a path that is not UTF-8',
+       'sealing: 0 on both sides', 'sealing: not 0 before', 'sealing: not 0 after',
+       'sealing: the two counts differ, neither 0', 'sealing: 2 or more on a side',
+       'sealing: an unreadable directory', 'sealing: a mount directory',
+       'sealing: the unreadable scope root',
+       'sealing: 0 beside a mounted regular file',
+       'sealing: 0 beside an unreadable regular file',
+       'sealing: 0 beside an unreadable symlink',
+       'sealing: 0 beside an unstable directory',
+       'sealing: not 0, every entry the same on both sides',
+       'sealing: not 0, every walk count 0 (provisional false)',
+       'sealing: not the manifest trailer\'s own unreadable count'])
+
+
+def reg_state(e):
+    for f in NR_STATES[2:]:
+        if e.get(f):
+            return f
+    return 'unverified' if e.get('unverified') else 'hashed'
+
+
+def not_read_coverage(stem, tags):
+    _, _, eb = ref.load(stem + '.before')
+    _, _, ea = ref.load(stem + '.after')
+    tb, ta = ref.trailer_of(stem + '.before')[0], ref.trailer_of(stem + '.after')[0]
+    res = ref_diff(stem)
+    recs = {r['path']: r for r in res[1]} if res is not None else {}
+    for p in set(eb) & set(ea):
+        b, a = eb[p], ea[p]
+        raced = b.get('raced') or a.get('raced')
+        nr = [e for e in (b, a) if e['type'] == 'reg' and reg_state(e) != 'hashed']
+        if b['type'] != a['type']:
+            if nr and not raced:
+                tags.add('a regular file not read becomes another type: no content_not_read'
+                         if b['type'] == 'reg' else
+                         'another type becomes a regular file not read: no content_not_read')
+            continue
+        if b['type'] == 'lnk' and (b.get('unreadable') or a.get('unreadable')) and \
+                b['size'] != a['size'] and not raced:
+            tags.add('an unreadable symlink, the size differs: modified, no content_not_read')
+        if b['type'] != 'reg' or b.get(ref.WRITER_OPEN) or a.get(ref.WRITER_OPEN):
+            continue
+        sb, sa = reg_state(b), reg_state(a)
+        if raced:
+            if nr and b['size'] != a['size']:
+                tags.add('a regular file not read on a side and raced, the size differs: unknown')
+            continue
+        if b['size'] == a['size']:
+            for x in {sb, sa} - {'hashed'}:
+                tags.add(NR_SAME % x)
+            continue
+        if not nr:
+            tags.add('a regular file hashed on both sides, the size differs: no content_not_read')
+            continue
+        tags.add(NR_SIZE % (sb, sa))
+        if any(b[f] != a[f] for f in ('mode', 'uid', 'gid')):
+            tags.add('content_not_read beside a metadata field in changed')
+        if b.get('xattrs_unknown') or a.get('xattrs_unknown'):
+            tags.add('content_not_read beside xattrs_unknown, which gives no reason')
+        if ('iflags' in b) != ('iflags' in a):
+            tags.add('content_not_read beside iflags on one side only, which gives no reason')
+        if 'findings' in recs.get(p, {}) and ref.CONTENT_NOT_READ in recs[p]:
+            tags.add('content_not_read on a record with findings')
+        if not is_utf8(p):
+            tags.add('content_not_read on a path that is not UTF-8')
+    nb, na = ref.sealing(eb), ref.sealing(ea)
+    if not nb and not na:
+        tags.add('sealing: 0 on both sides')
+    if nb:
+        tags.add('sealing: not 0 before')
+    if na:
+        tags.add('sealing: not 0 after')
+    if nb and na and nb != na:
+        tags.add('sealing: the two counts differ, neither 0')
+    if max(nb, na) >= 2:
+        tags.add('sealing: 2 or more on a side')
+    for es, n, t in ((eb, nb, tb), (ea, na, ta)):
+        for p, e in es.items():
+            if e['type'] == 'dir' and e.get('unreadable'):
+                tags.add('sealing: the unreadable scope root' if p == b'.'
+                         else 'sealing: an unreadable directory')
+            if e['type'] == 'dir' and e.get('mount'):
+                tags.add('sealing: a mount directory')
+            if not n:
+                if e['type'] == 'reg' and e.get('mount'):
+                    tags.add('sealing: 0 beside a mounted regular file')
+                if e['type'] == 'reg' and e.get('unreadable'):
+                    tags.add('sealing: 0 beside an unreadable regular file')
+                if e['type'] == 'lnk' and e.get('unreadable'):
+                    tags.add('sealing: 0 beside an unreadable symlink')
+                if e['type'] == 'dir' and e.get('unstable'):
+                    tags.add('sealing: 0 beside an unstable directory')
+        if n and n != t['unreadable']:
+            tags.add('sealing: not the manifest trailer\'s own unreadable count')
+    if (nb or na) and eb == ea:
+        tags.add('sealing: not 0, every entry the same on both sides')
+    if (nb or na) and not any(t[c] for t in (tb, ta) for c in ref.INPUT_COUNTS):
+        tags.add('sealing: not 0, every walk count 0 (provisional false)')
+
+
 KINDS = ('cell', 'field pair', 'optional', 'scenario', 'interpreter', 'manifest version',
-         'manifest v4')
+         'manifest v4', 'not read')
 
 
 def coverage(stems):
@@ -2047,6 +2224,10 @@ def coverage(stems):
         v4_coverage(stem, tags)
         for t in tags:
             cov['manifest v4'][t] += 1
+        tags = set()
+        not_read_coverage(stem, tags)
+        for t in tags:
+            cov['not read'][t] += 1
     return cov
 
 
@@ -2060,7 +2241,8 @@ def required():
             + [('scenario', s) for s in SCENARIOS]
             + [('interpreter', s) for s in INTERP_SCENARIOS]
             + [('manifest version', s) for s in VERSION_SCENARIOS]
-            + [('manifest v4', s) for s in V4_SCENARIOS])
+            + [('manifest v4', s) for s in V4_SCENARIOS]
+            + [('not read', s) for s in NOT_READ_SCENARIOS])
     return need, infeasible
 
 
@@ -2083,7 +2265,8 @@ def print_gate(cov):
                         ('scenario', 'scenarios'),
                         ('interpreter', 'interpreters, with no store; git\'s events with one'),
                         ('manifest version', 'manifest versions and v2 statements'),
-                        ('manifest v4', 'manifest v4: writer_open and its trailer counts')):
+                        ('manifest v4', 'manifest v4: writer_open and its trailer counts'),
+                        ('not read', 'content_not_read (O9) and the sealing counts (G3-2)')):
         items = [i for k, i in need if k == kind]
         lack = [i for k, i in missing if k == kind]
         print('   %s: %d/%d, fewest pairs %d' % (title, len(items) - len(lack), len(items),
@@ -2218,7 +2401,7 @@ def main():
             break
         order.append(head[0])
         left.discard(head[0])
-    print('== reasons in `unknown`: %s over %d records; the order observed: %s'
+    print('== reasons in `unknown` and `content_not_read`: %s over %d arrays; the order observed: %s'
           % ('ONE order' if not clash else 'NO single order (%s)' % clash[:4], len(orders),
              order + sorted(left)))
 
@@ -2248,6 +2431,10 @@ def main():
     # The coverage gate, over every pair (gen_corpus.py has already checked it
     # over its targeted pairs alone).
     gate_ok = print_gate(coverage(stems))
+    if ref.SHAPE_LACKS_SEALING:
+        print('== note: the "Shape" example of docs/spec/diff-v1.md ends its trailer at '
+              '`after_unguarded`, without `before_sealing` and `after_sealing` (diff-fields.md, '
+              '"The trailer", G3-2, is followed: reference.py, ambiguity N6)')
 
     ok = gate_ok and not (differ or rejected or header_only or bad_refusals or clash
                           or version_issues)

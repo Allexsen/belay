@@ -52,6 +52,11 @@ marked entry has no counterpart before v4 (V4-R2), so it is written in v4 only.
 (Tree.unguarded); it counts files read, so it stays within the hashed, unmarked
 files less `trusted` (V4-4). writer_open() builds the gate's v4 items.
 
+`content_not_read` and the sealing counts (test/expect/diff-fields.md O9 and
+"The trailer", G3-2): not_read() builds the gate's items -- a regular file in
+each state of its content before against each after, with its size different
+or the same, and trees with and without sealing directories.
+
 Exclusions (V2-2; docs/spec/diff-v1.md, "Present on one side only"): a
 tree's excluded paths have no entry, nothing below them is recorded (no entry, no other
 exclusion), and each one's parent is a directory that was listed -- neither
@@ -1169,7 +1174,8 @@ class Writer:
                           statements[::-1], store)]
 
     def targeted(self, rng, label, build, cells=(), pairs=(), optional=(), scenarios=(),
-                 interp=(), version=(), versions=None, statements=(None, None), v4=()):
+                 interp=(), version=(), versions=None, statements=(None, None), v4=(),
+                 nr=()):
         """One targeted pair: built ONCE -- no retries; build(rng) is written
         so that it cannot fail -- written both ways round, and checked to show
         what it was built for, as compare.py's coverage gate sees it: its
@@ -1179,7 +1185,8 @@ class Writer:
         unknown = [s for s in scenarios if s not in compare.SCENARIOS] + \
             [s for s in interp if s not in compare.INTERP_SCENARIOS] + \
             [s for s in version if s not in compare.VERSION_SCENARIOS] + \
-            [s for s in v4 if s not in compare.V4_SCENARIOS]
+            [s for s in v4 if s not in compare.V4_SCENARIOS] + \
+            [s for s in nr if s not in compare.NOT_READ_SCENARIOS]
         if unknown:
             die('%r names scenarios the gate does not have: %s' % (label, unknown))
         r = build(rng)
@@ -1193,7 +1200,8 @@ class Writer:
                 + [('optional', f) for f in optional] + [('scenario', s) for s in scenarios]
                 + [('interpreter', s) for s in interp]
                 + [('manifest version', s) for s in version]
-                + [('manifest v4', s) for s in v4])
+                + [('manifest v4', s) for s in v4]
+                + [('not read', s) for s in nr])
         lacking = [x for x in want if not cov[x[0]][x[1]]]
         if lacking:
             die('the pair built for %r (%s) does not show %s' % (label, stems[0], lacking))
@@ -4836,6 +4844,209 @@ def writer_open(w, rng):
                    v4=['versions: a marked entry in v4 against v%d' % v])
 
 
+def not_read(w, rng):
+    """test/expect/diff-fields.md O9 (`content_not_read`) and "The trailer",
+    G3-2 (`before_sealing`, `after_sealing`): compare.py's NOT_READ_SCENARIOS.
+    Each pair is written both ways round. A regular file's state on a side is
+    hashed, over the hash limit (a bare `unverified`), or one of `unstable`,
+    `unreadable` and `mount`, each with its `unverified` (manifest-v1 rules 5
+    to 8, 21; header rule 1)."""
+    NR = compare
+
+    def base(rng):
+        """A tree with no flag and no sealed directory, of a hash limit a
+        hashed file can change size within (at least 100), and a hashed
+        regular file of it with no attribute, not yet in the tree."""
+        t = Tree(rng, limit=size_limit(rng))
+        clear_flags(t.e[b'.'], t, rng)
+        for _ in range(rng.randrange(1, 4)):
+            e = subject(rng, t, rng.choice(['dir', 'fifo', 'lnk']), extras=False)
+            t.e[e['path']] = clear_flags(e, t, rng)
+        return t, clear_flags(subject(rng, t, 'reg', extras=False), t, rng)
+
+    def in_state(e, state, t, rng, nth, size=None):
+        """A copy of the regular file e in `state`, of `size` or of a size no
+        other state or `nth` (0, 1: the side) gives: hashed 0 or 1, over the
+        limit by 1 or 2, flagged 3 or 5."""
+        e = copy.deepcopy(e)
+        for k in ('sha256', 'stored', 'unverified', 'unstable', 'unreadable', 'mount'):
+            e.pop(k, None)
+        if state == 'hashed':
+            e['size'] = nth if size is None else size
+        elif state == 'unverified':
+            e['size'] = t.limit + 1 + nth if size is None else size
+        else:
+            e['size'] = (3, 5)[nth] if size is None else size
+            e[state] = True
+            if state == 'mount':
+                e['dev'] = other_dev(t, rng)
+        settle_hash(e, t, rng)
+        return e
+
+    # O9: every state before against every state after, the size different.
+    done = set()
+    for x, y in NR.NR_PAIRS:
+        if (y, x) in done:
+            continue
+        done.add((x, y))
+        def build(rng):
+            t, e = base(rng)
+            return with_subject(t, in_state(e, x, t, rng, 0), in_state(e, y, t, rng, 1))
+        w.targeted(rng, 'a regular file %s, then %s, its size different (O9)' % (x, y), build,
+                   nr=[NR.NR_SIZE % (x, y), NR.NR_SIZE % (y, x), 'sealing: 0 on both sides'])
+    def build(rng):
+        t, e = base(rng)
+        return with_subject(t, in_state(e, 'hashed', t, rng, 0), in_state(e, 'hashed', t, rng, 1))
+    w.targeted(rng, 'a regular file hashed on both sides, its size different (O9)', build,
+               nr=['a regular file hashed on both sides, the size differs: no content_not_read'])
+    # The size the same: nothing proves a change, `unknown` (rule 3, O1).
+    for x in NR.NR_STATES[1:]:
+        def build(rng):
+            t, e = base(rng)
+            if x == 'unverified':               # over the limit on both sides
+                b = in_state(e, x, t, rng, 0)
+                return with_subject(t, b, copy.deepcopy(b))
+            return with_subject(t, in_state(e, 'hashed', t, rng, 1),
+                                in_state(e, x, t, rng, 0, size=1))
+        w.targeted(rng, 'a regular file %s, its size the same (O9: unknown)' % x, build,
+                   nr=[NR.NR_SAME % x])
+    def build(rng):
+        t, e = base(rng)
+        a = in_state(e, 'unreadable', t, rng, 1)
+        a['raced'] = True
+        return with_subject(t, in_state(e, 'hashed', t, rng, 0), a)
+    w.targeted(rng, 'a regular file unreadable and raced, its size different (O9)', build,
+               nr=['a regular file not read on a side and raced, the size differs: unknown'])
+    # Not a regular file on both sides.
+    for x in NR.NR_STATES[1:4]:
+        def build(rng):
+            t, e = base(rng)
+            b = in_state(e, x, t, rng, 0)
+            a = {k: v for k, v in b.items()
+                 if k not in ('unverified', 'unstable', 'unreadable', 'nlink')}
+            a.update(type='fifo', mode=TYPES['fifo'] | (b['mode'] & 0o7777), nlink=1, size=0)
+            return with_subject(t, b, a)
+        w.targeted(rng, 'a regular file %s becomes a FIFO (O9: reg on both sides)' % x, build,
+                   nr=['a regular file not read becomes another type: no content_not_read',
+                       'another type becomes a regular file not read: no content_not_read'])
+    def build(rng):
+        t, _ = base(rng)
+        b = clear_flags(subject(rng, t, 'lnk', extras=False), t, rng)
+        b['link_target'] = b't'
+        b['size'] = 1
+        set_outside(b, t)
+        a = copy.deepcopy(b)
+        a.pop('target_outside_scope', None)
+        a.update(unreadable=True, link_target=b'', size=7)
+        return with_subject(t, b, a)
+    w.targeted(rng, 'a symlink unreadable on a side, its size different (O9: not a regular file)',
+               build, nr=['an unreadable symlink, the size differs: modified, no content_not_read'])
+    # Beside what gives no reason of its own.
+    def build(rng):
+        t, e = base(rng)
+        a = in_state(e, 'unreadable', t, rng, 1)
+        a['mode'] = (e['mode'] & S_IFMT) | other(rng, PERMS, e['mode'] & 0o7777)
+        return with_subject(t, in_state(e, 'hashed', t, rng, 0), a)
+    w.targeted(rng, 'a regular file unreadable, its size and mode different (O9)', build,
+               nr=['content_not_read beside a metadata field in changed'])
+    def build(rng):
+        t, e = base(rng)
+        a = in_state(e, 'unstable', t, rng, 1)
+        a['xattrs_unknown'] = True
+        return with_subject(t, in_state(e, 'hashed', t, rng, 0), a)
+    w.targeted(rng, 'a regular file unstable with xattrs_unknown, its size different (O9)', build,
+               nr=['content_not_read beside xattrs_unknown, which gives no reason'])
+    def build(rng):
+        t, e = base(rng)
+        b = in_state(e, 'hashed', t, rng, 0)
+        b['iflags'] = rng.choice(IFLAGS)
+        return with_subject(t, b, in_state(e, 'unreadable', t, rng, 1))
+    w.targeted(rng, 'a regular file unreadable, iflags on one side, its size different (O9)',
+               build, nr=['content_not_read beside iflags on one side only, which gives no '
+                          'reason'])
+    def build(rng):                             # the index: its finding needs no copy
+        t = interp_tree(rng)
+        path = rng.choice(REPOS) + b'.git/index'
+        ensure_dirs(t, rng, path)
+        e = file_at(rng, t, path, stored=False)
+        return with_subject(t, in_state(e, 'hashed', t, rng, 0),
+                            in_state(e, 'unreadable', t, rng, 1))
+    w.targeted(rng, 'a git index unreadable on a side, its size different (O9, before findings)',
+               build, nr=['content_not_read on a record with findings'])
+    def build(rng):
+        t, e = base(rng)
+        e['path'] = unlike(b'\xffnr', e['path'])
+        if e['path'] in t.e:
+            die('generator bug: %r is taken' % e['path'])
+        return with_subject(t, in_state(e, 'unverified', t, rng, 0),
+                            in_state(e, 'mount', t, rng, 1))
+    w.targeted(rng, 'a regular file not read, its path not UTF-8, its size different (O9)',
+               build, nr=['content_not_read on a path that is not UTF-8'])
+
+    # G3-2: each manifest's directories carrying `unreadable` or `mount`.
+    def sealed(rng, t, how):
+        d = clear_flags(subject(rng, t, 'dir', extras=False), t, rng)
+        d[how] = True
+        if how == 'mount':
+            d['dev'] = other_dev(t, rng)
+        t.e[d['path']] = d
+        return d
+    def build(rng):                             # 0 against 1, and a file unreadable too
+        t, e = base(rng)
+        a = t.copy()
+        sealed(rng, a, 'unreadable')
+        a.e[e['path']] = in_state(e, 'unreadable', a, rng, 0)
+        return t, a
+    w.targeted(rng, 'an unreadable directory and an unreadable file on one side (G3-2)', build,
+               nr=['sealing: not 0 before', 'sealing: not 0 after',
+                   'sealing: an unreadable directory',
+                   'sealing: not 0, every walk count 0 (provisional false)',
+                   'sealing: not the manifest trailer\'s own unreadable count'])
+    def build(rng):
+        t, _ = base(rng)
+        sealed(rng, t, 'mount')
+        return t, t.copy()
+    w.targeted(rng, 'a mount directory on both sides, every entry the same (G3-2)', build,
+               nr=['sealing: a mount directory',
+                   'sealing: not 0, every entry the same on both sides'])
+    def build(rng):
+        t, _ = base(rng)
+        sealed(rng, t, 'unreadable')
+        a = t.copy()
+        sealed(rng, a, 'unreadable')
+        sealed(rng, a, 'mount')
+        return t, a
+    w.targeted(rng, 'one sealed directory against three (G3-2)', build,
+               nr=['sealing: the two counts differ, neither 0', 'sealing: 2 or more on a side'])
+    def build(rng):
+        t = Tree(rng)
+        clear_flags(t.e[b'.'], t, rng)
+        a = t.copy()
+        t.e[b'.']['unreadable'] = True
+        return t, a
+    w.targeted(rng, 'the scope root unreadable on a side (G3-2)', build,
+               nr=['sealing: the unreadable scope root'])
+    def build(rng):                             # what is not a sealing directory
+        t, e = base(rng)
+        t.e[e['path']] = in_state(e, 'mount', t, rng, 0)
+        f = clear_flags(subject(rng, t, 'reg', extras=False), t, rng)
+        t.e[f['path']] = in_state(f, 'unreadable', t, rng, 0)
+        l = clear_flags(subject(rng, t, 'lnk', extras=False), t, rng)
+        l.pop('target_outside_scope', None)
+        l['unreadable'] = True
+        t.e[l['path']] = l
+        d = clear_flags(subject(rng, t, 'dir', extras=False), t, rng)
+        d['unstable'] = True
+        t.e[d['path']] = d
+        return t, t.copy()
+    w.targeted(rng, 'a mounted file, an unreadable file and symlink, an unstable directory: none '
+                    'sealing (G3-2)', build,
+               nr=['sealing: 0 on both sides', 'sealing: 0 beside a mounted regular file',
+                   'sealing: 0 beside an unreadable regular file',
+                   'sealing: 0 beside an unreadable symlink',
+                   'sealing: 0 beside an unstable directory'])
+
+
 def targeted(w, rng):
     cells(w, rng)
     field_pairs(w, rng)
@@ -4856,6 +5067,7 @@ def targeted(w, rng):
     interpreters(w, rng)
     git_events(w, rng)
     writer_open(w, rng)
+    not_read(w, rng)
 
 
 # ---------------------------------------------------------------------------
