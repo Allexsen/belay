@@ -712,6 +712,8 @@ def _run(sc, rep, cov, vstate, tmp, answered, holds):
                "walk_counts": (0, 0, sum(1 for e in exp["B"].values() if e["raced"]),      # V4-D6
                                0, 0, sum(1 for e in A.values() if e["raced"]))}
         lines, flags, _recs, _events = model.verify_lines(ctx)
+        if sc["name"] in REQUIRED_SCENARIOS:
+            cov.exp("scenario " + sc["name"])
         wkeys = writer_keys(flags, exp["B"], A)
         for k in wkeys.values():
             cov.exp(k)
@@ -769,6 +771,8 @@ def _run(sc, rep, cov, vstate, tmp, answered, holds):
             rep.disagree(sc, "verify refused, yet wrote standard output", "", so.strip()[:400])
         return
     ap = compare_lines(rep, sc, "verify", lines, so)
+    if sc["name"] in REQUIRED_SCENARIOS:
+        cov.saw("scenario " + sc["name"])
     for a in ap:
         d = dict((k, val) for k, val in a) if a and isinstance(a[0], list) else {}
         if "flag" in d:
@@ -780,6 +784,16 @@ def _run(sc, rep, cov, vstate, tmp, answered, holds):
                 cov.saw("flag %s %s" % (d["flag"], d.get("level")))
 
 
+# Scenarios the gate requires by name: each must be generated and judged by verify. Their absence
+# let a fail-open through (PV2-8 read rule by rule, and PV2-9's sealed directory): a rule with
+# `no_delete` and another mode or an `expected_sha256`, and two rules in either order, over a file
+# unreadable at reset; and a directory mode 000 at reset under `no_delete` alone.
+REQUIRED_SCENARIOS = (["pv2-8-nd-%s-one-rule-%s" % (o, w) for o in ("nc", "hash") for w in ("rewritten", "removed", "to-dir")]
+                      + [n % (o, w) for o in ("nc", "hash") for w in ("rewritten", "removed")
+                         for n in ("pv2-8-nd-then-%s-%s", "pv2-8-%s-then-nd-%s")]
+                      + ["pv2-9-dir-opened-file-removed", "pv2-9-dir-opened-file-removed-closed-again"])
+
+
 def gate(cov, verify_ran, probe):
     required = ["flag " + k for k in model.KINDS if k != "writes_outside_workdir"]
     required += ["flag %s %s" % (k, l) for k in ("package_changed", "tampered_installed_package")
@@ -789,10 +803,11 @@ def gate(cov, verify_ran, probe):
     if probe:
         required += ["writer_open %s%s" % (s, x) for s in WRITER_SHAPES for x in ("", ", with another reason")]
     required += NOT_READ_KEYS
+    required += ["scenario " + n for n in REQUIRED_SCENARIOS]
     bad = []
     for k in required:
         e, s = cov.expected.get(k, 0), cov.seen.get(k, 0)
-        verify_side = k.startswith(("flag ", "refusal verify:", "writer_open "))
+        verify_side = k.startswith(("flag ", "refusal verify:", "writer_open ", "scenario "))
         if e == 0:
             bad.append("%s: never expected" % k)
         elif s == 0 and (verify_ran or not verify_side):
