@@ -469,6 +469,8 @@ def check_diff(rep, sc, env, scope, since, to, recs, B, A, unguarded):
             rep.disagree(sc, "diff: the record of %r" % (p,), canon(want), canon(have))
         if "content_not_read" in d:
             seen.append(not_read_key(d))
+            if d.get("outcome") == "removed":
+                rep.disagree(sc, "diff: O10, content_not_read on a removed record at %r" % (p,), None, canon(d))
             # O9: "It stands where `unknown` would, after the values and before `findings`"
             at = [k for k in d if k in ("after", "content_not_read", "findings")]
             if at != [k for k in ("after", "content_not_read", "findings") if k in d] or "unknown" in d:
@@ -497,12 +499,16 @@ def check_diff(rep, sc, env, scope, since, to, recs, B, A, unguarded):
 
 
 def not_read_key(rec):
-    return "content_not_read %s" % ",".join(map(str, rec["content_not_read"]))
+    return "content_not_read %s%s%s" % ("added " if rec.get("outcome") == "added" else "",
+                                        "dir " if rec.get("type") == "dir" else "",
+                                        ",".join(map(str, rec["content_not_read"])))
 
 
 # What the harness can build of O9 and G3-2 with no mount and no file changing under the read.
 NOT_READ_KEYS = ["content_not_read unreadable", "content_not_read unverified",
-                 "content_not_read unverified,unreadable", "sealing not 0 before", "sealing not 0 after"]
+                 "content_not_read unverified,unreadable", "content_not_read added unreadable",
+                 "content_not_read added unverified", "content_not_read added dir unreadable",
+                 "sealing not 0 before", "sealing not 0 after"]
 
 
 def run_scenario(sc, rep, cov, state_of_verify):
@@ -804,6 +810,9 @@ def open_questions(rep, all_scs, ran, verify_ran):
     bad = []
     by_name = {s["name"]: s for s in all_scs}
     names = [q["name"] for q in gen.OPEN_QUESTIONS]
+    if not names:
+        print("OPEN: none (no scenario is listed as one the pins do not determine)")
+        return bad
     print("=" * 100)
     print("OPEN: %d scenario(s) the pins do not determine (questions for the author; not counted as disagreements)"
           % len(names))
@@ -868,8 +877,9 @@ def main(argv):
     for n in rep.notes:
         print("note: " + n)
     open_bad = open_questions(rep, gen.scenarios(), {s["name"] for s in scs}, not vstate.get("missing"))
-    print("%d scenarios; %d verified end to end; %d disagreements; %d open question(s), not counted"
-          % (len(scs), vstate.get("ran", 0), rep.disagreements, len(gen.OPEN_QUESTIONS)))
+    print("%d scenarios; %d verified end to end; %d disagreements%s"
+          % (len(scs), vstate.get("ran", 0), rep.disagreements,
+             "; %d open question(s), not counted" % len(gen.OPEN_QUESTIONS) if gen.OPEN_QUESTIONS else ""))
     bad = gate(cov, not vstate.get("missing"), not vstate.get("no_probe")) if not argv else []
     for b in bad:
         print("GATE " + b)

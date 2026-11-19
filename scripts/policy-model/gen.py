@@ -1130,23 +1130,9 @@ BIG = 4294967296 + 1
 #   binary    what belay does, in words
 #   belay     the disagreements that are this question: (what run.py compares, words belay's side
 #             of it must hold); every one must occur, and no other may
+# None now. The one entry there was, g2-rewritten-unreadable-after-no-delete (which sides `no_delete`
+# reads under PS-M5), was answered by protect-spec-v2 PV2-8: its scenario is an ordinary one again.
 OPEN_QUESTIONS = [
-    {"name": "g2-rewritten-unreadable-after-no-delete",
-     "rows": ["protect-spec PS-M5 (\"on a side its modes read\")", "protect-spec PS-M2 (`no_delete`: \"a path matched before\")",
-              "protect-spec-v2 PV2-5, PV2-7", "policy-v1 P-G2", "checkpoint-v3 G2-3"],
-     "model": "`no_delete` reads the before side only (PS-M2 names no other; model.py P6, P65): a file there and hashed "
-              "at reset, rewritten and unreadable after, under a rule with `no_delete` alone, gives no flag; exit 0",
-     "other": "`no_delete` reads the after side too, as `no_write` does, or any protected path whose record carries "
-              "`content_not_read` is unverifiable (G2-3, P-G2's first sentence): `protected_path_unverifiable`, "
-              "reasons `unverified`, `unreadable`; exit 1",
-     "binary": "the other reading here: `protected_path_unverifiable` from the after entry's flags; and so did "
-               "0.1.0-alpha.9+19, before `content_not_read` existed. Yet the mirror (unreadable at reset, readable "
-               "after, `no_create` alone: g2-rewritten-unreadable-before-no-create) gives no flag in both, so belay "
-               "does not read every side under every mode",
-     "belay": [("verify's exit code", "1"),
-               ("verify line 2", '["flag","protected_path_unverifiable"]'),
-               ("verify line 2", '["reasons",["unverified","unreadable"]]'),
-               ("verify line 3, belay only", '["protected_path_unverifiable",1]')]},
 ]
 
 
@@ -1169,6 +1155,7 @@ def not_read_scenarios():
     BOTH = BEFORE + [("chmod", sec, 0o000)]
 
     # -- P-G2's own case and its sides, by the modes that read them (PS-M5, P6, P65)
+    # (`no_delete` alone reads none of them: PV2-8, P68)
     for mode, spec in (("no-write", GW), ("no-delete", ND), ("no-create", NC),
                        ("expected", spec_of(rule(sec, expected=sha(b"s3cret\n"))))):
         add(S("g2-rewritten-unreadable-after-" + mode, SEC, AFTER, spec, diff=True, tags=["P25", "P65"]))
@@ -1180,6 +1167,32 @@ def not_read_scenarios():
     add(S("g2-test-rewritten-unreadable", BASE, [("write", "tests/test_api.py", b"def test_one():\n    pass\n"),
                                                  ("chmod", "tests/test_api.py", 0o000)],
           spec_of(rule("tests/**", "no_write")), diff=True, tags=["P13", "P25"]))
+    # -- PV2-8, P-G3: `no_delete` reads existence only. There on both sides: never unverifiable,
+    #    `unknown` included; removed: deleted and nothing more; on one side only and `unknown`:
+    #    unverifiable. With another mode, an `expected_sha256` or another rule: as before (P68)
+    SAME = [("write", sec, b"S3CRET\n"), ("chmod", sec, 0o000)]      # the same size: `unknown`
+    add(S("pv2-8-unknown-both-sides", SEC, SAME, ND, diff=True, tags=["P25", "P68"]))
+    add(S("pv2-8-unknown-both-sides-unreadable-before", SECX, [], ND, diff=True, tags=["P25", "P68"]))
+    add(S("pv2-8-two-no-delete-rules", SEC, SAME, spec_of(rule("grader/**", "no_delete"), rule(sec, "no_delete")),
+          tags=["P25", "P68"]))
+    add(S("pv2-8-with-no-create-same-rule", SEC, SAME, spec_of(rule("grader/**", "no_delete", "no_create")), tags=["P25", "P68"]))
+    add(S("pv2-8-with-no-write-same-rule", SEC, AFTER, spec_of(rule("grader/**", "no_delete", "no_write")), tags=["P25", "P68"]))
+    add(S("pv2-8-with-expected-same-rule", SEC, AFTER, spec_of(rule(sec, "no_delete", expected=sha(b"s3cret\n"))),
+          tags=["P25", "P68"]))
+    add(S("pv2-8-another-rule-after-it", SEC, SAME, spec_of(rule("grader/**", "no_delete"), rule(sec, "no_write")),
+          tags=["P5", "P25", "P68"]))
+    add(S("pv2-8-another-rule-before-it", SEC, AFTER, spec_of(rule(sec, "no_create"), rule("grader/**", "no_delete")),
+          tags=["P25", "P68"]))
+    add(S("pv2-8-another-rule-reads-the-other-side", SECX, BEFORE, spec_of(rule("grader/**", "no_delete"), rule(sec, "no_create")),
+          tags=["P25", "P68"]))
+    add(S("pv2-8-removed-too-big-at-reset", BASE + [("sparse", "grader/big.bin", 4294967296 + 1)], [("rm", "grader/big.bin")],
+          ND, tags=["P68"]))
+    SUBX = BASE + [("file", "grader/sub/x.txt", b"x\n")]
+    add(S("pv2-8-gone-below-unreadable", SUBX, [("chmod", "grader/sub", 0o000)], ND, diff=True, tags=["P25", "P50", "P69"]))
+    add(S("pv2-8-appears-below-once-unreadable", SUBX + [("chmod", "grader/sub", 0o000)], [("chmod", "grader/sub", 0o755)], ND,
+          diff=True, tags=["P25", "P50", "P69"]))
+    add(S("pv2-8-unreadable-directory-itself", SUBX, [("chmod", "grader/sub", 0o000)], spec_of(rule("grader/sub", "no_delete")),
+          tags=["P25", "P68"]))
     # -- no size change: nothing proves `modified`, so `unknown` and no `content_not_read`
     add(S("g2-same-size-unreadable-after", SEC, [("write", sec, b"S3CRET\n"), ("chmod", sec, 0o000)], GW, diff=True,
           tags=["P25", "P29"]))
@@ -1196,6 +1209,23 @@ def not_read_scenarios():
           tags=["P25", "P64", "P66"]))
     add(S("g2-unreadable-to-big", BASE + [("file", big, BLOB), ("chmod", big, 0o000)], [("chmod", big, 0o644), ("sparse", big, 67108865)],
           None, diff=True, tags=["P25", "P64", "P66"]))
+
+    # -- O10: `added` records; a `removed` one never carries it (P70)
+    NEWF = "grader/new.txt"
+    add(S("o10-added-unreadable-file", BASE, [("file", NEWF, b"n\n"), ("chmod", NEWF, 0o000)], NC, diff=True, tags=["P25", "P70"]))
+    add(S("o10-added-unreadable-file-no-delete", BASE, [("file", NEWF, b"n\n"), ("chmod", NEWF, 0o000)], ND, diff=True,
+          tags=["P25", "P68", "P70"]))
+    add(S("o10-added-big-file", BASE, [("sparse", big, 67108865)], None, diff=True, tags=["P70"]))
+    add(S("o10-added-readable-file", BASE, [("file", NEWF, b"n\n")], NC, diff=True, tags=["P70"]))
+    add(S("o10-added-unreadable-dir", BASE, [("file", "grader/newdir/x.txt", b"x\n"), ("chmod", "grader/newdir", 0o000)], NC,
+          diff=True, tags=["P25", "P70"]))
+    add(S("o10-added-readable-dir", BASE, [("file", "grader/newdir/x.txt", b"x\n")], NC, diff=True, tags=["P70"]))
+    add(S("o10-removed-unreadable-file", SECX, [("rm", sec)], GW, diff=True, tags=["P25", "P54", "P70"]))
+    add(S("o10-removed-unreadable-dir", BASE + [("dir", "data/a", 0o000)], [("chmod", "data/a", 0o755), ("rmtree", "data/a")], None,
+          diff=True, tags=["P25", "P70"]))
+    add(S("o10-added-below-once-unreadable", BASE + [("dir", "data/a", 0o000)],
+          [("chmod", "data/a", 0o755), ("file", "data/a/n.txt", b"n\n"), ("chmod", "data/a/n.txt", 0o000)], None,
+          diff=True, tags=["P25", "P70"]))
 
     # -- G3-2: directories carrying `unreadable`, counted from each manifest's entries (P67)
     SUB = BASE + [("file", "grader/sub/x.txt", b"x\n")]
