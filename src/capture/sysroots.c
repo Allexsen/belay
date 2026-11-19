@@ -99,7 +99,7 @@ static bool at_or_under(const char *path, const char *dir) {
  *  directory of WS-8. `home` is relative to the scope here (the leading "/"
  *  taken off), canonical.
  */
-static bool home_usable(const struct fsops *ops, int root_fd, uint64_t root_dev, char *home) {
+static bool home_usable(const struct fsops *ops, int root_fd, uint64_t root_dev, char *home, char **table, bool *asked) {
     for (size_t i = 0; i < N(NOT_READ); i++)
         if (at_or_under(home, NOT_READ[i])) return false;
     /* Each prefix in turn: a link anywhere on the way is refused before
@@ -117,7 +117,15 @@ static bool home_usable(const struct fsops *ops, int root_fd, uint64_t root_dev,
         }
         const bool dir = r == 0 && S_ISDIR(st.st_mode);
         const bool mount = dir && (mk ? mr : (uint64_t)st.st_dev != root_dev);
-        const bool ok = dir && (!mount || ops->mount_enterable(ops->ctx, root_fd, home));
+        bool ok = dir;
+        if (ok && mount) {              /* V5-E6, V5-A5: a whole filesystem of a listed type */
+            uint64_t id;
+            if (!*asked) {
+                *asked = true;
+                *table = ops->mountinfo(ops->ctx);
+            }
+            ok = ops->mount_id(ops->ctx, root_fd, home, &id) == 0 && fsops_mount_whole_listed(*table, id);
+        }
         *s = keep;
         if (!ok) return false;
         if (keep == '\0') return true;
@@ -159,8 +167,13 @@ static FILE *open_passwd(int root_fd) {
 }
 
 int belay_system_roots(const char *scope, struct belay_system_roots *out) {
+    return sysroots_resolve(fsops_default(), scope, out);
+}
+
+int sysroots_resolve(const struct fsops *ops, const char *scope, struct belay_system_roots *out) {
     memset(out, 0, sizeof *out);
-    const struct fsops *ops = fsops_default();
+    char *table = NULL;
+    bool asked = false;
     const int root_fd = open(scope, O_RDONLY | O_DIRECTORY | O_CLOEXEC);
     struct stat rst;
     if (root_fd == -1 || fstat(root_fd, &rst) != 0) {
@@ -217,10 +230,11 @@ int belay_system_roots(const char *scope, struct belay_system_roots *out) {
     for (size_t i = 0; !homes.oom && i < homes.n; i++) {
         if (i > 0 && strcmp(homes.roots[i - 1].path, homes.roots[i].path) == 0) continue;
         snprintf(rel, sizeof rel, "%s", homes.roots[i].path);
-        if (!home_usable(ops, root_fd, (uint64_t)rst.st_dev, rel)) continue;
+        if (!home_usable(ops, root_fd, (uint64_t)rst.st_dev, rel, &table, &asked)) continue;
         for (size_t k = 0; k < N(HOME_DIRS); k++) add(&b, rel, HOME_DIRS[k], BELAY_ROOT_CONTENT, false);
         for (size_t k = 0; k < N(HOME_FILES); k++) add(&b, rel, HOME_FILES[k], BELAY_ROOT_CONTENT, true);
     }
+    free(table);
     if (homes.oom) b.oom = true;
     free(homes.roots);
     free(homes.names);

@@ -414,13 +414,31 @@ bool cap_crossed(const struct walk_ctx *wc, const struct stat *st, bool mount_ro
  * one entry: these stay fatal, loudly. Everything else about one entry is
  * recorded on that entry and the walk goes on. */
 /* cap_crossed, for a capture with roots (manifest-v5 V5-E6): a mount point
- * whose filesystem is a local disk's is entered, its root an ordinary
+ * whose filesystem is a local disk's, whole, is entered, its root an ordinary
  * directory whose dev differs from its parent's. The walk and the
  * end-of-walk re-check both decide by this. */
 bool cap_boundary(const struct walk_ctx *wc, int dfd, const char *name, const struct stat *st,
                   bool mount_root, bool mount_known) {
     if (!cap_crossed(wc, st, mount_root, mount_known)) return false;
-    return !(wc->opts->n_roots > 0 && wc->ops->mount_enterable(wc->ops->ctx, dfd, name));
+    if (wc->opts->n_roots == 0) return true;
+    /* Addendum V5-A5: a whole filesystem of a listed type, on a device the
+     * capture neither walks already nor has entered -- unless this is the
+     * very mount it entered, met again (by the re-check). The mount table is
+     * read once, at the first mount point met. */
+    struct entered *en = wc->entered;
+    const uint64_t dev = (uint64_t)st->st_dev, ino = (uint64_t)st->st_ino;
+    for (size_t i = 0; i < en->n; i++)
+        if (en->dev[i] == dev) return en->ino[i] != ino;
+    if (dev == wc->root_dev || en->n == ENTERED_MAX) return true;
+    if (!en->asked) {
+        en->asked = true;
+        en->table = wc->ops->mountinfo(wc->ops->ctx);
+    }
+    uint64_t id;
+    if (wc->ops->mount_id(wc->ops->ctx, dfd, name, &id) != 0 || !fsops_mount_whole_listed(en->table, id)) return true;
+    en->dev[en->n] = dev;
+    en->ino[en->n++] = ino;
+    return false;
 }
 
 bool cap_fatal_errno(int err) {

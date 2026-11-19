@@ -146,8 +146,9 @@ int capture_write_root(const struct fsops *ops, const char *out_path, const char
     wc->xlen = calloc(opts->n_exclude_paths + 1, sizeof *wc->xlen);
     for (size_t i = 0; wc->xlen != NULL && i < opts->n_exclude_paths; i++) wc->xlen[i] = strlen(opts->exclude_paths[i]);
     wc->root_found = calloc(opts->n_roots + 1, sizeof *wc->root_found);
+    wc->entered = calloc(1, sizeof *wc->entered);
     if (wc->pack == NULL || wc->line == NULL || wc->readbuf == NULL || wc->xlist == NULL ||
-        wc->xnames == NULL || wc->xs == NULL || wc->xlen == NULL || wc->root_found == NULL) {
+        wc->xnames == NULL || wc->xs == NULL || wc->xlen == NULL || wc->root_found == NULL || wc->entered == NULL) {
         belay_err_set(BELAY_ERR_NOMEM, 0, "manifest: out of memory");
         goto cleanup;
     }
@@ -441,6 +442,8 @@ cleanup:
         free(wc->xs);
         free(wc->xlen);
         free(wc->root_found);
+        if (wc->entered != NULL) free(wc->entered->table);
+        free(wc->entered);
         cap_wipe(wc->key, sizeof wc->key);      /* the sealing key does not outlive the capture */
         free(wc->abs);
         prev_free(wc->prev);

@@ -415,9 +415,13 @@ static void pause_ms(long ms) {
     nanosleep(&ts, NULL);
 }
 
+static ino_t g_mount_ino[2];        /* the directories reported as mount roots (their fstat agrees) */
+static int g_mount_inos;
+
 /* A machine in small: what the roots below read, read as metadata, and do
  * not read. */
 static void tree(void) {
+    g_mount_inos = 0;
     rm_rf(g_tree);
     unlink(g_key);
     mkdir(g_tree, 0755);
@@ -879,26 +883,48 @@ TEST(mark_never_trusts_an_entry_the_previous_manifest_names_racy) {
 /* ---------- injected: mounts, a file that cannot be opened, changes during the walk ---------- */
 
 static const char *g_mount_name;    /* reported as a mount root */
-static bool g_enterable;
+static const char *g_mount_name2;   /* a second one, of the same filesystem */
+static const char *g_mountinfo;     /* the mount table the capture is given; NULL: none */
+static bool g_same_dev;             /* the mount is of the scope's own device */
 static const char *g_deny;          /* openat of this name fails EACCES (not O_PATH) */
 static void (*g_action)(void);      /* runs once, when the walk is over and before the re-check */
 static int g_tmpfiles;
 
+static bool g_no_statx;             /* the platform cannot stat with mount knowledge */
 static int t_stat_mount(void *ctx, int dfd, const char *name, struct stat *st, bool *mr, bool *mk) {
+    if (g_no_statx) { *mr = *mk = false; errno = ENOSYS; return -1; }
     const int r = g_real->stat_mount(ctx, dfd, name, st, mr, mk);
     if (r != 0) {                   /* no statx here: the same answer by lstat */
         if (g_real->fstatat(ctx, dfd, name[0] ? name : ".", st, AT_SYMLINK_NOFOLLOW) != 0) return -1;
         *mr = false;
     }
     *mk = true;
-    if (g_mount_name != NULL && strcmp(name, g_mount_name) == 0) *mr = true;
+    if ((g_mount_name != NULL && strcmp(name, g_mount_name) == 0) || (g_mount_name2 != NULL && strcmp(name, g_mount_name2) == 0)) {
+        *mr = true;
+        if (!g_same_dev) st->st_dev += 1000;        /* a mounted filesystem has its own device */
+        if (g_mount_inos < 2 && (g_mount_inos == 0 || g_mount_ino[0] != st->st_ino)) g_mount_ino[g_mount_inos++] = st->st_ino;
+    }
     if (g_gid_on && st->st_ino == g_gid_ino) st->st_gid += 1;
     return 0;
+}
+
+static int t_mount_id(void *ctx, int dfd, const char *name, uint64_t *id) {
+    (void)ctx; (void)dfd;
+    if (g_mount_name != NULL && strcmp(name, g_mount_name) == 0) { *id = 77; return 0; }
+    if (g_mount_name2 != NULL && strcmp(name, g_mount_name2) == 0) { *id = 77; return 0; }   /* the same mount source */
+    return -1;
+}
+
+static char *t_mountinfo(void *ctx) {
+    (void)ctx;
+    return g_mountinfo != NULL ? strdup(g_mountinfo) : NULL;
 }
 
 static int t_fstat(void *ctx, int fd, struct stat *st) {
     const int r = g_real->fstat(ctx, fd, st);
     if (r == 0 && g_gid_on && st->st_ino == g_gid_ino) st->st_gid += 1;
+    for (int i = 0; r == 0 && !g_same_dev && g_mount_name != NULL && i < g_mount_inos; i++)
+        if (st->st_ino == g_mount_ino[i]) st->st_dev += 1000;
     return r;
 }
 
@@ -908,10 +934,6 @@ static int t_fsync(void *ctx, int fd) {
     return g_real->fsync(ctx, fd);
 }
 
-static bool t_enterable(void *ctx, int dfd, const char *name) {
-    (void)ctx; (void)dfd;
-    return g_mount_name != NULL && strcmp(name, g_mount_name) == 0 && g_enterable;
-}
 
 static int t_openat(void *ctx, int dfd, const char *name, int flags) {
     if (g_deny != NULL && strcmp(name, g_deny) == 0) { errno = EACCES; return -1; }
@@ -934,35 +956,99 @@ static void decorate(void) {
     g_real = fsops_default();
     g_ops = *g_real;
     g_ops.stat_mount = t_stat_mount;
-    g_ops.mount_enterable = t_enterable;
+    g_ops.mount_id = t_mount_id;
+    g_ops.mountinfo = t_mountinfo;
     g_ops.openat = t_openat;
     g_ops.tmpfile_in = t_tmpfile_in;
     g_ops.fstat = t_fstat;
     g_ops.fsync = t_fsync;
 }
 
-/* V5-E6: a mount point under a root is entered when its filesystem is on
- * the list, and is a `mount` entry otherwise; without roots, always. */
+/* V5-E6 as manifest-v5-addendum V5-A5 has it: a mount point under a root is
+ * entered only when its filesystem type is on the list, it is the mount of a
+ * whole filesystem (its root in mountinfo is /), and that filesystem's device
+ * is not one the capture already walks or has entered. Anything else -- a
+ * bind mount of a directory included -- is a `mount` entry. The mount table
+ * here is the test's (no mount is made). */
+#define MI(id, root, type) #id " 30 8:" #id " " root " /mnt/" #id " rw,relatime shared:1 - " type " /dev/x rw\n"
 TEST(a_mount_is_entered_by_its_filesystem_type) {
-    tree();
-    g_mount_name = "sub";
-    g_enterable = true;
     struct belay_manifest_stats st;
+    static const struct { const char *what, *table; bool entered; } C[] = {
+        { "ext4, a whole filesystem", MI(77, "/", "ext4"), true },
+        { "xfs", MI(77, "/", "xfs"), true },
+        { "btrfs", MI(77, "/", "btrfs"), true },
+        { "zfs", MI(77, "/", "zfs"), true },
+        { "tmpfs", MI(77, "/", "tmpfs"), false },
+        { "overlay", MI(77, "/", "overlay"), false },
+        { "proc", MI(77, "/", "proc"), false },
+        { "ext4, a directory of it bound", MI(77, "/srv/data", "ext4"), false },
+        { "ext4, a file of it bound", MI(77, "/etc/hosts", "ext4"), false },
+        { "a type that only starts like one", MI(77, "/", "ext4dev"), false },
+        { "not in the table", MI(76, "/", "ext4") MI(771, "/", "ext4"), false },
+        { "the table unreadable", NULL, false },
+        { "a source that looks like a separator and a type", "77 30 8:1 / /mnt rw - tmpfs a - ext4 rw\n", false },
+        { "optional fields that look like a type", "77 30 8:1 /srv/data /mnt rw - ext4 /dev/x rw\n78 30 8:2 / /ext4 rw - tmpfs none rw\n", false },
+    };
+    for (size_t i = 0; i < sizeof C / sizeof C[0]; i++) {
+        tree();
+        g_mount_name = "sub";
+        g_mountinfo = C[i].table;
+        const int r = capture_roots(g_m2, NULL, &st);
+        g_mount_name = NULL;
+        if (r != 0 || ent("etc/sub") == NULL) { BELAY_FAIL("%s: no capture (%s)", C[i].what, belay_err_msg()); continue; }
+        if (ent("etc/sub")->is_mount == C[i].entered || (ent("etc/sub/x") != NULL) != C[i].entered)
+            BELAY_FAIL("%s: %s", C[i].what, C[i].entered ? "not entered" : "entered");
+        if (C[i].entered && (st.mounts + st.raced + st.unstable) != 0) BELAY_FAIL("%s: the re-check did not enter it too", C[i].what);
+        if (!C[i].entered && st.mounts != 1) BELAY_FAIL("%s: %zu mounts", C[i].what, st.mounts);
+    }
+    /* the same filesystem mounted a second time: the first met is entered, the second a mount entry */
+    tree();
+    mk("etc/sub2", 0755);
+    wr("etc/sub2/y", "y\n", 0644);
+    g_mount_name = "sub";
+    g_mount_name2 = "sub2";
+    g_mountinfo = MI(77, "/", "ext4");
     REQUIRE(capture_roots(g_m2, NULL, &st) == 0);
-    REQUIRE(ent("etc/sub") != NULL);
-    ASSERT_TRUE(!ent("etc/sub")->is_mount && ent("etc/sub/x") != NULL);
-    ASSERT_EQ_INT(0, (int)(st.mounts + st.raced + st.unstable));    /* the re-check enters it too */
-    g_enterable = false;
-    REQUIRE(capture_roots(g_m2, NULL, &st) == 0);
-    ASSERT_TRUE(ent("etc/sub")->is_mount && ent("etc/sub/x") == NULL);
     ASSERT_EQ_INT(1, (int)st.mounts);
-    /* a capture of a whole scope enters no mount, whatever its type (as version 4) */
-    g_enterable = true;
+    ASSERT_TRUE(ent("etc/sub")->is_mount != ent("etc/sub2")->is_mount);
+    ASSERT_TRUE((ent("etc/sub/x") != NULL) != (ent("etc/sub2/y") != NULL));
+    ASSERT_EQ_INT(0, (int)(st.raced + st.unstable));
+    g_mount_name2 = NULL;
+    /* a mount of the device the scope itself is on (a bind of the scope's own filesystem): never entered */
+    tree();
+    g_same_dev = true;
+    REQUIRE(capture_roots(g_m2, NULL, &st) == 0);
+    g_same_dev = false;
+    ASSERT_TRUE(ent("etc/sub")->is_mount && ent("etc/sub/x") == NULL);
+    /* a capture of a whole scope enters no mount, whatever it is (as version 4) */
     const struct belay_manifest_opts o = { .hash_max_bytes = 1u << 20 };
     REQUIRE(capture_write(&g_ops, g_m2, g_tree, &o, &st) == 0);
     ASSERT_EQ_INT(1, (int)st.mounts);
     ASSERT_TRUE(strstr(line_of(g_m2, "etc/sub"), "\"mount\":true") != NULL);
     g_mount_name = NULL;
+}
+
+/* The platform's own answers, asked once for real: /proc is a mount, it has
+ * an id, the mount table names it, and it is not a filesystem to enter. */
+TEST(the_real_mount_table_is_read) {
+#ifndef __linux__
+    SKIP("the mount table and mount ids are Linux's; elsewhere no mount is entered");
+#else
+    const struct fsops *ops = fsops_default();
+    const int root = open("/", O_RDONLY | O_DIRECTORY);
+    REQUIRE(root != -1);
+    uint64_t id = 0;
+    char *table = ops->mountinfo(ops->ctx);
+    const int have = ops->mount_id(ops->ctx, root, "proc", &id);
+    close(root);
+    REQUIRE(table != NULL && table[0] != '\0');
+    REQUIRE_MSG(have == 0, "%s", "no mount id for /proc");
+    char want[32];
+    snprintf(want, sizeof want, "\n%llu ", (unsigned long long)id);
+    ASSERT_TRUE(strstr(table, want) != NULL || strncmp(table, want + 1, strlen(want + 1)) == 0);
+    ASSERT_TRUE(!fsops_mount_whole_listed(table, id));
+    free(table);
+#endif
 }
 
 /* V5-E7: a meta file that cannot be opened is still meta, never unreadable. */
@@ -1351,6 +1437,38 @@ TEST(system_roots_from_a_hostile_passwd) {
     belay_system_roots_free(&g_sr);
 }
 
+/* WS-8a's two clauses a real tree cannot show without mounting: a home on a
+ * filesystem the capture does not enter is not used; and where the platform
+ * cannot say what is a mount (no statx), a link is still never followed. */
+TEST(system_roots_homes_by_mount_and_without_statx) {
+    tree();
+    mk("srv", 0755); mk("srv/real", 0755);
+    char l[1200];
+    snprintf(l, sizeof l, "%s/srv/link", g_tree);
+    REQUIRE(symlink("real", l) == 0);
+    wr("etc/passwd", "u:x:1000:1000::/home/u:/bin/sh\nl:x:1001:1001::/srv/link:/bin/sh\nr:x:1002:1002::/srv/real:/bin/sh\n", 0644);
+    g_mount_name = "home/u";            /* the resolver asks by the home's path */
+    g_mountinfo = MI(77, "/", "tmpfs");
+    REQUIRE(sysroots_resolve(&g_ops, g_tree, &g_sr) == 0);
+    ASSERT_TRUE(sroot("home/u/.ssh") == NULL && sroot("srv/real/.ssh") != NULL);
+    belay_system_roots_free(&g_sr);
+    g_mountinfo = MI(77, "/", "ext4");
+    REQUIRE(sysroots_resolve(&g_ops, g_tree, &g_sr) == 0);
+    ASSERT_TRUE(sroot("home/u/.ssh") != NULL);
+    belay_system_roots_free(&g_sr);
+    g_mountinfo = MI(77, "/home", "ext4");          /* a directory of it, bound */
+    REQUIRE(sysroots_resolve(&g_ops, g_tree, &g_sr) == 0);
+    ASSERT_TRUE(sroot("home/u/.ssh") == NULL);
+    belay_system_roots_free(&g_sr);
+    g_mount_name = NULL;
+    g_no_statx = true;
+    const int r = sysroots_resolve(&g_ops, g_tree, &g_sr);
+    g_no_statx = false;
+    REQUIRE(r == 0);
+    ASSERT_TRUE(sroot("home/u/.ssh") != NULL && sroot("srv/real/.ssh") != NULL && sroot("srv/link/.ssh") == NULL);
+    belay_system_roots_free(&g_sr);
+}
+
 /* A home so deep that its roots would not fit a path is left out (it joins
  * the homes WS-8a leaves out); the capture does not fail. */
 TEST(a_home_too_deep_for_its_roots_is_left_out) {
@@ -1448,6 +1566,7 @@ int main(void) {
     RUN(five_hundred_homes_are_captured);
     RUN(a_header_alone_gives_the_count);
     RUN(a_mount_is_entered_by_its_filesystem_type);
+    RUN(the_real_mount_table_is_read);
     RUN(a_meta_file_that_cannot_be_opened_is_still_meta);
     RUN(the_recheck_looks_at_what_was_recorded);
     RUN(an_excluded_root_is_not_found);
@@ -1455,6 +1574,7 @@ int main(void) {
     RUN(a_not_read_directory_s_ctime_is_not_the_newest);
     RUN(a_link_on_the_way_to_a_root_is_recorded);
     RUN(system_roots_from_a_hostile_passwd);
+    RUN(system_roots_homes_by_mount_and_without_statx);
     RUN(a_home_too_deep_for_its_roots_is_left_out);
     RUN(system_roots_fixed);
     RUN(system_roots_homes);
