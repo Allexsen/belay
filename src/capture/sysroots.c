@@ -175,28 +175,55 @@ int belay_system_roots(const char *scope, struct belay_system_roots *out) {
         if (is_dir(root_fd, METADATA_IF_DIR[i])) add(&b, NULL, METADATA_IF_DIR[i], BELAY_ROOT_METADATA, false);
     if (is_dir(root_fd, "lib")) add(&b, NULL, "lib/systemd", BELAY_ROOT_CONTENT, false);    /* WS-6 */
 
-    /* The sixth field of every line; a line without one names no home. A
-     * line longer than the buffer is read in pieces: only a piece that
-     * starts a line is looked at. */
+    /*
+     *  The sixth field of every line; a line without one names no home. The
+     *  file is not ours to trust: it is read byte by byte, so a line holding
+     *  a NUL byte (its fields cannot be told apart from what follows it) or
+     *  longer than a line can be is dropped by itself, and the line after it
+     *  is a line of its own. A last line without a newline is a line.
+     *
+     *  The homes are collected first, each once, then looked at: a passwd of
+     *  100,000 lines naming one home makes one home's roots, not 100,000
+     *  times as many to sort away.
+     */
     FILE *pw = open_passwd(root_fd);
     char line[2 * PATH_MAX], rel[PATH_MAX];
-    bool starts = true;
-    while (pw != NULL && fgets(line, sizeof line, pw) != NULL) {
-        const size_t ll = strlen(line);
-        const bool whole = ll > 0 && line[ll - 1] == '\n';
-        const bool use = starts && (whole || feof(pw));
-        starts = whole;
-        if (!use) continue;
-        if (whole) line[ll - 1] = '\0';
-        const char *f = line;
-        int field = 0;
-        while (field < 5 && (f = strchr(f, ':')) != NULL) { f++; field++; }
-        if (f == NULL || field < 5) continue;
-        const size_t hl = strcspn(f, ":");
-        if (!home_rel(f, hl, rel, sizeof rel) || !home_usable(ops, root_fd, (uint64_t)rst.st_dev, rel)) continue;
-        for (size_t i = 0; i < N(HOME_DIRS); i++) add(&b, rel, HOME_DIRS[i], BELAY_ROOT_CONTENT, false);
-        for (size_t i = 0; i < N(HOME_FILES); i++) add(&b, rel, HOME_FILES[i], BELAY_ROOT_CONTENT, true);
+    struct build homes = { 0 };         /* candidate homes, relative; `roots` unused but for the paths */
+    size_t ll = 0;
+    bool bad = false;
+    for (int ch = pw != NULL ? getc(pw) : EOF; pw != NULL; ch = getc(pw)) {
+        if (ch != '\n' && ch != EOF) {
+            if (ch == '\0' || ll + 1 >= sizeof line) bad = true;
+            else line[ll++] = (char)ch;
+            continue;
+        }
+        if (!bad && ll > 0) {
+            line[ll] = '\0';
+            const char *f = line;
+            int field = 0;
+            while (field < 5 && (f = strchr(f, ':')) != NULL) { f++; field++; }
+            /* WS-8a leaves a home out when it cannot be one; so is one whose
+             * deepest root would not fit a path (PATH_MAX with its NUL). */
+            if (f != NULL && field == 5 && home_rel(f, strcspn(f, ":"), rel, sizeof rel) &&
+                strlen(rel) + sizeof "/.config/systemd/user" < 4096 && strlen(rel) + sizeof "/.config/fish/config.fish" < 4096)
+                add(&homes, NULL, rel, BELAY_ROOT_CONTENT, false);
+        }
+        ll = 0;
+        bad = false;
+        if (ch == EOF) break;
     }
+    for (size_t i = 0; !homes.oom && i < homes.n; i++) homes.roots[i].path = homes.names + (uintptr_t)homes.roots[i].path;
+    if (!homes.oom && homes.n > 1) qsort(homes.roots, homes.n, sizeof *homes.roots, by_path);
+    for (size_t i = 0; !homes.oom && i < homes.n; i++) {
+        if (i > 0 && strcmp(homes.roots[i - 1].path, homes.roots[i].path) == 0) continue;
+        snprintf(rel, sizeof rel, "%s", homes.roots[i].path);
+        if (!home_usable(ops, root_fd, (uint64_t)rst.st_dev, rel)) continue;
+        for (size_t k = 0; k < N(HOME_DIRS); k++) add(&b, rel, HOME_DIRS[k], BELAY_ROOT_CONTENT, false);
+        for (size_t k = 0; k < N(HOME_FILES); k++) add(&b, rel, HOME_FILES[k], BELAY_ROOT_CONTENT, true);
+    }
+    if (homes.oom) b.oom = true;
+    free(homes.roots);
+    free(homes.names);
     const bool read_failed = pw != NULL && ferror(pw);
     if (pw != NULL) fclose(pw);
     close(root_fd);

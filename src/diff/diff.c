@@ -226,7 +226,11 @@ static int run_pipeline(struct run *x) {
             if (absent == ANC_PARTIAL) {
                 const size_t start = alen ? alen + 1 : 0;
                 const bool direct = memchr(e->path + start, '/', e->path_len - start) == NULL;
-                const bool recorded = !direct || e->type == BELAY_T_DIR || (e->type == BELAY_T_LNK && alen == 0);
+                /* ... and (addendum V5-A4) a link where a directory on the way to
+                 * one of that side's roots is looked for. */
+                const bool recorded = !direct || e->type == BELAY_T_DIR ||
+                                      (e->type == BELAY_T_LNK &&
+                                       (alen == 0 || belay_manifest_root_below(lacking, e->path, e->path_len)));
                 absent = recorded || belay_manifest_lists_root(lacking, e->path, e->path_len) ? ANC_NONE : ANC_SEALED;
             }
             if (classify_one(e, a != NULL, absent, &v) == -1) return -1;

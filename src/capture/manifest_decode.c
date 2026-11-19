@@ -610,6 +610,23 @@ bool belay_manifest_lists_root(const struct belay_manifest_header *h, const char
     return false;
 }
 
+bool belay_manifest_root_below(const struct belay_manifest_header *h, const char *path, size_t len) {
+    /* the roots below `path` start with path + "/" and sort together */
+    size_t lo = 0, hi = h->roots != NULL ? h->n_roots : 0;
+    while (lo < hi) {
+        const size_t mid = lo + (hi - lo) / 2;
+        const char *r = h->roots[mid].path;
+        const size_t rl = strlen(r), m = rl < len ? rl : len;
+        int c = memcmp(r, path, m);
+        if (c == 0) c = rl <= len ? -1 : (unsigned char)r[len] < '/' ? -1 : 1;
+        if (c < 0) lo = mid + 1;
+        else hi = mid;
+    }
+    if (lo >= (h->roots != NULL ? h->n_roots : 0)) return false;
+    const char *r = h->roots[lo].path;
+    return strlen(r) > len + 1 && memcmp(r, path, len) == 0 && r[len] == '/';
+}
+
 bool belay_manifest_same_source(const struct belay_manifest_header *a, const struct belay_manifest_header *b) {
     return strcmp(a->source_docker, b->source_docker) == 0 && strcmp(a->source_image, b->source_image) == 0;
 }

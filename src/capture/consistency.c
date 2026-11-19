@@ -248,6 +248,10 @@ static int recheck_one(struct rstack *rs, struct walk_ctx *wc, const struct bela
          * recorded names are re-listed below. */
         const struct ident now = ident_of_stat(&st);
         same = ident_same(&now, &rec, e->not_read || e->partial ? ID_OBJECT | ID_MODE : ID_ALL);
+        /* Their owner and group are recorded and compared (V5-D4), and no
+         * ctime stands in for them here as it does for every other entry. */
+        if (same && (e->not_read || e->partial))
+            same = (uint32_t)st.st_uid == e->uid && (uint32_t)st.st_gid == e->gid;
     }
     if (same && kind == RC_LISTING) {
         const int fd = rs->n && !(plen == 1 && path[0] == '.') ? rs->fd[rs->n - 1] : rs->root_fd;

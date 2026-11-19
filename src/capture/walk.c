@@ -43,9 +43,11 @@ enum visited { VISIT_RECORDED = 1, VISIT_GONE, VISIT_INCOMPLETE,
                                   its listing either, which the re-check filters the same way */ };
 
 /* V5-E3, for a child already stat'ed: a root, a directory, or a link
- * directly under the scope root. */
+ * directly under the scope root -- or (manifest-v5-addendum V5-A4) a link
+ * standing where a directory on the way to a root is looked for: recorded as
+ * the link it is, never followed, so the roots below it are not found. */
 static bool partial_records(int match, const struct stat *st, bool top) {
-    return match == RM_EXACT || S_ISDIR(st->st_mode) || (S_ISLNK(st->st_mode) && top);
+    return match == RM_EXACT || S_ISDIR(st->st_mode) || (S_ISLNK(st->st_mode) && (top || match == RM_ABOVE));
 }
 
 bool cap_partial_records(const struct walk_ctx *wc, int dfd, const char *dir, size_t dir_len, const char *name) {
@@ -99,7 +101,8 @@ static int visit(int parent_fd, const char *name, char *rel, size_t relsz,
          *  A longer root wins over a shorter (watch-system WS-9): its class
          *  holds from its own path down.
          */
-        bool rule_not_read = false, plain = false;
+        bool rule_not_read = false, plain = false, is_root = false;
+        size_t root_at = 0;
         cz = *z;
         cz.top = false;
         if (wc->opts->n_roots > 0) {
@@ -109,7 +112,8 @@ static int visit(int parent_fd, const char *name, char *rel, size_t relsz,
             if (z->partial && !partial_records(m, &st, z->top)) return VISIT_SKIPPED;
             cz.partial = false;
             if (m == RM_EXACT) {
-                wc->root_found[ri] = true;
+                is_root = true;             /* found, unless the scope excludes it (below) */
+                root_at = ri;
                 cz.cls = wc->opts->roots[ri].cls == BELAY_ROOT_METADATA ? CLS_METADATA : CLS_CONTENT;
                 plain = wc->opts->roots[ri].plain;
             } else if (z->partial) {
@@ -176,6 +180,7 @@ static int visit(int parent_fd, const char *name, char *rel, size_t relsz,
             x->ino = (uint64_t)st.st_ino;
             return VISIT_EXCLUDED;
         }
+        if (is_root) wc->root_found[root_at] = true;
         if (!rule_not_read) {       /* a not_read directory's ctime is not recorded (V5-4) */
             const int64_t ct = ident_of_stat(&st).ctime_ns;
             if (ct > wc->newest_ctime_ns) wc->newest_ctime_ns = ct;

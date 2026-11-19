@@ -383,13 +383,17 @@ mode and owner and nothing of what is inside. `/` and the directories on the way
 (`home`, `home/you`, `home/you/.config`) carry `partial`: of what they hold, only the roots, the
 directories (as `not_read`) and, directly under `/`, the symbolic links (`bin`, `lib` on a
 merged-`/usr` machine) are recorded. A file in your home directory outside the list above is not
-recorded at all, not even its name.
+recorded at all, not even its name. A symbolic link standing where a directory on the way to a
+root is looked for (`~/.config` as a link) is recorded as that link and not followed: what is
+behind it is not read, and the roots below it are listed as not found.
 
 **Sealed.** Under the roots that are read, a file others cannot read -- its mode has no read bit
 for others, or a directory above it has no search bit for others, as everything in `/root` -- is
 recorded with a keyed hash (HMAC-SHA256) and `sealed`; its content is never kept, and no
 interpreter is given it. The shell startup files above are the exception: they are kept as
-ordinary content wherever they are. The key is `sealing.key` in the scope's state directory. It is
+ordinary content wherever they are. (The pin also exempts the files an interpreter keeps --
+sudoers, crontabs, `authorized_keys`, units; no interpreter claims those yet, so in this version
+they are sealed like any other file others cannot read.) The key is `sealing.key` in the scope's state directory. It is
 made by the first capture that seals a file and never rewritten; each manifest's header carries the
 first 16 hex digits of its sha256 as `sealed_key`. Two sealed hashes compare only under one key:
 if the key file is lost a new one is made, and every sealed entry of the older checkpoints is

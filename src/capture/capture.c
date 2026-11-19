@@ -95,6 +95,7 @@ static int hash_fd(const struct fsops *ops, int fd, unsigned char *buf, char hex
         belay_sha256_update(&c, pad, sizeof pad);
         belay_sha256_update(&c, d, sizeof d);
         belay_sha256_final(&c, d);
+        cap_wipe(pad, sizeof pad);
     }
     belay_hex_encode(hex_out, d, sizeof d);
     return 0;
@@ -125,11 +126,15 @@ int cap_seal_key(struct walk_ctx *wc, bool create) {
                             st.st_size == BELAY_SEALING_KEY_BYTES && (n = read(fd, k, sizeof k)) == BELAY_SEALING_KEY_BYTES;
             close(fd);
             if (!ok) {
-                belay_err_set(BELAY_ERR_CORRUPT, 0, "%s is not a sealing key: %d bytes in a regular file of mode 600",
+                cap_wipe(k, sizeof k);
+                belay_err_set(BELAY_ERR_CORRUPT, 0, "%s is not a sealing key: %d bytes in a regular file of mode 600. "
+                              "belay does not replace it: delete it and the next capture makes a new key, under "
+                              "which every sealed entry reads unknown once against the checkpoints before it",
                               path, BELAY_SEALING_KEY_BYTES);
                 return -1;
             }
             memcpy(wc->key, k, BELAY_SEALING_KEY_BYTES);
+            cap_wipe(k, sizeof k);
             struct belay_sha256 h;
             uint8_t d[BELAY_SHA256_DIGEST_LEN];
             char hex[2 * BELAY_SHA256_DIGEST_LEN + 1];
@@ -175,6 +180,19 @@ int cap_seal_key(struct walk_ctx *wc, bool create) {
         const bool linked = wrote && link(tmp, path) == 0;
         const int lerr = errno;
         if (tfd != -1) unlink(tmp);
+        cap_wipe(k, sizeof k);
+        /* The name survives a crash only once its directory is synced: a
+         * manifest kept and its key lost would read unknown throughout. */
+        if (linked) {
+            char dir[PATH_MAX + 32];
+            const char *slash = strrchr(path, '/');
+            snprintf(dir, sizeof dir, "%.*s", slash != NULL ? (int)(slash - path ? slash - path : 1) : 1, slash != NULL ? path : ".");
+            const int dfd = open(dir, O_RDONLY | O_DIRECTORY | O_CLOEXEC);
+            if (dfd != -1) {
+                if (wc->ops->fsync(wc->ops->ctx, dfd) != 0) { /* the key is in place; the next sync carries it */ }
+                close(dfd);
+            }
+        }
         if (!wrote || (!linked && lerr != EEXIST)) {
             belay_err_set(BELAY_ERR_IO, wrote ? lerr : werr, "cannot create %s", path);
             return -1;
@@ -183,6 +201,12 @@ int cap_seal_key(struct walk_ctx *wc, bool create) {
     }
     belay_err_set(BELAY_ERR_IO, 0, "cannot create %s", path);
     return -1;
+}
+
+/* Zeroes what held key material, in a way the compiler may not drop. */
+void cap_wipe(void *p, size_t n) {
+    volatile unsigned char *v = p;
+    while (n--) *v++ = 0;
 }
 
 /* V5-E4: under a metadata root, a file that grants privilege is read. */
