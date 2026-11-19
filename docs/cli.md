@@ -417,7 +417,10 @@ more". An entry belay could not capture reliably is named on its own line with t
 (`raced`, `unstable`, `unverified`, ...). A directory belay could not list, or a mount root it did
 not enter, is that one line whatever changed below it, and the line says so (`? secret   unknown:
 unreadable, nothing below it was seen`); when the newer side has such directories, one line under
-the counts says how many (`nothing seen below 2 directories`). There is no "provisional" banner; when entries changed
+the counts says how many (`nothing seen below 2 directories`). A regular file modified by what belay
+could compare (its size), whose content it did not read on a side, says so at the end of its line,
+with the reasons (`M shadow   size 530 -> 542, mtime_ns; content not read (unreadable)`; in
+`--json`, the record's `content_not_read`). There is no "provisional" banner; when entries changed
 while they were read (raced, unstable or vanished), one line counts them for each side: those of
 the newer side are settled by running belay again; those of an earlier checkpoint stay in any diff
 from it. Past 50 events, or 50 untracked changes (or changes by path, without git), the rest fold
