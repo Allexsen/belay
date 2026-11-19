@@ -17,7 +17,10 @@ model's P63). The gate counts the kind like any other, so it holds only through 
 A concurrent writer is real: the harness holds the scenario's files open for writing, or mapped
 shared-writable, across the capture. For those scenarios it also takes
 a `check` on each side and compares `belay diff --json`'s records and trailer with the model's,
-since policy.v1 does not show what V4-D2 and V4-D5 pin.
+since policy.v1 does not show what V4-D2 and V4-D5 pin. A scenario that asks for it (`diff`) is
+compared the same way with no writer: a record's `content_not_read` (diff-fields O9) and the
+trailer's `before_sealing` and `after_sealing` (G3-2), which policy.v1 does not show either
+(P-G2: its output does not change).
 
   python3 -I -B scripts/policy-model/run.py [NAME-SUBSTRING ...]
 
@@ -429,7 +432,10 @@ def path_of(d):
 
 
 def check_diff(rep, sc, env, scope, since, to, recs, B, A, unguarded):
-    """`belay diff --json` against the model: V4-D1..D3's records, V4-D5's trailer."""
+    """`belay diff --json` against the model: V4-D1..D3's records and O9's `content_not_read`,
+    V4-D5's trailer and, after it, G3-2's two counts. -> the coverage keys belay's diff showed."""
+    KEYS = ("outcome", "type", "type_before", "changed", "unknown", "content_not_read")
+    seen = []
     rc, so, se = belay(["diff", "--scope", scope, "--since", str(since), "--to", str(to), "--json", "--all"], env)
     if rc != 0:
         rep.disagree(sc, "diff's exit code", "0", "%d %s" % (rc, se.strip()[:400]))
@@ -445,10 +451,16 @@ def check_diff(rep, sc, env, scope, since, to, recs, B, A, unguarded):
             if not (d is not None and d.get("outcome") == "unchanged"):
                 rep.disagree(sc, "diff: a record on one side only, %r" % (p,), m, d)
             continue
-        want = {k: m[k] for k in ("outcome", "type", "type_before", "changed", "unknown") if k in m}
-        have = {k: d[k] for k in ("outcome", "type", "type_before", "changed", "unknown") if k in d}
+        want = {k: m[k] for k in KEYS if k in m}
+        have = {k: d[k] for k in KEYS if k in d}
         if want != have:
             rep.disagree(sc, "diff: the record of %r" % (p,), canon(want), canon(have))
+        if "content_not_read" in d:
+            seen.append(not_read_key(d))
+            # O9: "It stands where `unknown` would, after the values and before `findings`"
+            at = [k for k in d if k in ("after", "content_not_read", "findings")]
+            if at != [k for k in ("after", "content_not_read", "findings") if k in d] or "unknown" in d:
+                rep.disagree(sc, "diff: O9, where content_not_read stands at %r" % (p,), None, canon(list(d)))
         if "writer_open" in m.get("unknown", ()):
             for side in ("before", "after"):
                 if "sha256" in d.get(side, {}):
@@ -458,12 +470,27 @@ def check_diff(rep, sc, env, scope, since, to, recs, B, A, unguarded):
     tr = lines[-1]
     want = [("before_writer_open", sum(1 for e in B.values() if e["writer_open"])),
             ("after_writer_open", sum(1 for e in A.values() if e["writer_open"])),
-            ("before_unguarded", unguarded[0]), ("after_unguarded", unguarded[1])]
+            ("before_unguarded", unguarded[0]), ("after_unguarded", unguarded[1]),
+            # G3-2: "In that order, after every key the trailer has."
+            ("before_sealing", model.sealing(B)), ("after_sealing", model.sealing(A))]
     keys = list(tr)
-    if keys[-5:-4] != ["after_sha256"] or [(k, tr[k]) for k in keys[-4:]] != want:
-        rep.disagree(sc, "diff: V4-D5, the trailer ends", canon(want), canon(list(tr.items())[-5:]))
+    if keys[-7:-6] != ["after_sha256"] or [(k, tr[k]) for k in keys[-6:]] != want:
+        rep.disagree(sc, "diff: V4-D5 and G3-2, the trailer ends", canon(want), canon(list(tr.items())[-7:]))
     if tr.get("provisional") is not False:
         rep.disagree(sc, "diff: V4-D6, provisional", "false", canon(tr.get("provisional")))
+    for side in ("before", "after"):
+        if tr.get(side + "_sealing"):
+            seen.append("sealing not 0 %s" % side)
+    return seen
+
+
+def not_read_key(rec):
+    return "content_not_read %s" % ",".join(map(str, rec["content_not_read"]))
+
+
+# What the harness can build of O9 and G3-2 with no mount and no file changing under the read.
+NOT_READ_KEYS = ["content_not_read unreadable", "content_not_read unverified",
+                 "content_not_read unverified,unreadable", "sealing not 0 before", "sealing not 0 after"]
 
 
 def run_scenario(sc, rep, cov, state_of_verify):
@@ -516,7 +543,7 @@ def _run(sc, rep, cov, vstate, tmp, answered, holds):
             f.write(spec_raw)
     hold_b = Writers(scope, sc["writers"][0])
     holds.append(hold_b)
-    with_diff = sc["writers"] != ([], []) and not sc["verify"].get("to")
+    with_diff = (sc["writers"] != ([], []) or sc["diff"]) and not sc["verify"].get("to")
     since = None
     if with_diff:
         belay(["check", "--scope", scope], env)
@@ -698,7 +725,14 @@ def _run(sc, rep, cov, vstate, tmp, answered, holds):
                     rep.disagree(sc, "the checkpoint %s: %s" % (what, p), None, None)
         hold_a.release()
         recs = model.diff(model.Side(hb, raw_b[b"."]["dev"], excl_b), model.Side(ha, raw_a[b"."]["dev"], excl_a))
-        check_diff(rep, sc, env, scope, since[0], to_cp[0], recs, hb, ha, ug)
+        for r in recs.values():
+            if "content_not_read" in r:
+                cov.exp(not_read_key(r))
+        for side, es in (("before", hb), ("after", ha)):
+            if model.sealing(es):
+                cov.exp("sealing not 0 %s" % side)
+        for k in check_diff(rep, sc, env, scope, since[0], to_cp[0], recs, hb, ha, ug) or ():
+            cov.saw(k)
     if rc == 2 and "unknown command" in se:
         vstate["missing"] = True
         print("belay verify is not built yet (%s): export checked, verify pending" % se.strip())
@@ -736,6 +770,7 @@ def gate(cov, verify_ran, probe):
     required += sorted(k for k in cov.expected if k.startswith("refusal "))
     if probe:
         required += ["writer_open %s%s" % (s, x) for s in WRITER_SHAPES for x in ("", ", with another reason")]
+    required += NOT_READ_KEYS
     bad = []
     for k in required:
         e, s = cov.expected.get(k, 0), cov.seen.get(k, 0)
