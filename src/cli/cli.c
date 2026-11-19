@@ -168,8 +168,8 @@ void cli_err_line(FILE *err) { err_line(err); }
 /* ---- options ---- */
 
 struct opts {
-    const char *scope, *since, *to, *add, *remove, *docker;
-    bool json, full, exit_code, all, full_every_set, keep;
+    const char *scope, *since, *to, *add, *remove, *docker, *system_root;
+    bool json, full, exit_code, all, full_every_set, keep, system;
     long full_every;
 };
 
@@ -184,6 +184,11 @@ static int parse(int argc, char **argv, struct opts *o, FILE *err) {
         else if (!strcmp(a, "--keep")) o->keep = true;
         else if (!strcmp(a, "--exit-code")) o->exit_code = true;
         else if (!strcmp(a, "--all")) o->all = true;
+        else if (!strcmp(a, "--system")) {
+            if (o->system) return usage(err, "--system given twice");
+            o->system = true;
+        }
+        else if (!strcmp(a, "--system-root")) val = &o->system_root;    /* cli_system_scope */
         else if (!strcmp(a, "--scope")) val = &o->scope;
         else if (!strcmp(a, "--docker")) val = &o->docker;
         else if (!strcmp(a, "--since")) val = &o->since;
@@ -217,8 +222,48 @@ static int parse(int argc, char **argv, struct opts *o, FILE *err) {
             *val = argv[++i];
         }
     }
+    if (o->system || o->system_root != NULL) {
+        const int rc = cli_system_scope(o->system, o->system_root, &o->scope, o->docker, err);
+        if (rc) return rc;
+        o->system = true;
+    }
     if (o->scope == NULL) return usage(err, "--scope DIR is required");
     return 0;
+}
+
+int cli_system_scope(bool system, const char *system_root, const char **scope, const char *docker, FILE *err) {
+    if (*scope != NULL || (system && system_root != NULL)) return usage(err, "--system takes the place of --scope");
+    if (docker != NULL) {
+        fputs("belay: refused: --system with --docker is not implemented in this version\n", err);
+        return EXIT_REFUSED;
+    }
+    *scope = system_root != NULL ? system_root : "/";
+    return 0;
+}
+
+int cli_refuse_system(const struct state *st, long id, const char *what, FILE *err) {
+    if (id == 0) {
+        struct checkpoint *list = NULL;
+        size_t n = 0;
+        if (st->cp_fd == -1) return 0;                      /* never captured */
+        if (state_list(st, &list, &n) == -1) return failed(err);
+        id = n > 0 ? list[n - 1].id : 0;
+        free(list);
+        if (id == 0) return 0;
+    }
+    struct manifest_file mf;
+    struct belay_manifest_reader *r = NULL;
+    if (manifest_acquire_header(st, id, &mf) == -1) return failed(err);
+    if (belay_manifest_open(mf.path, &r) == -1) {
+        manifest_release(&mf);
+        return failed(err);
+    }
+    const bool roots = belay_manifest_header(r)->n_roots > 0;
+    belay_manifest_close(r);
+    manifest_release(&mf);
+    if (!roots) return 0;
+    fprintf(err, CLI_NOT_FOR_SYSTEM, what);
+    return EXIT_REFUSED;
 }
 
 /* Strict (review 2026-10-31, Phase 5, 10): digits, no leading zero, at
@@ -489,7 +534,7 @@ static int cmd_capture(const struct opts *o, const char *kind, FILE *out, FILE *
     struct state st;
     int rc = open_scope(o, true, &st, err);
     if (rc) return rc;
-    const struct capture_req req = { kind, strcmp(kind, "mark") == 0, o->full, o->full_every, 0, o->keep, false };
+    const struct capture_req req = { kind, strcmp(kind, "mark") == 0, o->full, o->full_every, 0, o->keep, false, o->system };
     struct checkpoint c;
     if (state_capture(&st, &req, &c) == -1) {
         rc = failed(err);
@@ -599,7 +644,7 @@ static int cmd_diff(const struct opts *o, FILE *out, FILE *err) {
     }
     if (to == 0) {
         /* Q3: the capture is kept as a checkpoint, prefiltered as a mark. */
-        const struct capture_req req = { "diff", true, false, o->full_every, 0, false, false };
+        const struct capture_req req = { "diff", true, false, o->full_every, 0, false, false, o->system };
         if (state_capture(&st, &req, &now) == -1) { rc = failed(err); goto done; }
         to = now.id;
         snprintf(label_b, sizeof label_b, "now (checkpoint %ld)", to);
@@ -735,6 +780,7 @@ static int run(int argc, char **argv, FILE *out, FILE *err) {
     if (strcmp(cmd, "mark") && o.keep) return usage(err, "--keep is mark's");
     if ((!strcmp(cmd, "check") || !strcmp(cmd, "log") || !strcmp(cmd, "exclude")) && o.full_every_set)
         return usage(err, "--full-every is mark's and diff's");
+    if (!strcmp(cmd, "exclude") && o.system) return usage(err, "--system is check's, mark's, diff's, log's and manifest's");
     if (strcmp(cmd, "exclude") && (o.add || o.remove)) return usage(err, "--add and --remove are exclude's");
     if (!strcmp(cmd, "exclude") && o.json) return usage(err, "exclude has no --json");
     if (!strcmp(cmd, "exclude")) return cmd_exclude(&o, out, err);

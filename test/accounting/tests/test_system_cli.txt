@@ -1,0 +1,5 @@
+check_captures_the_roots
+mark_diff_and_log_take_it
+usage
+baseline_verify_and_protect_are_refused
+a_bundle_whose_manifest_has_roots_is_rejected

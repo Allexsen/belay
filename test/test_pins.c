@@ -315,7 +315,7 @@ static enum diff_outcome expected(enum change_class cls) {
 
 TEST(every_field_type_cell_classifies_as_its_pin_says) {
     REQUIRE(load_diff_pin() == 0);
-    const struct diff_ctx ctx = { 1, 1, false };
+    const struct diff_ctx ctx = { 1, 1, false, false };
     int cells = 0;
     for (int f = 0; f < F_COUNT; f++) {
         const struct pin_row *p = &PIN[f];
@@ -347,7 +347,7 @@ TEST(every_field_type_cell_classifies_as_its_pin_says) {
  * outcome unknown either way: rule 3). */
 TEST(mount_root_cells_follow_the_pin) {
     REQUIRE(load_diff_pin() == 0);
-    const struct diff_ctx ctx = { 1, 1, false };
+    const struct diff_ctx ctx = { 1, 1, false, false };
     for (int f = 0; f < F_COUNT; f++) {
         const struct pin_row *p = &PIN[f];
         for (int t = 0; t < ENTRY_TYPE_COUNT; t++) {
@@ -373,7 +373,7 @@ TEST(mount_root_cells_follow_the_pin) {
 /* Absence on one side, by the pin's absent-means words. */
 TEST(one_sided_fields_follow_the_pin) {
     REQUIRE(load_diff_pin() == 0);
-    const struct diff_ctx ctx = { 1, 1, false };
+    const struct diff_ctx ctx = { 1, 1, false, false };
     for (int f = 0; f < F_COUNT; f++) {
         const struct pin_row *p = &PIN[f];
         if (p->am != AM_UNKNOWN && p->am != AM_NONE_IF_READ) continue;

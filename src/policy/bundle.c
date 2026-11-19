@@ -699,6 +699,12 @@ int bundle_read(const char *path, const char *want, const char *workdir, const c
         belay_err_set(BELAY_ERR_CORRUPT, 0, "bundle: its manifest is not one a reader accepts: %s", belay_err_msg());
         goto out;
     }
+    /* manifest-v5 V5-R4: a bundle carries the manifest of an ordinary scope;
+     * one whose manifest has roots is rejected by every reader. */
+    if (mh.n_roots > 0) {
+        corrupt("its manifest has roots: a system watch's, which no bundle carries", 0);
+        goto out;
+    }
     if (strcmp(mh.scope, out->meta.scope) != 0 || mh.hash_max_bytes != out->meta.hash_max_bytes) {
         corrupt("its manifest is of another scope or hash limit than its bundle line says", 0);
         goto out;

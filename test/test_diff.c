@@ -1358,7 +1358,7 @@ static void set_flag(struct belay_entry *e, enum entry_field f) {
 /* manifest-v4 V4-D1..D3: a marked entry is unknown on either side, whatever
  * differs; its hash is never compared; on one side only, never added. */
 TEST(a_marked_entry_is_unknown_and_its_hash_never_compared) {
-    const struct diff_ctx ctx = { 0, 0, false };
+    const struct diff_ctx ctx = { 0, 0, false, false };
     static struct belay_entry b, a;
     struct verdict v;
     memset(&b, 0, sizeof b);
@@ -1451,7 +1451,7 @@ TEST(no_flag_combination_on_either_side_is_unchanged) {
     static const enum entry_field flags[] = { F_RACED, F_WRITER_OPEN, F_UNSTABLE, F_UNVERIFIED, F_UNREADABLE,
                                               F_MOUNT, F_XATTRS_UNKNOWN };
     const int nf = (int)(sizeof flags / sizeof flags[0]);
-    const struct diff_ctx ctx = { 0, 0, false };
+    const struct diff_ctx ctx = { 0, 0, false, false };
     static struct belay_entry base, b, a;
     int checked = 0;
     for (int t = 0; t < ENTRY_TYPE_COUNT; t++) {
