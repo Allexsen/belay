@@ -56,14 +56,17 @@ struct stream {
     unsigned char sealed_by_rule[SEALED_MAX];   /* that one is `not_read` (V5-E2), for the message */
     size_t n_sealed;
     size_t dirs[SEALED_MAX];    /* lengths of recorded directories, prefixes of prev */
+    unsigned char dir_partial[SEALED_MAX];  /* that one carries `partial` (version 5) */
+    bool   root_partial, root_sealed;       /* the scope root's, for stream_end */
     size_t n_dirs;
 };
 
 /* One entry, in file order. 0, or -1 with the error set. */
-int stream_entry(struct stream *s, const struct belay_entry *e);
+int stream_entry(struct stream *s, const struct belay_manifest_header *h, const struct belay_entry *e);
 
 /* The trailer's values (indexed by enum trailer_field) against what was
  * read. 0, or -1. */
-int stream_end(const struct stream *s, const uint64_t v[TR_COUNT], const struct belay_manifest_stats *t);
+int stream_end(const struct stream *s, const struct belay_manifest_header *h, const uint64_t v[TR_COUNT],
+               const struct belay_manifest_stats *t);
 
 #endif

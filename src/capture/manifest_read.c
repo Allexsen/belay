@@ -388,7 +388,7 @@ size_t belay_manifest_racy(const struct belay_manifest_reader *r, size_t i, cons
 static int parse_trailer(struct belay_manifest_reader *r, const struct obj *o) {
     uint64_t v[TR_COUNT];
     if (decode_trailer(o, &r->header, v, &r->trailer) == -1) return -1;
-    if (stream_end(&r->st, v, &r->trailer) == -1) return -1;
+    if (stream_end(&r->st, &r->header, v, &r->trailer) == -1) return -1;
     r->trailer.entries    = (size_t)v[TR_ENTRIES];
     r->trailer.vanished   = (size_t)v[TR_VANISHED];
     r->trailer.unreadable = (size_t)v[TR_UNREADABLE];
@@ -476,7 +476,7 @@ int belay_manifest_next(struct belay_manifest_reader *r, struct belay_entry *e) 
         }
     }
 
-    if (stream_entry(&r->st, e) == -1) return fail(r);
+    if (stream_entry(&r->st, &r->header, e) == -1) return fail(r);
     return 1;
 }
 

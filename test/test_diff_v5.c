@@ -92,11 +92,48 @@ static void m_write(const char *name) {
     snprintf(p, sizeof p, "%s/%s", g_dir, name);
     FILE *f = fopen(p, "wb");
     if (f == NULL) return;
+    /* A manifest given no roots whose entries carry a version 5 flag is made
+     * the capture it must be for a reader to take it (V5-E3): each name
+     * directly under the scope root is a root -- metadata when an entry at
+     * or below it is meta, content otherwise -- and the scope root partial. */
+    static char body[sizeof M.body + 64];
+    snprintf(body, sizeof body, "%s", M.body);
+    if (M.roots[0] == '\0' && (M.nr || M.meta || M.sealed || strstr(M.body, "\"partial\":true"))) {
+        char seen[64][64];
+        size_t ns = 0;
+        for (const char *l = M.body; l != NULL && *l; l = strchr(l, '\n') ? strchr(l, '\n') + 1 : NULL) {
+            if (strncmp(l, "{\"path\":\"", 9) != 0) continue;
+            char top[64];
+            snprintf(top, sizeof top, "%.*s", (int)strcspn(l + 9, "\"/"), l + 9);
+            if (strcmp(top, ".") == 0) continue;
+            bool dup = false;
+            for (size_t i = 0; i < ns; i++) dup |= strcmp(seen[i], top) == 0;
+            if (dup || ns == 64) continue;
+            snprintf(seen[ns++], sizeof seen[0], "%s", top);
+            bool meta = false;              /* any entry at or below it */
+            char at[80], below[80];
+            snprintf(at, sizeof at, "{\"path\":\"%s\",", top);
+            snprintf(below, sizeof below, "{\"path\":\"%s/", top);
+            for (const char *k = M.body; k != NULL && *k; k = strchr(k, '\n') ? strchr(k, '\n') + 1 : NULL)
+                if ((strncmp(k, at, strlen(at)) == 0 || strncmp(k, below, strlen(below)) == 0) &&
+                    memmem(k, strcspn(k, "\n"), "\"meta\":true", 11) != NULL)
+                    meta = true;
+            char rl[200];
+            snprintf(rl, sizeof rl, "{\"root\":\"%s\",\"class\":\"%s\",\"found\":true}\n", top, meta ? "metadata" : "content");
+            strncat(M.roots, rl, sizeof M.roots - strlen(M.roots) - 1);
+        }
+        char *root = strstr(body, "{\"path\":\".\",");
+        char *end = root != NULL ? strchr(root, '\n') : NULL;
+        if (end != NULL && memmem(root, (size_t)(end - root), "\"partial\":true", 14) == NULL) {
+            memmove(end - 1 + 15, end - 1, strlen(end - 1) + 1);
+            memcpy(end - 1, ",\"partial\":true", 15);
+        }
+    }
     size_t nroots = 0;                  /* V5-A1: the count, then one line per root */
     for (const char *c = M.roots; *c; c++) nroots += *c == '\n';
     fprintf(f, "{\"belay_manifest\":5,\"created_ns\":0,\"scopes\":[\"/s\"],\"hash\":\"sha256\",\"hash_max_bytes\":67108864,"
                "\"store_max_bytes\":65536,\"excluded\":[],\"walk_start_ns\":0,\"source\":null,\"roots\":%zu%s,"
-               "\"basis\":\"walk\"}\n%s%s", nroots, M.key, M.roots, M.body);
+               "\"basis\":\"walk\"}\n%s%s", nroots, M.key, M.roots, body);
     fprintf(f, "{\"belay_manifest_end\":%zu,\"vanished\":0,\"unreadable\":%zu,\"unstable\":%zu,\"mounts\":%zu,\"raced\":%zu,"
                "\"trusted\":0,\"reference\":\"none\",\"read_all\":\"check\",\"writer_open\":%zu,\"unguarded\":0,"
                "\"not_read\":%zu,\"meta\":%zu,\"sealed\":%zu,\"carried\":0,\"racy\":0}\n",
@@ -323,10 +360,12 @@ TEST(a_first_user_unit_in_a_home_is_added) {
  * there, so its absence is known; a file's is known only when the other
  * side's roots list it. `partial` itself is not compared. */
 TEST(a_path_under_a_partial_directory_on_the_other_side) {
+    /* the other side recorded everything: a capture of the whole scope (a
+     * capture by roots never records such files, and a reader refuses one that does) */
     home_before();
-    m_new(HOME_ROOTS, NULL);
-    dir(".", P); lnk("bin"); dir("home", P); reg("home/stray", SHA(HA)); dir("home/u", P);
-    reg("home/u/.bashrc", SHA(HA)); dir("home/u/.config", P); dir("home/u/Music", ",\"not_read\":true"); lnk("home/u/link");
+    m_new(NULL, NULL);
+    dir(".", ""); lnk("bin"); dir("home", ""); reg("home/stray", SHA(HA)); dir("home/u", "");
+    reg("home/u/.bashrc", SHA(HA)); dir("home/u/.config", ""); dir("home/u/Music", ""); lnk("home/u/link");
     reg("home/u/notes.txt", SHA(HA)); reg("top.txt", SHA(HA));
     m_write("after");
     REQUIRE(run() == 0);
@@ -341,7 +380,7 @@ TEST(a_path_under_a_partial_directory_on_the_other_side) {
     /* a link: directly under the scope root it is recorded, elsewhere not */
     IS("{\"path\":\"bin\",\"outcome\":\"added\",\"type\":\"lnk\"}", rec("bin"));
     IS("{\"path\":\"home/u/link\",\"outcome\":\"unknown\",\"type\":\"lnk\",\"unknown\":[\"not_captured\"]}", rec("home/u/link"));
-    ASSERT_TRUE(strstr(first_line(), "roots_differ") == NULL);         /* V5-D6: equal roots, no key */
+    ASSERT_TRUE(strstr(first_line(), ",\"roots_differ\":true}") != NULL);
     /* partial on one side only, every compared field equal: no record */
     m_new(NULL, NULL); dir(".", ""); dir("home", ""); m_write("before");
     m_new(RT("home/u/.ssh", "content", "false"), NULL); dir(".", P); dir("home", P); m_write("after");
@@ -363,12 +402,11 @@ TEST(a_path_under_a_partial_directory_on_the_other_side) {
 TEST(a_link_on_the_way_to_a_root) {
     home_before();
     m_new(HOME_ROOTS, NULL);
-    dir(".", P); dir("home", P); dir("home/u", P); lnk("home/u/.config"); lnk("home/u/.other");
+    dir(".", P); dir("home", P); dir("home/u", P); lnk("home/u/.config");
     m_write("after");
     REQUIRE(run() == 0);
     ASSERT_TRUE(strstr(rec("home/u/.config"), "\"outcome\":\"type_changed\",\"type\":\"lnk\",\"type_before\":\"dir\"") != NULL);
-    /* a link on the way to nothing is not such a name */
-    IS("{\"path\":\"home/u/.other\",\"outcome\":\"unknown\",\"type\":\"lnk\",\"unknown\":[\"not_captured\"]}", rec("home/u/.other"));
+    /* (a link on the way to nothing is not such a name: home/u/link, in the test above) */
     m_new(HOME_ROOTS, NULL); dir(".", P); dir("home", P); dir("home/u", P); m_write("before");
     REQUIRE(run() == 0);
     IS("{\"path\":\"home/u/.config\",\"outcome\":\"added\",\"type\":\"lnk\"}", rec("home/u/.config"));

@@ -8,7 +8,57 @@
 
 #include <string.h>
 
-int stream_entry(struct stream *s, const struct belay_entry *e) {
+/*
+ *  Where an entry may be, by the roots (manifest-v5 V5-E3, V5-E4, V5-E5, V5-2;
+ *  its addendum V5-A4): what a capture writes, and nothing else.
+ *    - No roots: a whole scope, as version 4: none of the four flags.
+ *    - Under a root (the longest listed path that is the entry's or above
+ *      it): the root was found; no `partial`; `meta` only where the root is
+ *      metadata, `sealed` only where it is content.
+ *    - Outside every root: the directory it is in is partial, and it is a
+ *      directory, or a link directly under the scope root or on the way to a
+ *      root; never `meta` or `sealed`.
+ *  `parent_partial`: the recorded parent carries `partial` (the scope root's
+ *  own is checked when the trailer is read: it may sort after its children).
+ *  No memory: the roots are the header's, looked up by binary search.
+ */
+static int zone_check(const struct belay_manifest_header *h, const struct belay_entry *e, bool top, bool parent_partial) {
+    if (h->n_roots == 0 || h->roots == NULL) {
+        if (e->partial || e->not_read || e->meta || e->sealed)
+            return lex_corrupt("partial, not_read, meta or sealed in a capture of a whole scope (no roots)");
+        return 0;
+    }
+    if (e->path_len == 1 && e->path[0] == '.') return 0;
+    const struct belay_root *root = NULL;
+    for (size_t k = e->path_len; k > 0 && root == NULL; ) {
+        size_t lo = 0, hi = h->n_roots;
+        while (lo < hi) {
+            const size_t mid = lo + (hi - lo) / 2;
+            const char *r = h->roots[mid].path;
+            const size_t rl = strlen(r), m = rl < k ? rl : k;
+            int c = memcmp(r, e->path, m);
+            if (c == 0) c = (rl > k) - (rl < k);
+            if (c == 0) { root = &h->roots[mid]; break; }
+            if (c < 0) lo = mid + 1;
+            else hi = mid;
+        }
+        do k--; while (k > 0 && e->path[k] != '/');     /* the next shorter prefix */
+    }
+    if (root != NULL) {
+        if (!root->found) return lex_corrupt("an entry at or below a root that was not found");
+        if (e->partial) return lex_corrupt("partial on a directory under a root");
+        if (e->meta && root->cls != BELAY_ROOT_METADATA) return lex_corrupt("meta under a content root");
+        if (e->sealed && root->cls != BELAY_ROOT_CONTENT) return lex_corrupt("sealed under a metadata root");
+        return 0;
+    }
+    const bool recorded = e->type == BELAY_T_DIR ||
+                          (e->type == BELAY_T_LNK && (top || belay_manifest_root_below(h, e->path, e->path_len)));
+    if (!recorded || (!top && !parent_partial) || e->meta || e->sealed)
+        return lex_corrupt("an entry outside every root that a partial directory does not record");
+    return 0;
+}
+
+int stream_entry(struct stream *s, const struct belay_manifest_header *h, const struct belay_entry *e) {
     /* Strictly increasing raw-path order: the comparator merges two
      * manifests and would mis-pair out-of-order or duplicated entries. */
     size_t common = 0;          /* length of the prefix shared with prev */
@@ -54,6 +104,9 @@ int stream_entry(struct stream *s, const struct belay_entry *e) {
         while (i > 0 && s->dirs[i - 1] > plen - 1) i--;
         if (i == 0 || s->dirs[i - 1] != plen - 1)
             return lex_corrupt("orphan: the parent directory is not recorded");
+        if (zone_check(h, e, false, s->dir_partial[i - 1]) == -1) return -1;
+    } else if (zone_check(h, e, true, false) == -1) {
+        return -1;
     }
 
     /* "." is not a prefix of the paths below it; an unreadable root is
@@ -61,6 +114,7 @@ int stream_entry(struct stream *s, const struct belay_entry *e) {
     if (e->type == BELAY_T_DIR && !(e->path_len == 1 && e->path[0] == '.')) {
         if (s->n_dirs == SEALED_MAX)            /* unreachable: see SEALED_MAX */
             return lex_corrupt("too many nested directories");
+        s->dir_partial[s->n_dirs] = e->partial;
         s->dirs[s->n_dirs++] = e->path_len;
         if (e->unreadable || e->is_mount || e->not_read) {
             if (s->n_sealed == SEALED_MAX)      /* unreachable: see SEALED_MAX */
@@ -74,6 +128,8 @@ int stream_entry(struct stream *s, const struct belay_entry *e) {
         if (e->type != BELAY_T_DIR) return lex_corrupt("scope root is not a directory");
         if (e->is_mount) return lex_corrupt("scope root flagged as a mount");
         s->have_root = true;
+        s->root_partial = e->partial;
+        s->root_sealed = e->unreadable || e->not_read;
         /* A not_read root was not entered either (V5-E2). */
         s->root_unreadable = e->unreadable || e->not_read;
     }
@@ -90,7 +146,11 @@ int stream_entry(struct stream *s, const struct belay_entry *e) {
     return 0;
 }
 
-int stream_end(const struct stream *s, const uint64_t v[TR_COUNT], const struct belay_manifest_stats *t) {
+int stream_end(const struct stream *s, const struct belay_manifest_header *h, const uint64_t v[TR_COUNT],
+               const struct belay_manifest_stats *t) {
+    /* V5-E3: with roots the scope root is on the way to them, unless it could not be listed at all. */
+    if (h->n_roots > 0 && s->have_root && !s->root_partial && !s->root_sealed)
+        return lex_corrupt("a capture of roots whose scope root is not partial");
     const size_t writer_open = t->writer_open;
     if (t->racy_listed != s->n_racy) {              /* manifest-v5-addendum V5-A2 */
         belay_err_set(BELAY_ERR_CORRUPT, 0, "manifest: trailer says %zu racy, read %zu", t->racy_listed, s->n_racy);
