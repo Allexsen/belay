@@ -573,6 +573,22 @@ TEST(an_unknown_directory_nothing_was_seen_below_says_so) {
     ASSERT_TRUE(strstr(g_text, "  ? moving   unknown: raced\n") != NULL);
 }
 
+/* G2-2: a file modified by what belay could compare, whose content it did
+ * not read, says so at the end of its line, with the record's reasons. */
+TEST(a_changed_file_whose_content_was_not_read_says_so) {
+    ASSERT_EQ_INT(0, render(HEAD
+        "{\"path\":\"big\",\"outcome\":\"modified\",\"type\":\"reg\",\"changed\":[\"size\"],"
+        "\"before\":{\"size\":1},\"after\":{\"size\":2},\"content_not_read\":[\"unverified\",\"unreadable\"]}\n"
+        "{\"path\":\"plain\",\"outcome\":\"modified\",\"type\":\"reg\",\"changed\":[\"size\",\"mtime_ns\"],"
+        "\"before\":{\"size\":530,\"mtime_ns\":1},\"after\":{\"size\":542,\"mtime_ns\":2}}\n"
+        "{\"path\":\"shadow\",\"outcome\":\"modified\",\"type\":\"reg\",\"changed\":[\"size\",\"mtime_ns\"],"
+        "\"before\":{\"size\":530,\"mtime_ns\":1},\"after\":{\"size\":542,\"mtime_ns\":2},\"content_not_read\":[\"unreadable\"]}\n"
+        TRAIL("3", "0", "0", "0", "0", "0", "0"), false));
+    ASSERT_TRUE(strstr(g_text, "  M shadow   size 530 -> 542, mtime_ns; content not read (unreadable)\n") != NULL);
+    ASSERT_TRUE(strstr(g_text, "  M big   size 1 -> 2; content not read (unverified, unreadable)\n") != NULL);
+    ASSERT_TRUE(strstr(g_text, "  M plain   size 530 -> 542, mtime_ns\n") != NULL);
+}
+
 /* G3-2: the summary says how many directories of the after side nothing was
  * seen below; nothing when there is none, or when the trailer has no count. */
 TEST(the_summary_counts_the_directories_nothing_was_seen_below) {
@@ -604,6 +620,7 @@ int main(void) {
     RUN(privilege_is_found_whatever_the_path_and_the_outcome);
     RUN(unknown_records_never_fold);
     RUN(an_unknown_directory_nothing_was_seen_below_says_so);
+    RUN(a_changed_file_whose_content_was_not_read_says_so);
     RUN(the_summary_counts_the_directories_nothing_was_seen_below);
     RUN(a_diff_of_another_version_is_rejected_and_b64_scopes_shown);
     RUN(a_line_of_many_strings_is_read_in_linear_memory);

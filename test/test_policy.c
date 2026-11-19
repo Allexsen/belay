@@ -791,6 +791,24 @@ TEST(an_unverifiable_entry_names_every_flag_it_carries) {
     HAS("protected_path_unverifiable", "tests/new.py", ",\"reasons\":[\"unverified\",\"unreadable\"],");
 }
 
+/* policy-v1 P-G2, protect-spec-v2 PV2-7 (checkpoint-v3 G2-3): a protected
+ * file rewritten and left unreadable is modified by its size, and its record
+ * says its content was not read. It is written, and it cannot be verified:
+ * PS-M5 reads the entry's flags whatever the outcome. */
+TEST(a_protected_file_modified_and_not_read_is_written_and_unverifiable) {
+    if (geteuid() == 0) SKIP("root reads anything");
+    fresh("{\"belay_protect\":2,\"protect\":[{\"path\":\"grader/**\",\"mode\":[\"no_write\"]}]}");
+    sh("mkdir -p grader && printf 'k\\n' > grader/key");
+    REQUIRE_MSG(export_(true) == EXIT_DONE, "%s", g_err);
+    sh("printf 'another key\\n' > grader/key && chmod 000 grader/key");
+    ASSERT_EQ_INT(EXIT_CHANGES, verify_(true));
+    HAS("protected_path_written", "grader/key", ",\"outcome\":\"modified\",\"changed\":[\"mode\",\"size\",");
+    HAS("protected_path_unverifiable", "grader/key", ",\"rule\":\"grader/**\",\"reasons\":[\"unverified\",\"unreadable\"],");
+    ASSERT_EQ_INT(EXIT_DONE, belay("diff", "--scope", g_scope, "--since", "1", "--json", NULL));
+    sh("chmod 644 grader/key");
+    ASSERT_TRUE(strstr(g_out, "\"content_not_read\":[\"unreadable\"]}\n") != NULL);     /* the record it rests on */
+}
+
 /* Found by policy.v1's separate author: a side never looked at (E11,
  * not_captured) is neither held nor absent -- nothing is counted. */
 TEST(a_side_never_looked_at_is_not_counted) {
@@ -1048,6 +1066,7 @@ int main(void) {
     RUN(events_carry_their_provisional_how_and_sorted_paths);
     RUN(verify_to_a_checkpoint_that_left_a_protected_path_out_is_refused);
     RUN(an_unverifiable_entry_names_every_flag_it_carries);
+    RUN(a_protected_file_modified_and_not_read_is_written_and_unverifiable);
     RUN(a_side_never_looked_at_is_not_counted);
     RUN(a_path_not_utf8_reads_as_the_receipt_writes_it);
     RUN(the_test_file_rule_keeps_to_tests);

@@ -181,6 +181,13 @@ const struct line_field_def DIFF_RECORD_FIELDS[DF_COUNT] = {
     [DF_AFTER] = { "after", NULL, "object", "As `before`, for the after side." },
     [DF_UNKNOWN] = { "unknown", NULL, "array",
         "For `unknown` only: the reasons, in the order of the reasons table." },
+    [DF_CONTENT_NOT_READ] = { "content_not_read", NULL, "array",
+        "For `modified` and `metadata_only` only, on a regular file whose content was not read on a "
+        "side: the reasons, in the order of the reasons table, from the flags of either side -- "
+        "`unstable`, `unverified`, `unreadable`, `mount`. `unverified` is listed only for a side "
+        "that carries none of the other three: the file was over the hash limit. Absent when both "
+        "sides were hashed. What was compared proves the change; the content itself was not "
+        "compared (`test/expect/diff-fields.md`, O9)." },
     [DF_FINDINGS] = { "findings", NULL, "array",
         "What an interpreter explained about the change, one object each (Findings, below); "
         "absent when none. Annotations only: an interpreter never sets or changes the outcome." },

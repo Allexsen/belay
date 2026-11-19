@@ -361,6 +361,7 @@ static int record(const struct jval *r, struct ctx *x, const struct receipt_opts
     if (have_path) esc(&b, path, plen);
     else sbf(&b, "(no path)");
     if (ign_edit) sbf(&b, "   (git-ignored)");
+    const size_t said = b.n;            /* the line up to its path */
     if (why.n) {
         sbf(&b, "   ");
         if (strcmp(outcome, "type_changed") == 0) {     /* the type change is said too (D8) */
@@ -385,6 +386,15 @@ static int record(const struct jval *r, struct ctx *x, const struct receipt_opts
     } else if (strcmp(outcome, "metadata_only") == 0 || strcmp(outcome, "modified") == 0) {
         const struct jval *ch = jget(r, "changed");
         if (ch != NULL && ch->n && !jget(r, "findings")) { sbf(&b, "   "); changed_values(&b, r, ch); }
+    }
+    /* What was compared proves the change; the content was not read
+     * (checkpoint-v3, G2-2). After whatever the line says so far. */
+    const struct jval *cnr = jget(r, "content_not_read");
+    if (cnr != NULL && cnr->t == J_ARR && cnr->n > 0) {
+        sbf(&b, "%s", b.n > said ? "; " : "   ");
+        sbf(&b, "content not read (");
+        list(&b, cnr);
+        sbf(&b, ")");
     }
     free(why.p);
     /* A record past the 4,096-finding cap ends in an and_more finding

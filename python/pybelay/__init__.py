@@ -159,6 +159,7 @@ class DiffRecord:
     before: Optional[dict] = None
     after: Optional[dict] = None
     unknown: Optional[Tuple[str, ...]] = None
+    content_not_read: Optional[Tuple[str, ...]] = None      # diff-fields O9
     findings: Tuple[dict, ...] = ()
 
 
@@ -208,7 +209,7 @@ def _diff(lines: List[dict]) -> Diff:
         extra = set(o) - _RECORD
         if extra or not {"path", "outcome", "type"} <= set(o):
             raise FormatError("a diff record with keys %s" % sorted(o))
-        for t in ("changed", "unknown", "findings"):
+        for t in ("changed", "unknown", "content_not_read", "findings"):
             if t in o:
                 o[t] = tuple(o[t])
         recs.append(DiffRecord(**o))
