@@ -393,7 +393,8 @@ def S(name, tree, episode=(), spec=None, tags=(), **kw):
     d = {"name": name, "tree": list(tree), "episode": list(episode), "spec": spec,
          "tags": list(tags), "excludes": kw.pop("excludes", []), "out": kw.pop("out", "outside"),
          "verify": kw.pop("verify", {}), "refusal": kw.pop("refusal", None),
-         "workdir": kw.pop("workdir", None), "writers": tuple(list(w) for w in kw.pop("writers", ([], [])))}
+         "workdir": kw.pop("workdir", None), "writers": tuple(list(w) for w in kw.pop("writers", ([], []))),
+         "diff": kw.pop("diff", False)}
     assert not kw, kw
     return d
 
@@ -877,6 +878,7 @@ def scenarios():
     for c in ("trailing", "unknown-key", "short"):
         add(S("verify-corrupt-" + c, BASE, [], TW, verify={"corrupt": c}, refusal="verify:corrupt-" + c))
     out.extend(writer_scenarios())
+    out.extend(not_read_scenarios())
     out.extend(version2_scenarios())
     out.extend(inode_flag_scenarios())
     out.extend(touched_scenarios())
@@ -1114,6 +1116,66 @@ def touched_scenarios():
 
 BLOB = b"\x00\x01 no copy is kept of a binary file\n"
 BIG = 4294967296 + 1
+
+
+def not_read_scenarios():
+    """diff-fields O9 and "The trailer" G3-2, policy-v1 P-G2, protect-spec-v2 PV2-7: a file whose
+    record is `modified` though a capture did not read it, and directories nothing below which
+    was seen. policy.v1's lines are PS-M5's, as before; every scenario here also has its
+    `belay diff --json` compared (`diff`), where `content_not_read` and the sealing counts show."""
+    out = []
+    add = out.append
+    sec = "grader/secret.txt"
+    SEC = BASE + [("file", sec, b"s3cret\n")]
+    SECX = SEC + [("chmod", sec, 0o000)]
+    LONGER = b"another, longer secret\n"
+    GW = spec_of(rule("grader/**", "no_write"))
+    ND = spec_of(rule("grader/**", "no_delete"))
+    NC = spec_of(rule("grader/**", "no_create"))
+    AFTER = [("write", sec, LONGER), ("chmod", sec, 0o000)]          # rewritten, then unreadable
+    BEFORE = [("chmod", sec, 0o644), ("write", sec, LONGER)]         # unreadable at reset, rewritten
+    BOTH = BEFORE + [("chmod", sec, 0o000)]
+
+    # -- P-G2's own case and its sides, by the modes that read them (PS-M5, P6, P65)
+    for mode, spec in (("no-write", GW), ("no-delete", ND), ("no-create", NC),
+                       ("expected", spec_of(rule(sec, expected=sha(b"s3cret\n"))))):
+        add(S("g2-rewritten-unreadable-after-" + mode, SEC, AFTER, spec, diff=True, tags=["P25", "P65"]))
+        add(S("g2-rewritten-unreadable-before-" + mode, SECX, BEFORE, spec, diff=True, tags=["P25", "P65"]))
+        add(S("g2-rewritten-unreadable-both-" + mode, SECX, BOTH, spec, diff=True, tags=["P25", "P65"]))
+    add(S("g2-rewritten-unreadable-unprotected", BASE + [("file", "src/secret.txt", b"s3cret\n")],
+          [("write", "src/secret.txt", LONGER), ("chmod", "src/secret.txt", 0o000)], GW, diff=True, tags=["P25"]))
+    add(S("g2-rewritten-unreadable-no-spec", SEC, AFTER, None, diff=True, tags=["P25"]))
+    add(S("g2-test-rewritten-unreadable", BASE, [("write", "tests/test_api.py", b"def test_one():\n    pass\n"),
+                                                 ("chmod", "tests/test_api.py", 0o000)],
+          spec_of(rule("tests/**", "no_write")), diff=True, tags=["P13", "P25"]))
+    # -- no size change: nothing proves `modified`, so `unknown` and no `content_not_read`
+    add(S("g2-same-size-unreadable-after", SEC, [("write", sec, b"S3CRET\n"), ("chmod", sec, 0o000)], GW, diff=True,
+          tags=["P25", "P29"]))
+    add(S("g2-chmod-unreadable-after", SEC, [("chmod", sec, 0o000)], GW, diff=True, tags=["P25", "P29"]))
+    # -- not a regular file on both sides
+    add(S("g2-unreadable-to-symlink", SECX, [("rm", sec), ("symlink", sec, "check.py")], GW, diff=True, tags=["P25"]))
+    # -- over check's hash limit: a bare `unverified`
+    big = "data/big.bin"
+    BIGGER = BASE + [("sparse", big, 67108865)]
+    add(S("g2-big-grown", BIGGER, [("sparse", big, 67108866)], None, diff=True, tags=["P66"]))
+    add(S("g2-big-to-small", BIGGER, [("write", big, BLOB)], None, diff=True))
+    add(S("g2-small-to-big", BASE + [("file", big, BLOB)], [("sparse", big, 67108865)], None, diff=True))
+    add(S("g2-big-to-unreadable", BIGGER, [("write", big, BLOB), ("chmod", big, 0o000)], None, diff=True,
+          tags=["P25", "P64", "P66"]))
+    add(S("g2-unreadable-to-big", BASE + [("file", big, BLOB), ("chmod", big, 0o000)], [("chmod", big, 0o644), ("sparse", big, 67108865)],
+          None, diff=True, tags=["P25", "P64", "P66"]))
+
+    # -- G3-2: directories carrying `unreadable`, counted from each manifest's entries (P67)
+    SUB = BASE + [("file", "grader/sub/x.txt", b"x\n")]
+    add(S("g3-dir-unreadable-after", SUB, [("chmod", "grader/sub", 0o000)], GW, diff=True, tags=["P25", "P50", "P67"]))
+    add(S("g3-dir-unreadable-before", SUB + [("chmod", "grader/sub", 0o000)], [("chmod", "grader/sub", 0o755)], GW,
+          diff=True, tags=["P25", "P50", "P67"]))
+    TWO = BASE + [("dir", "data/a", 0o000), ("dir", "data/b", 0o000), ("dir", "data/c")]
+    add(S("g3-two-then-three", TWO, [("chmod", "data/c", 0o000)], None, diff=True, tags=["P67"]))
+    add(S("g3-two-both-sides-nothing-changed", TWO, [], None, diff=True, tags=["P67"]))
+    add(S("g3-unreadable-file-is-not-one", SECX, [("write", "README.md", b"# app, edited\n")], GW, diff=True,
+          tags=["P25", "P67"]))
+    return out
 
 
 def writer_scenarios():

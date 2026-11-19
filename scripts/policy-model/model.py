@@ -368,6 +368,36 @@ P63 New with protected_path_touched: how the harness reaches a container source 
     without `--docker` a manifest with a source is refused -- would make every `CT` scenario a
     refusal (exit 3): a disagreement there is this reading's, before it is the row's.
 
+P64 New with diff-fields O9 (`content_not_read`; checkpoint-v3 G2-1). Its order is "the order of
+    the `unknown` array", and the pins this model reads give that array's order nowhere in words
+    for the diff (P2's is policy-v1's order for `reasons`, which puts `unverified` first). Read:
+    O9's own list, which follows those words at once -- "`unstable`, `unverified`, `unreadable`,
+    `mount`". The two orders differ only where one side is `unstable` and the other over the hash
+    limit, which this harness cannot build; what it can show is `unverified` before `unreadable`.
+
+P65 New with P-G2 and PV2-7 (checkpoint-v3 G2-3). G2-3 alone reads "a protected path with it is
+    `protected_path_unverifiable`", and P-G2 opens "read as an `unknown` reason is" -- and an
+    `unknown` record is unverifiable under any rule that matches (P50). But P-G2 goes on:
+    "`protected_path_unverifiable` already reads those flags on each side the rule's modes read
+    (PS-M5), whatever the outcome", and PV2-7: "PS-M5 is unchanged ... whose entry, on a side the
+    rule's modes read, is `unverified`, `unstable`, `unreadable` or a `mount`". Read: PS-M5 as it
+    was (P6) -- the flags of the sides the modes read, so a file rewritten and unreadable after
+    only, under a rule with `no_delete` alone, is not unverifiable though its diff record carries
+    `content_not_read`. Nothing in policy.v1's output changes, and no code of this model's
+    policy did; `reasons` are "the entry's flags, every one set, in the row's order":
+    `unverified`, `unreadable`, where `content_not_read` is `["unreadable"]`.
+
+P66 New with O9. "A `modified` or `metadata_only` record": the second cannot occur. Each of the
+    four flags makes content unknown, and diff-v1's rule 3 gives `unknown` before rule 4 unless
+    a content field (`size`) proves `modified`. `_both` would write it; no scenario can.
+    "On a side": a side carrying one of the four flags; `unverified` is judged per side, so a
+    file over the hash limit before and unreadable after gives `["unverified","unreadable"]`.
+
+P67 New with G3-2 (diff-fields, "The trailer"). "Its directories carrying `unreadable` or
+    `mount` ..., counted from its entries": directories only -- an unreadable file is not one --
+    and never the manifest trailer's own `unreadable`. The harness mounts nothing, so only an
+    unreadable directory is ever counted here.
+
 Not modelled: IF-8 (the receipt's privilege section) -- this model produces policy.v1, not the
 receipt. IF-1's macOS flags: the harness measures Linux's FS_IOC_GETFLAGS, so only
 `FS_IMMUTABLE_FL` (0x10) and `FS_APPEND_FL` (0x20) are tested for. IF-9 needs no code: the
@@ -415,6 +445,7 @@ def not_emitted(source):
 ENTRY_FLAGS = ("unverified", "unstable", "unreadable", "raced", "mount", "writer_open")   # V4-D7
 REASON_ORDER = ENTRY_FLAGS[:-1] + ("xattrs_unknown", "iflags_unknown", "not_captured",  # P2
                                    "listing_incomplete", "writer_open")                # V4-D4
+O9_ORDER = ("unstable", "unverified", "unreadable", "mount")                     # diff-fields O9, P64
 FIELD_ORDER = ("mode", "uid", "gid", "size", "mtime_ns", "ctime_ns", "ino", "dev", "nlink",
                "iflags", "caps", "xattrs", "sha256", "rdev", "link_target")
 
@@ -900,7 +931,31 @@ def _both(b, a, bs, as_, identity):
         if iflags_one_sided:                                                         # P29
             rs.add("iflags_unknown")
         rec["unknown"] = _reasons(rs)
+    elif t == "reg":                                                                 # diff-fields O9
+        cn = content_not_read(b, a)
+        if cn:
+            rec["content_not_read"] = cn
     return rec
+
+
+def content_not_read(b, a):
+    """diff-fields O9, for a `modified` or `metadata_only` record of a regular file: "the reasons
+    ... from the flags of either side: `unstable`, `unverified`, `unreadable`, `mount` ...
+    `unverified` adds no reason on a side that also carries `unreadable`, `unstable` or `mount`".
+    [] when both sides were hashed: the key is absent (P64, P66)."""
+    rs = set()
+    for e in (b, a):
+        because = [f for f in ("unreadable", "unstable", "mount") if e[f]]
+        rs.update(because)
+        if e["unverified"] and not because:
+            rs.add("unverified")
+    return [r for r in O9_ORDER if r in rs]
+
+
+def sealing(entries):
+    """diff-fields "The trailer", G3-2: a manifest's "directories carrying `unreadable` or `mount`
+    ..., counted from its entries" (P67)."""
+    return sum(1 for e in entries.values() if e["type"] == "dir" and (e["unreadable"] or e["mount"]))
 
 
 def diff(bs, as_):

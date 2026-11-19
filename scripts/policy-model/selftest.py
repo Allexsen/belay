@@ -531,6 +531,82 @@ def fixture_writer_open():
     check("a test file marked: no outcome the rules name, no copy to count (P47)", got[1:-1], [])
 
 
+def fixture_not_read():
+    """diff-fields O9 and "The trailer" G3-2 by hand, then P-G2's own sentence."""
+    base = {b".": raw("dir", D, ino=2), b"g": raw("dir", D, ino=3)}
+    x = raw("reg", F, b"one\n", ino=4)
+    longer = raw("reg", F, b"three\n", ino=4, mtime=200)
+    locked = dict(longer, mode=0o100000, readable=False, iflags=None)       # P25
+    same = dict(raw("reg", F, b"ONE\n", ino=4, mtime=200), mode=0o100000, readable=False, iflags=None)
+    big = dict(raw("reg", F, None, ino=4), size=model.HASH_DEFAULT + 1)
+    bigger = dict(big, size=model.HASH_DEFAULT + 2, mtime_ns=200)
+
+    def rec(b, a, edit=None):
+        B = model.view(dict(list(base.items()) + [(b"g/x", b)]), model.HASH_DEFAULT)
+        A = model.view(dict(list(base.items()) + [(b"g/x", a)]), model.HASH_DEFAULT)
+        if edit:
+            edit(B[b"g/x"], A[b"g/x"])
+        return model.diff(model.Side(B, 10, []), model.Side(A, 10, [])).get(b"g/x")
+
+    def flag(side, f):
+        def edit(b, a):
+            e = (b, a)[side]
+            e.update({f: True, "unverified": True, "sha256": None, "stored": False})
+        return edit
+    check("O9: rewritten and unreadable after, the size proves modified",
+          rec(x, locked), {"outcome": "modified", "type": "reg", "changed": ["mode", "size", "mtime_ns"],
+                           "content_not_read": ["unreadable"]})
+    check("O9: unreadable before", rec(locked, x)["content_not_read"], ["unreadable"])
+    check("O9: unreadable on both sides, once", rec(dict(locked, size=9), locked)["content_not_read"], ["unreadable"])
+    check("O9: both sides hashed, absent", rec(x, longer),
+          {"outcome": "modified", "type": "reg", "changed": ["size", "mtime_ns", "sha256"]})
+    check("O9: the size the same: unknown, and no record has both", rec(x, same),
+          {"outcome": "unknown", "type": "reg", "changed": ["mode", "mtime_ns"],
+           "unknown": ["unverified", "unreadable", "iflags_unknown"]})
+    check("O9: over the hash limit on both sides: unverified alone", rec(big, bigger)["content_not_read"], ["unverified"])
+    check("O9: over the limit before, unreadable after: unverified per side", rec(big, locked)["content_not_read"],
+          ["unverified", "unreadable"])
+    check("O9: unstable after, O9's order", rec(big, longer, flag(1, "unstable"))["content_not_read"],
+          ["unstable", "unverified"])
+    check("O9: a mount after: mount, not its unverified", rec(x, longer, flag(1, "mount"))["content_not_read"], ["mount"])
+    check("O9: a type change carries none", "content_not_read" in rec(locked, raw("lnk", 0o120777, ino=4, link=b"t")), False)
+    lnk = raw("lnk", 0o120777, ino=4, link=b"t")
+    check("O9: an unreadable symlink is not a regular file",
+          rec(lnk, dict(lnk, size=7, link_target=None)), {"outcome": "modified", "type": "lnk", "changed": ["size"]})
+    # G3-2
+    tree = dict(base)
+    tree[b"g/d"] = dict(raw("dir", 0o40000, ino=5), readable=False)
+    tree[b"g/e"] = dict(raw("dir", 0o40000, ino=6), readable=False)
+    tree[b"g/x"] = locked
+    v = model.view(tree, model.HASH_DEFAULT)
+    check("G3-2: unreadable directories, not the unreadable file", model.sealing(v), 2)
+    v[b"g"]["mount"] = True
+    v[b"g/x"]["mount"] = True
+    check("G3-2: a mount directory, not a mounted file", model.sealing(v), 3)
+    check("G3-2: none", model.sealing(model.view(base, model.HASH_DEFAULT)), 0)
+    # P-G2: "a protected file whose record is `modified` with `content_not_read` gives
+    # `protected_path_unverifiable` as well as ... `protected_path_written` for a `no_write` rule.
+    # Its `reasons` stay the entry's flags ...: `unverified`, `unreadable`"
+    B = dict(list(base.items()) + [(b"g/x", x)])
+    A = dict(list(base.items()) + [(b"g/x", locked)])
+    for mode, want in (("no_write", ["protected_path_written", "protected_path_unverifiable"]),
+                       ("no_delete", []),                                            # P65: reads before
+                       ("no_create", ["protected_path_unverifiable"])):
+        spec = ('{"belay_protect":2,"protect":[{"path":"g/**","mode":["%s"]}]}' % mode).encode()
+        got, _flags = verify(spec, B, A)
+        lines = [json.loads(l) for l in got[1:-1]]
+        check("P-G2 under %s: the kinds" % mode, [l["flag"] for l in lines if l["flag"].startswith("protected_")], want)
+        if mode == "no_write":
+            check("P-G2: the written line's outcome and changed", (lines[0]["outcome"], lines[0]["changed"]),
+                  ("modified", ["mode", "size", "mtime_ns"]))
+            check("P-G2: reasons are the entry's flags, in the row's order", lines[1]["reasons"], ["unverified", "unreadable"])
+            check("P-G2: no key of policy.v1 carries content_not_read", any("content_not_read" in l for l in got), False)
+    got, _flags = verify(b'{"belay_protect":2,"protect":[{"path":"g/**","mode":["no_delete"]}]}', A, B)
+    check("PV2-7 under no_delete, unreadable before: unverifiable",
+          [json.loads(l)["flag"] for l in got[1:-1] if json.loads(l)["flag"].startswith("protected_")],
+          ["protected_path_unverifiable"])
+
+
 def fixture_manifest_v4():
     """V4's Lines, on the pin's example trailer."""
     entry = {"path": "data.bin", "type": "reg", "mode": 33188, "uid": 1000, "gid": 1000, "size": 4, "mtime_ns": 1,
@@ -763,7 +839,7 @@ def run():
     for f in (tables, fixture_protected_write, fixture_privilege_path, fixture_iflags_decision_163, fixture_inode_flags,
               fixture_text_cut,
               fixture_pip_reinstall_judged, fixture_pyc_decision_186, fixture_pip_bundle,
-              fixture_dpkg_bundle_and_tamper, fixture_git_reset, fixture_writer_open, fixture_manifest_v4, fixture_protect_v2,
+              fixture_dpkg_bundle_and_tamper, fixture_git_reset, fixture_writer_open, fixture_manifest_v4, fixture_not_read, fixture_protect_v2,
               fixture_protected_touched):
         try:
             f()
