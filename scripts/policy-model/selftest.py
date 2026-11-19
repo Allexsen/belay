@@ -694,10 +694,10 @@ def fixture_manifest_v4():
     root = {"path": ".", "type": "dir", "mode": 16877, "uid": 1000, "gid": 1000, "size": 4096, "mtime_ns": 1,
             "ctime_ns": 1, "ino": 2, "dev": 2096, "nlink": 2}
     head = {"belay_manifest": 5, "created_ns": 1, "scopes": ["/w"], "hash": "sha256", "hash_max_bytes": 1, "store_max_bytes": 1,
-            "excluded": [], "walk_start_ns": 1, "source": None, "roots": [], "basis": "walk"}
+            "excluded": [], "walk_start_ns": 1, "source": None, "roots": 0, "basis": "walk"}
     tail = {"belay_manifest_end": 2, "vanished": 0, "unreadable": 0, "unstable": 0, "mounts": 1, "raced": 0, "trusted": 0,
             "reference": "none", "read_all": "check", "writer_open": 1, "unguarded": 0,
-            "not_read": 0, "meta": 0, "sealed": 0, "carried": 0, "racy": []}
+            "not_read": 0, "meta": 0, "sealed": 0, "carried": 0, "racy": 0}
     data = b"".join(model.enc(o).encode() + b"\n" for o in (head, root, entry, tail))
     B = {b".": {"writer_open": False}, b"data.bin": {"writer_open": True}}
     check("the pin's lines hold", model.manifest_problems(data, B, 0), [])
@@ -709,11 +709,14 @@ def fixture_manifest_v4():
           ("read_all", "writer_open", "unguarded", "not_read", "meta", "sealed", "carried", "racy"))
     check("the header's order", model.V5_HEADER[-3:], ("source", "roots", "basis"))
     for what, old, new in (("v4's version", b'"belay_manifest":5', b'"belay_manifest":4'),
-                           ("a root", b'"roots":[]', b'"roots":[{"path":"etc","class":"content","found":true}]'),
+                           ("a root count", b'"roots":0', b'"roots":1'),
+                           ("the roots as an array", b'"roots":0', b'"roots":[]'),
+                           ("a root line", b'\n{"path":".",', b'\n{"root":"etc","class":"content","found":true}\n{"path":".",'),
                            ("basis events", b'"basis":"walk"', b'"basis":"events"'),
                            ("a sealed_key", b'"basis"', b'"sealed_key":"0123456789abcdef","basis"'),
                            ("a meta count", b'"meta":0', b'"meta":1'),
-                           ("a racy path", b'"racy":[]', b'"racy":["data.bin"]'),
+                           ("a racy count", b'"racy":0', b'"racy":1'),
+                           ("the racy paths as an array", b'"racy":0', b'"racy":[]'),
                            ("no carried", b'"carried":0,', b""),
                            ("a v5 flag on an entry", b',"writer_open":true', b',"writer_open":true,"sealed":true')):
         assert old in data, what
@@ -727,8 +730,12 @@ def fixture_manifest_v4():
         check("break %s" % how, (key in broken[where], broken[0]["belay_manifest"]), (there, int(how[1])))
     hr, er, _tr = model.read_manifest(model.break_manifest(data.replace(b',"writer_open":true', b""), "v5-roots"))
     check("V5-R4's bundle: every child a root, `.` partial",
-          (hr["roots"], er[0].get("partial"), list(hr)[-2:]),
-          ([{"path": "data.bin", "class": "content", "found": True}], True, ["roots", "basis"]))
+          (hr["roots"], er[0], er[1].get("partial"), list(hr)[-2:]),
+          (1, {"root": "data.bin", "class": "content", "found": True}, True, ["roots", "basis"]))
+    for how, want in (("v5-roots-count", (1, 0, 2)), ("v5-root-line-uncounted", (0, 0, 3)), ("v5-racy-count", (0, 1, 2)),
+                      ("v5-racy-no-entry", (0, 1, 3)), ("v5-racy-line-uncounted", (0, 0, 3))):
+        hx, ex, tx = model.read_manifest(model.break_manifest(data.replace(b',"writer_open":true', b""), how))
+        check("break %s: the counts and the lines between header and trailer" % how, (hx["roots"], tx["racy"], len(ex)), want)
     plain = data.replace(b',"writer_open":true', b"").replace(b'"writer_open":1', b'"writer_open":0')
     h3, _e3, t3 = model.read_manifest(model.downgrade_manifest(plain, 3))
     check("v3 keeps source, loses both counts and v5's keys",
