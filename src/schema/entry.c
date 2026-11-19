@@ -430,6 +430,11 @@ static bool violated(const struct entry_rule *r, const struct belay_entry *e, ui
 }
 
 int entry_check(const struct belay_entry *e, uint32_t present) {
+    /* V5-E1 said for what it is: rule 5's own message names two of the three. */
+    if (e->type == BELAY_T_REG && (present & FBIT(F_META)) && (present & (FBIT(F_SHA256) | FBIT(F_UNVERIFIED)))) {
+        belay_err_set(BELAY_ERR_CORRUPT, 0, "manifest: meta with sha256 or unverified");
+        return -1;
+    }
     for (size_t i = 0; i < ENTRY_RULE_COUNT; i++) {
         const char *msg;
         if (violated(&ENTRY_RULES[i], e, present, &msg)) {

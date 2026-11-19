@@ -195,7 +195,7 @@ TEST(v5_header_values_are_checked) {
         { "sealed_key upper case", H5X(",\"roots\":0,\"sealed_key\":\"0123456789ABCDEF\",\"basis\":\"walk\"") ROOT_ T5(1, 0, 0, 0), "16 lowercase hex" },
         { "sealed_key, nothing sealed", H5X(",\"roots\":0,\"sealed_key\":\"" KEYID "\",\"basis\":\"walk\"") ROOT_ T5(1, 0, 0, 0),
           "a sealed_key without sealed entries" },
-        { "sealed, no sealed_key", H5 ROOT_ REG_("f", SHA_ ",\"sealed\":true") T5(2, 0, 0, 1), "sealed entries without a sealed_key" },
+        { "sealed, no sealed_key", H5R(1) RL("f", "content", "true") PR_ REG_("f", SHA_ ",\"sealed\":true") T5(2, 0, 0, 1), "sealed entries without a sealed_key" },
         { "false on a line of its own", H5 ROOT_ REG_("f", SHA_ ",\"sealed\":false") T5(2, 0, 0, 0), "malformed value" },
     };
     for (size_t i = 0; i < sizeof C / sizeof C[0]; i++) {
@@ -203,7 +203,7 @@ TEST(v5_header_values_are_checked) {
         if (r != -1) { BELAY_FAIL("%s: read, want refused", C[i].what); continue; }
         if (strstr(belay_err_msg(), C[i].msg) == NULL) BELAY_FAIL("%s: \"%s\", want \"%s\"", C[i].what, belay_err_msg(), C[i].msg);
     }
-    REQUIRE(read_text(H5X(",\"roots\":0,\"sealed_key\":\"" KEYID "\",\"basis\":\"walk\"") ROOT_
+    REQUIRE(read_text(H5X(",\"roots\":1,\"sealed_key\":\"" KEYID "\",\"basis\":\"walk\"") RL("f", "content", "true") PR_
                       REG_("f", SHA_ ",\"sealed\":true") T5(2, 0, 0, 1)) == 0);
     ASSERT_EQ_STR(KEYID, g_h.sealed_key);
     ASSERT_TRUE(ent("f")->sealed);
@@ -219,10 +219,12 @@ TEST(v5_header_values_are_checked) {
 TEST(v5_trailer_values_are_checked) {
 #define HE H5X(",\"roots\":0,\"basis\":\"events\"")
     static const struct { const char *what, *text, *msg; } C[] = {
-        { "not_read miscounted", H5 ROOT_ NR_("d", "") T5(2, 0, 0, 0), "not_read" },
-        { "meta miscounted", H5 ROOT_ REG_("f", ",\"meta\":true") T5(2, 0, 2, 0), "meta" },
-        { "sealed miscounted", H5X(",\"roots\":0,\"sealed_key\":\"" KEYID "\",\"basis\":\"walk\"") ROOT_
-          REG_("f", SHA_ ",\"sealed\":true") T5(2, 0, 0, 2), "sealed" },
+        { "not_read miscounted", H5R(1) RL("f", "content", "false") DIR_(".", ",\"partial\":true") NR_("d", "") T5(2, 0, 0, 0),
+          "trailer says 0 not_read" },
+        { "meta miscounted", H5R(1) RL("f", "metadata", "true") DIR_(".", ",\"partial\":true") REG_("f", ",\"meta\":true") T5(2, 0, 2, 0),
+          "/ 2 meta" },
+        { "sealed miscounted", H5X(",\"roots\":1,\"sealed_key\":\"" KEYID "\",\"basis\":\"walk\"") RL("f", "content", "true")
+          DIR_(".", ",\"partial\":true") REG_("f", SHA_ ",\"sealed\":true") T5(2, 0, 0, 2), "/ 2 sealed" },
         { "a walk that carries", H5 ROOT_ T5X(1, 0, 0, 0, ",\"carried\":1,\"racy\":0"), "a walk carries no entry" },
         { "a walk with racy paths", H5 ROOT_ REG_("f", SHA_) RC("f") T5X(2, 0, 0, 0, ",\"carried\":0,\"racy\":1"), "a walk names no racy path" },
         /* V5-A2: the count is the number of racy lines; they come after the last entry, sorted, each naming an entry */
@@ -284,17 +286,19 @@ TEST(v5_entry_rules) {
         { "not_read and mount", H5 ROOT_ DIRX("d", "", ",\"mount\":true,\"not_read\":true") T5(2, 1, 0, 0), "exclusive" },
         { "not_read and unstable", H5 ROOT_ DIRX("d", "", ",\"unstable\":true,\"not_read\":true") T5(2, 1, 0, 0), "exclusive" },
         /* V5-E2 */
-        { "an entry below not_read", H5 ROOT_ NR_("d", "") REG_("d/f", SHA_) T5(3, 1, 0, 0), "entry below a not_read directory" },
-        { "entries under a not_read root", H5 NR_(".", "") REG_("f", SHA_) T5(2, 1, 0, 0), "under an unreadable scope root" },
+        { "an entry below not_read", H5R(1) RL("f", "content", "false") DIR_(".", ",\"partial\":true") NR_("d", "") REG_("d/f", SHA_)
+          T5(3, 1, 0, 0), "entry below a not_read directory" },
+        { "entries under a not_read root", H5R(1) RL("f", "content", "true") NR_(".", "") REG_("f", SHA_) T5(2, 1, 0, 0),
+          "under an unreadable scope root" },
         /* V5-4b */
         { "partial on a file", H5 ROOT_ REG_("f", SHA_ ",\"partial\":true") T5(2, 0, 0, 0), "on a non-directory" },
         { "partial and not_read", H5 ROOT_ DIRX("d", "", ",\"not_read\":true,\"partial\":true") T5(2, 1, 0, 0), "partial with" },
         { "partial and unreadable", H5 ROOT_ DIR_("d", ",\"unreadable\":true,\"partial\":true") T5(2, 0, 0, 0), "partial with" },
         { "partial and mount", H5 ROOT_ DIRX("d", ST_, NL_ ",\"mount\":true,\"partial\":true") T5(2, 0, 0, 0), "partial with" },
         /* V5-5, V5-E1 */
-        { "meta and sha256", H5 ROOT_ REG_("f", SHA_ ",\"meta\":true") T5(2, 0, 1, 0), "both sha256 and unverified" },
+        { "meta and sha256", H5 ROOT_ REG_("f", SHA_ ",\"meta\":true") T5(2, 0, 1, 0), "meta with sha256 or unverified" },
         { "meta and unverified", H5 ROOT_ REG_("f", ",\"unverified\":true,\"unreadable\":true,\"meta\":true") T5(2, 0, 1, 0),
-          "both sha256 and unverified" },
+          "meta with sha256 or unverified" },
         { "a file with none of the three", H5 ROOT_ REG_("f", "") T5(2, 0, 0, 0), "neither sha256 nor unverified" },
         { "meta on a directory", H5 ROOT_ DIR_("d", ",\"meta\":true") T5(2, 0, 1, 0), "on a non-regular file" },
         /* V5-6 */
@@ -308,7 +312,8 @@ TEST(v5_entry_rules) {
         if (strstr(belay_err_msg(), C[i].msg) == NULL) BELAY_FAIL("%s: \"%s\", want \"%s\"", C[i].what, belay_err_msg(), C[i].msg);
     }
     /* What the rules allow. */
-    REQUIRE(read_text(K5 DIR_(".", ",\"partial\":true") NR_("a", "") DIRX("b", "", ",\"raced\":true,\"not_read\":true")
+    REQUIRE(read_text(H5X(",\"roots\":2,\"sealed_key\":\"" KEYID "\",\"basis\":\"walk\"") RL("m", "metadata", "true")
+                      RL("s", "content", "true") DIR_(".", ",\"partial\":true") NR_("a", "") DIRX("b", "", ",\"raced\":true,\"not_read\":true")
                       DIR_("c", ",\"unstable\":true,\"partial\":true") REG_("m", ",\"meta\":true")
                       REG_("s", SHA_ ",\"writer_open\":true,\"sealed\":true")
                       "{\"belay_manifest_end\":6,\"vanished\":0,\"unreadable\":0,\"unstable\":1,\"mounts\":0,\"raced\":1,"
@@ -320,6 +325,50 @@ TEST(v5_entry_rules) {
     ASSERT_EQ_INT(1, (int)g_t.meta);
     ASSERT_EQ_INT(1, (int)g_t.sealed);
     ASSERT_EQ_INT(2, (int)g_t.sealing);             /* checkpoint-v3 C3-3: not_read directories seal */
+}
+
+/* V5-E3 and "no roots: as v4 in every other respect", held by the reader:
+ * where an entry may be, by the roots. */
+TEST(v5_structure_by_the_roots) {
+#define SR H5X(",\"roots\":4,\"sealed_key\":\"" KEYID "\",\"basis\":\"walk\"") \
+           RL("etc", "content", "true") RL("home/u/.ssh", "content", "false") RL("opt", "metadata", "false") RL("usr", "metadata", "true")
+#define PD(p) DIR_(p, ",\"partial\":true")
+#define SEAL_ REG_("etc/shadow", SHA_ ",\"sealed\":true")
+    /* as a capture writes it */
+    REQUIRE_MSG(read_text(SR PD(".") "{\"path\":\"bin\",\"type\":\"lnk\",\"mode\":41471,\"uid\":0,\"gid\":0,\"size\":1,\"mtime_ns\":1,"
+                          "\"ctime_ns\":1,\"ino\":4,\"dev\":1,\"nlink\":1,\"link_target\":\"u\"}\n"
+                          DIR_("etc", "") SEAL_ PD("home") NR_("home/o", "") PD("home/u") NR_("proc", "")
+                          DIR_("usr", "") REG_("usr/tool", ",\"meta\":true") T5(10, 2, 1, 1)) == 0, "%s", belay_err_msg());
+    static const struct { const char *what, *text, *msg; } C[] = {
+        /* no roots: as version 4 */
+        { "partial without roots", H5 PD(".") T5(1, 0, 0, 0), "a capture of a whole scope" },
+        { "not_read without roots", H5 ROOT_ NR_("d", "") T5(2, 1, 0, 0), "a capture of a whole scope" },
+        { "meta without roots", H5 ROOT_ REG_("f", ",\"meta\":true") T5(2, 0, 1, 0), "a capture of a whole scope" },
+        { "sealed without roots", K5 ROOT_ REG_("f", SHA_ ",\"sealed\":true") T5(2, 0, 0, 1), "a capture of a whole scope" },
+        /* with roots */
+        { "the scope root not partial", SR ROOT_ DIR_("etc", "") SEAL_ T5(3, 0, 0, 1), "scope root is not partial" },
+        { "a file in a partial directory", SR PD(".") DIR_("etc", "") SEAL_ REG_("top.txt", SHA_) T5(4, 0, 0, 1), "outside every root" },
+        { "a file in a partial home", SR PD(".") DIR_("etc", "") SEAL_ PD("home") PD("home/u") REG_("home/u/notes", SHA_) T5(6, 0, 0, 1),
+          "outside every root" },
+        { "a directory below a plain directory outside the roots", SR PD(".") DIR_("etc", "") SEAL_ DIR_("srv", "") NR_("srv/d", "") T5(5, 1, 0, 1),
+          "outside every root" },
+        { "meta under a content root", SR PD(".") DIR_("etc", "") REG_("etc/f", ",\"meta\":true") SEAL_ T5(4, 0, 1, 1), "meta under a content root" },
+        { "sealed under a metadata root", SR PD(".") DIR_("etc", "") SEAL_ DIR_("usr", "") REG_("usr/f", SHA_ ",\"sealed\":true") T5(5, 0, 0, 2),
+          "sealed under a metadata root" },
+        { "partial under a root", SR PD(".") DIR_("etc", "") SEAL_ PD("etc/sub") T5(4, 0, 0, 1), "partial on a directory under a root" },
+        { "a root itself partial", SR PD(".") PD("etc") SEAL_ T5(3, 0, 0, 1), "partial on a directory under a root" },
+        { "entries under a root not found", SR PD(".") DIR_("etc", "") SEAL_ DIR_("opt", "") T5(4, 0, 0, 1), "a root that was not found" },
+        { "an entry below a root not found", SR PD(".") DIR_("etc", "") SEAL_ PD("home") PD("home/u") DIR_("home/u/.ssh", "") T5(6, 0, 0, 1),
+          "a root that was not found" },
+    };
+    for (size_t i = 0; i < sizeof C / sizeof C[0]; i++) {
+        const int r = read_text(C[i].text);
+        if (r != -1) { BELAY_FAIL("%s: read, want refused", C[i].what); continue; }
+        if (strstr(belay_err_msg(), C[i].msg) == NULL) BELAY_FAIL("%s: \"%s\", want \"%s\"", C[i].what, belay_err_msg(), C[i].msg);
+    }
+    /* F3's message: meta beside a hash is said as that */
+    ASSERT_EQ_INT(-1, read_text(SR PD(".") DIR_("usr", "") REG_("usr/f", SHA_ ",\"meta\":true") T5(3, 0, 1, 0)));
+    ASSERT_TRUE(strstr(belay_err_msg(), "meta with sha256 or unverified") != NULL);
 }
 
 /* ---------- real trees: the walk ---------- */
@@ -1387,6 +1436,7 @@ int main(void) {
     RUN(v5_header_values_are_checked);
     RUN(v5_trailer_values_are_checked);
     RUN(v5_entry_rules);
+    RUN(v5_structure_by_the_roots);
     RUN(a_whole_scope_is_written_as_v5_with_no_roots);
     RUN(roots_make_partial_and_not_read_directories);
     RUN(a_metadata_root_reads_only_what_grants_privilege);
