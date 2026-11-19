@@ -230,6 +230,29 @@ G_TYPE_BEFORE = 'type_before on every path whose types differ, raced or not'
 G_DIGEST = 'xattrs: an inline set against a digest, by the formula (manifest-v1)'
 G_O8 = 'unverified on a side that also carries mount: no reason; on the other side its own (O8)'
 G_O9 = 'content_not_read on a modified regular file whose content was not read on a side (O9)'
+G_V5 = 'manifest v5: a reason (V5-D1 to V5-D4; %s)'
+# OPEN QUESTIONS: record disagreements the pins do not determine. A record
+# whose only disagreement is one of these is not counted; the list is printed
+# on every run with what each side says, and the run fails when an entry is
+# seen in no pair (answered or gone: remove it) -- so none outlives its
+# question. The gate's own item keeps a pair that shows each.
+OPEN_META_FLAG = ('OPEN: `meta` on both sides, every field equal, `unknown` for a flag (`raced`, '
+                  '`xattrs_unknown`): is `not_read` a reason too?')
+OPEN_QUESTIONS = {
+    OPEN_META_FLAG: {
+        'rows': 'manifest-v5 V5-D1 ("All equal: no record ... Otherwise any difference: '
+                '`unknown`, reason `not_read`"; the row diff-fields gains, "flag: content unknown '
+                'when any other field differs"); diff-v1 rule 1 and its `unknown` sentence ("the '
+                'reasons of every flag on either side")',
+        'reference': 'V5-D1\'s cases are of the fields: none differs, so `meta` makes nothing '
+                     'unknown and the flag\'s reason stands alone, `["raced"]`, '
+                     '`["xattrs_unknown"]` (reference.py, ambiguity M1)',
+        'other': 'V5-D1\'s "otherwise" is every record that is not `modified`: two `meta` '
+                 'entries with an `unknown` record always list `not_read`, '
+                 '`["raced","not_read"]`, `["xattrs_unknown","not_read"]`',
+        'binary': 'the other reading',
+    },
+}
 G_O10 = 'content_not_read on an added regular file not read or sealing directory (O10)'
 G_O9_UNVERIFIED = ('content_not_read: unverified gives no reason beside unreadable, unstable or '
                    'mount on its side (O9)')
@@ -323,7 +346,7 @@ def contradicts_itself(g):
         if isinstance(cn, list) and o == 'added' and len(cn) != 1:
             return 'content_not_read of an added record is %r' % (cn,)
         if not isinstance(cn, list) or not cn or len(set(map(str, cn))) != len(cn) or \
-                any(r not in ref.NOT_READ_FLAGS for r in cn):
+                any(r not in ref.NOT_READ_FLAGS + [ref.NOT_READ] for r in cn):
             return 'content_not_read is %r' % (cn,)
     # diff-values V1: `before` and `after` together, exactly on a record with
     # `changed` (every record with `type_before` has ["type"], above); each a
@@ -348,7 +371,11 @@ def contradicts_itself(g):
             return '%s holds %s, not among %s in order' % (side, keys, names)
         if 'type_before' in g and keys[:1] != ['mode']:
             return '%s of a record with type_before, without mode' % side
-    if g.get('before') == [] and g.get('after') == []:
+    # V2: "the two are never both empty" -- but for V5-D3, whose record
+    # "never carries `sha256` in `before` or `after`": two sealed hashes that
+    # differ alone (reference.py, ambiguity M4; compare_record() holds it to
+    # the reference's record).
+    if g.get('before') == [] and g.get('after') == [] and ch != ['sha256']:
         return 'before and after both {}'
     # "Interpreters": `findings` is "absent when none"; "for a path whose
     # outcome is `unknown` or `metadata_only` it adds nothing (a git hook's
@@ -430,14 +457,24 @@ def compare_record(path, exp, got, trace, orders):
         groups.append('OTHER: a reason twice')
     # V4-D4: "last in `unknown` when others are present", whatever the
     # reasons table says of the others.
-    if ref.WRITER_OPEN in ug and ug[-1] != ref.WRITER_OPEN:
-        groups.append('V4-D4: `writer_open` is not the last reason')
+    # V5-D5: "`not_read` comes after `writer_open` ...; `sealed_key` after it"
+    # (reference.py, ambiguity M8): the end of `unknown` is, in this order,
+    # those of `writer_open`, `not_read`, `sealed_key` it has.
+    tail = [r for r in [ref.WRITER_OPEN] + ref.V5_REASONS if r in ug]
+    if tail and ug[len(ug) - len(tail):] != tail:
+        groups.append('V4-D4, V5-D5: `writer_open`, `not_read`, `sealed_key` do not end the '
+                      'reasons in that order')
     if set(ue) != set(ug):
         for r in sorted(set(ue) ^ set(ug)):
             if r == 'iflags_unknown':
                 groups.append(G_IFLAGS_MOUNT if 'not-on-mount-root:iflags' in trace else G_IFLAGS)
             elif r == 'unverified' and any(x.startswith('O8') for x in trace):
                 groups.append(G_O8)
+            elif r == ref.NOT_READ and r in ug and 'v5:meta-both' in trace \
+                    and 'v5:meta-difference' not in trace:
+                groups.append(OPEN_META_FLAG)
+            elif r in ref.V5_REASONS or any(x.startswith('v5:') for x in trace):
+                groups.append(G_V5 % ','.join(sorted(x for x in trace if x.startswith('v5:'))))
             else:
                 unexplained.append('reason ' + r)
     elif ug:
@@ -517,7 +554,9 @@ def run_driver(driver, stem, before='.before', after='.after'):
 # the files' bytes) -- "diff.v1 records and outcomes do not depend on the
 # version (the entries are v1's)" and the v2 statements "decide nothing"
 # (test/expect/manifest-v2.md V2-R4, V2-R6).
-OTHER_VERSIONS = [('.before.alt', '.after'), ('.before', '.after.alt'),
+OTHER_VERSIONS = [('.before.v5', '.after.v5'), ('.before.v4', '.after.v5'),
+                  ('.before.v5', '.after.v4'),          # V5-R1, V5-R2: a whole scope's v5
+                  ('.before.alt', '.after'), ('.before', '.after.alt'),
                   ('.before.alt', '.after.alt'),
                   # Versions 3 and 4 (V3-R5, V4-R4): among themselves, and
                   # version 4 against the pair's own.
@@ -2265,8 +2304,256 @@ def not_read_coverage(stem, tags):
         tags.add('sealing: not 0, every walk count 0 (provisional false)')
 
 
+# Manifest v5 (test/expect/manifest-v5.md): V5-R1, V5-R2 (versions), V5-D1 and
+# V5-D2 (`meta`), V5-D3 (`sealed`), V5-D4 (`not_read`), V5-D4b (`partial`),
+# V5-D5 (the reasons' place), V5-D6 (`roots_differ`), and what the reader takes
+# besides what belay writes (V5-10 to V5-12). From the manifests, and for an
+# outcome the reference's record.
+M_BOTH = ('nothing differs', 'only ctime_ns differs', 'only mtime_ns differs', 'only mode differs',
+          'only size differs', 'size and mode differ', 'iflags on one side only, nothing differs',
+          'raced on a side', 'raced on a side, nothing differs',
+          'raced on both sides, nothing differs',
+          'xattrs_unknown on a side, nothing differs')
+M_ONE = ('same size', 'the size differs', 'a metadata field differs, same size')
+S_SAME = ('nothing differs', 'only the hash differs', 'the hash and the size differ',
+          'only mode differs', 'the hash and mode differ')
+S_NOT = ('nothing else differs', 'the size differs', 'a metadata field differs, same size')
+N_BOTH = ('nothing differs', 'mode differs', 'owner differs', 'only ino differs')
+V5_SCENARIOS = (
+    ['versions: before v%d, after v%d, every side a whole scope' % vv for vv in ((5, 5), (4, 5), (5, 4))]
+    + ['versions: roots on a v5 side against a manifest before v5 (roots_differ)',
+       'roots_differ: one list empty (v5 on both sides)', 'roots_differ: another list',
+       'roots_differ: a root\'s class differs', 'roots_differ: a root found on one side only',
+       'roots equal and not empty: no roots_differ',
+       'statements: basis events on a side', 'statements: carried not 0',
+       'statements: racy not empty', 'statements: racy_b64']
+    + ['meta on both sides, %s' % d for d in M_BOTH]
+    + ['meta %s, a hash on the other side, %s' % (s, d) for s in ('before', 'after') for d in M_ONE]
+    + ['meta on one side, the type differs', 'meta on one side, unverified on the other',
+       'meta on one side, unverified on the other, the size differs',
+       'meta on one side, sealed on the other', 'meta on one side only: added',
+       'meta on one side only: removed', 'meta on one side, writer_open on the other']
+    + ['sealed on both sides, one key, %s' % d for d in S_SAME]
+    + ['sealed on both sides, two keys, %s' % d for d in S_NOT]
+    + ['sealed %s only, a plain hash on the other side, %s' % (s, d)
+       for s in ('before', 'after') for d in S_NOT]
+    + ['sealed on a side, the type differs', 'sealed on a side, unverified on the other',
+       'sealed on one side only: added', 'sealed on one side only: removed',
+       'sealed on a side, raced']
+    + ['not_read on both sides, %s' % d for d in N_BOTH]
+    + ['not_read before only', 'not_read after only', 'not_read on one side, mode differs',
+       'not_read on one side, unreadable on the other', 'not_read on a side, the type differs',
+       'a path on one side only below a not_read directory on the other',
+       'a not_read directory on one side only: added', 'a not_read directory on one side only: removed',
+       'sealing: a not_read directory counted', 'sealing: only not_read directories, not 0']
+    + ['partial: a directory on one side only under it', 'partial: a path below a directory new under it',
+       'partial: a link directly under the scope root, on one side only',
+       'partial: a file on one side only, a root not found on the other',
+       'partial: a file on one side only, no root of the other',
+       'partial: a link under a deeper partial directory, no root of the other',
+       'partial: a directory root not found on the other side, and what is below it',
+       'partial: a directory two levels below a partial one, its parent new too',
+       'partial on one side only, a directory on both: not compared',
+       'partial: raced on the one-sided entry']
+    + ['reasons: not_read beside another reason', 'reasons: sealed_key beside another reason',
+       'reasons: not_read and sealed_key', 'reasons: writer_open and not_read'])
+
+
+def v5_coverage(stem, tags):
+    hb, _, eb = ref.load(stem + '.before')
+    ha, _, ea = ref.load(stem + '.after')
+    tb, ta = ref.trailer_of(stem + '.before')[0], ref.trailer_of(stem + '.after')[0]
+    vb, va = hb['belay_manifest'], ha['belay_manifest']
+    if 5 not in (vb, va):
+        return
+    res = ref_diff(stem)
+    if res is None:
+        return
+    recs = {r['path']: r for r in res[1]}
+    rb, ra = ref.roots_of(hb), ref.roots_of(ha)
+    if not rb and not ra and (vb, va) in ((5, 5), (4, 5), (5, 4)):
+        tags.add('versions: before v%d, after v%d, every side a whole scope' % (vb, va))
+    if (rb or ra) and min(vb, va) < 5:
+        tags.add('versions: roots on a v5 side against a manifest before v5 (roots_differ)')
+    if rb and ra and rb == ra:
+        tags.add('roots equal and not empty: no roots_differ')
+    if rb != ra and vb == va == 5:
+        if not rb or not ra:
+            tags.add('roots_differ: one list empty (v5 on both sides)')
+        else:
+            pb, pa = ({r['path']: r for r in x} for x in (rb, ra))
+            if set(pb) != set(pa):
+                tags.add('roots_differ: another list')
+            for q in set(pb) & set(pa):
+                if pb[q]['class'] != pa[q]['class']:
+                    tags.add('roots_differ: a root\'s class differs')
+                if pb[q]['found'] != pa[q]['found']:
+                    tags.add('roots_differ: a root found on one side only')
+    for h, t in ((hb, tb), (ha, ta)):
+        if h.get('basis') == 'events':
+            tags.add('statements: basis events on a side')
+        if t.get('carried'):
+            tags.add('statements: carried not 0')
+        if t.get('racy') or t.get('racy_b64'):
+            tags.add('statements: racy not empty')
+        if 'racy_b64' in t:
+            tags.add('statements: racy_b64')
+    M, S, N, P = ref.META, ref.SEALED, ref.NOT_READ, ref.PARTIAL
+    same_key = hb.get(ref.SEALED_KEY) == ha.get(ref.SEALED_KEY)
+    for p in set(eb) & set(ea):
+        b, a = eb[p], ea[p]
+        rec = recs.get(p, {})
+        un = rec.get('unknown', [])
+        if ref.NOT_READ in un and ref.SEALED_KEY in un:
+            tags.add('reasons: not_read and sealed_key')
+        if ref.NOT_READ in un and ref.WRITER_OPEN in un:
+            tags.add('reasons: writer_open and not_read')
+        if ref.NOT_READ in un and set(un) - {ref.NOT_READ, ref.SEALED_KEY, ref.WRITER_OPEN}:
+            tags.add('reasons: not_read beside another reason')
+        if ref.SEALED_KEY in un and set(un) - {ref.NOT_READ, ref.SEALED_KEY}:
+            tags.add('reasons: sealed_key beside another reason')
+        v5 = [f for f in (M, S, N) if b.get(f) or a.get(f)]
+        if b['type'] == a['type'] == 'dir' and bool(b.get(P)) != bool(a.get(P)) and p not in recs:
+            tags.add('partial on one side only, a directory on both: not compared')
+        if not v5:
+            continue
+        if b['type'] != a['type']:
+            for f, name in ((M, 'meta on one side, the type differs'),
+                            (S, 'sealed on a side, the type differs'),
+                            (N, 'not_read on a side, the type differs')):
+                if (b.get(f) or a.get(f)) and not (b.get('raced') or a.get('raced')):
+                    tags.add(name)
+            continue
+        raced = b.get('raced') or a.get('raced')
+        D = {k for k in set(b) | set(a) if not same(b.get(k), a.get(k))} - {M, S, N, P}
+        if N in v5:
+            if b.get(N) and a.get(N):
+                if not raced:
+                    for d, want in zip(N_BOTH, (set(), {'mode'}, None, {'ino'})):
+                        if (D == want if want is not None else D and D <= {'uid', 'gid'}):
+                            tags.add('not_read on both sides, %s' % d)
+            else:
+                other = a if b.get(N) else b
+                if other.get('unreadable'):
+                    tags.add('not_read on one side, unreadable on the other')
+                elif not raced and not any(other.get(f) for f in ('mount', 'unstable')):
+                    tags.add('not_read %s only' % ('before' if b.get(N) else 'after'))
+                    if b['mode'] != a['mode']:
+                        tags.add('not_read on one side, mode differs')
+            continue
+        meta_d = D - {'sha256', 'unverified', 'stored', 'unstable', 'unreadable', 'mount',
+                      'writer_open', 'raced'}
+        plain = lambda e: 'sha256' in e and not e.get(S) and not e.get('writer_open')
+        if M in v5:
+            if b.get(M) and a.get(M):
+                if raced and b == a:
+                    tags.add('meta on both sides, raced on both sides, nothing differs')
+                elif raced:
+                    tags.add('meta on both sides, raced on a side'
+                             + (', nothing differs' if meta_d == set() else ''))
+                elif meta_d == {'xattrs_unknown'}:
+                    tags.add('meta on both sides, xattrs_unknown on a side, nothing differs')
+                else:
+                    for d, want in zip(M_BOTH[:6], (set(), {'ctime_ns'}, {'mtime_ns'}, {'mode'},
+                                                    {'size'}, {'size', 'mode'})):
+                        if meta_d == want:
+                            tags.add('meta on both sides, %s' % d)
+                    if ('iflags' in b) != ('iflags' in a) and meta_d == {'iflags'}:
+                        tags.add('meta on both sides, iflags on one side only, nothing differs')
+            else:
+                side = 'before' if b.get(M) else 'after'
+                other = a if b.get(M) else b
+                if raced:
+                    pass
+                elif other.get('writer_open'):
+                    tags.add('meta on one side, writer_open on the other')
+                elif other.get(S):
+                    tags.add('meta on one side, sealed on the other')
+                elif other.get('unverified'):
+                    tags.add('meta on one side, unverified on the other'
+                             + (', the size differs' if 'size' in D else ''))
+                elif plain(other):
+                    tags.add('meta %s, a hash on the other side, %s'
+                             % (side, M_ONE[1] if 'size' in meta_d else
+                                M_ONE[2] if meta_d & {'mode', 'uid', 'gid'} else M_ONE[0]))
+            continue
+        # sealed, no meta
+        if raced:
+            tags.add('sealed on a side, raced')
+            continue
+        hash_differs = 'sha256' in b and 'sha256' in a and b['sha256'] != a['sha256']
+        if b.get(S) and a.get(S) and same_key:
+            only = meta_d - {'ctime_ns', 'mtime_ns'}
+            for d, want in zip(S_SAME, ((False, set()), (True, set()), (True, {'size'}),
+                                        (False, {'mode'}), (True, {'mode'}))):
+                if (hash_differs, only) == want and (d != S_SAME[0] or not meta_d):
+                    tags.add('sealed on both sides, one key, %s' % d)
+            continue
+        other = None if b.get(S) and a.get(S) else (a if b.get(S) else b)
+        if other is not None and other.get('unverified'):
+            tags.add('sealed on a side, unverified on the other')
+            continue
+        if other is not None and not plain(other):
+            continue
+        d = (S_NOT[1] if 'size' in meta_d else S_NOT[2] if meta_d & {'mode', 'uid', 'gid'}
+             else S_NOT[0])
+        if other is None:
+            tags.add('sealed on both sides, two keys, %s' % d)
+        else:
+            tags.add('sealed %s only, a plain hash on the other side, %s'
+                     % ('before' if b.get(S) else 'after', d))
+    for p in set(eb) ^ set(ea):
+        present, lacking, lroots, word = ((ea, eb, rb, 'added') if p in ea else (eb, ea, ra, 'removed'))
+        e = present[p]
+        o = recs[p]['outcome']
+        anc = ref.nearest_ancestor(lacking, p)
+        if anc['type'] == 'dir' and anc.get(N):
+            tags.add('a path on one side only below a not_read directory on the other')
+        if o == word:
+            if e.get(M):
+                tags.add('meta on one side only: %s' % word)
+            if e.get(S):
+                tags.add('sealed on one side only: %s' % word)
+            if e.get(N):
+                tags.add('a not_read directory on one side only: %s' % word)
+        if not (anc['type'] == 'dir' and anc.get(P)):
+            continue
+        ap = anc['path']
+        direct = (p.rsplit(b'/', 1)[0] if b'/' in p else b'.') == ap
+        listed = [r for r in lroots if r['path'].encode('utf-8') == p]
+        if e.get('raced') and o == 'unknown':
+            tags.add('partial: raced on the one-sided entry')
+        if not direct:
+            tags.add('partial: a path below a directory new under it')
+            if e['type'] == 'dir' and p.count(b'/') - (0 if ap == b'.' else ap.count(b'/') + 1) >= 1:
+                tags.add('partial: a directory two levels below a partial one, its parent new too')
+        elif e['type'] == 'dir':
+            tags.add('partial: a directory on one side only under it')
+            if listed and any(q.startswith(p + b'/') for q in present):
+                tags.add('partial: a directory root not found on the other side, and what is '
+                         'below it')
+        elif e['type'] == 'lnk' and ap == b'.':
+            tags.add('partial: a link directly under the scope root, on one side only')
+        elif listed:
+            tags.add('partial: a file on one side only, a root not found on the other')
+        else:
+            tags.add('partial: a file on one side only, no root of the other')
+            if e['type'] == 'lnk':
+                tags.add('partial: a link under a deeper partial directory, no root of the other')
+    nb, na = (sum(1 for e in es.values() if e.get(N)) for es in (eb, ea))
+    if nb or na:
+        tags.add('sealing: a not_read directory counted')
+    for es, n in ((eb, nb), (ea, na)):
+        if n and ref.sealing(es) == n:
+            tags.add('sealing: only not_read directories, not 0')
+
+
 KINDS = ('cell', 'field pair', 'optional', 'scenario', 'interpreter', 'manifest version',
-         'manifest v4', 'not read')
+         'manifest v4', 'not read', 'manifest v5')
+
+
+def has_roots(stem):
+    return any(ref.roots_of(ref.load(stem + side)[0]) for side in ('.before', '.after'))
 
 
 def coverage(stems):
@@ -2276,7 +2563,11 @@ def coverage(stems):
     this, and the targeted pairs together with gate()."""
     cov = {k: collections.Counter() for k in KINDS}
     for stem in stems:
-        pair_coverage(stem, cov['cell'], cov['optional'], cov['scenario'], cov['field pair'])
+        # A pair with roots (manifest v5) shows no cell: its entries follow
+        # other rules (a `not_read` directory records no size), and v5_coverage
+        # reads it.
+        if not has_roots(stem):
+            pair_coverage(stem, cov['cell'], cov['optional'], cov['scenario'], cov['field pair'])
         tags = set()
         interp_coverage(stem, tags)
         for t in tags:
@@ -2293,6 +2584,10 @@ def coverage(stems):
         not_read_coverage(stem, tags)
         for t in tags:
             cov['not read'][t] += 1
+        tags = set()
+        v5_coverage(stem, tags)
+        for t in tags:
+            cov['manifest v5'][t] += 1
     return cov
 
 
@@ -2307,7 +2602,8 @@ def required():
             + [('interpreter', s) for s in INTERP_SCENARIOS]
             + [('manifest version', s) for s in VERSION_SCENARIOS]
             + [('manifest v4', s) for s in V4_SCENARIOS]
-            + [('not read', s) for s in NOT_READ_SCENARIOS])
+            + [('not read', s) for s in NOT_READ_SCENARIOS]
+            + [('manifest v5', s) for s in V5_SCENARIOS])
     return need, infeasible
 
 
@@ -2331,7 +2627,8 @@ def print_gate(cov):
                         ('interpreter', 'interpreters, with no store; git\'s events with one'),
                         ('manifest version', 'manifest versions and v2 statements'),
                         ('manifest v4', 'manifest v4: writer_open and its trailer counts'),
-                        ('not read', 'content_not_read (O9, O10) and the sealing counts (G3-2)')):
+                        ('not read', 'content_not_read (O9, O10) and the sealing counts (G3-2)'),
+                        ('manifest v5', 'manifest v5: versions, meta, sealed, not_read, partial, roots')):
         items = [i for k, i in need if k == kind]
         lack = [i for k, i in missing if k == kind]
         print('   %s: %d/%d, fewest pairs %d' % (title, len(items) - len(lack), len(items),
@@ -2364,6 +2661,7 @@ def main():
     header_examples = {}
     full = header_only = differ = rejected = 0
     rejected_examples, trailer_only, event_issues = [], [], []
+    open_seen = collections.defaultdict(list)
     outcomes = collections.Counter()
     with concurrent.futures.ThreadPoolExecutor(max_workers=os.cpu_count() or 4) as pool:
         ran = list(pool.map(lambda s: run_driver(driver, s), stems))
@@ -2390,6 +2688,10 @@ def main():
             header_examples.setdefault(k, (name, v, g))
         if res['events']:
             event_issues.append((name, label(stem), res['events']))
+        opened = [r for r in res['records'] if len(r[0]) == 1 and r[0][0] in OPEN_QUESTIONS]
+        for groups, p, e, g in opened:
+            open_seen[groups[0]].append((name, label(stem), p, e, g))
+        res['records'] = [r for r in res['records'] if r not in opened]
         if res['records']:
             differ += 1
             for groups, p, e, g in res['records']:
@@ -2501,8 +2803,30 @@ def main():
               '`after_unguarded`, without `before_sealing` and `after_sealing` (diff-fields.md, '
               '"The trailer", G3-2, is followed: reference.py, ambiguity N6)')
 
+    # The open questions: listed every run, not counted, never left unseen.
+    stale = [q for q in OPEN_QUESTIONS if not open_seen[q]]
+    if not OPEN_QUESTIONS:
+        print('== OPEN: none (no disagreement is listed as one the pins do not determine)')
+    else:
+        print('=' * 100)
+        print('== OPEN: %d question(s) the pins do not determine (for the author; their records '
+              'are not counted as disagreements)' % len(OPEN_QUESTIONS))
+        for q, d in OPEN_QUESTIONS.items():
+            items = open_seen[q]
+            print('   %s\n      pin rows in tension: %s\n      the reference: %s\n      the '
+                  'other reading: %s\n      what belay does: %s\n      this run: %d record(s) in '
+                  '%d pair(s)' % (q, d['rows'], d['reference'], d['other'], d['binary'],
+                                  len(items), len({i[0] for i in items})))
+            for name, lab, p, e, g in items[:1]:
+                print('      %s [%s] %r\n         reference %s\n         belay     %s'
+                      % (name, lab, p, show(ref.encode_record(e)) if e else '(no record)',
+                         json.dumps(unpairs(g), ensure_ascii=False) if g else '(no record)'))
+        for q in stale:
+            print('   OPEN FAILS: no pair shows %r any more: answered or gone, remove the entry'
+                  % q)
+        print('=' * 100)
     ok = gate_ok and not (differ or rejected or header_only or bad_refusals or clash
-                          or version_issues)
+                          or version_issues or stale)
     sys.exit(0 if ok else 1)
 
 

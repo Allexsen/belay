@@ -223,11 +223,12 @@ def load_manifest_pin():
 
 KEYS, TYPES, PIN_RULES = load_manifest_pin()
 TYPE_NAMES = list(TYPES)
-ENTRY_KEYS = [k[0] for k in KEYS['entry']] + ['writer_open']
+V5_FLAGS = ['not_read', 'partial', 'meta', 'sealed']
+ENTRY_KEYS = [k[0] for k in KEYS['entry']] + ['writer_open'] + V5_FLAGS
 REQUIRED_FIELDS = [k[0] for k in KEYS['entry']
                    if k[3].startswith('required') and k[0] not in ('path', 'type')]
 OPTIONAL_FIELDS = [k[0] for k in KEYS['entry'] if k[3].startswith('optional')]
-FLAG_FIELDS = [k[0] for k in KEYS['entry'] if k[2] == 'bool'] + ['writer_open']
+FLAG_FIELDS = [k[0] for k in KEYS['entry'] if k[2] == 'bool'] + ['writer_open'] + V5_FLAGS
 
 # The rules violations() implements, exactly as the pin states them.
 IMPLEMENTED_RULES = [
@@ -402,6 +403,91 @@ def load_later_versions():
 KEYS_V3, KEYS_V4, ENTRY_V4 = load_later_versions()
 KEYS_OF = {1: KEYS, 2: KEYS_V2, 3: KEYS_V3, 4: KEYS_V4}
 
+# Manifest version 5 (test/expect/manifest-v5.md), its Lines table and key
+# order checked: "an entry's as v4's, with `not_read`, `partial`, `meta`,
+# `sealed` after `writer_open`. The header: v4's keys, then `roots`,
+# `sealed_key`, `basis`. The trailer: v4's, then V5-7, V5-8, V5-9, V5-11, V5-12."
+MANIFEST_V5_PIN = os.path.join(REPO, 'test', 'expect', 'manifest-v5.md')
+V5_ORDER = ("Key order: an entry's as v4's, with `not_read`, `partial`, `meta`, `sealed` after "
+            "`writer_open`. The header: v4's keys, then `roots`, `sealed_key`, `basis`. The "
+            "trailer: v4's, then V5-7, V5-8, V5-9, V5-11, V5-12.")
+V5_LINES = {'V5-1': ('header', 'belay_manifest'), 'V5-2': ('header', 'roots'),
+            'V5-3': ('header', 'sealed_key'), 'V5-4': ('entry', 'not_read'),
+            'V5-4b': ('entry', 'partial'), 'V5-5': ('entry', 'meta'), 'V5-6': ('entry', 'sealed'),
+            'V5-7': ('trailer', 'not_read'), 'V5-8': ('trailer', 'meta'),
+            'V5-9': ('trailer', 'sealed'), 'V5-10': ('header', 'basis'),
+            'V5-11': ('trailer', 'carried'), 'V5-12': ('trailer', 'racy')}
+# The words of the rows v5_violations() and write_manifest() rely on.
+V5_SAID = {
+    'V5-2': ['`{"path": <relative to the scope>, "class": "content" \\| "metadata", "found": true '
+             '\\| false}` for every root this capture looked for, sorted bytewise by path, each '
+             'once.', 'Empty for a capture of a whole scope, which is then as v4 in every other '
+             'respect.'],
+    'V5-3': ['Absent when no entry is `sealed`.'],
+    'V5-4': ['a directory; excludes `unreadable`, `unstable`, `mount`; absent otherwise, never '
+             '`false`', 'Its `size`, `mtime_ns`, `ctime_ns` and `nlink` are not recorded'],
+    'V5-4b': ['a directory; excludes `not_read`, `unreadable`, `mount`; absent otherwise'],
+    'V5-5': ['a regular file with none of `sha256`, `unverified`, `stored`; absent otherwise'],
+    'V5-6': ['a regular file with `sha256`, no `stored`; absent otherwise'],
+    'V5-10': ['`walk` or `events`'],
+    'V5-11': ['(`events` only; `0` for a walk)'],
+    'V5-12': ['paths (relative, sorted, each once; `racy_b64` when any is not UTF-8) of entries '
+              'looked at in this capture', 'Empty for a walk.'],
+    'V5-E1': ['a regular file has exactly one of `sha256`, `unverified`, `meta`'],
+    'V5-E2': ['at most one of them on a directory, and no entry below a directory carrying any'],
+    'V5-E3': ['With `roots` not empty, the scope root `.` and every directory on the way to a root '
+              'looked for, as far as the path exists, are entries, recorded as any directory and '
+              'carrying `partial`',
+              'Of the other children of such a directory: a directory is recorded with '
+              '`not_read`; a symbolic link directly under the scope root is recorded',
+              'anything else is not recorded', 'A root may be a single file.'],
+    'V5-E4': ['A regular file under a `metadata` root carries `meta`, unless its mode has setuid '
+              'or setgid or it has `caps`: then it is read, and carries `sha256` (or '
+              '`unverified`) like a file under a `content` root.'],
+    'V5-E5': ['A regular file under a `content` root that others cannot read carries `sealed`: '
+              'its own mode has no read bit for others, **or** some directory from the scope '
+              'root down to it has no search bit for others',
+              'The rule does not apply under a `metadata` root'],
+    'V5-E8': ['required on every entry except one carrying `not_read`, where they are absent'],
+}
+
+
+def load_v5():
+    text = open(MANIFEST_V5_PIN, encoding='utf-8').read()
+    rows = {}
+    for l in text.splitlines():
+        m = re.match(r'\| (V5-[A-Z]?[0-9]+b?) \|', l)
+        if m:
+            rows.setdefault(m.group(1), l)
+    for r, (line, key) in V5_LINES.items():
+        if not rows.get(r, '').startswith('| %s | %s | `%s` |' % (r, line, key)):
+            die('pin: manifest-v5.md %s is no longer `%s` of the %s' % (r, key, line))
+    for r, words in V5_SAID.items():
+        for w in words:
+            if w not in rows.get(r, ''):
+                die('pin: manifest-v5.md %s no longer says %r' % (r, w))
+    if V5_ORDER not in ' '.join(text.split()):
+        die('pin: manifest-v5.md no longer gives the key order this generator writes')
+    at = [k[0] for k in ENTRY_V4].index('writer_open') + 1
+    absent_on_not_read = ('size', 'mtime_ns', 'ctime_ns', 'nlink')            # V5-E8
+    entry = [(k[0], k[1], k[2], 'optional (V5-E8)') if k[0] in absent_on_not_read else k
+             for k in ENTRY_V4[:at]] \
+        + [(f, (f,), 'bool', 'optional (v5)') for f in V5_FLAGS] + ENTRY_V4[at:]
+    header = KEYS_V4['header'] + [('roots', ('roots',), 'roots', 'required (v5)'),
+                                  ('sealed_key', ('sealed_key',), 'string', 'optional (v5)'),
+                                  ('basis', ('basis',), 'string', 'required (v5)')]
+    trailer = KEYS_V4['trailer'] + [(k, (k,), 'int', 'required (v5)')
+                                    for k in ('not_read', 'meta', 'sealed', 'carried')] \
+        + [('racy', ('racy', 'racy_b64'), 'paths', 'required (v5)')]
+    return dict(header=header, trailer=trailer, entry=entry)
+
+
+import re
+KEYS_V5 = load_v5()
+KEYS_OF[5] = KEYS_V5
+ROOT_KEYS = [('path', ('path',), 'string', 'required'), ('class', ('class',), 'string', 'required'),
+             ('found', ('found',), 'truth', 'required')]
+
 # ---------------------------------------------------------------------------
 # Values.
 
@@ -575,6 +661,12 @@ class Tree:
         self.store_max = rng.choice([0, 4096, 65536])
         self.vanished = 0
         self.unguarded = None                   # V4-4: None, for the writer to choose
+        # Manifest v5: `roots` ({path bytes: (class, found)}; None for a whole
+        # scope, V5-2), the state's `sealed_key` (written when an entry is
+        # sealed, V5-3), `basis`, `carried` and `racy` (V5-10 to V5-12).
+        self.roots = None
+        self.sealed_key = '0123456789abcdef'
+        self.basis, self.carried, self.racy = 'walk', 0, []
         self.e = {}
         # Manifest v2's `excluded` (V2-2): {path bytes: {'reason', 'dev',
         # 'ino'}}. Nothing at or below such a path is in self.e; its parent
@@ -802,7 +894,7 @@ def entry_violations(e, t):
         v.append('3')
     if typ != 'reg' and has('caps'):
         v.append('4')
-    if typ == 'reg' and has('sha256') == has('unverified'):
+    if typ == 'reg' and has('sha256') + has('unverified') + has('meta') != 1:   # V5-E1
         v.append('5')
     if typ == 'reg' and (has('unstable') or has('unreadable')) and not has('unverified'):
         v.append('6')
@@ -812,9 +904,10 @@ def entry_violations(e, t):
         v.append('8')
     if typ == 'dir' and (has('sha256') or has('unverified') or has('stored')):
         v.append('9')
-    if typ == 'dir' and has('raced') and not (has('unreadable') or has('mount')):
+    if typ == 'dir' and has('raced') and not (has('unreadable') or has('mount')
+                                              or has('not_read')):                # V5-E2
         v.append('10')
-    if typ == 'dir' and sum(map(has, ('unreadable', 'unstable', 'mount'))) > 1:
+    if typ == 'dir' and sum(map(has, ('unreadable', 'unstable', 'mount', 'not_read'))) > 1:
         v.append('11')
     if typ == 'lnk' and any(map(has, ('sha256', 'unverified', 'stored', 'unstable'))):
         v.append('12')
@@ -894,12 +987,150 @@ def violations(t):
         v += ['%r: rule %s' % (p, r) for r in entry_violations(e, t)]
         if v4_violation(e):
             v.append('%r: V4-2' % p)
+        if p != b'.' and t.e.get(parent_of(p), {}).get('not_read'):           # V5-E2
+            v.append('below a not_read directory %r' % p)
         # test/expect/manifest-v1-addendum.md A3 and A4: a reader rejects a
         # longer path or link target.
         if len(p) > ADDENDUM_MAX['path'] or len(e.get('link_target', b'')) > \
                 ADDENDUM_MAX['link_target']:
             v.append('%r: addendum A3/A4' % p)
-    return v + exclusion_violations(t)
+    return v + exclusion_violations(t) + v5_violations(t)
+
+
+def v5_content(t):
+    """Whether only a version 5 manifest can hold the tree: it has roots, or
+    statements a walk of a whole scope does not make."""
+    return bool(t.roots) or t.basis != 'walk' or t.carried != 0 or bool(t.racy)
+
+
+def root_of(t, p):
+    """The root p is, or lies under: (path, class, found); None for none."""
+    for q, (cls, found) in (t.roots or {}).items():
+        if p == q or p.startswith(q + b'/'):
+            return q, cls, found
+    return None
+
+
+def others_cannot_read(t, p):
+    """V5-E5: "its own mode has no read bit for others, or some directory
+    from the scope root down to it has no search bit for others"."""
+    if not t.e[p]['mode'] & 0o004:
+        return True
+    q = p
+    while q != b'.':
+        q = parent_of(q)
+        if not t.e[q]['mode'] & 0o001:
+            return True
+    return False
+
+
+def v5_settle(t, rng):
+    """Gives every regular file of a tree with roots what its root's class
+    says (V5-E4, V5-E5), from its mode, its `caps` and the directories above
+    it; `unstable`, `unreadable` and a mount keep their `unverified`."""
+    for p, e in t.e.items():
+        if e['type'] != 'reg':
+            continue
+        cls = root_of(t, p)[1]
+        for k in ('meta', 'sealed'):
+            e.pop(k, None)
+        e.pop('stored', None)
+        if cls == 'metadata' and not (e['mode'] & 0o6000 or 'caps' in e or e.get('mount')
+                                      or e.get('unstable') or e.get('unreadable')):
+            for k in ('sha256', 'unverified'):
+                e.pop(k, None)
+            e['meta'] = True
+            continue
+        settle_hash(e, t, rng)
+        if cls == 'content' and 'sha256' in e and not e.get('writer_open') \
+                and others_cannot_read(t, p):
+            e['sealed'] = True
+
+
+def v5_violations(t):
+    """manifest-v5.md's Lines ("when") and entry rules V5-E1 to V5-E5 and
+    V5-E8, as far as a tree can break them."""
+    v = []
+    has_v5 = [p for p, e in t.e.items() if any(f in e for f in V5_FLAGS)]
+    if not t.roots:
+        # V5-2: a whole scope "is then as v4 in every other respect".
+        if has_v5:
+            v.append('a v5 flag with no root: %r' % has_v5[:3])
+    if t.basis not in ('walk', 'events') or type(t.carried) is not int or \
+            not 0 <= t.carried <= len(t.e) or (t.basis == 'walk' and (t.carried or t.racy)):
+        v.append('basis, carried or racy (V5-10 to V5-12)')
+    if sorted(set(t.racy)) != list(t.racy) or any(q not in t.e for q in t.racy):
+        v.append('racy is not sorted paths of entries (V5-12)')
+    for p, e in t.e.items():
+        typ, has = e['type'], lambda k, e=e: k in e
+        if has('not_read') and (typ != 'dir' or has('unreadable') or has('unstable')
+                                or has('mount')):
+            v.append('%r: V5-4' % p)
+        recorded = [k for k in ('size', 'mtime_ns', 'ctime_ns', 'nlink') if has(k)]
+        if len(recorded) != (0 if has('not_read') else 4):
+            v.append('%r: V5-E8' % p)
+        if has('partial') and (typ != 'dir' or has('not_read') or has('unreadable')
+                               or has('mount')):
+            v.append('%r: V5-4b' % p)
+        if has('meta') and (typ != 'reg' or has('sha256') or has('unverified') or has('stored')):
+            v.append('%r: V5-5' % p)
+        if has('sealed') and (typ != 'reg' or not has('sha256') or has('stored')):
+            v.append('%r: V5-6' % p)
+    if not t.roots:
+        return v
+    for q, (cls, found) in t.roots.items():
+        if cls not in ('content', 'metadata') or found not in (True, False) or \
+                found != (q in t.e) or q == b'.' or not is_utf8(q) or \
+                any(o != q and (q.startswith(o + b'/')) for o in t.roots):
+            v.append('root %r' % q)
+    # V5-E3: `.` and every directory on the way to a root, as far as it exists.
+    way = {b'.'}
+    for q in t.roots:
+        while q != b'.':
+            q = parent_of(q)
+            way.add(q)
+    for p, e in t.e.items():
+        on_way = p in way and root_of(t, p) is None
+        if has_partial(e) != on_way or (on_way and e['type'] != 'dir'):
+            v.append('%r: V5-E3, partial' % p)
+        if p == b'.':
+            continue
+        r = root_of(t, p)
+        if r is not None:
+            if not r[2]:
+                v.append('%r: under a root not found' % p)
+            if e['type'] == 'reg':                                            # V5-E4, V5-E5
+                read = e['mode'] & 0o6000 or 'caps' in e or any(
+                    k in e for k in ('mount', 'unstable', 'unreadable'))
+                if r[1] == 'metadata' and ('meta' in e) == bool(read):
+                    v.append('%r: V5-E4' % p)
+                if 'sealed' in e and r[1] != 'content':
+                    v.append('%r: V5-E5, sealed under a metadata root' % p)
+                if r[1] == 'content' and 'sha256' in e and not e.get('writer_open') and \
+                        ('sealed' in e) != others_cannot_read(t, p):
+                    v.append('%r: V5-E5' % p)
+                if r[1] == 'content' and 'sha256' not in e and others_cannot_read(t, p) \
+                        and not any(k in e for k in ('mount', 'unstable', 'unreadable')):
+                    v.append('%r: V5-E5 gives no word for a file too large to hash that '
+                             'others cannot read; the generator makes none' % p)
+            if 'not_read' in e:
+                v.append('%r: a not_read directory under a root (the generator makes none)' % p)
+            continue
+        if 'partial' in e:
+            continue
+        # another child of a directory on the way: V5-E3
+        if not t.e[parent_of(p)].get('partial'):
+            v.append('%r: not under a root nor a partial directory' % p)
+        elif not (e['type'] == 'dir' and 'not_read' in e) and \
+                not (e['type'] == 'lnk' and parent_of(p) == b'.'):
+            v.append('%r: V5-E3, a child of a partial directory that is not recorded' % p)
+    if any('stored' in e for e in t.e.values()):
+        v.append('a stored copy in a tree with roots (the generator makes none)')
+    return v
+
+
+def has_partial(e):
+    return 'partial' in e
 
 
 def addendum_limits():
@@ -956,6 +1187,15 @@ def enc_obj(keys, d):
         elif kind == 'array':
             assert isinstance(v, list) and v and all(isinstance(x, str) for x in v), (canon, v)
             enc = '[' + ','.join(jstr(x) for x in v) + ']'
+        elif kind == 'roots':                   # V5-2: `[]` for a whole scope
+            assert isinstance(v, list), (canon, v)
+            enc = '[' + ','.join(enc_obj(ROOT_KEYS, x) for x in v) + ']'
+        elif kind == 'truth':                   # a root's `found`: true or false
+            assert v is True or v is False, (canon, v)
+            enc = 'true' if v else 'false'
+        elif kind == 'paths':                   # V5-12: `racy`, `[]` when none
+            assert isinstance(v, list) and all(isinstance(x, str) for x in v), (canon, v)
+            enc = '[' + ','.join(jstr(x) for x in v) + ']'
         elif kind == 'objects':
             # v2's `excluded` (V2-2): flat objects, `[]` when none.
             assert isinstance(v, list) and all(isinstance(x, dict) for x in v), (canon, v)
@@ -973,7 +1213,9 @@ def write_manifest(t, path, version=1, st=None):
     statements `st` (v2_statements()) under the keys V2-2..V2-6 add, from v3
     `source`, and in v4 `writer_open` and the trailer's two counts."""
     keys = KEYS_OF[version]
-    entry_keys = ENTRY_V4 if version == 4 else KEYS['entry']
+    entry_keys = KEYS_V5['entry'] if version == 5 else ENTRY_V4 if version == 4 else KEYS['entry']
+    if version < 5 and v5_content(t):
+        die('generator bug: a tree with roots before version 5')
     header = {'belay_manifest': version, 'created_ns': t.created, 'scopes': [t.scope],
               'hash': 'sha256', 'hash_max_bytes': t.limit, 'store_max_bytes': t.store_max}
     lines = [None]
@@ -999,9 +1241,19 @@ def write_manifest(t, path, version=1, st=None):
         assert version == 1 and not t.x, (version, sorted(t.x))
     if version >= 3:
         header['source'] = None
-    if version == 4:
+    if version >= 4:
         trailer['writer_open'] = len(marked(t))
         trailer['unguarded'] = st['unguarded']
+    if version == 5:
+        header['roots'] = [{'path': q.decode('utf-8'), 'class': t.roots[q][0],
+                            'found': t.roots[q][1]} for q in sorted(t.roots or {})]
+        if any('sealed' in e for e in t.e.values()):                          # V5-3
+            header['sealed_key'] = t.sealed_key
+        header['basis'] = t.basis
+        for k in ('not_read', 'meta', 'sealed'):
+            trailer[k] = sum(1 for e in t.e.values() if k in e)
+        trailer['carried'] = t.carried
+        trailer['racy'] = list(t.racy)
     lines[0] = enc_obj(keys['header'], header)
     lines.append(enc_obj(keys['trailer'], trailer))
     for l in lines:
@@ -1018,7 +1270,8 @@ def write_manifest(t, path, version=1, st=None):
 # kind of walk cycles over V2_WALKS, its numbers come from the writer's own
 # random stream (the trees' stream is left as it was).
 
-VERSION_PAIRS = [(1, 1), (1, 2), (2, 1), (2, 2), (3, 3), (3, 4), (4, 3), (4, 4)]
+VERSION_PAIRS = [(1, 1), (1, 2), (2, 1), (2, 2), (3, 3), (3, 4), (4, 3), (4, 4),
+                 (5, 5), (4, 5), (5, 4)]        # V5-R1, V5-R2
 # (read_all, reference, trusted: 'some' (1 up to the regular files) or 0).
 # "every N marks" and "... newest N below the previous M": numbers filled in.
 V2_WALKS = ([('', 'walk_start', 'some'), ('', 'newest_ctime', 'some'), ('', 'walk_start', 0),
@@ -1129,11 +1382,14 @@ class Writer:
         in the combinations of versions whose files exist."""
         st = self.unguarded(t, st)
         write_manifest(t, path, version, st)
+        if v5_content(t):                       # roots: version 5 only (V5-R1)
+            return
         if version <= 2 and not t.x and not marked(t):
             write_manifest(t, path + '.alt', 3 - version, st)
         if not marked(t):
             write_manifest(t, path + '.v3', 3, st)
         write_manifest(t, path + '.v4', 4, st)
+        write_manifest(t, path + '.v5', 5, st)  # a whole scope's v5: V5-R2
 
     def pair(self, b, a, label, versions=None, statements=(None, None), store=None):
         """One pair, in `versions` (before, after) or the next combination of
@@ -1149,11 +1405,14 @@ class Writer:
         vb, va = versions or VERSION_PAIRS[self.k % len(VERSION_PAIRS)]
         if versions is None:        # a side with exclusions is not v1, one marked is v4
             vb, va = (max(v, 2) if t.x else v for v, t in ((vb, b), (va, a)))
-            vb, va = (4 if marked(t) else v for v, t in ((vb, b), (va, a)))
+            vb, va = (max(v, 4) if marked(t) else v for v, t in ((vb, b), (va, a)))
+            vb, va = (5 if v5_content(t) else v for v, t in ((vb, b), (va, a)))
         elif (b.x and vb == 1) or (a.x and va == 1):
             die('generator bug (%s): exclusions in a version 1 manifest' % label)
-        elif (marked(b) and vb != 4) or (marked(a) and va != 4):
+        elif (marked(b) and vb < 4) or (marked(a) and va < 4):
             die('generator bug (%s): writer_open before version 4' % label)
+        elif (v5_content(b) and vb != 5) or (v5_content(a) and va != 5):
+            die('generator bug (%s): roots before version 5' % label)
         sb, sa = (self.statements(t) if st is None else st(t)
                   for st, t in zip(statements, (b, a)))
         stem = os.path.join(self.out, 'pair-%05d' % self.k)
@@ -1175,7 +1434,7 @@ class Writer:
 
     def targeted(self, rng, label, build, cells=(), pairs=(), optional=(), scenarios=(),
                  interp=(), version=(), versions=None, statements=(None, None), v4=(),
-                 nr=()):
+                 nr=(), v5=()):
         """One targeted pair: built ONCE -- no retries; build(rng) is written
         so that it cannot fail -- written both ways round, and checked to show
         what it was built for, as compare.py's coverage gate sees it: its
@@ -1186,7 +1445,8 @@ class Writer:
             [s for s in interp if s not in compare.INTERP_SCENARIOS] + \
             [s for s in version if s not in compare.VERSION_SCENARIOS] + \
             [s for s in v4 if s not in compare.V4_SCENARIOS] + \
-            [s for s in nr if s not in compare.NOT_READ_SCENARIOS]
+            [s for s in nr if s not in compare.NOT_READ_SCENARIOS] + \
+            [s for s in v5 if s not in compare.V5_SCENARIOS]
         if unknown:
             die('%r names scenarios the gate does not have: %s' % (label, unknown))
         r = build(rng)
@@ -1201,7 +1461,8 @@ class Writer:
                 + [('interpreter', s) for s in interp]
                 + [('manifest version', s) for s in version]
                 + [('manifest v4', s) for s in v4]
-                + [('not read', s) for s in nr])
+                + [('not read', s) for s in nr]
+                + [('manifest v5', s) for s in v5])
         lacking = [x for x in want if not cov[x[0]][x[1]]]
         if lacking:
             die('the pair built for %r (%s) does not show %s' % (label, stems[0], lacking))
@@ -5127,6 +5388,445 @@ def not_read(w, rng):
                    'sealing: 0 beside an unstable directory'])
 
 
+# ---------------------------------------------------------------------------
+# Manifest version 5 (test/expect/manifest-v5.md): trees with roots.
+
+def v5_dir(rng, t, p, mode=0o755, **flags):
+    e = new_entry(rng, t, p, 'dir', extras=False)
+    e['mode'] = TYPES['dir'] | mode
+    e.update(flags)
+    if 'not_read' in e:                         # V5-E8
+        for k in ('size', 'mtime_ns', 'ctime_ns', 'nlink'):
+            del e[k]
+    t.e[p] = e
+    return e
+
+
+def v5_reg(rng, t, p, mode=0o644, size=None):
+    """A regular file; what it carries is v5_settle()'s to say."""
+    e = new_entry(rng, t, p, 'reg', extras=False)
+    e['mode'] = TYPES['reg'] | mode
+    e['size'] = rng.choice([1, 7, 40, 99]) if size is None else size
+    for k in ('sha256', 'unverified'):
+        e.pop(k, None)
+    t.e[p] = e
+    return e
+
+
+def v5_lnk(rng, t, p, target):
+    e = new_entry(rng, t, p, 'lnk', extras=False)
+    e['link_target'], e['size'] = target, len(target)
+    set_outside(e, t)
+    t.e[p] = e
+    return e
+
+
+def v5_open(rng, t, p):
+    """A `not_read` directory of t entered: an ordinary directory."""
+    e = t.e[p]
+    del e['not_read']
+    e.update(size=4096, mtime_ns=rng.randrange(1, 1 << 61), ctime_ns=rng.randrange(1, 1 << 61),
+             nlink=2)
+    return e
+
+
+U = b'home/u/'
+
+
+def v5_home(rng):
+    """A tree with roots (V5-2, V5-E3): `etc`, a content root; `usr`, a
+    metadata root; in a home, one file that is a root, a root not found
+    (`.ssh`) and one two levels below a directory that is there
+    (`.config/systemd/user`); directories on the way, `partial`; other
+    directories beside them, `not_read`; a link under the scope root. Not yet
+    settled (v5_settle): the pair's builder changes it first."""
+    t = Tree(rng, limit=size_limit(rng), extras=False)
+    root = t.e[b'.']
+    root['mode'] = TYPES['dir'] | 0o755
+    root['partial'] = True
+    t.roots = {b'etc': ('content', True), b'usr': ('metadata', True),
+               U + b'.profile': ('content', True), U + b'.ssh': ('content', False),
+               U + b'.config/systemd/user': ('content', False)}
+    t.sealed_key = rng.choice(['0123456789abcdef', 'fedcba9876543210'])
+    for p in (b'etc', b'etc/conf.d', b'usr', b'usr/bin', b'usr/share'):
+        v5_dir(rng, t, p)
+    v5_dir(rng, t, b'etc/priv', 0o700)
+    for p, mode in ((b'etc/passwd', 0o644), (b'etc/shadow', 0o640), (b'etc/conf.d/a', 0o644),
+                    (b'etc/priv/key', 0o644), (b'usr/bin/tool', 0o755), (b'usr/bin/su', 0o4755),
+                    (b'usr/bin/ping', 0o755), (b'usr/share/doc', 0o644), (U + b'.profile', 0o644)):
+        v5_reg(rng, t, p, mode)
+    t.e[b'usr/bin/ping']['caps'] = caps_hex(rng)
+    v5_lnk(rng, t, b'etc/alt', b'passwd')
+    v5_lnk(rng, t, b'bin', b'usr/bin')
+    for p in (b'home', b'home/u', U + b'.config'):
+        v5_dir(rng, t, p, partial=True)
+    for p in (b'opt', U + b'work'):
+        v5_dir(rng, t, p, rng.choice([0o755, 0o700, 0o750]), not_read=True)
+    for i in range(rng.randrange(0, 4)):        # a few more, of either root
+        d = rng.choice([b'etc', b'etc/conf.d', b'usr/bin', b'usr/share'])
+        v5_reg(rng, t, d + b'/x%d' % i, rng.choice([0o644, 0o600, 0o755, 0o444]))
+    for i in range(rng.randrange(0, 3)):
+        v5_dir(rng, t, rng.choice([b'd%d', U + b'd%d', b'home/d%d']) % i, not_read=True)
+    return t
+
+
+def v5_pair(rng, change, before=None):
+    """A home, `before(b, rng)` applied to it, and a later copy with
+    `change(a, rng)` applied; both settled."""
+    b = v5_home(rng)
+    if before is not None:
+        before(b, rng)
+    v5_settle(b, rng)
+    a = b.copy()
+    change(a, rng)
+    v5_settle(a, rng)
+    for t in (b, a):
+        for p in t.e:
+            if compare.ref.claim(t.scope, p):
+                die('generator bug: an interpreter claims %r of a tree with roots' % p)
+    return b, a
+
+
+def manifest_v5(w, rng):
+    """compare.py's V5_SCENARIOS. Each pair is written both ways round, so
+    "before" and "after", `added` and `removed`, come together."""
+    C = compare
+    TOOL, SHADOW, KEY, OPT = b'usr/bin/tool', b'etc/shadow', b'etc/priv/key', b'opt'
+
+    def T(label, change, v5, before=None, **kw):
+        w.targeted(rng, label + ' (v5)', lambda rng: v5_pair(rng, change, before), v5=v5, **kw)
+
+    def other_hash(e, rng):
+        e['sha256'] = unlike(hexs(rng), e.get('sha256', ''))
+
+    def bump(f, by=1):
+        def change(a, rng, p=None):
+            a.e[p][f] += by
+        return change
+
+    def on(p, f):
+        """A change of field f of the entry at p."""
+        def change(a, rng):
+            e = a.e[p]
+            if f == 'mode':
+                e['mode'] ^= 0o010              # a group bit: no class moves with it
+            elif f == 'sha256':
+                other_hash(e, rng)
+            elif f == 'iflags':
+                e['iflags'] = rng.choice(IFLAGS)
+            elif f in ('raced', 'xattrs_unknown', 'writer_open'):
+                e[f] = True
+            else:
+                e[f] += 1
+        return change
+
+    def both(*changes):
+        def change(a, rng):
+            for c in changes:
+                c(a, rng)
+        return change
+
+    def root(q, cls, found=True):
+        def change(a, rng):
+            a.roots[q] = (cls, found)
+        return change
+
+    # Nothing differs: no record of any of them; the roots are equal.
+    T('nothing differs', lambda a, rng: None,
+      ['meta on both sides, nothing differs', 'sealed on both sides, one key, nothing differs',
+       'not_read on both sides, nothing differs', 'roots equal and not empty: no roots_differ',
+       'sealing: a not_read directory counted', 'sealing: only not_read directories, not 0'])
+    # V5-D1: `meta` on both sides.
+    for d, change in zip(C.M_BOTH, (None, on(TOOL, 'ctime_ns'), on(TOOL, 'mtime_ns'),
+                                    on(TOOL, 'mode'), on(TOOL, 'size'),
+                                    both(on(TOOL, 'size'), on(TOOL, 'mode')), on(TOOL, 'iflags'),
+                                    both(on(TOOL, 'raced'), on(TOOL, 'mode')), on(TOOL, 'raced'),
+                                    'raced before', on(TOOL, 'xattrs_unknown'))):
+        if change == 'raced before':
+            T('meta on both sides, ' + d, lambda a, rng: None, ['meta on both sides, ' + d],
+              before=on(TOOL, 'raced'))
+        elif change is not None:
+            T('meta on both sides, ' + d, change, ['meta on both sides, ' + d])
+    T('meta on both sides, mode differs, xattrs_unknown on a side',
+      both(on(TOOL, 'mode'), on(TOOL, 'xattrs_unknown')), ['reasons: not_read beside another reason'])
+    # V5-D2: `meta` against a hash -- the root's class moved, or the file became setuid.
+    cls = root(b'usr', 'content')
+    for d, change in zip(C.M_ONE, (cls, both(cls, on(TOOL, 'size')), both(cls, on(TOOL, 'uid')))):
+        T('meta, then a hash: ' + d, change,
+          ['meta %s, a hash on the other side, %s' % (s, d) for s in ('before', 'after')]
+          + ["roots_differ: a root's class differs"])
+    def setuid(a, rng):
+        a.e[TOOL]['mode'] |= 0o4000
+    T('a file under a metadata root becomes setuid (V5-E4)', setuid,
+      ['meta %s, a hash on the other side, %s' % (s, C.M_ONE[2]) for s in ('before', 'after')])
+    def grow_big(a, rng):
+        a.e[TOOL]['size'] = a.limit + 1 + rng.randrange(9)
+    def big(b, rng):
+        b.e[TOOL]['size'] = b.limit + 1
+    T('meta, then too large to hash, the same size', cls,
+      ['meta on one side, unverified on the other'], before=big)
+    T('meta, then too large to hash, another size', both(cls, grow_big),
+      ['meta on one side, unverified on the other, the size differs'])
+    def unread(a, rng):
+        a.e[TOOL]['mode'] &= ~0o004
+    T('meta, then sealed', both(cls, unread),
+      ['meta on one side, sealed on the other', 'reasons: not_read and sealed_key'])
+    T('meta, then a writer at it', both(cls, on(TOOL, 'writer_open')),
+      ['meta on one side, writer_open on the other', 'reasons: writer_open and not_read'])
+    def to(p, typ):
+        def change(a, rng):
+            old = a.e[p]
+            e = new_entry(rng, a, p, typ, extras=False)
+            e.update({k: old[k] for k in ('uid', 'gid', 'ino', 'dev')})
+            if typ == 'lnk':
+                e['link_target'], e['size'] = b'passwd', 6
+                set_outside(e, a)
+            a.e[p] = e
+        return change
+    T('a meta file becomes a FIFO', to(TOOL, 'fifo'), ['meta on one side, the type differs'])
+    def add(p, mode=0o644):
+        return lambda a, rng: v5_reg(rng, a, p, mode)
+    T('a file added under a metadata root', add(b'usr/bin/new', 0o755),
+      ['meta on one side only: added', 'meta on one side only: removed'])
+    # V5-D3: `sealed`.
+    for d, change in zip(C.S_SAME, (None, on(SHADOW, 'sha256'),
+                                    both(on(SHADOW, 'sha256'), on(SHADOW, 'size')),
+                                    on(SHADOW, 'mode'),
+                                    both(on(SHADOW, 'sha256'), on(SHADOW, 'mode')))):
+        if change is not None:
+            T('sealed on both sides, one key, ' + d, change,
+              ['sealed on both sides, one key, ' + d])
+    def rekey(a, rng):
+        a.sealed_key = 'a' * 16 if a.sealed_key != 'a' * 16 else 'b' * 16
+    def opened(a, rng):                         # the directory above it lets others in
+        a.e[b'etc/priv']['mode'] |= 0o055
+    for d, change in zip(C.S_NOT, (None, on(SHADOW, 'size'), on(SHADOW, 'uid'))):
+        T('sealed under two keys, ' + d, both(rekey, change) if change else rekey,
+          ['sealed on both sides, two keys, ' + d])
+        k = None if change is None else on(KEY, 'size' if d == C.S_NOT[1] else 'uid')
+        T('sealed, then plain: its directory opened, ' + d, both(opened, k) if k else opened,
+          ['sealed %s only, a plain hash on the other side, %s' % (s, d)
+           for s in ('before', 'after')])
+    T('sealed under two keys, xattrs_unknown on a side', both(rekey, on(SHADOW, 'xattrs_unknown')),
+      ['reasons: sealed_key beside another reason'])
+    T('a sealed file becomes a symlink', to(SHADOW, 'lnk'), ['sealed on a side, the type differs'])
+    def too_big(a, rng):
+        a.e[SHADOW]['size'] = a.limit + 2
+        a.e[SHADOW]['mode'] |= 0o004
+    T('a sealed file, then too large to hash and readable', too_big,
+      ['sealed on a side, unverified on the other'])
+    T('a file others cannot read added under a content root', add(b'etc/secret', 0o600),
+      ['sealed on one side only: added', 'sealed on one side only: removed'])
+    T('a sealed file raced, its hash different', both(on(SHADOW, 'raced'), on(SHADOW, 'sha256')),
+      ['sealed on a side, raced'])
+    # V5-D4: `not_read` directories.
+    for d, change in zip(C.N_BOTH, (None, on(OPT, 'mode'), on(OPT, 'uid'), on(OPT, 'ino'))):
+        if change is not None:
+            T('a not_read directory, ' + d, change, ['not_read on both sides, ' + d])
+    def enter(a, rng):                          # `opt` becomes a root: entered, and listed
+        a.roots[OPT] = ('content', True)
+        v5_open(rng, a, OPT)
+        v5_reg(rng, a, OPT + b'/x')
+        v5_dir(rng, a, OPT + b'/sub')
+    T('a not_read directory becomes a root', enter,
+      ['not_read before only', 'not_read after only', 'roots_differ: another list',
+       'a path on one side only below a not_read directory on the other'])
+    T('a not_read directory becomes a root, its mode different', both(enter, on(OPT, 'mode')),
+      ['not_read on one side, mode differs'])
+    def enter_unreadable(a, rng):
+        a.roots[OPT] = ('content', True)
+        v5_open(rng, a, OPT)['unreadable'] = True
+    T('a not_read directory becomes a root that cannot be read', enter_unreadable,
+      ['not_read on one side, unreadable on the other'])
+    T('a not_read directory becomes a link under the scope root', to(OPT, 'lnk'),
+      ['not_read on a side, the type differs'])
+    def new_dir(p, **flags):
+        return lambda a, rng: v5_dir(rng, a, p, **dict(flags, not_read=True))
+    T('a directory added beside the roots', new_dir(b'srv'),
+      ['a not_read directory on one side only: added', 'a not_read directory on one side only: removed',
+       'partial: a directory on one side only under it'])
+    T('a directory added beside the roots, raced', new_dir(b'srv', raced=True),
+      ['partial: raced on the one-sided entry'])
+    # V5-D4b: under a `partial` directory.
+    T('a link added under the scope root', lambda a, rng: v5_lnk(rng, a, b'lib', b'usr/share'),
+      ['partial: a link directly under the scope root, on one side only'])
+    def first_key(a, rng):                      # the pin's first fixture
+        a.roots[U + b'.ssh'] = ('content', True)
+        v5_dir(rng, a, U + b'.ssh', 0o755)
+        v5_reg(rng, a, U + b'.ssh/authorized_keys')
+    T('a first .ssh/authorized_keys in an existing home', first_key,
+      ['partial: a directory root not found on the other side, and what is below it',
+       'partial: a path below a directory new under it',
+       'roots_differ: a root found on one side only'])
+    def first_unit(a, rng):                     # the pin's second fixture
+        a.roots[U + b'.config/systemd/user'] = ('content', True)
+        v5_dir(rng, a, U + b'.config/systemd', partial=True)
+        v5_dir(rng, a, U + b'.config/systemd/user')
+        v5_reg(rng, a, U + b'.config/systemd/user/x.service')
+    T('a first .config/systemd/user/x.service where .config was', first_unit,
+      ['partial: a directory two levels below a partial one, its parent new too'])
+    def file_root(found):
+        return lambda t, rng: t.roots.__setitem__(U + b'.bashrc', ('content', found))
+    T('a file that is a root, not found and then there',
+      both(file_root(True), add(U + b'.bashrc')),
+      ['partial: a file on one side only, a root not found on the other'], before=file_root(False))
+    T('a file that is a root of one side only', both(file_root(True), add(U + b'.bashrc')),
+      ['partial: a file on one side only, no root of the other'])
+    def link_root(a, rng):
+        a.roots[U + b'.link'] = ('content', True)
+        v5_lnk(rng, a, U + b'.link', b'.profile')
+    T('a link that is a root of one side only', link_root,
+      ['partial: a link under a deeper partial directory, no root of the other'])
+    def whole_home(a, rng):                     # the home itself becomes the root
+        for q in [q for q in a.roots if q.startswith(U)]:
+            del a.roots[q]
+        a.roots[b'home/u'] = ('content', True)
+        del a.e[b'home/u']['partial']
+        del a.e[U + b'.config']['partial']
+        for p in [p for p, e in a.e.items() if p.startswith(U) and 'not_read' in e]:
+            v5_open(rng, a, p)
+    T('a home that was on the way becomes a root', whole_home,
+      ['partial on one side only, a directory on both: not compared'])
+    # V5-D6 against no roots, and V5-10 to V5-12.
+    def plain(rng, versions):
+        b = v5_home(rng)
+        v5_settle(b, rng)
+        a = Tree(rng, scope=b.scope, limit=b.limit, root_dev=b.root_dev(), extras=False)
+        a.created = b.created + 600 * 10 ** 9
+        for typ in ('reg', 'dir', 'lnk'):
+            e = clear_flags(subject(rng, a, typ, extras=False), a, rng)
+            a.e[e['path']] = e
+        clear_flags(a.e[b'.'], a, rng)
+        return b, a
+    w.targeted(rng, 'roots against a whole scope, both v5', lambda rng: plain(rng, None),
+               versions=(5, 5), v5=['roots_differ: one list empty (v5 on both sides)'])
+    w.targeted(rng, 'roots against a whole scope in v4', lambda rng: plain(rng, None),
+               versions=(5, 4),
+               v5=['versions: roots on a v5 side against a manifest before v5 (roots_differ)'])
+    def events(a, rng):
+        v5_reg(rng, a, b'etc/\xffodd')
+        v5_settle(a, rng)
+        a.basis, a.carried = 'events', rng.randrange(1, len(a.e))
+        a.racy = sorted(rng.sample(sorted(a.e), 3) + [b'etc/\xffodd'])
+        a.racy = sorted(set(a.racy))
+    T('an event capture: carried entries and racy paths', events,
+      ['statements: basis events on a side', 'statements: carried not 0',
+       'statements: racy not empty', 'statements: racy_b64'])
+    def events_utf8(a, rng):
+        a.basis, a.carried = 'events', 0
+        a.racy = sorted(rng.sample(sorted(a.e), 2))
+    T('an event capture: racy paths, nothing carried', both(events_utf8, on(TOOL, 'size')),
+      ['statements: racy not empty'])
+
+
+def v5_mutate(t, rng, n):
+    """n changes to a settled tree with roots, each as a system makes it; the
+    tree is settled again by the caller."""
+    regs = lambda: sorted(p for p, e in t.e.items() if e['type'] == 'reg')
+    for _ in range(n):
+        op = rng.choice(['content', 'content', 'size', 'chmod', 'chmod', 'chown', 'touch', 'ctime',
+                         'setuid', 'dirmode', 'class', 'add', 'add', 'remove', 'newdir', 'rmdir',
+                         'notread-mode', 'key', 'ssh', 'raced', 'link', 'ino', 'iflags', 'big'])
+        p = rng.choice(regs())
+        e = t.e[p]
+        if op == 'content':
+            if 'sha256' in e:
+                e['sha256'] = hexs(rng)
+            e['mtime_ns'] += 1
+            e['ctime_ns'] += 1
+            if rng.random() < 0.5:
+                e['size'] = rng.choice([0, 3, 50, 98])
+        elif op == 'size':
+            e['size'] = rng.choice([0, 3, 50, 98])
+        elif op == 'chmod':
+            e['mode'] = TYPES['reg'] | rng.choice([0o644, 0o600, 0o640, 0o755, 0o444, 0o604])
+        elif op == 'chown':
+            e[rng.choice(['uid', 'gid'])] = rng.choice(IDS)
+        elif op in ('touch', 'ctime'):
+            e['mtime_ns' if op == 'touch' else 'ctime_ns'] += rng.randrange(1, 99)
+        elif op == 'setuid':
+            e['mode'] ^= 0o4000
+        elif op == 'ino':
+            e['ino'] += 1
+        elif op == 'iflags':
+            if 'iflags' in e and rng.random() < 0.5:
+                del e['iflags']
+            else:
+                e['iflags'] = rng.choice(IFLAGS)
+        elif op == 'big':
+            if e['mode'] & 0o004 and not others_cannot_read(t, p):
+                e['size'] = t.limit + 1 + rng.randrange(5)
+        elif op == 'raced':
+            e['raced'] = True
+        elif op == 'dirmode':
+            d = rng.choice([b'etc/priv', b'etc/conf.d', b'usr/bin'])
+            if d in t.e:
+                t.e[d]['mode'] = TYPES['dir'] | rng.choice([0o755, 0o700, 0o750, 0o711])
+        elif op == 'class':
+            q = rng.choice([b'etc', b'usr'])
+            t.roots[q] = ('metadata' if t.roots[q][0] == 'content' else 'content', True)
+        elif op == 'add':
+            d = rng.choice([q for q in (b'etc', b'etc/conf.d', b'etc/priv', b'usr/bin',
+                                        b'usr/share') if q in t.e])
+            q = d + b'/' + letters(rng, 3)
+            if q not in t.e:
+                v5_reg(rng, t, q, rng.choice([0o644, 0o600, 0o755, 0o4755]))
+        elif op == 'remove':
+            if root_of(t, p)[0] != p:           # not a file that is itself a root
+                del t.e[p]
+        elif op == 'newdir':
+            q = rng.choice([b'', b'home/', U]) + b'n' + letters(rng, 2)
+            if q not in t.e:
+                v5_dir(rng, t, q, not_read=True)
+        elif op == 'rmdir':
+            ds = sorted(q for q, x in t.e.items() if 'not_read' in x)
+            if ds:
+                del t.e[rng.choice(ds)]
+        elif op == 'notread-mode':
+            ds = sorted(q for q, x in t.e.items() if 'not_read' in x)
+            if ds:
+                x = t.e[rng.choice(ds)]
+                x[rng.choice(['mode', 'uid', 'ino'])] ^= 0o020
+        elif op == 'key':
+            t.sealed_key = rng.choice(['0123456789abcdef', 'fedcba9876543210'])
+        elif op == 'ssh':
+            q = U + b'.ssh'
+            if q not in t.e:
+                t.roots[q] = ('content', True)
+                v5_dir(rng, t, q, rng.choice([0o700, 0o755]))
+                v5_reg(rng, t, q + b'/authorized_keys', rng.choice([0o600, 0o644]))
+        elif op == 'link':
+            q = b'l' + letters(rng, 2)
+            if q not in t.e:
+                v5_lnk(rng, t, q, b'usr/bin')
+    for p, e in t.e.items():                    # a file too large to hash is one others can read
+        if e['type'] == 'reg' and e['size'] > t.limit and others_cannot_read(t, p) and \
+                root_of(t, p)[1] == 'content':
+            e['size'] = 9
+
+
+def v5_randomized(w, rng, n):
+    """Random pairs of trees with roots: a home and variants of it, several
+    changes at once, compared in both directions and with themselves."""
+    for i in range(n):
+        base = v5_home(rng)
+        v5_settle(base, rng)
+        variants = [base]
+        for _ in range(3):
+            v = base.copy()
+            v5_mutate(v, rng, rng.randrange(1, 7))
+            v5_settle(v, rng)
+            if rng.random() < 0.2:
+                v.basis, v.carried = 'events', rng.randrange(0, len(v.e))
+                v.racy = sorted(rng.sample(sorted(v.e), rng.randrange(0, 3)))
+            variants.append(v)
+        for x, b in enumerate(variants):
+            for y, a in enumerate(variants):
+                if x != y and rng.random() > 0.6:
+                    continue
+                w.pair(b, a, 'random home %d (v5): variant %d -> %d' % (i, x, y))
+
+
 def targeted(w, rng):
     cells(w, rng)
     field_pairs(w, rng)
@@ -5148,6 +5848,7 @@ def targeted(w, rng):
     git_events(w, rng)
     writer_open(w, rng)
     not_read(w, rng)
+    manifest_v5(w, rng)
 
 
 # ---------------------------------------------------------------------------
@@ -5323,6 +6024,7 @@ def main():
     targeted(w, rng)
     w.check_gate()          # the targeted pairs alone: the random ones add variety only
     randomized(w, rng, n)
+    v5_randomized(w, rng, max(4, n // 2))
     refusals(w, rng)
     print(w.k)
 
