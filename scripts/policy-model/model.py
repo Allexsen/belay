@@ -409,9 +409,9 @@ P72 New with manifest v5 (manifest-v5.md; the numbers P71 is another branch's). 
     writes v5"; V5-2: `roots` "empty for a capture of a whole scope, which is then as v4 in every
     other respect". Every capture here is of a whole scope, so the model holds each manifest
     belay writes -- the bundle's and every checkpoint's -- to: `belay_manifest` 5; the header's
-    keys v4's, then `roots` (`[]`), then `basis`, and no `sealed_key` (V5-3: "absent when no
+    keys v4's, then `roots` (`0`: the addendum, P76), then `basis`, and no `sealed_key` (V5-3: "absent when no
     entry is `sealed`"; nothing is sealed where there is no root); the trailer's keys v4's, then
-    `not_read`, `meta`, `sealed`, `carried`, `racy`, valued `0`, `0`, `0`, `0`, `[]`; no entry
+    `not_read`, `meta`, `sealed`, `carried`, `racy`, valued `0`, `0`, `0`, `0`, `0`; no entry
     carrying `not_read`, `partial`, `meta` or `sealed` (each needs a root or a rule about one).
     `basis` is read as `walk`: V5-10 allows `events`, and V5-11/V5-12 say what a walk's trailer
     holds; that these captures are walks is checkpoint-v3 C3-4 ("always `walk` until the
@@ -437,6 +437,17 @@ P74 New with V5-R4. "A bundle whose manifest has `roots` is rejected by every re
     lists every child of the scope root as a `content` root and marks `.` `partial` (V5-E3), so
     that nothing else in it is wrong. The first half of V5-R4 (a scope captured with roots) is
     not reached: this harness has no system watch to capture.
+
+P76 New with manifest-v5-addendum.md (V5-A1 to V5-A3; where it and manifest-v5.md differ, "this
+    file is right"). `roots` is an int, the number of root lines after the header; `racy` an int,
+    the number of racy lines before the trailer: "A capture of a whole scope has `"roots":0` and
+    no such line", and a walk has no racy path, so `"racy":0` and no such line. V5-R4's bundle
+    (P74) has its roots as lines. What a reader rejects, built here: "a count that is not the
+    number of root lines" (a count with no line, a line with no count), "a count that is not the
+    number of racy lines and a racy line naming no entry", and the arrays manifest-v5.md first
+    gave the two keys (a type the key no longer has: V5-R1's "strictly"). Not built: "a root
+    line after an entry, and lines out of order" -- a bundle with any root is refused for its
+    roots first (V5-R4), so the answer would not show which rule gave it.
 
 P70 New with diff-fields O10 (checkpoint-v3 G2-5). "An `added` record": a path in the after
     manifest only whose outcome the one-sided rules leave `added`; one that is `unknown` there
@@ -2502,7 +2513,7 @@ V5_HEADER_ADDS = ("roots", "sealed_key", "basis")
 V5_HEADER = V4_HEADER + ("roots", "basis")                                # a whole scope: no `sealed_key` (V5-3, P72)
 V5_TRAILER_ADDS = ("not_read", "meta", "sealed", "carried", "racy")
 V5_TRAILER = V4_TRAILER + V5_TRAILER_ADDS
-V5_WHOLE_SCOPE = {"not_read": 0, "meta": 0, "sealed": 0, "carried": 0, "racy": []}   # V5-7..V5-12, a walk with no root
+V5_WHOLE_SCOPE = {"not_read": 0, "meta": 0, "sealed": 0, "carried": 0, "racy": 0}    # V5-7..V5-11, V5-A2: a walk, no root
 
 
 def read_manifest(content):
@@ -2537,8 +2548,10 @@ def manifest_problems(content, B, unguarded):
     keys = tuple("scopes" if k == "scopes_b64" else k for k in mh)
     if keys != V5_HEADER:
         problems.append("V5: the header's keys %r" % (keys,))
-    if mh.get("roots") != [] or type(mh.get("roots")) is not list:
-        problems.append("V5-2: roots %r for a capture of a whole scope" % (mh.get("roots"),))
+    if mh.get("roots") != 0 or type(mh.get("roots")) is not int:                    # V5-A1
+        problems.append("V5-A1: roots %r for a capture of a whole scope" % (mh.get("roots"),))
+    if any(set(o) & {"root", "root_b64", "racy", "racy_b64"} for o in entries):
+        problems.append("V5-A1, V5-A2: a root or racy line in a capture of a whole scope")
     if mh.get("basis") != "walk":
         problems.append("V5-10: basis %r" % (mh.get("basis"),))
     if tuple(mt) != V5_TRAILER:
@@ -2657,14 +2670,29 @@ def break_manifest(content, how):
     elif how == "v5-basis-order":                                                    # "then `roots`, `sealed_key`, `basis`"
         mh["roots"] = mh.pop("roots")
     elif how == "v4-with-roots":                                                     # V5-R1: v4 by v4's key set
-        mh["roots"] = []
+        mh["roots"] = 0
     elif how == "v4-with-racy":
+        mt["racy"] = 0
+    elif how == "v5-roots-count":                                                    # V5-A1: a count, no line
+        mh["roots"] = 1
+    elif how == "v5-root-line-uncounted":                                            # V5-A1: a line, no count
+        entries.insert(0, {"root": "data", "class": "content", "found": True})
+    elif how == "v5-roots-array":                                                    # manifest-v5.md's first shape
+        mh["roots"] = []
+    elif how == "v5-racy-count":                                                     # V5-A2
+        mt["racy"] = 1
+    elif how == "v5-racy-line-uncounted":
+        entries.append({"racy": "README.md"})
+    elif how == "v5-racy-no-entry":                                                  # "a racy line naming no entry"
+        mt["racy"] = 1
+        entries.append({"racy": "no/such/entry"})
+    elif how == "v5-racy-array":
         mt["racy"] = []
     elif how == "v5-roots":                                                          # V5-R4, P74
         top = sorted(entry_path(o) for o in entries if b"/" not in entry_path(o) and entry_path(o) != b".")
-        mh = {k: ([{"path": p.decode("utf-8"), "class": "content", "found": True} for p in top] if k == "roots" else v)
-              for k, v in mh.items()}
+        mh["roots"] = len(top)                                                       # V5-A1: one line per root
         next(o for o in entries if entry_path(o) == b".")["partial"] = True          # V5-E3
+        entries[0:0] = [{"root": p.decode("utf-8"), "class": "content", "found": True} for p in top]
     elif how == "trailer-missing-writer-open":
         mt.pop("writer_open")
     elif how == "trailer-missing-unguarded":
