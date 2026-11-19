@@ -100,6 +100,11 @@ int classify_both(const struct diff_ctx *ctx, const struct belay_entry *b,
         v->changed = FBIT(F_TYPE);
         v->outcome = raced ? D_UNKNOWN : D_TYPE_CHANGED;
         if (raced) v->reasons = reasons;
+        /* What it became is a directory that was not listed, or a mount
+         * root: nothing below it has a record (pin O11). No other type
+         * change says anything was unread: none compares content (O7). */
+        else if (a->type == BELAY_T_DIR)
+            v->not_read = (a->unreadable ? DRBIT(DR_UNREADABLE) : 0) | (a->is_mount ? DRBIT(DR_MOUNT) : 0);
         return 0;
     }
     /* A mount root's own timestamps belong to the mounted filesystem. */

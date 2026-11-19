@@ -189,7 +189,8 @@ const struct line_field_def DIFF_RECORD_FIELDS[DF_COUNT] = {
         "sides were hashed. What was compared proves the change; the content itself was not "
         "compared (`test/expect/diff-fields.md`, O9). For `added` too, from the one entry: a "
         "regular file by the same rule, and a directory carrying `unreadable` or `mount`, whose "
-        "listing was not read (O10). Never on `removed`." },
+        "listing was not read (O10). For `type_changed` only when the entry after is such a "
+        "directory (O11). Never on `removed`." },
     [DF_FINDINGS] = { "findings", NULL, "array",
         "What an interpreter explained about the change, one object each (Findings, below); "
         "absent when none. Annotations only: an interpreter never sets or changes the outcome." },

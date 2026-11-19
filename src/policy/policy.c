@@ -570,8 +570,11 @@ static void protected(struct state *s, const char *p, size_t n, const struct bel
      * its outcome is unknown (V4-S2). Any other matching rule, and the path
      * is judged as PS-M5 says. So is a directory nothing was seen below
      * (PV2-9): what the rule protects there has no entry to be missed. */
-    const bool sealed = (b != NULL && b->type == BELAY_T_DIR && (b->unreadable || b->is_mount)) ||
-                        (a != NULL && a->type == BELAY_T_DIR && (a->unreadable || a->is_mount));
+    /* Not one that was not there at reset: no_delete has nothing to say
+     * about what was created, whatever it carries (PV2-11). */
+    const bool sealed = b != NULL &&
+                        ((b->type == BELAY_T_DIR && (b->unreadable || b->is_mount)) ||
+                         (a != NULL && a->type == BELAY_T_DIR && (a->unreadable || a->is_mount)));
     const bool one_side = (b == NULL) != (a == NULL);
     if (only_no_delete && !sealed && !(unknown && one_side)) {
         /* it is there, or it is gone and the diff says which */

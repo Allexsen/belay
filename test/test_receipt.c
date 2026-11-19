@@ -674,6 +674,38 @@ TEST(every_line_for_a_directory_nothing_was_seen_below_says_so) {
     g_class = NULL;
 }
 
+/* G3-5: a path that became a directory nothing was seen below says so on
+ * its line, and the line is never folded: not past the cut, not into what
+ * git ignores. Another type change is as it was. */
+TEST(a_type_change_into_a_sealed_directory_says_so_and_never_folds) {
+    static char diff[1 << 16];
+#define INTO(p, why) "{\"path\":\"" p "\",\"outcome\":\"type_changed\",\"type\":\"dir\",\"type_before\":\"reg\"," \
+        "\"changed\":[\"type\"],\"before\":{\"mode\":33188,\"size\":1},\"after\":{\"mode\":16384},\"content_not_read\":[\"" why "\"]}\n"
+    size_t w = (size_t)snprintf(diff, sizeof diff, "%s", HEAD);
+    for (int i = 0; i < 60; i++)
+        w += (size_t)snprintf(diff + w, sizeof diff - w, "{\"path\":\"a%03d.txt\",\"outcome\":\"added\",\"type\":\"reg\"}\n", i);
+    w += (size_t)snprintf(diff + w, sizeof diff - w, "%s",
+        "{\"path\":\"out/a.o\",\"outcome\":\"added\",\"type\":\"reg\"}\n"
+        INTO("out/tofile", "unreadable")
+        "{\"path\":\"plain\",\"outcome\":\"type_changed\",\"type\":\"dir\",\"type_before\":\"reg\","
+        "\"changed\":[\"type\"],\"before\":{\"mode\":33188,\"size\":1},\"after\":{\"mode\":16877}}\n"
+        INTO("tofile", "unreadable")
+        INTO("tomnt", "mount")
+        TRAIL("0", "61", "0", "0", "0", "0", "0"));
+#undef INTO
+    g_class = fake_class;
+    g_class_fails = false;
+    ASSERT_EQ_INT(0, render(diff, false));
+    ASSERT_TRUE(strstr(g_text, "  T tofile   reg -> dir; nothing below it was seen\n") != NULL);
+    ASSERT_TRUE(strstr(g_text, "  T tomnt   reg -> dir; nothing below it was seen\n") != NULL);
+    ASSERT_TRUE(strstr(g_text, "  T out/tofile   reg -> dir; nothing below it was seen\n") != NULL);
+    ASSERT_TRUE(strstr(g_text, "  git-ignored: 1 change under out/\n") != NULL);
+    ASSERT_TRUE(strstr(g_text, "T plain") == NULL);                     /* past the cut, as before */
+    ASSERT_EQ_INT(0, render(diff, true));
+    ASSERT_TRUE(strstr(g_text, "  T plain   reg -> dir\n") != NULL);
+    g_class = NULL;
+}
+
 /* G3-2: the summary says how many directories of the after side nothing was
  * seen below; nothing when there is none, or when the trailer has no count. */
 TEST(the_summary_counts_the_directories_nothing_was_seen_below) {
@@ -708,6 +740,7 @@ int main(void) {
     RUN(a_changed_file_whose_content_was_not_read_says_so);
     RUN(a_row_whose_content_was_not_read_never_folds);
     RUN(every_line_for_a_directory_nothing_was_seen_below_says_so);
+    RUN(a_type_change_into_a_sealed_directory_says_so_and_never_folds);
     RUN(the_note_follows_the_path_when_the_line_says_nothing_else);
     RUN(the_summary_counts_the_directories_nothing_was_seen_below);
     RUN(a_diff_of_another_version_is_rejected_and_b64_scopes_shown);

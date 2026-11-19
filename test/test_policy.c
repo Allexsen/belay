@@ -940,6 +940,30 @@ TEST(under_no_delete_a_directory_nothing_was_seen_below_is_unverifiable) {
     ASSERT_EQ_INT(0, count("protected_path_unverifiable"));
 }
 
+/* PV2-11: under no_delete alone, what was not there at reset and is there
+ * after is no finding, whatever it carries -- a file or a directory belay
+ * could not read. PV2-9: a directory nothing was seen below at reset, then
+ * removed, is deleted and cannot be verified. */
+TEST(under_no_delete_what_was_created_is_no_finding_and_a_sealed_directory_removed_is_both) {
+    if (geteuid() == 0) SKIP("root reads anything");
+    static const char ONLY[] = "{\"belay_protect\":2,\"protect\":[{\"path\":\"grader/**\",\"mode\":[\"no_delete\"]}]}";
+    fresh(ONLY);
+    sh("mkdir -p grader && printf 'k\\n' > grader/key");
+    REQUIRE_MSG(export_(true) == EXIT_DONE, "%s", g_err);
+    sh("printf 'n\\n' > grader/new && chmod 000 grader/new && mkdir grader/newdir && chmod 000 grader/newdir");
+    const int rc = verify_(true);
+    sh("chmod 755 grader/newdir");
+    if (rc != EXIT_DONE || count("protected_path_unverifiable") != 0) BELAY_FAIL("exit %d in:\n%s", rc, g_out);
+
+    fresh(ONLY);
+    sh("mkdir -p grader/sub && printf 'k\\n' > grader/sub/x && chmod 000 grader/sub");
+    REQUIRE_MSG(export_(true) == EXIT_DONE, "%s", g_err);
+    sh("chmod 755 grader/sub && rm -rf grader/sub");
+    ASSERT_EQ_INT(EXIT_CHANGES, verify_(true));
+    HAS("protected_path_deleted", "grader/sub", ",\"rule\":\"grader/**\",");
+    HAS("protected_path_unverifiable", "grader/sub", ",\"rule\":\"grader/**\",\"reasons\":[\"unreadable\"");
+}
+
 /* PV2-8 for a flag other than unreadable: a writer holds the protected file
  * at verify, so its outcome is unknown (writer_open). It is there. */
 TEST(under_no_delete_a_file_a_writer_holds_is_there) {
@@ -1221,6 +1245,7 @@ int main(void) {
     RUN(no_delete_reads_existence_only);
     RUN(no_delete_beside_anything_else_reads_what_it_read);
     RUN(under_no_delete_a_directory_nothing_was_seen_below_is_unverifiable);
+    RUN(under_no_delete_what_was_created_is_no_finding_and_a_sealed_directory_removed_is_both);
     RUN(under_no_delete_a_file_a_writer_holds_is_there);
     RUN(a_protected_file_modified_and_not_read_is_written_and_unverifiable);
     RUN(a_side_never_looked_at_is_not_counted);
