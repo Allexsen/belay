@@ -14,7 +14,8 @@ the driver's diff and reference.diff() must agree on
   - every record: path and its spelling (path / path_b64), outcome, type,
     type_before, `changed` exactly (order included), `unknown` as a set, the
     records' order;
-  - every record's `content_not_read` (test/expect/diff-fields.md O9): present
+  - every record's `content_not_read` (test/expect/diff-fields.md O9, and O10
+    for an `added` record: a regular file not read, a sealing directory): present
     exactly where the reference says, its reasons as a set, and where it
     stands ("after the values and before `findings`"); its order is "the
     order of the `unknown` array", so it is held to the one order below
@@ -44,8 +45,9 @@ the driver's diff and reference.diff() must agree on
   `metadata_only` a non-content one, `type_changed` is exactly ["type"],
   `unknown` appears only on an `unknown` outcome (rules 3 and 4),
   `content_not_read` only on a `modified` or `metadata_only` record of a
-  regular file with no `type_before`, never empty, each reason once and one
-  of O9's four, `before`
+  regular file with no `type_before`, or on an `added` record of a regular
+  file or a directory (O10: a directory's is one of `unreadable`, `mount`),
+  never empty, each reason once and one of O9's four, `before`
   and `after` appear together exactly on a record with `changed` (V1),
   each naming only what V1 allows, or V6 on a record with `type_before`
   (`unknown` too), under a key the manifest uses, never both `{}` (V2).
@@ -228,6 +230,7 @@ G_TYPE_BEFORE = 'type_before on every path whose types differ, raced or not'
 G_DIGEST = 'xattrs: an inline set against a digest, by the formula (manifest-v1)'
 G_O8 = 'unverified on a side that also carries mount: no reason; on the other side its own (O8)'
 G_O9 = 'content_not_read on a modified regular file whose content was not read on a side (O9)'
+G_O10 = 'content_not_read on an added regular file not read or sealing directory (O10)'
 G_O9_UNVERIFIED = ('content_not_read: unverified gives no reason beside unreadable, unstable or '
                    'mount on its side (O9)')
 # diff-values.md: the values of a record that otherwise agrees, by what the
@@ -307,9 +310,18 @@ def contradicts_itself(g):
     # "no record has both" it and `unknown`.
     if ref.CONTENT_NOT_READ in g:
         cn = g[ref.CONTENT_NOT_READ]
-        if o not in ('modified', 'metadata_only') or g.get('type') != 'reg' or 'type_before' in g:
+        # O10: "An `added` record carries `content_not_read` too ... A regular
+        # file ... A directory ... No other type, and never a `removed` record."
+        ok = (o in ('modified', 'metadata_only') and g.get('type') == 'reg') or \
+            (o == 'added' and g.get('type') in ('reg', 'dir'))
+        if not ok or 'type_before' in g:
             return 'content_not_read on a %s record of a %s%s' % (
                 o, g.get('type'), ' with type_before' if 'type_before' in g else '')
+        if isinstance(cn, list) and g.get('type') == 'dir' and \
+                (len(cn) != 1 or cn[0] not in ref.SEALING_FLAGS):
+            return 'content_not_read of a directory is %r' % (cn,)
+        if isinstance(cn, list) and o == 'added' and len(cn) != 1:
+            return 'content_not_read of an added record is %r' % (cn,)
         if not isinstance(cn, list) or not cn or len(set(map(str, cn))) != len(cn) or \
                 any(r not in ref.NOT_READ_FLAGS for r in cn):
             return 'content_not_read is %r' % (cn,)
@@ -387,7 +399,8 @@ def compare_record(path, exp, got, trace, orders):
             groups.append('OTHER: record key order %s (diff-values V1, V6)' % keys)
         # O9: "It stands where `unknown` would, after the values and before
         # `findings`".
-        at = [k for k in ('after', ref.CONTENT_NOT_READ, 'findings') if k in keys]
+        # O10: "after `type`, before `findings`" (an `added` record has no values).
+        at = [k for k in ('type', 'after', ref.CONTENT_NOT_READ, 'findings') if k in keys]
         if ref.CONTENT_NOT_READ in keys and [k for k in keys if k in at] != at:
             groups.append('OTHER: record key order %s (O9: after the values, before findings)'
                           % keys)
@@ -435,7 +448,9 @@ def compare_record(path, exp, got, trace, orders):
     if not isinstance(ng, list):
         ng = [ng]
     if set(ne) != set(map(str, ng)) or (ref.CONTENT_NOT_READ in exp) != (ref.CONTENT_NOT_READ in g):
-        if exp['outcome'] == g.get('outcome'):
+        if exp['outcome'] == g.get('outcome') == 'added':
+            groups.append(G_O10)
+        elif exp['outcome'] == g.get('outcome'):
             groups.append(G_O9_UNVERIFIED if 'O9-unverified-because-of' in trace
                           and set(ne) ^ set(map(str, ng)) == {'unverified'} else G_O9)
         else:
@@ -2087,6 +2102,7 @@ def v4_coverage(stem, tags):
 NR_STATES = ('hashed', 'unverified', 'unstable', 'unreadable', 'mount')
 NR_PAIRS = [(x, y) for x in NR_STATES for y in NR_STATES if (x, y) != ('hashed', 'hashed')]
 NR_SIZE = 'a regular file %s before, %s after, the size differs'
+NR_ADDED = 'an added regular file %s'
 NR_SAME = 'a regular file %s on a side, the size the same: unknown, no content_not_read'
 NOT_READ_SCENARIOS = (
     [NR_SIZE % xy for xy in NR_PAIRS]
@@ -2101,6 +2117,21 @@ NOT_READ_SCENARIOS = (
        'content_not_read beside iflags on one side only, which gives no reason',
        'content_not_read on a record with findings',
        'content_not_read on a path that is not UTF-8',
+       # O10
+       ]
+    + [NR_ADDED % x for x in NR_STATES]
+    + ['an added directory unreadable: content_not_read',
+       'an added directory that is a mount: content_not_read',
+       'an added directory unstable: no content_not_read',
+       'an added directory with no flag: no content_not_read',
+       'an added symlink unreadable: no content_not_read',
+       'a removed regular file not read: no content_not_read',
+       'a removed sealing directory: no content_not_read',
+       'a regular file not read on one side only and raced: unknown, no content_not_read',
+       'a regular file not read on one side only, below a sealed directory on the other: '
+       'unknown, no content_not_read',
+       'an added regular file not read, with findings',
+       'an added regular file not read, its path not UTF-8',
        'sealing: 0 on both sides', 'sealing: not 0 before', 'sealing: not 0 after',
        'sealing: the two counts differ, neither 0', 'sealing: 2 or more on a side',
        'sealing: an unreadable directory', 'sealing: a mount directory',
@@ -2165,6 +2196,40 @@ def not_read_coverage(stem, tags):
             tags.add('content_not_read on a record with findings')
         if not is_utf8(p):
             tags.add('content_not_read on a path that is not UTF-8')
+    for p in set(eb) ^ set(ea):                 # O10, by the outcome the reference decides
+        e = ea[p] if p in ea else eb[p]
+        o = recs[p]['outcome'] if p in recs else None
+        t = e['type']
+        nr = t == 'reg' and reg_state(e) != 'hashed'
+        seals = t == 'dir' and (e.get('unreadable') or e.get('mount'))
+        if o == 'added':
+            if t == 'reg':
+                tags.add(NR_ADDED % reg_state(e))
+                if nr and 'findings' in recs[p]:
+                    tags.add('an added regular file not read, with findings')
+                if nr and not is_utf8(p):
+                    tags.add('an added regular file not read, its path not UTF-8')
+            elif t == 'dir':
+                tags.add('an added directory unreadable: content_not_read' if e.get('unreadable')
+                         else 'an added directory that is a mount: content_not_read'
+                         if e.get('mount') else
+                         'an added directory unstable: no content_not_read' if e.get('unstable')
+                         else 'an added directory with no flag: no content_not_read')
+            elif t == 'lnk' and e.get('unreadable'):
+                tags.add('an added symlink unreadable: no content_not_read')
+        elif o == 'removed':
+            if nr:
+                tags.add('a removed regular file not read: no content_not_read')
+            if seals:
+                tags.add('a removed sealing directory: no content_not_read')
+        elif o == 'unknown' and nr:
+            if e.get('raced') and recs[p]['unknown'] == ['raced']:
+                tags.add('a regular file not read on one side only and raced: unknown, no '
+                         'content_not_read')
+            anc = ref.nearest_ancestor(eb if p in ea else ea, p)
+            if anc['type'] == 'dir' and (anc.get('unreadable') or anc.get('mount')):
+                tags.add('a regular file not read on one side only, below a sealed directory '
+                         'on the other: unknown, no content_not_read')
     nb, na = ref.sealing(eb), ref.sealing(ea)
     if not nb and not na:
         tags.add('sealing: 0 on both sides')
@@ -2266,7 +2331,7 @@ def print_gate(cov):
                         ('interpreter', 'interpreters, with no store; git\'s events with one'),
                         ('manifest version', 'manifest versions and v2 statements'),
                         ('manifest v4', 'manifest v4: writer_open and its trailer counts'),
-                        ('not read', 'content_not_read (O9) and the sealing counts (G3-2)')):
+                        ('not read', 'content_not_read (O9, O10) and the sealing counts (G3-2)')):
         items = [i for k, i in need if k == kind]
         lack = [i for k, i in missing if k == kind]
         print('   %s: %d/%d, fewest pairs %d' % (title, len(items) - len(lack), len(items),
