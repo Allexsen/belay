@@ -14,8 +14,8 @@ Its only sources:
     and, under "Field rules a reader MUST enforce", what `xattrs_sha256` is;
   - test/expect/diff-fields.md, READ AT RUN TIME: for each field its
     `compared as`, `for types`, `on mount roots` and `absent means`, and the
-    outcome rules O1-O9 (the text of O2, O5, O6, O7, O8 and O9 checked at
-    start-up where this file relies on it), and "The trailer", G3-2 (its
+    outcome rules O1-O10 (the text of O2, O5, O6, O7, O8, O9 and O10 checked
+    at start-up where this file relies on it), and "The trailer", G3-2 (its
     words checked at start-up): `before_sealing` and `after_sealing`;
   - test/expect/manifest-v1.md, read at run time for the entry types;
   - docs/spec/diff-v1.md "Interpreters" and "What each interpreter reports",
@@ -103,9 +103,21 @@ Ambiguities in O9 and G3-2 (N1-N6), where they are decided:
      regular file or symlink and an unstable directory are not counted, and
      the count is of the entries, never the manifest trailer's own
      `unreadable`. The scope root counts when it is unreadable;
-  N6 the "Shape" example of docs/spec/diff-v1.md does not show the two
-     keys, though the "### Trailer" paragraph under it names them: the pin
-     is followed, and the example is accepted with or without them (as X2).
+  N6 SETTLED: the "Shape" example of docs/spec/diff-v1.md now shows the
+     two keys. It did not at first, though the "### Trailer" paragraph
+     under it named them; the example is still accepted either way (as X2);
+  N7 O10, "from its one entry", read with the one-sided rules as they are:
+     only a path whose outcome is `added`. An entry on one side only that
+     is `unknown` (below a sealed or unstable directory, excluded, `raced`,
+     `writer_open`) keeps `unknown` and carries no `content_not_read`
+     ("no record has both", O9);
+  N8 O10's directory: "carrying `unreadable` or `mount`: that reason" --
+     one reason (manifest-v1 rule 11 allows a directory one of them). An
+     added directory carrying `unstable` gives none: its listing was read,
+     incompletely, and O10 does not name it. A regular file's
+     `xattrs_unknown` gives none, as under O9 (N2);
+  N9 O10, "No other type": an added symlink carrying `unreadable` (its
+     target not read) carries no `content_not_read`.
 
 Ambiguities this file resolves one way (questions for the author) are
 marked "ambiguity I<n>" where they are decided (VA<n> for diff-values.md,
@@ -595,7 +607,7 @@ def load_fields():
     for name, ok in need.items():
         if name not in fields or not ok(fields[name]):
             raise SystemExit('pin: row %r no longer says what reference.py assumes' % name)
-    for r in ('O1', 'O2', 'O3', 'O4', 'O5', 'O6', 'O7', 'O8', 'O9'):
+    for r in ('O1', 'O2', 'O3', 'O4', 'O5', 'O6', 'O7', 'O8', 'O9', 'O10'):
         if r not in rules:
             raise SystemExit('pin: outcome rule %s missing' % r)
     # The words of each rule that both_sides() relies on.
@@ -620,6 +632,9 @@ def load_fields():
         # O9, in content_not_read(): which records, which flags, `unverified`
         # per side, where the key stands, and that nothing else moves.
         'O9': O9_WORDS,
+        # O10, in added_not_read(): the outcome, the two types and their
+        # reasons, never `removed`, and where the key stands.
+        'O10': O10_WORDS,
     }
     for r, words in said.items():
         for w in words:
@@ -641,6 +656,16 @@ O9_WORDS = ['A `modified` or `metadata_only` record of a regular file (`reg` on 
             'It stands where `unknown` would, after the values and before `findings`; no record '
             'has both.',
             'The `unknown` key and the outcome are unchanged']
+O10_WORDS = ['An `added` record carries `content_not_read` too, from its one entry.',
+             'A regular file: by O9\'s rule for a side -- `unstable`, `unreadable`, `mount`, or '
+             '`unverified` when it carries none of those (over the hash limit).',
+             'A directory carrying `unreadable` or `mount`: that reason, since its listing was '
+             'not read and nothing below it has a record.',
+             'No other type, and never a `removed` record.',
+             'It stands where O9 puts it: after `type`, before `findings`.',
+             'The outcome is unchanged']
+# A directory's reasons under O10: "carrying `unreadable` or `mount`: that reason".
+SEALING_FLAGS = ['unreadable', 'mount']
 CONTENT_NOT_READ = 'content_not_read'
 # O9's reasons, as it lists them (ambiguity N1); `not_read` is manifest v5's,
 # which no manifest of versions 1 to 4 can carry.
@@ -656,6 +681,8 @@ G_WORDS = {
              'order of the diff\'s own `unknown` array, from the flags of either side; '
              '`unverified` adds no reason on a side that also carries `unreadable`, `unstable` '
              'or `mount`. An unreadable file gives `["unreadable"]`.'],
+    'G2-5': ['An `added` record of a regular file not read, or of a directory nothing was seen '
+             'below, carries `content_not_read` (`diff-fields.md`, O10).'],
     'G3-2': ['The diff trailer gains `before_sealing`, `after_sealing`, ints, after every key '
              'it has (`diff-fields.md`, "The trailer").'],
 }
@@ -687,9 +714,11 @@ def sealing_pin():
                          'write: %s' % others)
     lines = open(CHECKPOINT_V3_PIN, encoding='utf-8').read().splitlines()
     for r, words in G_WORDS.items():
+        # The row of "The lines": the first (a later table says how each
+        # row was established, under the same ids).
         row = [l for l in lines if l.startswith('| %s |' % r)]
         for w in words:
-            if len(row) != 1 or w not in row[0]:
+            if not row or w not in row[0]:
                 raise SystemExit('pin: checkpoint-v3.md %s no longer says what reference.py '
                                  'assumes: %r' % (r, w))
     if SPEC_SEALING_WORDS not in ' '.join(spec_prose(SPEC).split()):
@@ -974,6 +1003,25 @@ def content_not_read(b, a, out, trace):
         for side in (b, a):
             if side.get(UNVERIFIED) and not gives(side, UNVERIFIED):
                 trace.append('O9-unverified-because-of')
+    return why
+
+
+def added_not_read(e, trace):
+    """O10: the reasons an `added` record carries, from its one entry e; []
+    for none. "A regular file: by O9's rule for a side -- `unstable`,
+    `unreadable`, `mount`, or `unverified` when it carries none of those";
+    "A directory carrying `unreadable` or `mount`: that reason"; "No other
+    type" (ambiguities N8, N9)."""
+    if e['type'] == 'reg':
+        why = [f for f in NOT_READ_FLAGS if f != UNVERIFIED and e.get(f)]
+        if not why and e.get(UNVERIFIED):
+            why = [UNVERIFIED]
+    elif e['type'] == 'dir':
+        why = [f for f in NOT_READ_FLAGS if f in SEALING_FLAGS and e.get(f)]
+    else:
+        why = []
+    if why:
+        trace.append('O10')
     return why
 
 
@@ -3225,6 +3273,13 @@ def diff(before, after, store=None):
                 if out != 'modified' or 'before' not in rec:
                     raise AssertionError('reference bug: content_not_read on a %s record at '
                                          '%r (ambiguity N3)' % (out, p))
+                rec[CONTENT_NOT_READ] = cnr
+        elif out == 'added':
+            # O10: "An `added` record carries `content_not_read` too, from its
+            # one entry ... never a `removed` record. It stands ... after
+            # `type`, before `findings`."
+            cnr = added_not_read(a, traces[p])
+            if cnr:
                 rec[CONTENT_NOT_READ] = cnr
         # "For a path that is not `unchanged`, the interpreter that claims it
         # adds **findings** to its record" -- `findings` "absent when none".
