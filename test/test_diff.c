@@ -1349,7 +1349,7 @@ static void set_flag(struct belay_entry *e, enum entry_field f) {
     case F_PATH: case F_TYPE: case F_MODE: case F_UID: case F_GID: case F_SIZE: case F_MTIME:
     case F_CTIME: case F_INO: case F_DEV: case F_NLINK: case F_IFLAGS: case F_CAPS: case F_XATTRS:
     case F_XATTRS_SHA256: case F_SHA256: case F_RDEV: case F_LINK_TARGET: case F_TARGET_OUTSIDE:
-    case F_STORED: case F_COUNT:
+    case F_STORED: case F_NOT_READ: case F_PARTIAL: case F_META: case F_SEALED: case F_COUNT:
         BELAY_FAIL("flag field %d has no setter here", (int)f);
         break;
     }
@@ -1411,7 +1411,10 @@ TEST(a_marked_entry_is_unknown_and_its_hash_never_compared) {
     b.raced = true;                                         /* its own two flags: both */
     REQUIRE(classify_one(&b, true, ANC_NONE, &v) == 0);
     ASSERT_EQ_INT((int)(DRBIT(DR_RACED) | DRBIT(DR_WRITER_OPEN)), (int)v.reasons);
-    ASSERT_EQ_INT(DR_COUNT - 1, DR_WRITER_OPEN);            /* last among the reasons (V4-D4) */
+    /* last among the reasons of v4 (V4-D4); v5's two come after it, in this order (V5-D5) */
+    ASSERT_EQ_INT(DR_WRITER_OPEN + 1, DR_NOT_READ);
+    ASSERT_EQ_INT(DR_NOT_READ + 1, DR_SEALED_KEY);
+    ASSERT_EQ_INT(DR_COUNT - 1, DR_SEALED_KEY);
 }
 
 /* V4-D2 where the values are not `changed`'s: across a type change a side's

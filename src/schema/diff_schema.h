@@ -29,6 +29,7 @@ enum diff_reason {
     DR_UNSET, DR_NONE,
     DR_RACED, DR_UNSTABLE, DR_UNVERIFIED, DR_UNREADABLE, DR_MOUNT, DR_XATTRS_UNKNOWN,
     DR_IFLAGS_UNKNOWN, DR_LISTING_INCOMPLETE, DR_NOT_CAPTURED, DR_WRITER_OPEN,
+    DR_NOT_READ, DR_SEALED_KEY,         /* manifest-v5 V5-D5: after writer_open, in this order */
     DR_COUNT
 };
 #define DR_FIRST DR_RACED
@@ -58,7 +59,11 @@ extern const struct diff_name_def DIFF_REASONS[DR_COUNT];
  *                 is an attribute the manifest does not record;
  *    CC_FLAG      not compared; on either side, makes what `unknown_scope`
  *                 names unknown, for reason `reason`;
- *    CC_INFO      not compared (derived, or bookkeeping).
+ *    CC_INFO      not compared (derived, or bookkeeping);
+ *    CC_RULE      a version 5 flag whose effect a rule of its pin decides
+ *                 (manifest-v5.md V5-D1 to V5-D4), in classify.c: unlike a
+ *                 CC_FLAG it does not always make something unknown -- two
+ *                 `meta` entries equal in every field are unchanged.
  *  `types` limits the class to those entry types; elsewhere the field is
  *  CC_INFO (a directory's size and mtime follow its listing, which its
  *  children report). `mount_roots` says whether it is compared on an entry
@@ -71,7 +76,7 @@ extern const struct diff_name_def DIFF_REASONS[DR_COUNT];
  *  US_NONE, DR_NONE.
  */
 enum change_class { CC_UNSET, CC_KEY, CC_TYPE, CC_CONTENT, CC_METADATA, CC_IDENTITY, CC_DEVICE,
-                    CC_INODE, CC_CTIME, CC_FLAG, CC_INFO };
+                    CC_INODE, CC_CTIME, CC_FLAG, CC_INFO, CC_RULE };
 enum unknown_scope { US_UNSET, US_NONE, US_CONTENT, US_METADATA, US_ALL };
 enum mount_roots { MR_UNSET, MR_COMPARED, MR_NOT_COMPARED };
 /* What an optional field's absence on one side means. */
@@ -106,7 +111,7 @@ enum change_class diff_field_class(enum entry_field f, enum belay_entry_type t);
 enum diff_header_field { DH_VERSION, DH_SCOPES, DH_BEFORE_CREATED, DH_AFTER_CREATED,
                          DH_BEFORE_HASH_MAX, DH_AFTER_HASH_MAX, DH_SCOPE_REMOUNTED,
                          DH_IDENTITY_COMPARED, DH_BEFORE_MANIFEST_VERSION, DH_AFTER_MANIFEST_VERSION,
-                         DH_BEFORE_EXCLUDED, DH_AFTER_EXCLUDED,
+                         DH_BEFORE_EXCLUDED, DH_AFTER_EXCLUDED, DH_ROOTS_DIFFER,
                          DH_COUNT };
 enum diff_record_field { DF_PATH, DF_OUTCOME, DF_TYPE, DF_TYPE_BEFORE, DF_CHANGED, DF_BEFORE,
                          DF_AFTER, DF_UNKNOWN, DF_CONTENT_NOT_READ, DF_FINDINGS, DF_COUNT };

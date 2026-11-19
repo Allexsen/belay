@@ -106,6 +106,30 @@ static int linux_inode_flags(void *ctx, int fd, const struct stat *st, uint64_t 
     return 0;
 }
 
+/* manifest-v5 V5-E6, by <linux/magic.h>: ext2, ext3 and ext4 share one
+ * number; zfs's is OpenZFS's ZFS_SUPER_MAGIC. O_PATH: the open triggers no
+ * automount and needs no permission on the directory. */
+static bool linux_mount_enterable(void *ctx, int dfd, const char *name) {
+    (void)ctx;
+    static const unsigned long ENTERED[] = {
+        0xEF53,         /* ext2, ext3, ext4 */
+        0x58465342,     /* xfs */
+        0x9123683E,     /* btrfs */
+        0x4d44,         /* vfat (msdos) */
+        0xF2F52010,     /* f2fs */
+        0x2fc12fc1,     /* zfs */
+    };
+    const int fd = openat(dfd, name, O_PATH | O_NOFOLLOW | O_CLOEXEC);
+    if (fd == -1) return false;
+    struct statfs sfs;
+    bool yes = false;
+    if (fstatfs(fd, &sfs) == 0)
+        for (size_t i = 0; i < sizeof ENTERED / sizeof ENTERED[0]; i++)
+            if ((unsigned long)sfs.f_type == ENTERED[i]) yes = true;
+    close(fd);
+    return yes;
+}
+
 static bool linux_is_overlay(void *ctx, int root_fd) {
     (void)ctx;
     struct statfs sfs;
@@ -219,6 +243,7 @@ static const struct fsops linux_ops = {
     .xattr_get = linux_xattr_get,
     .inode_flags = linux_inode_flags,
     .is_overlay = linux_is_overlay,
+    .mount_enterable = linux_mount_enterable,
     .writer_present = linux_writer_present,
     .probe_begin = linux_probe_begin,
     .probe_end = linux_probe_end,

@@ -89,5 +89,8 @@ void outcome_count(struct belay_manifest_stats *s, const struct belay_entry *e) 
     s->mounts     += e->is_mount;
     s->raced      += e->raced;
     s->writer_open += e->writer_open;
-    s->sealing    += e->type == BELAY_T_DIR && (e->unreadable || e->is_mount);
+    s->not_read   += e->not_read;
+    s->meta       += e->meta;
+    s->sealed     += e->sealed;
+    s->sealing    += e->type == BELAY_T_DIR && (e->unreadable || e->is_mount || e->not_read);
 }

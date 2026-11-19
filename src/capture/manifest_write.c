@@ -145,11 +145,13 @@ int capture_write_root(const struct fsops *ops, const char *out_path, const char
     wc->xs = calloc(BELAY_EXCLUDED_MAX, sizeof *wc->xs);
     wc->xlen = calloc(opts->n_exclude_paths + 1, sizeof *wc->xlen);
     for (size_t i = 0; wc->xlen != NULL && i < opts->n_exclude_paths; i++) wc->xlen[i] = strlen(opts->exclude_paths[i]);
+    wc->root_found = calloc(opts->n_roots + 1, sizeof *wc->root_found);
     if (wc->pack == NULL || wc->line == NULL || wc->readbuf == NULL || wc->xlist == NULL ||
-        wc->xnames == NULL || wc->xs == NULL || wc->xlen == NULL) {
+        wc->xnames == NULL || wc->xs == NULL || wc->xlen == NULL || wc->root_found == NULL) {
         belay_err_set(BELAY_ERR_NOMEM, 0, "manifest: out of memory");
         goto cleanup;
     }
+    if (roots_check(opts) == -1) goto cleanup;
     wc->ops = ops;
     wc->opts = opts;
     wc->root_dev = (uint64_t)rst.st_dev;
@@ -179,6 +181,14 @@ int capture_write_root(const struct fsops *ops, const char *out_path, const char
         const int pr = prev_load(ops, opts->previous, real, wc->root_dev, opts, &wc->prev, &pinfo, &prev_why);
         if (pr == -1) goto cleanup;
         wc->reference_ns = pinfo.reference_ns;
+        /* V5-E7: a sealed entry is trusted only when the previous
+         * manifest's sealed_key is this state's. No key here: it is not. */
+        if (wc->prev != NULL && pinfo.sealed_key[0] != '\0') {
+            if (opts->sealing_key_path != NULL && cap_seal_key(wc, false) == 0)
+                wc->prev_key_same = strcmp(wc->sealed_key_id, pinfo.sealed_key) == 0;
+            else
+                belay_err_clear();      /* unreadable or absent: said when a file needs it */
+        }
     }
 
     /* Once per walk: can statx be used here, and is the scope on overlayfs?
@@ -190,14 +200,14 @@ int capture_write_root(const struct fsops *ops, const char *out_path, const char
         wc->scope_overlay = ops->is_overlay(ops->ctx, root_fd);
     }
 
-    if (opts->store_dir != NULL) {
+    if (opts->store_dir != NULL || opts->n_roots > 0) {     /* claims are asked for sealing too (V5-E5) */
         wc->abs = malloc(PATH_MAX * 2);
         if (wc->abs == NULL) {
             belay_err_set(BELAY_ERR_NOMEM, 0, "manifest: out of memory");
             goto cleanup;
         }
         memcpy(wc->abs, real, wc->scope_len);
-        if (store_open(ops, opts->store_dir, &wc->store) == -1) goto cleanup;
+        if (opts->store_dir != NULL && store_open(ops, opts->store_dir, &wc->store) == -1) goto cleanup;
     }
     /* Every file hashed is probed for a writer (capture.c), which needs the
      * platform prepared for it until the capture is over. */
@@ -223,8 +233,17 @@ int capture_write_root(const struct fsops *ops, const char *out_path, const char
     if (ops->fstatat(ops->ctx, root_fd, ".", &probe, AT_SYMLINK_NOFOLLOW) != 0) {
         outcome_apply(&root_e, FACET_LISTING, OUT_DENIED, &wc->tally);
     } else {
+        /* With roots the scope root is on the way to them: partial, as far
+         * as it could be listed (V5-E3). Its search bit counts for sealing
+         * like any directory's above a file (V5-E5). */
+        const struct zone top = {
+            .partial = opts->n_roots > 0, .top = true, .below = opts->n_roots > 0,
+            .cls = opts->n_roots > 0 ? CLS_CONTENT : CLS_WHOLE,
+            .closed = opts->n_roots > 0 && !(rst.st_mode & S_IXOTH),
+        };
+        root_e.partial = top.partial;
         rel[0] = '\0';
-        const int wr = cap_walk(root_fd, rel, PATH_CAP, 0, 0, wc, &root_seen);
+        const int wr = cap_walk(root_fd, rel, PATH_CAP, 0, 0, wc, &root_seen, &top);
         if (wr == -1) goto cleanup;
 
         if (wr == W_INCOMPLETE) outcome_apply(&root_e, FACET_LISTING, OUT_CHANGED, &wc->tally);
@@ -254,7 +273,12 @@ int capture_write_root(const struct fsops *ops, const char *out_path, const char
         close(ofd);
         goto cleanup;
     }
-    if (cap_write_header(ops, out, real, wc->xs, wc->excluded, walk_start_ns, opts, wc->line) == -1)
+    /* The header says `sealed_key` exactly when an entry is sealed (V5-3):
+     * an entry sealed during the walk may since have lost its hash to the
+     * re-check, so the entries are counted as they will be written. */
+    const struct header5 v5 = { opts->roots, wc->root_found, opts->n_roots,
+                                wc->sealed_entries > 0 ? wc->sealed_key_id : NULL };
+    if (cap_write_header(ops, out, real, wc->xs, wc->excluded, walk_start_ns, opts, &v5, wc->line) == -1)
         goto cleanup;
 
     /* The output pass: each entry with its re-check verdict applied, counted
@@ -343,6 +367,17 @@ int capture_write_root(const struct fsops *ops, const char *out_path, const char
     if (tw >= 0)
         tw = fprintf(out, ",\"%s\":%zu,\"%s\":%zu", TRAILER4_FIELDS[TR4_WRITER_OPEN].name, tally.writer_open,
                      TRAILER4_FIELDS[TR4_UNGUARDED].name, wc->unguarded);
+    /* Version 5 (V5-7 to V5-12): the flags counted, and a walk's constants:
+     * nothing carried, no racy path. */
+    if (tw >= 0)
+        tw = fprintf(out, ",\"%s\":%zu,\"%s\":%zu,\"%s\":%zu,\"%s\":0,\"%s\":[]", TRAILER5_FIELDS[TR5_NOT_READ].name,
+                     tally.not_read, TRAILER5_FIELDS[TR5_META].name, tally.meta, TRAILER5_FIELDS[TR5_SEALED].name,
+                     tally.sealed, TRAILER5_FIELDS[TR5_CARRIED].name, TRAILER5_FIELDS[TR5_RACY].name);
+    if (tw >= 0 && tally.sealed != wc->sealed_entries) {
+        belay_err_set(BELAY_ERR_INTERNAL, 0, "manifest: internal error: %zu sealed entries written, %zu counted",
+                      tally.sealed, wc->sealed_entries);
+        goto cleanup;
+    }
     if (tw < 0 || fputs("}\n", out) == EOF) {
         belay_err_set(BELAY_ERR_IO, errno, "manifest: trailer write failed");
         goto cleanup;
@@ -403,6 +438,7 @@ cleanup:
         free(wc->xnames);
         free(wc->xs);
         free(wc->xlen);
+        free(wc->root_found);
         free(wc->abs);
         prev_free(wc->prev);
         belay_store_close(wc->store);

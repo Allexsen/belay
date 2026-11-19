@@ -47,6 +47,8 @@ static int differs(const struct diff_ctx *ctx, enum entry_field f, const struct 
                (b->has_xattrs && strcmp(b->xattrs_sha256_hex, a->xattrs_sha256_hex) != 0);
     case F_SHA256:
         if (b->writer_open || a->writer_open) return NOT_COMPARED;     /* it may be torn (V4-D2) */
+        /* A keyed hash compares with a keyed hash of the same key (V5-D3). */
+        if ((b->sealed || a->sealed) && !(b->sealed && a->sealed && ctx->sealed_comparable)) return NOT_COMPARED;
         return b->has_hash && a->has_hash ? strcmp(b->sha256_hex, a->sha256_hex) != 0 : -1;
     case F_RDEV:   return b->has_rdev && a->has_rdev ? b->rdev != a->rdev : -1;
     case F_LINK_TARGET:
@@ -55,7 +57,7 @@ static int differs(const struct diff_ctx *ctx, enum entry_field f, const struct 
                memcmp(b->link_target, a->link_target, b->link_target_len) != 0;
     case F_PATH: case F_TYPE: case F_XATTRS_SHA256: case F_XATTRS_UNKNOWN: case F_UNVERIFIED:
     case F_UNSTABLE: case F_TARGET_OUTSIDE: case F_STORED: case F_MOUNT: case F_UNREADABLE:
-    case F_RACED: case F_WRITER_OPEN:
+    case F_RACED: case F_WRITER_OPEN: case F_NOT_READ: case F_PARTIAL: case F_META: case F_SEALED:
         return NOT_COMPARED;
     case F_COUNT:
         break;
@@ -69,7 +71,7 @@ static int differs(const struct diff_ctx *ctx, enum entry_field f, const struct 
 static uint32_t not_read(const struct belay_entry *e) {
     const uint32_t r = (e->unstable ? DRBIT(DR_UNSTABLE) : 0) | (e->unreadable ? DRBIT(DR_UNREADABLE) : 0) |
                        (e->is_mount ? DRBIT(DR_MOUNT) : 0);
-    return r != 0 ? r : e->unverified ? DRBIT(DR_UNVERIFIED) : 0;
+    return r != 0 ? r : e->unverified ? DRBIT(DR_UNVERIFIED) : e->meta ? DRBIT(DR_NOT_READ) : 0;   /* v5: O9 */
 }
 
 int classify_both(const struct diff_ctx *ctx, const struct belay_entry *b,
@@ -95,11 +97,42 @@ int classify_both(const struct diff_ctx *ctx, const struct belay_entry *b,
      * reason of its own. */
     if (!(b->unverified && !b->is_mount) && !(a->unverified && !a->is_mount))
         reasons &= ~DRBIT(DR_UNVERIFIED);
+    /*
+     *  Manifest v5's flags (CC_RULE: manifest-v5.md V5-D1 to V5-D4). Each
+     *  gives its reason whenever the outcome is unknown; what it makes
+     *  unknown depends on the other side:
+     *    meta      on one side, the content (V5-D2, as O1 for unverified); on
+     *              both, nothing by itself -- see below (V5-D1);
+     *    sealed    the content, unless both are sealed under one key (V5-D3);
+     *    not_read  a directory: decided here, after the type (V5-D4).
+     */
+    const bool meta_both = b->meta && a->meta;
+    if (b->meta || a->meta) {
+        reasons |= DRBIT(DR_NOT_READ);
+        content_unknown |= !meta_both;
+    }
+    if ((b->sealed || a->sealed) && !(b->sealed && a->sealed && ctx->sealed_comparable)) {
+        reasons |= DRBIT(DR_SEALED_KEY);
+        content_unknown = true;
+    }
+    if (b->not_read || a->not_read) reasons |= DRBIT(DR_NOT_READ);
 
     if (b->type != a->type) {                               /* rule 2, after rule 1 */
         v->changed = FBIT(F_TYPE);
         v->outcome = raced ? D_UNKNOWN : D_TYPE_CHANGED;
         if (raced) v->reasons = reasons;
+        return 0;
+    }
+    /* V5-D4: a directory not entered is compared by its type (above), mode
+     * and owner, and by nothing else: on both sides and equal, no record; on
+     * one side only, or differing, unknown. (Both are directories here: the
+     * flag is a directory's and the types are equal.) */
+    if (b->not_read || a->not_read) {
+        static const enum entry_field OWN[] = { F_MODE, F_UID, F_GID };
+        for (size_t i = 0; i < sizeof OWN / sizeof OWN[0]; i++)
+            if (differs(ctx, OWN[i], b, a) == 1) v->changed |= FBIT(OWN[i]);
+        v->outcome = !raced && b->not_read && a->not_read && v->changed == 0 ? D_UNCHANGED : D_UNKNOWN;
+        if (v->outcome == D_UNKNOWN) v->reasons = reasons;
         return 0;
     }
     /* A mount root's own timestamps belong to the mounted filesystem. */
@@ -131,6 +164,13 @@ int classify_both(const struct diff_ctx *ctx, const struct belay_entry *b,
     if (raced) v->outcome = D_UNKNOWN;                              /* rule 1 */
     else if (content_diff) v->outcome = D_MODIFIED;                 /* rule 3: proof */
     else if (content_unknown) v->outcome = D_UNKNOWN;
+    /* V5-D1: neither side read the content, so nothing shows it intact: any
+     * difference at all -- a field's, or the ctime alone -- is unknown, never
+     * metadata_only (a same-size rewrite moves the same fields). */
+    else if (meta_both && (meta_diff || meta_unknown || differs(ctx, F_CTIME, b, a) == 1)) {
+        v->outcome = D_UNKNOWN;
+        if (!meta_diff) v->changed |= differs(ctx, F_CTIME, b, a) == 1 ? FBIT(F_CTIME) : 0;
+    }
     else if (meta_diff) v->outcome = D_METADATA_ONLY;               /* rule 4 */
     else if (meta_unknown) v->outcome = D_UNKNOWN;
     /* A mount root never gets here: its flag made the content unknown. */
