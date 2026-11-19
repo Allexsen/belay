@@ -23,6 +23,7 @@ struct prev_rec {
     int64_t mtime_ns, ctime_ns;
     uint32_t mode;
     bool has_stored;
+    bool sealed;                    /* the hash is keyed (manifest-v5 V5-6): trusted only as sealed (V5-E9) */
     uint8_t sha256[32];
 };
 
@@ -34,6 +35,7 @@ struct prev_info {
     int64_t walk_start_ns;          /* the previous header's walk_start_ns; 0: unknown (v1, or not read) */
     uint64_t hash_max_bytes, store_max_bytes;
     size_t files;                   /* regular files indexed */
+    char sealed_key[BELAY_SEALED_KEY_HEX + 1];   /* the previous header's; "" when it has none */
 };
 
 /* Loads `path`, written for a scope whose root is on `root_dev`. 0; 1 when

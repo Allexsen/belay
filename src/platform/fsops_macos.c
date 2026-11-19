@@ -72,6 +72,14 @@ static int macos_inode_flags(void *ctx, int fd, const struct stat *st, uint64_t 
     return 0;
 }
 
+/* manifest-v5 V5-E6 lists Linux filesystem types; none of them is what
+ * macOS mounts as a local disk (apfs, hfs), so no mount is entered here:
+ * every mount point stays a `mount` entry, as before version 5. */
+static bool macos_mount_enterable(void *ctx, int dfd, const char *name) {
+    (void)ctx; (void)dfd; (void)name;
+    return false;
+}
+
 static bool macos_is_overlay(void *ctx, int root_fd) {
     (void)ctx; (void)root_fd;
     return false;
@@ -126,6 +134,7 @@ static const struct fsops macos_ops = {
     .xattr_get = macos_xattr_get,
     .inode_flags = macos_inode_flags,
     .is_overlay = macos_is_overlay,
+    .mount_enterable = macos_mount_enterable,
     .writer_present = macos_writer_present,
     .probe_begin = macos_probe_noop,
     .probe_end = macos_probe_noop,

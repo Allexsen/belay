@@ -43,9 +43,17 @@ const struct diff_name_def DIFF_REASONS[DR_COUNT] = {
         "shared-writable, when it was read, so its hash may be of bytes it never held. Never "
         "compared." },
     [DR_NOT_CAPTURED] = { "not_captured",
-        "Absent on a side whose nearest recorded ancestor directory is `unreadable` or a "
-        "`mount`, or that excluded the path or a directory above it (manifest v2's `excluded`): "
-        "nothing there was captured." },
+        "Absent on a side whose nearest recorded ancestor directory is `unreadable`, a `mount` or "
+        "(manifest v5) `not_read`, or that excluded the path or a directory above it (manifest "
+        "v2's `excluded`), or whose nearest recorded ancestor is `partial` and records neither "
+        "such a name nor, in its `roots`, this path: nothing there was captured." },
+    [DR_NOT_READ] = { "not_read",
+        "Manifest v5. A regular file whose content was not read, by its root's class (`meta`), "
+        "with something else differing or a hash on the other side; or a directory not entered "
+        "(`not_read`) on one side only, or whose type, mode or owner differs." },
+    [DR_SEALED_KEY] = { "sealed_key",
+        "Manifest v5. A `sealed` hash on one side only, or on both under different sealing keys "
+        "(the manifests' `sealed_key`): the hashes do not compare." },
 };
 
 #define T_REG  TBIT(BELAY_T_REG)
@@ -118,6 +126,25 @@ const struct field_change DIFF_FIELDS[F_COUNT] = {
     [F_WRITER_OPEN] = { CC_FLAG, T_ALL, US_ALL, DR_WRITER_OPEN, C, AM_FLAG,
                    "Everything unknown: the hash may be torn and is not compared, and a writer was "
                    "at the file, so no difference is proof (manifest-v4 V4-D1, V4-D2)." },
+    /* Manifest v5 (test/expect/manifest-v5.md, V5-D1 to V5-D4b). */
+    [F_NOT_READ] = { CC_RULE, T_DIR, US_NONE, DR_NONE, C, AM_FLAG,
+                   "A directory not entered. On both sides, with equal type, mode and owner: no "
+                   "record, and nothing else of it is compared. On one side only, or those differ: "
+                   "`unknown` (reason `not_read`). A path below it on the other side is "
+                   "`not_captured`." },
+    [F_PARTIAL] = { CC_INFO, T_DIR, US_NONE, DR_NONE, C, AM_FLAG,
+                   "Not compared. For a path the other side lacks directly under it: a directory, "
+                   "or a link under the scope root, is `added` or `removed` as anywhere; anything "
+                   "else only when that side's `roots` list it, and is `not_captured` otherwise." },
+    [F_META]   = { CC_RULE, T_REG, US_NONE, DR_NONE, C, AM_FLAG,
+                   "Content not read. On both sides: unchanged when every other field is equal, "
+                   "`modified` when `size` differs, `unknown` (reason `not_read`) for any other "
+                   "difference, never `metadata_only`. Against a hash on the other side: `unknown` "
+                   "unless `size` differs." },
+    [F_SEALED] = { CC_RULE, T_REG, US_NONE, DR_NONE, C, AM_FLAG,
+                   "A keyed hash. On both sides under one `sealed_key`, `sha256` compares as any; on "
+                   "one side only, or under different keys, it does not: `unknown` (reason "
+                   "`sealed_key`) unless `size` differs. No record carries a sealed entry's hash." },
 };
 #undef C
 #undef NC
@@ -158,6 +185,9 @@ const struct line_field_def DIFF_HEADER_FIELDS[DH_COUNT] = {
         "named only here (test/expect/manifest-v2.md, V2-R7)." },
     [DH_AFTER_EXCLUDED] = { "after_excluded", NULL, "array",
         "What the after manifest did not walk, likewise." },
+    [DH_ROOTS_DIFFER] = { "roots_differ", NULL, "bool",
+        "`true` when the two manifests' `roots` (manifest v5) are not equal -- another list, "
+        "another class, or a root found on one side only; absent otherwise." },
 };
 
 const struct line_field_def DIFF_RECORD_FIELDS[DF_COUNT] = {

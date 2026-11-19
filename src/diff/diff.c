@@ -213,9 +213,22 @@ static int run_pipeline(struct run *x) {
         } else {
             const struct belay_entry *e = b != NULL ? b : a;
             const struct belay_manifest_header *lacking = b != NULL ? ha : hb;
-            const enum anc absent = excluded_covers(lacking, e->path, e->path_len)
-                                        ? ANC_SEALED
-                                        : ancestry_of(&x->anc[b != NULL ? 1 : 0], e->path, e->path_len);
+            size_t alen = 0;
+            enum anc absent = excluded_covers(lacking, e->path, e->path_len)
+                                  ? ANC_SEALED
+                                  : ancestry_at(&x->anc[b != NULL ? 1 : 0], e->path, e->path_len, &alen);
+            /* manifest-v5 V5-D4b: the nearest ancestor on the other side is
+             * partial. It records every directory in it, and under the scope
+             * root every link, so the absence of one -- or of anything deeper,
+             * which lies below such a directory on this side -- is known. A
+             * file's is known only when that side's roots list it: looked for
+             * and not there. Otherwise that side did not record such a name. */
+            if (absent == ANC_PARTIAL) {
+                const size_t start = alen ? alen + 1 : 0;
+                const bool direct = memchr(e->path + start, '/', e->path_len - start) == NULL;
+                const bool recorded = !direct || e->type == BELAY_T_DIR || (e->type == BELAY_T_LNK && alen == 0);
+                absent = recorded || belay_manifest_lists_root(lacking, e->path, e->path_len) ? ANC_NONE : ANC_SEALED;
+            }
             if (classify_one(e, a != NULL, absent, &v) == -1) return -1;
         }
         if (b != NULL) ancestry_feed(&x->anc[0], b);
@@ -267,8 +280,12 @@ int diff_run(const char *before, const char *after, const char *out_path,
     ancestry_init(&x->anc[0], ancestry_kind(&x->root[0]));
     ancestry_init(&x->anc[1], ancestry_kind(&x->root[1]));
     const uint64_t dev_b = x->root[0].dev, dev_a = x->root[1].dev;
-    x->ctx = (struct diff_ctx){ .root_dev_before = dev_b, .root_dev_after = dev_a,
-                                .remounted = dev_b != dev_a };
+    {
+        const struct belay_manifest_header *hb = belay_manifest_header(x->rb), *ha = belay_manifest_header(x->ra);
+        x->ctx = (struct diff_ctx){ .root_dev_before = dev_b, .root_dev_after = dev_a, .remounted = dev_b != dev_a,
+                                    .sealed_comparable = hb->sealed_key[0] != '\0' &&
+                                                         strcmp(hb->sealed_key, ha->sealed_key) == 0 };
+    }
     if ((x->pair = pair_new(x->rb, x->ra)) == NULL) {
         belay_err_set(BELAY_ERR_NOMEM, 0, "diff: out of memory");
         goto done;

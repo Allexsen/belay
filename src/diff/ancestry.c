@@ -7,8 +7,9 @@ enum anc ancestry_kind(const struct belay_entry *e) {
      * recorded, into a directory perhaps (review F5). A raced directory is
      * also unreadable or a mount (manifest rule 10): sealed. */
     if (e->type != BELAY_T_DIR) return e->raced ? ANC_RACED : ANC_NONE;
-    if (e->unreadable || e->is_mount) return ANC_SEALED;
+    if (e->unreadable || e->is_mount || e->not_read) return ANC_SEALED;     /* V5-D4 */
     if (e->unstable) return ANC_INCOMPLETE;
+    if (e->partial) return ANC_PARTIAL;
     return ANC_NONE;
 }
 
@@ -39,9 +40,18 @@ void ancestry_feed(struct ancestry *a, const struct belay_entry *e) {
     a->n++;
 }
 
-enum anc ancestry_of(struct ancestry *a, const char *path, size_t len) {
+enum anc ancestry_at(struct ancestry *a, const char *path, size_t len, size_t *alen) {
     pop_for(a, path, len);
     for (size_t i = a->n; i > 0; i--)
-        if (path[a->len[i - 1]] == '/') return (enum anc)a->kind[i - 1];
+        if (path[a->len[i - 1]] == '/') {
+            *alen = a->len[i - 1];
+            return (enum anc)a->kind[i - 1];
+        }
+    *alen = 0;
     return a->root;
+}
+
+enum anc ancestry_of(struct ancestry *a, const char *path, size_t len) {
+    size_t alen;
+    return ancestry_at(a, path, len, &alen);
 }

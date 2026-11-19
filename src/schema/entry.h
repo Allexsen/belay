@@ -29,9 +29,13 @@ enum entry_field {
     F_SHA256, F_UNVERIFIED, F_UNSTABLE, F_RDEV, F_LINK_TARGET, F_TARGET_OUTSIDE,
     F_STORED, F_MOUNT, F_UNREADABLE, F_RACED,
     F_WRITER_OPEN,      /* version 4: past F_V1_COUNT, in no earlier version's key set */
+    F_NOT_READ, F_PARTIAL, F_META, F_SEALED,    /* version 5: past F_V4_COUNT */
     F_COUNT
 };
 #define F_V1_COUNT F_WRITER_OPEN    /* the fields of versions 1 to 3 */
+#define F_V4_COUNT F_NOT_READ       /* the fields of version 4 */
+/* How many of the fields a manifest of `version` may carry. */
+#define ENTRY_FIELDS_OF(version) ((version) >= 5 ? F_COUNT : (version) >= 4 ? F_V4_COUNT : F_V1_COUNT)
 #define FBIT(f) (1u << (f))
 
 /* Entry types: the manifest's spelling and the S_IFMT bits `mode` carries
@@ -80,6 +84,7 @@ struct entry_rule {
 extern const struct entry_rule ENTRY_RULES[];
 extern const size_t ENTRY_RULE_COUNT;
 extern const size_t ENTRY_RULE_COUNT_V1;    /* the rules of versions 1 to 3: the first ones */
+extern const size_t ENTRY_RULE_COUNT_V4;    /* those and version 4's */
 
 /* The header and trailer lines: their fields in canonical order. The
  * writer prints these names, the reader decodes by them, and the spec's
@@ -111,6 +116,17 @@ extern const struct line_field_def TRAILER2_FIELDS[TR2_COUNT];
 /* Version 4's additions (test/expect/manifest-v4.md), after v2's keys. */
 enum trailer4_field { TR4_WRITER_OPEN, TR4_UNGUARDED, TR4_COUNT };
 extern const struct line_field_def TRAILER4_FIELDS[TR4_COUNT];
+/* Version 5's additions (test/expect/manifest-v5.md): the header's after
+ * v3's keys, the trailer's after v4's. `sealed_key` is the one optional
+ * header key; `racy` has a base64 spelling. */
+enum header5_field { H5_ROOTS, H5_SEALED_KEY, H5_BASIS, H5_COUNT };
+enum trailer5_field { TR5_NOT_READ, TR5_META, TR5_SEALED, TR5_CARRIED, TR5_RACY, TR5_COUNT };
+extern const struct line_field_def HEADER5_FIELDS[H5_COUNT];
+extern const struct line_field_def TRAILER5_FIELDS[TR5_COUNT];
+/* The keys of one `roots` element, in order. */
+enum root_field { RT_PATH, RT_CLASS, RT_FOUND, RT_COUNT };
+extern const struct line_field_def ROOT_FIELDS[RT_COUNT];
+extern const char *const ROOT_CLASSES[2];       /* by enum belay_root_class */
 /* The keys of one `excluded` element, in order. */
 enum excluded_field { EX_PATH, EX_REASON, EX_DEV, EX_INO, EX_COUNT };
 extern const struct line_field_def EXCLUDED_FIELDS[EX_COUNT];

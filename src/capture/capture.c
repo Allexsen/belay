@@ -53,9 +53,17 @@ static bool sniff_binary(const struct fsops *ops, int fd, unsigned char *buf) {
  * SNIFF_BYTES. 0, or -1 when the file could not be read. */
 static int hash_fd(const struct fsops *ops, int fd, unsigned char *buf, char hex_out[65],
                    uint64_t *nread, struct belay_store_tx *tx, bool *store_failed,
-                   bool *binary) {
+                   bool *binary, const uint8_t *key) {
     struct belay_sha256 c;
     belay_sha256_init(&c);
+    /* `key` (BELAY_SEALING_KEY_BYTES): HMAC-SHA256 under it instead of the
+     * plain hash (RFC 2104; the key is shorter than the 64-byte block). */
+    uint8_t pad[64];
+    if (key != NULL) {
+        memset(pad, 0x36, sizeof pad);
+        for (size_t i = 0; i < BELAY_SEALING_KEY_BYTES; i++) pad[i] ^= key[i];
+        belay_sha256_update(&c, pad, sizeof pad);
+    }
     *nread = 0;
     *binary = false;
     for (;;) {
@@ -80,8 +88,106 @@ static int hash_fd(const struct fsops *ops, int fd, unsigned char *buf, char hex
     }
     uint8_t d[BELAY_SHA256_DIGEST_LEN];
     belay_sha256_final(&c, d);
+    if (key != NULL) {
+        memset(pad, 0x5c, sizeof pad);
+        for (size_t i = 0; i < BELAY_SEALING_KEY_BYTES; i++) pad[i] ^= key[i];
+        belay_sha256_init(&c);
+        belay_sha256_update(&c, pad, sizeof pad);
+        belay_sha256_update(&c, d, sizeof d);
+        belay_sha256_final(&c, d);
+    }
     belay_hex_encode(hex_out, d, sizeof d);
     return 0;
+}
+
+/*
+ *  The state's sealing key (manifest-v5 V5-R3): 32 random bytes in the file
+ *  opts->sealing_key_path, mode 600, made by the first capture that needs it
+ *  and never rewritten -- it is written under another name and linked into
+ *  place, which fails when a key is already there, so a crash leaves a whole
+ *  key or none. Loads it into wc with its id (the header's `sealed_key`).
+ *  0; 1 when there is none and `create` is false; -1 with belay_err.
+ */
+int cap_seal_key(struct walk_ctx *wc, bool create) {
+    if (wc->have_key) return 0;
+    const char *path = wc->opts->sealing_key_path;
+    if (path == NULL) {
+        belay_err_set(BELAY_ERR_INVALID, 0, "manifest: a file must be sealed and the capture was given no sealing key");
+        return -1;
+    }
+    for (int attempt = 0; attempt < 2; attempt++) {
+        const int fd = open(path, O_RDONLY | O_NOFOLLOW | O_NONBLOCK | O_CLOEXEC);
+        if (fd != -1) {
+            struct stat st;
+            uint8_t k[BELAY_SEALING_KEY_BYTES + 1];
+            ssize_t n = -1;
+            const bool ok = fstat(fd, &st) == 0 && S_ISREG(st.st_mode) && (st.st_mode & 077) == 0 &&
+                            st.st_size == BELAY_SEALING_KEY_BYTES && (n = read(fd, k, sizeof k)) == BELAY_SEALING_KEY_BYTES;
+            close(fd);
+            if (!ok) {
+                belay_err_set(BELAY_ERR_CORRUPT, 0, "%s is not a sealing key: %d bytes in a regular file of mode 600",
+                              path, BELAY_SEALING_KEY_BYTES);
+                return -1;
+            }
+            memcpy(wc->key, k, BELAY_SEALING_KEY_BYTES);
+            struct belay_sha256 h;
+            uint8_t d[BELAY_SHA256_DIGEST_LEN];
+            char hex[2 * BELAY_SHA256_DIGEST_LEN + 1];
+            belay_sha256_init(&h);
+            belay_sha256_update(&h, wc->key, BELAY_SEALING_KEY_BYTES);
+            belay_sha256_final(&h, d);
+            belay_hex_encode(hex, d, sizeof d);
+            memcpy(wc->sealed_key_id, hex, BELAY_SEALED_KEY_HEX);
+            wc->sealed_key_id[BELAY_SEALED_KEY_HEX] = '\0';
+            wc->have_key = true;
+            return 0;
+        }
+        if (errno != ENOENT) {
+            belay_err_set(BELAY_ERR_IO, errno, "cannot open %s", path);
+            return -1;
+        }
+        if (!create) return 1;
+        /* None yet: make one. */
+        uint8_t k[BELAY_SEALING_KEY_BYTES];
+        const int rfd = open("/dev/urandom", O_RDONLY | O_CLOEXEC);
+        size_t got = 0;
+        while (rfd != -1 && got < sizeof k) {
+            const ssize_t n = read(rfd, k + got, sizeof k - got);
+            if (n < 0 && errno == EINTR) continue;
+            if (n <= 0) break;
+            got += (size_t)n;
+        }
+        if (rfd != -1) close(rfd);
+        if (got != sizeof k) {
+            belay_err_set(BELAY_ERR_IO, errno, "cannot read /dev/urandom for the sealing key");
+            return -1;
+        }
+        char tmp[PATH_MAX + 32];
+        if ((size_t)snprintf(tmp, sizeof tmp, "%s.tmp.XXXXXX", path) >= sizeof tmp) {
+            belay_err_set(BELAY_ERR_RANGE, 0, "the sealing key's path is too long");
+            return -1;
+        }
+        const int tfd = mkstemp(tmp);                   /* mode 600 */
+        const bool wrote = tfd != -1 && fchmod(tfd, 0600) == 0 && write(tfd, k, sizeof k) == (ssize_t)sizeof k &&
+                           wc->ops->fsync(wc->ops->ctx, tfd) == 0;
+        const int werr = errno;
+        if (tfd != -1) close(tfd);
+        const bool linked = wrote && link(tmp, path) == 0;
+        const int lerr = errno;
+        if (tfd != -1) unlink(tmp);
+        if (!wrote || (!linked && lerr != EEXIST)) {
+            belay_err_set(BELAY_ERR_IO, wrote ? lerr : werr, "cannot create %s", path);
+            return -1;
+        }
+        /* Linked, or another capture's key got there first: read what is there. */
+    }
+    belay_err_set(BELAY_ERR_IO, 0, "cannot create %s", path);
+    return -1;
+}
+
+/* V5-E4: under a metadata root, a file that grants privilege is read. */
+static bool must_read(const struct belay_entry *e) {
+    return (e->mode & (S_ISUID | S_ISGID)) != 0 || e->has_caps;
 }
 
 void cap_fill_from_stat(struct belay_entry *e, const struct stat *st) {
@@ -283,6 +389,16 @@ bool cap_crossed(const struct walk_ctx *wc, const struct stat *st, bool mount_ro
 /* Errors that are belay's own resource exhaustion rather than a property of
  * one entry: these stay fatal, loudly. Everything else about one entry is
  * recorded on that entry and the walk goes on. */
+/* cap_crossed, for a capture with roots (manifest-v5 V5-E6): a mount point
+ * whose filesystem is a local disk's is entered, its root an ordinary
+ * directory whose dev differs from its parent's. The walk and the
+ * end-of-walk re-check both decide by this. */
+bool cap_boundary(const struct walk_ctx *wc, int dfd, const char *name, const struct stat *st,
+                  bool mount_root, bool mount_known) {
+    if (!cap_crossed(wc, st, mount_root, mount_known)) return false;
+    return !(wc->opts->n_roots > 0 && wc->ops->mount_enterable(wc->ops->ctx, dfd, name));
+}
+
 bool cap_fatal_errno(int err) {
     return err == EMFILE || err == ENFILE || err == ENOMEM;
 }
@@ -357,6 +473,17 @@ int cap_read_file(int pfd, const char *name, const struct stat *st, const char *
             belay_err_set(BELAY_ERR_IO, errno, "manifest: openat %s", rel);
             return -1;
         }
+        /* V5-E7: a file under a metadata root that cannot be opened is
+         * still `meta`, without what only an open reaches (its inode flags
+         * on Linux); `unreadable` would make it a record in every diff. Its
+         * attributes are reached without an open, for the capability. */
+        if (wc->cls == CLS_METADATA) {
+            if (cap_read_extras(wc, -1, pfd, name, st) == -1) return -1;
+            if (!must_read(e)) {
+                e->meta = true;
+                return V_OK;
+            }
+        }
         /* EACCES, EPERM, ELOOP (swapped for a link), EAGAIN (a lease),
          * ETXTBSY, EIO...: one entry's property, recorded on it. */
         outcome_apply(e, FACET_CONTENT, OUT_DENIED, &wc->tally);
@@ -379,6 +506,15 @@ int cap_read_file(int pfd, const char *name, const struct stat *st, const char *
         close(fd);
         return -1;
     }
+    /* V5-E4, V5-5: under a metadata root the file is opened, for its
+     * attributes and inode flags, and never read -- unless it is setuid,
+     * setgid or carries a capability: then it is read and hashed plainly,
+     * like a file under a content root, whatever its mode (V5-E5). */
+    if (wc->cls == CLS_METADATA && !must_read(e)) {
+        e->meta = true;
+        close(fd);
+        return V_OK;
+    }
     if (e->size > wc->opts->hash_max_bytes) {
         outcome_apply(e, FACET_CONTENT, OUT_TOO_LARGE, &wc->tally);
         close(fd);
@@ -389,7 +525,12 @@ int cap_read_file(int pfd, const char *name, const struct stat *st, const char *
      * (stored whatever its size) or forbids storing (hash only); unclaimed
      * files are kept if small and text. */
     struct belay_claim claim = { BELAY_INTERP_BINARY, BELAY_KEEP_DEFAULT };
-    if (wc->store != NULL) {
+    /* V5-E5: under a content root, a file others cannot read -- by its own
+     * mode, or by a directory above it they cannot search -- is sealed: a
+     * keyed hash, no copy, its bytes given to no interpreter. Not a file an
+     * interpreter claims to keep, nor a shell startup file (`plain`). */
+    const bool sealable = wc->cls == CLS_CONTENT && !wc->plain && (wc->closed || !(st->st_mode & S_IROTH));
+    if (wc->store != NULL || sealable) {
         const size_t sep = wc->scope_len > 1 ? 1 : 0;
         if (wc->scope_len + sep + rel_len < PATH_MAX * 2) {
             if (sep) wc->abs[wc->scope_len] = '/';
@@ -397,7 +538,8 @@ int cap_read_file(int pfd, const char *name, const struct stat *st, const char *
             belay_interp_classify(wc->abs, wc->scope_len + sep + rel_len, &claim);
         }
     }
-    bool want = wc->store != NULL && claim.keep != BELAY_KEEP_HASH &&
+    const bool seal = sealable && claim.keep != BELAY_KEEP_STORE;
+    bool want = !seal && wc->store != NULL && claim.keep != BELAY_KEEP_HASH &&
                 (claim.keep == BELAY_KEEP_STORE || e->size <= (claim.keep == BELAY_KEEP_STORE_BOUNDED
                                                                    ? (uint64_t)BELAY_KEEP_BOUNDED_MAX
                                                                    : wc->opts->store_max_bytes));
@@ -413,7 +555,9 @@ int cap_read_file(int pfd, const char *name, const struct stat *st, const char *
      * end-of-walk re-check applies to it as to any other. */
     if (wc->prev != NULL) {
         const struct prev_rec *p = prev_find(wc->prev, (uint64_t)st->st_dev, (uint64_t)st->st_ino);
-        if (prev_trusted(p, st, wc->reference_ns)) {
+        /* V5-E9, V5-E7: trusted only in the class it has now, and a sealed
+         * hash only under the key that made it. */
+        if (prev_trusted(p, st, wc->reference_ns) && p->sealed == seal && (!seal || wc->prev_key_same)) {
             char hex[65];
             prev_hex(p, hex);
             /* A copy is recorded only as a full capture would record it: in
@@ -435,6 +579,7 @@ int cap_read_file(int pfd, const char *name, const struct stat *st, const char *
             }
             if (skip) {
                 e->has_hash = true;
+                e->sealed = seal;
                 memcpy(e->sha256_hex, hex, sizeof e->sha256_hex);
                 if (copy) {
                     e->has_stored = true;
@@ -463,6 +608,10 @@ int cap_read_file(int pfd, const char *name, const struct stat *st, const char *
      *  the file is counted `unguarded`, and its copy is kept, as the spec
      *  says (test/expect/manifest-v4.md).
      */
+    if (seal && cap_seal_key(wc, true) == -1) {
+        close(fd);
+        return -1;
+    }
     const int writer_start = wc->ops->writer_present(wc->ops->ctx, fd);
     if (writer_start == 1) want = false;
 
@@ -478,7 +627,7 @@ int cap_read_file(int pfd, const char *name, const struct stat *st, const char *
     uint64_t nread = 0;
     bool binary = false, store_failed = false;
     const int h = hash_fd(wc->ops, fd, wc->readbuf, e->sha256_hex, &nread, want ? &tx : NULL,
-                          &store_failed, &binary);
+                          &store_failed, &binary, seal ? wc->key : NULL);
     if (store_failed) {
         belay_store_abort(&tx);
         wc->store_failed++;
@@ -513,6 +662,7 @@ int cap_read_file(int pfd, const char *name, const struct stat *st, const char *
     }
 
     e->has_hash = true;
+    e->sealed = seal;
     if (writer_start == 1 || writer_end == 1) e->writer_open = true;
     else if (writer_start == -1 || writer_end == -1 || wc->scope_overlay) wc->unguarded++;
     /* Unclaimed binary content is not kept: the text interpreter could not
@@ -588,6 +738,7 @@ int cap_emit(struct walk_ctx *wc, const struct belay_entry *e, const struct list
         return -1;
     }
     const struct listing none = { 0, 0, 0 };
+    if (e->sealed) wc->sealed_entries++;
     memcpy(wc->pack + n, l != NULL ? l : &none, sizeof none);
     return runs_add(wc->runs, e->path, (uint32_t)e->path_len, wc->pack,
                     (uint32_t)(n + sizeof none));

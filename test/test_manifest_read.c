@@ -1396,7 +1396,7 @@ TEST(v2_header_and_trailer_are_read_and_exposed) {
  * present; the v2 values well formed and agreeing with each other. */
 TEST(v2_is_read_strictly) {
     static const struct { const char *name, *m, *reason; } cases[] = {
-        { "version 5", "{\"belay_manifest\":5,\"created_ns\":0}\n" ROOT_E T2, "format version 5" },
+        { "version 6", "{\"belay_manifest\":6,\"created_ns\":0}\n" ROOT_E T2, "format version 6" },
         { "a v1 header with a v2 key", "{\"belay_manifest\":1,\"created_ns\":0,\"scopes\":[\"/s\"],\"hash\":\"sha256\","
           "\"hash_max_bytes\":67108864,\"store_max_bytes\":65536,\"excluded\":[]}\n" ROOT_E T1 "}\n",
           "unknown key \"excluded\"" },
@@ -1422,6 +1422,8 @@ TEST(v2_is_read_strictly) {
         { "excluded missing ino", H2_PRE ",\"excluded\":[{\"path\":\"a\",\"reason\":\"user\",\"dev\":1}],"
           "\"walk_start_ns\":5}\n" ROOT_E T2, "missing ino" },
         { "a nested value in excluded", H2_PRE ",\"excluded\":[{\"path\":\"a\",\"reason\":true,\"dev\":1,\"ino\":2}],"
+          "\"walk_start_ns\":5}\n" ROOT_E T2, "\"reason\" must be a string" },  /* a bool lexes there from v5 (a root's found) */
+        { "an array in excluded", H2_PRE ",\"excluded\":[{\"path\":\"a\",\"reason\":[1],\"dev\":1,\"ino\":2}],"
           "\"walk_start_ns\":5}\n" ROOT_E T2, "malformed value in an array element" },
         { "objects where strings belong", HDR REG_LINE("f", ",\"xattrs\":[{\"a\":1}]" SHA_F),
           "\"xattrs\" must be a non-empty array" },
