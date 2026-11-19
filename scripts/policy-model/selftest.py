@@ -590,7 +590,7 @@ def fixture_not_read():
     B = dict(list(base.items()) + [(b"g/x", x)])
     A = dict(list(base.items()) + [(b"g/x", locked)])
     for mode, want in (("no_write", ["protected_path_written", "protected_path_unverifiable"]),
-                       ("no_delete", []),                                            # P65: reads before
+                       ("no_delete", []),                                            # PV2-8: existence only
                        ("no_create", ["protected_path_unverifiable"])):
         spec = ('{"belay_protect":2,"protect":[{"path":"g/**","mode":["%s"]}]}' % mode).encode()
         got, _flags = verify(spec, B, A)
@@ -602,9 +602,50 @@ def fixture_not_read():
             check("P-G2: reasons are the entry's flags, in the row's order", lines[1]["reasons"], ["unverified", "unreadable"])
             check("P-G2: no key of policy.v1 carries content_not_read", any("content_not_read" in l for l in got), False)
     got, _flags = verify(b'{"belay_protect":2,"protect":[{"path":"g/**","mode":["no_delete"]}]}', A, B)
-    check("PV2-7 under no_delete, unreadable before: unverifiable",
-          [json.loads(l)["flag"] for l in got[1:-1] if json.loads(l)["flag"].startswith("protected_")],
-          ["protected_path_unverifiable"])
+    check("PV2-8 under no_delete, unreadable before, rewritten: it is there",
+          [json.loads(l)["flag"] for l in got[1:-1] if json.loads(l)["flag"].startswith("protected_")], [])
+    # O10: an `added` record, from its one entry
+    def added(e, edit=None):
+        A = model.view(dict(list(base.items()) + [(b"g/x", e)]), model.HASH_DEFAULT)
+        if edit:
+            edit(A[b"g/x"])
+        return model.diff(model.Side(model.view(base, model.HASH_DEFAULT), 10, []), model.Side(A, 10, [])).get(b"g/x")
+    check("O10: an added file unreadable", added(locked), {"outcome": "added", "type": "reg", "content_not_read": ["unreadable"]})
+    check("O10: an added file over the hash limit", added(big)["content_not_read"], ["unverified"])
+    check("O10: an added file hashed", added(x), {"outcome": "added", "type": "reg"})
+    sealed = dict(raw("dir", 0o40000, ino=5), readable=False)
+    check("O10: an added directory unreadable", added(sealed), {"outcome": "added", "type": "dir", "content_not_read": ["unreadable"]})
+    check("O10: an added directory that is a mount", added(raw("dir", D, ino=5), lambda e: e.update(mount=True))["content_not_read"],
+          ["mount"])
+    check("O10: an added directory unstable: none", added(raw("dir", D, ino=5), lambda e: e.update(unstable=True)),
+          {"outcome": "added", "type": "dir"})
+    check("O10: no other type", added(dict(lnk, link_target=None)), {"outcome": "added", "type": "lnk"})
+    Bx = model.view(dict(list(base.items()) + [(b"g/x", locked)]), model.HASH_DEFAULT)
+    check("O10: never a removed record",
+          model.diff(model.Side(Bx, 10, []), model.Side(model.view(base, model.HASH_DEFAULT), 10, [])).get(b"g/x"),
+          {"outcome": "removed", "type": "reg"})
+    # PV2-8, P-G3: `no_delete` reads existence only
+    nd = '{"path":"g/**","mode":["no_delete"]}'
+
+    def kinds_of(rules, b, a, wb=frozenset(), wa=frozenset()):
+        got, _f = verify(('{"belay_protect":2,"protect":[%s]}' % rules).encode(), b, a, wb=wb, wa=wa)
+        return [(json.loads(l)["flag"], json.loads(l).get("reasons")) for l in got[1:-1]
+                if json.loads(l)["flag"].startswith("protected_")]
+    S_ = dict(list(base.items()) + [(b"g/x", same)])
+    N_ = dict(base)
+    H = {(10, 4)}
+    check("PV2-8: there on both sides, unknown: not unverifiable", kinds_of(nd, B, S_), [])
+    check("PV2-8: a writer held it on both sides: not unverifiable", kinds_of(nd, B, B, wb=H, wa=H), [])
+    check("PV2-8: flagged at reset and removed: deleted and nothing more", kinds_of(nd, A, N_), [("protected_path_deleted", None)])
+    check("PV2-5 still, under no_write: both", kinds_of('{"path":"g/**","mode":["no_write"]}', A, N_),
+          [("protected_path_deleted", None), ("protected_path_unverifiable", ["unverified", "unreadable"])])
+    check("PV2-8: on one side only and unknown: unverifiable (V4-S2)", kinds_of(nd, B, N_, wb=H),
+          [("protected_path_unverifiable", ["writer_open"])])
+    check("PV2-8: with no_create in the rule, as before", kinds_of('{"path":"g/**","mode":["no_delete","no_create"]}', B, S_),
+          [("protected_path_unverifiable", ["unverified", "unreadable", "iflags_unknown"])])
+    check("PV2-8: another rule matching reads what it reads", kinds_of(nd + ',{"path":"g/x","mode":["no_create"]}', B, A),
+          [("protected_path_unverifiable", ["unverified", "unreadable"])])
+    check("PV2-8: two no_delete-only rules read nothing", kinds_of(nd + ',{"path":"g/x","mode":["no_delete"]}', B, S_), [])
 
 
 def fixture_manifest_v4():

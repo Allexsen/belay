@@ -44,8 +44,10 @@ P5  protected_path_unverifiable's `rule`, "the first that matches it": the first
     side makes the path unverifiable.
 
 P6  (For an `unknown`, see P50.) "On a side its modes read" (PS-M5): no_write reads before, and after when the path is
-    there too ("matched before, on both sides"); no_delete reads before; no_create reads after,
-    whenever the path is there (unchanged included); expected_sha256 reads after.
+    there too ("matched before, on both sides"); no_create reads after,
+    whenever the path is there (unchanged included); expected_sha256 reads after. no_delete was
+    read as "reads before"; SETTLED otherwise by PV2-8 (P-G3): it "reads existence only", no
+    entry's flags on either side (P68).
 
 P7  expected_sha256 against an after entry that is a regular file without a hash
     (`unverified`): no protected_hash_mismatch -- none of its `why` fits; PS-M5 says it, as
@@ -278,7 +280,9 @@ P53 New with protect spec 2. PV2-1's "any other value" takes its message whereve
 P54 New with protect spec 2. PV2-2's "a path matched before whose outcome is `removed`" and PS-M5,
     which PV2-5 says reads before for deletion too: a path flagged at reset (`unverified`,
     `unreadable`) and removed is both protected_path_deleted and protected_path_unverifiable, as
-    under no_delete, PS-M5's "whose entry there" being before's. protected_path_written is
+    under no_delete, PS-M5's "whose entry there" being before's (PV2-8 has since taken the
+    `no_delete` half away: under `no_delete` alone it is protected_path_deleted only, P68).
+    protected_path_written is
     unchanged: its `rule` is still the first with `no_write` (policy-v1, "the mode concerned").
 
 P55 New with inode-flags.md. IF-2's "a locking flag is set or cleared": the two values differ in
@@ -386,9 +390,8 @@ P65 New with P-G2 and PV2-7 (checkpoint-v3 G2-3). G2-3 alone reads "a protected 
     `content_not_read`. Nothing in policy.v1's output changes, and no code of this model's
     policy did; `reasons` are "the entry's flags, every one set, in the row's order":
     `unverified`, `unreadable`, where `content_not_read` is `["unreadable"]`.
-    OPEN: belay answers the other way for `no_delete`. The scenario is in gen.OPEN_QUESTIONS, which
-    run.py prints on every run and does not count, until a pin row says which sides `no_delete`
-    reads.
+    SETTLED for `no_delete` by PV2-8 (P68), neither as this model read it nor as belay answered:
+    it reads no side's flags. The scenario was gen.OPEN_QUESTIONS' one entry until then.
 
 P66 New with O9. "A `modified` or `metadata_only` record": the second cannot occur. Each of the
     four flags makes content unknown, and diff-v1's rule 3 gives `unknown` before rule 4 unless
@@ -400,6 +403,29 @@ P67 New with G3-2 (diff-fields, "The trailer"). "Its directories carrying `unrea
     `mount` ..., counted from its entries": directories only -- an unreadable file is not one --
     and never the manifest trailer's own `unreadable`. The harness mounts nothing, so only an
     unreadable directory is ever counted here.
+
+P70 New with diff-fields O10 (checkpoint-v3 G2-5). "An `added` record": a path in the after
+    manifest only whose outcome the one-sided rules leave `added`; one that is `unknown` there
+    (below a directory not listed before, `raced`, a writer) keeps `unknown` and carries none
+    ("no record has both"). An added directory carrying `unstable` and an added symlink that
+    could not be read carry none: O10 names two types and, for a directory, two flags.
+
+P68 New with PV2-8 and P-G3 ("`no_delete` reads existence only"). "A rule whose only mode is
+    `no_delete`": its `mode` is exactly `["no_delete"]` and it gives no `expected_sha256` ("A
+    rule that also has `no_write` or `no_create`, an `expected_sha256`, ... reads what it reads
+    today"). Such a rule reads no entry's flags. "Or another rule matching the path": where
+    several rules match, each is judged by itself -- the path is unverifiable by its entries'
+    flags on the sides the other rules read, and, `unknown` on both sides, when any rule that
+    matches is not such a rule; two `no_delete`-only rules together read nothing. The flag's
+    `rule` stays "the first that matches it" (P5), so it can name a `no_delete`-only rule when a
+    later rule is what cannot be verified; PV2-8 does not say otherwise. This also ends PV2-5's
+    and P54's `no_delete` half: flagged at reset and removed is protected_path_deleted alone.
+
+P69 New with PV2-8. "Only when its existence after cannot be established: it is on one side only
+    and its outcome is `unknown` -- as V4-S2 says of every rule". A path in the after manifest
+    only, `unknown` (a writer held it, or it is `raced`), is there after; the words after the
+    colon, and V4-S2's "whichever side", still make it unverifiable. Read: the colon's condition
+    decides -- one side only, either side, and `unknown`.
 
 Not modelled: IF-8 (the receipt's privilege section) -- this model produces policy.v1, not the
 receipt. IF-1's macOS flags: the harness measures Linux's FS_IOC_GETFLAGS, so only
@@ -511,6 +537,11 @@ SPEC_KEYS = ("belay_protect", "protect", "frozen_packages", "path_dirs")
 RULE_KEYS = ("path", "mode", "expected_sha256")
 MODES = ("no_write", "no_delete", "no_create")
 JSON_WS = " \t\n\r"
+
+
+def existence_only(r):
+    """PV2-8: "a rule whose only mode is `no_delete`" (P68)."""
+    return tuple(r.modes) == ("no_delete",) and r.expected is None
 
 
 class Rule:
@@ -955,6 +986,17 @@ def content_not_read(b, a):
     return [r for r in O9_ORDER if r in rs]
 
 
+def added_not_read(e):
+    """diff-fields O10, for an `added` record, "from its one entry. A regular file: by O9's rule
+    for a side ... A directory carrying `unreadable` or `mount`: that reason ... No other type"
+    (so not an unreadable symlink, nor an unstable directory), "and never a `removed` record"."""
+    if e["type"] == "reg":
+        return content_not_read(e, e)
+    if e["type"] == "dir":
+        return [f for f in O9_ORDER if f in ("unreadable", "mount") and e[f]]
+    return []
+
+
 def sealing(entries):
     """diff-fields "The trailer", G3-2: a manifest's "directories carrying `unreadable` or `mount`
     ..., counted from its entries" (P67)."""
@@ -975,6 +1017,8 @@ def diff(bs, as_):
             rec = {"outcome": o or "added", "type": a["type"]}
             if why:
                 rec["unknown"] = why
+            elif added_not_read(a):                                                  # diff-fields O10
+                rec["content_not_read"] = added_not_read(a)
         else:
             o, why = _one_sided(p, b, as_)
             rec = {"outcome": o or "removed", "type": b["type"]}
@@ -1890,18 +1934,23 @@ def protected_flags(spec, recs, B, A, source=None):
                                       "%s: created where %s forbids it (no_create)" % (show(p), r.pattern),
                                       [p], prov))
                 break
-        # PS-M5 fail closed (P5, P6)
+        # PS-M5 fail closed (P5, P6); PV2-8: a rule whose only mode is `no_delete` reads no flag
         hit_sides = set()
         for r in matching:
             sides = set()
-            if ("no_write" in r.modes or "no_delete" in r.modes) and b is not None:
+            if "no_write" in r.modes and b is not None:                               # PV2-5
                 sides.add("before")
-                if "no_write" in r.modes and a is not None:
+                if a is not None:
                     sides.add("after")
             if ("no_create" in r.modes or r.expected is not None) and a is not None:
                 sides.add("after")
+            if "no_delete" in r.modes and not existence_only(r) and b is not None:    # as before PV2-8
+                sides.add("before")
             hit_sides |= sides
-        if hit_sides or unknown:                                                      # V4-S2, P50
+        # an `unknown`: on one side only, under any rule (V4-S2, P50, P69); on both sides, under
+        # any rule but one that reads existence only (PV2-8: "it is there", P68)
+        unknown = unknown and (b is None or a is None or not all(existence_only(r) for r in matching))
+        if hit_sides or unknown:
             ents = [e for s, e in (("before", b), ("after", a)) if s in hit_sides]
             flagged = [f for f in ENTRY_FLAGS if any(e[f] for e in ents)]
             if unknown or flagged:
