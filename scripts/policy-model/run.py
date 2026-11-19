@@ -791,7 +791,11 @@ def _run(sc, rep, cov, vstate, tmp, answered, holds):
 REQUIRED_SCENARIOS = (["pv2-8-nd-%s-one-rule-%s" % (o, w) for o in ("nc", "hash") for w in ("rewritten", "removed", "to-dir")]
                       + [n % (o, w) for o in ("nc", "hash") for w in ("rewritten", "removed")
                          for n in ("pv2-8-nd-then-%s-%s", "pv2-8-%s-then-nd-%s")]
-                      + ["pv2-9-dir-opened-file-removed", "pv2-9-dir-opened-file-removed-closed-again"])
+                      + ["pv2-9-dir-opened-file-removed", "pv2-9-dir-opened-file-removed-closed-again",
+                         "pv2-9-sealed-dir-removed", "pv2-9-file-becomes-sealed-dir"]
+                      # PV2-11: created under no_delete alone, and with another rule (PV2-10)
+                      + ["pv2-11-%s%s" % (w, x) for w in ("dir-created-sealed", "file-created-unreadable")
+                         for x in ("", "-two-no-delete-rules", "-with-no-create-rule")])
 
 
 def gate(cov, verify_ran, probe):

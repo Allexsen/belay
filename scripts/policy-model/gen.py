@@ -1220,6 +1220,19 @@ def not_read_scenarios():
           tags=["P25", "P71"]))
     add(S("pv2-9-sealed-dir-removed", CLOSED, [("chmod", "grader/sub", 0o755), ("rmtree", "grader/sub")], ND,
           tags=["P25", "P71"]))
+    # -- PV2-11, P-G5: created under `no_delete` alone is no finding, a sealed directory included;
+    #    with another rule it is judged as before (PV2-10). A file that became a sealed directory
+    #    was there at reset: PV2-9. Required by run.py's gate.
+    NEWD = [("file", "grader/newdir/x.txt", b"x\n"), ("chmod", "grader/newdir", 0o000)]
+    NEWF = [("file", "grader/new.txt", b"n\n"), ("chmod", "grader/new.txt", 0o000)]
+    ND2 = spec_of(rule("grader/**", "no_delete"), rule("grader/new*", "no_delete"))
+    for what, episode in (("dir-created-sealed", NEWD), ("file-created-unreadable", NEWF)):
+        add(S("pv2-11-" + what, BASE, episode, ND, diff=True, tags=["P25", "P75"]))
+        add(S("pv2-11-" + what + "-two-no-delete-rules", BASE, episode, ND2, tags=["P25", "P75"]))
+        add(S("pv2-11-" + what + "-with-no-create-rule", BASE, episode,
+              spec_of(rule("grader/**", "no_delete"), rule("grader/new*", "no_create")), tags=["P25", "P68", "P75"]))
+    add(S("pv2-9-file-becomes-sealed-dir", BASE + [("file", key, b"k3y\n")], [("rm", key), ("dir", key, 0o000)], ND,
+          diff=True, tags=["P25", "P71", "P75"]))
     add(S("pv2-9-sealed-dir-rule-names-it", CLOSED, [], spec_of(rule("grader/sub", "no_delete")), tags=["P25", "P71"]))
     add(S("pv2-9-unreadable-file-is-not-one", KEYX, [], ND, tags=["P25", "P71"]))
     # -- no size change: nothing proves `modified`, so `unknown` and no `content_not_read`

@@ -668,6 +668,23 @@ def fixture_not_read():
     check("PV2-9: sealed at reset and removed: both (P71)", kinds_of(nd, T0, N_),
           [("protected_path_deleted", None), ("protected_path_unverifiable", ["unreadable"])])
     check("PV2-9: a file that is there is there", kinds_of(nd, A, A), [])
+    # PV2-11, P-G5: created under no_delete alone is no finding; O11 in the model's diff
+    check("PV2-11: a directory created sealed: no finding", kinds_of(nd, N_, T0), [])
+    check("PV2-11: a file created unreadable: no finding", kinds_of(nd, N_, A), [])
+    check("PV2-10: with a no_create rule too, as before PV2-8",
+          kinds_of(nd + ',{"path":"g/d","mode":["no_create"]}', N_, T0),
+          [("protected_path_created", None), ("protected_path_unverifiable", ["unreadable"])])
+    Fd = dict(list(base.items()) + [(b"g/d", raw("reg", F, b"one\n", ino=5))])
+    check("PV2-9: a file that became a sealed directory was there at reset", kinds_of(nd, Fd, T0),
+          [("protected_path_unverifiable", ["unreadable"])])
+    check("O11: a type change into a sealed directory",
+          model.diff(model.Side(model.view(Fd, model.HASH_DEFAULT), 10, []),
+                     model.Side(model.view(T0, model.HASH_DEFAULT), 10, [])).get(b"g/d"),
+          {"outcome": "type_changed", "type": "dir", "type_before": "reg", "changed": ["type"],
+           "content_not_read": ["unreadable"]})
+    check("O11: not out of one", "content_not_read" in model.diff(
+        model.Side(model.view(T0, model.HASH_DEFAULT), 10, []),
+        model.Side(model.view(Fd, model.HASH_DEFAULT), 10, [])).get(b"g/d"), False)
 
 
 def fixture_manifest_v4():

@@ -433,7 +433,19 @@ P71 New with PV2-9 and P-G4. "A matched directory nothing was seen below on a si
     which says it amends PV2-8's "whatever its entries carry" (the both-sides sentence) but
     whose own condition, "on a side", has no such limit and whose reason ("what the rules
     protect below it has no entry on that side: it cannot be shown to exist") holds there too.
-    Read: PV2-9's condition decides -- deleted and unverifiable.
+    Read: PV2-9's condition decides -- deleted and unverifiable. SETTLED as read: PV2-9 now
+    says "also when it is removed (it is then `protected_path_deleted` too)". P68 is SETTLED
+    too, by PV2-10 ("every rule that matches it ... in either order").
+
+P75 New with PV2-11 and P-G5. "Under such rules alone, a path that was not there at reset and is
+    there after is no finding, whatever its entry carries (`unreadable` included)": read of a
+    path whose outcome is `added`, a directory created sealed included -- PV2-9's "a matched
+    directory nothing was seen below on a side" would name it, and PV2-11, the later row, says
+    "no finding ... whatever its entry carries" and "`no_delete` has nothing to say about a file
+    that was created". "A one-sided path whose outcome is `unknown` stays unverifiable": one
+    below a directory not listed at reset, a raced or writer-held one (P69). A path that was a
+    file at reset and is a sealed directory after was there at reset: PV2-9, unverifiable.
+    The model's diff gives such a record `content_not_read` (diff-fields O11).
 
 P69 New with PV2-8. "Only when its existence after cannot be established: it is on one side only
     and its outcome is `unknown` -- as V4-S2 says of every rule". A path in the after manifest
@@ -927,6 +939,8 @@ def _both(b, a, bs, as_, identity):
         if everything:
             rec["outcome"] = "unknown"
             rec["unknown"] = _reasons(_flag_reasons(b) | _flag_reasons(a))
+        elif t == "dir" and (a["unreadable"] or a["mount"]):                         # diff-fields O11
+            rec["content_not_read"] = [f for f in O9_ORDER if f in ("unreadable", "mount") and a[f]]
         return rec
     differs = {}
     differs["mode"] = b["mode"] != a["mode"]
@@ -1966,6 +1980,8 @@ def protected_flags(spec, recs, B, A, source=None):
             # below on a side is judged as under any other mode (P68, P71).
             hit_sides = {s for s, e in (("before", b), ("after", a))
                          if e is not None and e["type"] == "dir" and (e["unreadable"] or e["mount"])}
+            if outcome == "added":                                                    # PV2-11, P75
+                hit_sides = set()
             unknown = unknown and (b is None or a is None or bool(hit_sides))
         if hit_sides or unknown:
             ents = [e for s, e in (("before", b), ("after", a)) if s in hit_sides]
