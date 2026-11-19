@@ -76,10 +76,48 @@ struct walk_ctx {
     size_t *xlen;               /* strlen of each opts->exclude_paths, once per walk */
     size_t state_dirs;          /* xs entries for belay's own state directory */
 
+    /* Version 5 (test/expect/manifest-v5.md). The class and the two sealing
+     * conditions of the entry being captured are set by visit() from its
+     * directory's zone before the entry is read. */
+    bool  *root_found;          /* per opts->roots: the walk met it */
+    struct entered *entered;    /* the mounts entered (V5-A5), and the mount table once read */
+    int    cls;                 /* CLS_* */
+    bool   closed;              /* a directory from the scope root down to it has no search bit for others */
+    bool   plain;               /* its root is never sealed (a shell startup file) */
+    size_t sealed_entries;      /* entries emitted carrying `sealed` */
+    bool   have_key;            /* the sealing key is loaded */
+    uint8_t key[BELAY_SEALING_KEY_BYTES];
+    char   sealed_key_id[BELAY_SEALED_KEY_HEX + 1];
+    bool   prev_key_same;       /* the previous manifest's sealed_key is this state's (V5-E7) */
+
     struct belay_store *store;  /* NULL when content storage is off */
     size_t store_failed;        /* copies the store failed to keep (R11) */
     char  *abs;                 /* scope + "/" + rel, for interpreter claims */
     size_t scope_len;
+};
+
+/* What a file is by its root (V5-E4, V5-E5): no roots (a whole scope, as
+ * before version 5), a content root, a metadata root. */
+enum { CLS_WHOLE, CLS_CONTENT, CLS_METADATA };
+
+/* The filesystems a capture with roots has entered at a mount point
+ * (manifest-v5-addendum V5-A5): each device once, with the mount root it
+ * was entered at. A machine has a handful; past ENTERED_MAX no more are. */
+#define ENTERED_MAX 64
+struct entered {
+    uint64_t dev[ENTERED_MAX], ino[ENTERED_MAX];
+    size_t n;
+    bool asked;                 /* the mount table was asked for */
+    char *table;                /* the platform's, malloc'd, or NULL */
+};
+
+/* The directory a listing is of, for what is recorded of its children. */
+struct zone {
+    bool partial;       /* on the way to a root, not under one (V5-E3) */
+    bool top;           /* the scope root */
+    bool below;         /* some root lies below it: its children are looked up */
+    int  cls;           /* CLS_*: the class its children inherit */
+    bool closed;        /* it, or a directory above it, has no search bit for others */
 };
 
 /* Results of capturing one entry (0 is success; -1 is fatal). */
@@ -110,6 +148,10 @@ int  cap_stat_entry(const struct walk_ctx *wc, int dfd, const char *name, struct
                     bool *mount_root, bool *mount_known);
 bool cap_crossed(const struct walk_ctx *wc, const struct stat *st, bool mount_root,
                  bool mount_known);
+bool cap_boundary(const struct walk_ctx *wc, int dfd, const char *name, const struct stat *st,
+                  bool mount_root, bool mount_known);
+int  cap_seal_key(struct walk_ctx *wc, bool create);
+void cap_wipe(void *p, size_t n);
 void cap_fill_from_stat(struct belay_entry *e, const struct stat *st);
 int  cap_read_extras(struct walk_ctx *wc, int fd, int pfd, const char *name,
                      const struct stat *st);
@@ -125,7 +167,19 @@ int  cap_record_unpack(const unsigned char *val, uint32_t vlen, const unsigned c
 
 /* walk.c */
 int  cap_walk(int dfd, char *rel, size_t relsz, size_t rel_len, int depth, struct walk_ctx *wc,
-              struct listing *seen);
+              struct listing *seen, const struct zone *z);
+/* Whether a partial directory's child `name` is recorded (V5-E3): a root, a
+ * directory, or a link directly under the scope root. `dir` is the
+ * directory's path ("" for the scope root). */
+bool cap_partial_records(const struct walk_ctx *wc, int dfd, const char *dir, size_t dir_len, const char *name);
+
+/* roots.c: the roots of opts, sorted. */
+enum { RM_NONE, RM_ABOVE, RM_EXACT };
+/* `rel` against the roots: RM_EXACT with *idx when it is one, RM_ABOVE when
+ * it is not and some root lies below it. *below: some root lies below it. */
+int  roots_match(const struct belay_manifest_opts *o, const char *rel, size_t len, size_t *idx, bool *below);
+bool roots_not_read(const struct belay_manifest_opts *o, const char *rel, size_t len);
+int  roots_check(const struct belay_manifest_opts *o);     /* 0, or -1 (INVALID): not sorted, not canonical */
 
 /* consistency.c: every judgment of "did it change while belay looked". */
 void cons_listing_add(struct listing *l, const char *name);
@@ -143,8 +197,12 @@ int  cons_verdict_get(FILE *f, const unsigned char *key, uint32_t klen);
 
 /* publish.c */
 FILE *cap_tmpfile(void *ctx);
+/* Version 5's part of the header: the roots as given, whether the walk
+ * found each, and the sealing key's id (NULL: no entry is sealed). */
+struct header5 { const struct belay_root *roots; const bool *found; size_t n; const char *sealed_key; };
 int  cap_write_header(const struct fsops *ops, FILE *f, const char *scope_real,
                       const struct belay_excluded *xs, size_t nx, int64_t walk_start_ns,
-                      const struct belay_manifest_opts *opts, char *buf);
+                      const struct belay_manifest_opts *opts, const struct header5 *v5, char *buf);
+int  cap_write_roots(FILE *f, const struct header5 *v5, char *buf);
 
 #endif

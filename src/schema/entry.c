@@ -120,6 +120,17 @@ const struct entry_field_def ENTRY_FIELDS[F_COUNT] = {
     [F_WRITER_OPEN] = { "writer_open", NULL, "bool", false,
         "Version 4. A writer had the file open, or mapped shared-writable, at the start or end of "
         "its read: `sha256` may be of bytes the file never held. Never compared by a diff." },
+    [F_NOT_READ] = { "not_read", NULL, "bool", false,
+        "Version 5. A directory the capture did not enter, by rule: no listing was taken, and its "
+        "`size`, `mtime_ns`, `ctime_ns` and `nlink` are not recorded." },
+    [F_PARTIAL] = { "partial", NULL, "bool", false,
+        "Version 5. A directory on the way to a root: only the children the roots name were looked "
+        "at; its other directories are recorded with `not_read`, its other children not at all." },
+    [F_META] = { "meta", NULL, "bool", false,
+        "Version 5. A regular file whose content was not read, by its root's class: no hash." },
+    [F_SEALED] = { "sealed", NULL, "bool", false,
+        "Version 5. `sha256` is HMAC-SHA256 of the content under the state's sealing key; the "
+        "content was not kept." },
     [F_RACED] = { "raced", NULL, "bool", false,
         "`true`. The entry changed after it was recorded, before the walk ended: re-stat'ed "
         "at the end of the walk, its inode, device, mode, size, mtime or ctime differed, or it "
@@ -168,6 +179,40 @@ const struct line_field_def TRAILER4_FIELDS[TR4_COUNT] = {
         "not tell, or the scope is on overlayfs, where a shared mapping whose descriptor was "
         "closed is not seen. An entry carrying `writer_open` is not counted, nor a file not read." },
 };
+
+const struct line_field_def HEADER5_FIELDS[H5_COUNT] = {
+    [H5_ROOTS] = { "roots", NULL, "int",
+        "The number of root lines (manifest-v5-addendum V5-A1): every root this capture looked for "
+        "is a line of its own directly after the header, sorted by path bytes, each once; `0` and "
+        "no such line for a capture of a whole scope." },
+    [H5_SEALED_KEY] = { "sealed_key", NULL, "string",
+        "The first 16 hex digits of the sha256 of the state's sealing key; absent when no entry is "
+        "`sealed`. Two manifests compare `sealed` hashes only when it is equal." },
+    [H5_BASIS] = { "basis", NULL, "string", "`walk` or `events`." },
+};
+
+const struct line_field_def ROOT_FIELDS[RT_COUNT] = {
+    [RT_PATH] = { "root", "root_b64", "string",
+        "Relative to the scope, as entry paths are; `root_b64` when it is not valid UTF-8." },
+    [RT_CLASS] = { "class", NULL, "string", "`content` or `metadata`." },
+    [RT_FOUND] = { "found", NULL, "bool", "`false`: looked for and not there." },
+};
+const char *const ROOT_CLASSES[2] = { [BELAY_ROOT_CONTENT] = "content", [BELAY_ROOT_METADATA] = "metadata" };
+
+const struct line_field_def TRAILER5_FIELDS[TR5_COUNT] = {
+    [TR5_NOT_READ] = { "not_read", NULL, "int", "Entries carrying `not_read`." },
+    [TR5_META] = { "meta", NULL, "int", "Entries carrying `meta`." },
+    [TR5_SEALED] = { "sealed", NULL, "int", "Entries carrying `sealed`." },
+    [TR5_CARRIED] = { "carried", NULL, "int",
+        "Entries taken from the previous manifest without a stat; `0` for a walk." },
+    [TR5_RACY] = { "racy", NULL, "int",
+        "The number of racy lines (V5-A2): each path of an entry looked at in this capture whose "
+        "`ctime_ns` was not older than its barrier is a line of its own after the last entry, "
+        "sorted, each once. `0` for a walk." },
+};
+/* A racy line's one key. */
+const struct line_field_def RACY_FIELD = { "racy", "racy_b64", "string",
+    "An entry's path; `racy_b64` when it is not valid UTF-8." };
 
 const struct line_field_def HEADER2_FIELDS[H2_COUNT] = {
     [H2_EXCLUDED] = { "excluded", NULL, "array",
@@ -253,7 +298,10 @@ const struct entry_rule ENTRY_RULES[] = {
       "`xattrs_unknown` excludes `xattrs`, `xattrs_sha256` and `caps`." },
     { R_FORBID, T_ALL & ~T_REG, FBIT(F_CAPS), 0, NULL, "caps on a non-regular file", NULL,
       "`caps` appears only on `reg`." },
-    { R_EXACTLY_ONE, T_REG, FBIT(F_SHA256) | FBIT(F_UNVERIFIED), 0, NULL,
+    /* Rule 5 is, from version 5, exactly one of sha256, unverified, meta (V5-E1); rules 10 and
+     * 11 read `not_read` beside `unreadable` and `mount` (V5-E2). No manifest before version 5
+     * can carry either key, so the frozen documentation of versions 1 to 4 stays true. */
+    { R_EXACTLY_ONE, T_REG, FBIT(F_SHA256) | FBIT(F_UNVERIFIED) | FBIT(F_META), 0, NULL,
       "both sha256 and unverified", "regular file with neither sha256 nor unverified",
       "A `reg` carries exactly one of `sha256` and `unverified`." },
     { R_IMPLIES, T_REG, FBIT(F_UNSTABLE) | FBIT(F_UNREADABLE), FBIT(F_UNVERIFIED), NULL,
@@ -267,10 +315,10 @@ const struct entry_rule ENTRY_RULES[] = {
       "A mounted `reg` carries neither `unstable` nor `unreadable`." },
     { R_FORBID, T_DIR, HASHES, 0, NULL, "hash fields on a directory", NULL,
       "A `dir` carries no `sha256`, `unverified` or `stored`." },
-    { R_IMPLIES, T_DIR, FBIT(F_RACED), FBIT(F_UNREADABLE) | FBIT(F_MOUNT), NULL,
+    { R_IMPLIES, T_DIR, FBIT(F_RACED), FBIT(F_UNREADABLE) | FBIT(F_MOUNT) | FBIT(F_NOT_READ), NULL,
       "raced on a listed directory", NULL,
       "A `dir` carries `raced` only with `unreadable` or `mount` (a listed one that changed is `unstable`)." },
-    { R_EXCLUSIVE, T_DIR, FBIT(F_UNREADABLE) | FBIT(F_UNSTABLE) | FBIT(F_MOUNT), 0, NULL,
+    { R_EXCLUSIVE, T_DIR, FBIT(F_UNREADABLE) | FBIT(F_UNSTABLE) | FBIT(F_MOUNT) | FBIT(F_NOT_READ), 0, NULL,
       "directory flags unreadable, unstable and mount are exclusive", NULL,
       "A `dir` carries at most one of `unreadable`, `unstable` and `mount`." },
     { R_FORBID, T_LNK, HASHES | FBIT(F_UNSTABLE), 0, NULL, "file-only fields on a symlink", NULL,
@@ -305,13 +353,34 @@ const struct entry_rule ENTRY_RULES[] = {
       "`writer_open` requires `sha256`." },
     { R_EXCLUDES, T_REG, FBIT(F_WRITER_OPEN), FBIT(F_STORED), NULL, "writer_open with stored", NULL,
       "`writer_open` excludes `stored`." },
+    /* Version 5 (manifest-v5.md: V5-4, V5-4b, V5-5, V5-6, V5-E8). */
+    { R_FORBID, T_ALL & ~T_DIR, FBIT(F_NOT_READ) | FBIT(F_PARTIAL), 0, NULL,
+      "not_read or partial on a non-directory", NULL, "`not_read` and `partial` appear only on `dir`." },
+    { R_EXCLUDES, T_DIR, FBIT(F_PARTIAL), FBIT(F_NOT_READ) | FBIT(F_UNREADABLE) | FBIT(F_MOUNT), NULL,
+      "partial with not_read, unreadable or mount", NULL,
+      "`partial` excludes `not_read`, `unreadable` and `mount`." },
+    { R_EXCLUDES, T_DIR, FBIT(F_NOT_READ), FBIT(F_SIZE) | FBIT(F_MTIME) | FBIT(F_CTIME) | FBIT(F_NLINK), NULL,
+      "size, mtime_ns, ctime_ns or nlink on a not_read directory", NULL,
+      "A `not_read` directory carries no `size`, `mtime_ns`, `ctime_ns` or `nlink`; every other "
+      "entry carries all four (the reader requires them where the flag is absent: V5-E8)." },
+    { R_FORBID, T_ALL & ~T_REG, FBIT(F_META) | FBIT(F_SEALED), 0, NULL,
+      "meta or sealed on a non-regular file", NULL, "`meta` and `sealed` appear only on `reg`." },
+    { R_EXCLUDES, T_REG, FBIT(F_META), FBIT(F_STORED), NULL, "meta with stored", NULL,
+      "`meta` excludes `stored`." },
+    { R_IMPLIES, T_REG, FBIT(F_SEALED), FBIT(F_SHA256), NULL, "sealed without sha256", NULL,
+      "`sealed` requires `sha256`." },
+    { R_EXCLUDES, T_REG, FBIT(F_SEALED), FBIT(F_STORED), NULL, "sealed with stored", NULL,
+      "`sealed` excludes `stored`." },
 };
 const size_t ENTRY_RULE_COUNT = sizeof ENTRY_RULES / sizeof ENTRY_RULES[0];
-const size_t ENTRY_RULE_COUNT_V1 = sizeof ENTRY_RULES / sizeof ENTRY_RULES[0] - 3;
+const size_t ENTRY_RULE_COUNT_V1 = sizeof ENTRY_RULES / sizeof ENTRY_RULES[0] - 3 - 7;
+const size_t ENTRY_RULE_COUNT_V4 = sizeof ENTRY_RULES / sizeof ENTRY_RULES[0] - 7;
 
 uint32_t entry_present(const struct belay_entry *e) {
     uint32_t p = 0;
     for (int f = F_PATH; f <= F_NLINK; f++) p |= FBIT(f);
+    /* V5-4: what moves with every file made inside is not recorded. */
+    if (e->not_read) p &= ~(FBIT(F_SIZE) | FBIT(F_MTIME) | FBIT(F_CTIME) | FBIT(F_NLINK));
     if (e->has_iflags) p |= FBIT(F_IFLAGS);
     if (e->has_caps) p |= FBIT(F_CAPS);
     if (e->has_xattrs) p |= e->xattrs_inline ? FBIT(F_XATTRS) : FBIT(F_XATTRS_SHA256);
@@ -327,6 +396,10 @@ uint32_t entry_present(const struct belay_entry *e) {
     if (e->unreadable) p |= FBIT(F_UNREADABLE);
     if (e->raced) p |= FBIT(F_RACED);
     if (e->writer_open) p |= FBIT(F_WRITER_OPEN);
+    if (e->not_read) p |= FBIT(F_NOT_READ);
+    if (e->partial) p |= FBIT(F_PARTIAL);
+    if (e->meta) p |= FBIT(F_META);
+    if (e->sealed) p |= FBIT(F_SEALED);
     return p;
 }
 
@@ -357,6 +430,11 @@ static bool violated(const struct entry_rule *r, const struct belay_entry *e, ui
 }
 
 int entry_check(const struct belay_entry *e, uint32_t present) {
+    /* V5-E1 said for what it is: rule 5's own message names two of the three. */
+    if (e->type == BELAY_T_REG && (present & FBIT(F_META)) && (present & (FBIT(F_SHA256) | FBIT(F_UNVERIFIED)))) {
+        belay_err_set(BELAY_ERR_CORRUPT, 0, "manifest: meta with sha256 or unverified");
+        return -1;
+    }
     for (size_t i = 0; i < ENTRY_RULE_COUNT; i++) {
         const char *msg;
         if (violated(&ENTRY_RULES[i], e, present, &msg)) {
@@ -435,6 +513,7 @@ enum {
     B_XUNKNOWN = 1u << 4, B_HASH = 1u << 5, B_UNVERIFIED = 1u << 6, B_LINK = 1u << 7,
     B_OUTSIDE = 1u << 8, B_STORED = 1u << 9, B_MOUNT = 1u << 10, B_RDEV = 1u << 11,
     B_UNSTABLE = 1u << 12, B_UNREADABLE = 1u << 13, B_RACED = 1u << 14, B_WRITER_OPEN = 1u << 15,
+    B_NOT_READ = 1u << 16, B_PARTIAL = 1u << 17, B_META = 1u << 18, B_SEALED = 1u << 19,
 };
 
 struct w { unsigned char *p; size_t n, cap; int ok; };
@@ -460,7 +539,9 @@ size_t entry_pack(const struct belay_entry *e, unsigned char *buf, size_t cap) {
                 (e->target_outside_scope ? B_OUTSIDE : 0) | (e->has_stored ? B_STORED : 0) |
                 (e->is_mount ? B_MOUNT : 0) | (e->has_rdev ? B_RDEV : 0) |
                 (e->unstable ? B_UNSTABLE : 0) | (e->unreadable ? B_UNREADABLE : 0) |
-                (e->raced ? B_RACED : 0) | (e->writer_open ? B_WRITER_OPEN : 0),
+                (e->raced ? B_RACED : 0) | (e->writer_open ? B_WRITER_OPEN : 0) |
+                (e->not_read ? B_NOT_READ : 0) | (e->partial ? B_PARTIAL : 0) |
+                (e->meta ? B_META : 0) | (e->sealed ? B_SEALED : 0),
     };
     struct w w = { buf, 0, cap, 1 };
     put(&w, &h, sizeof h);
@@ -509,6 +590,8 @@ int entry_unpack(const unsigned char *buf, size_t len, const unsigned char *path
     e->unstable = h.bits & B_UNSTABLE;   e->unreadable = h.bits & B_UNREADABLE;
     e->raced = h.bits & B_RACED;
     e->writer_open = h.bits & B_WRITER_OPEN;
+    e->not_read = h.bits & B_NOT_READ;   e->partial = h.bits & B_PARTIAL;
+    e->meta = h.bits & B_META;           e->sealed = h.bits & B_SEALED;
     get(&r, e->link_target, h.link_len);
     e->link_target[h.link_len] = '\0';
     e->link_target_len = h.link_len;

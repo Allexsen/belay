@@ -110,7 +110,7 @@ static int rs_to(struct rstack *rs, const char *dir, size_t dir_len) {
             }
             return 1;
         }
-        if (!S_ISDIR(st.st_mode) || cap_crossed(rs->wc, &st, mr, mk)) return 1;
+        if (!S_ISDIR(st.st_mode) || cap_boundary(rs->wc, parent, name, &st, mr, mk)) return 1;
         const int fd = ops->openat(ops->ctx, parent, name,
                                    O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC);
         if (fd == -1) {
@@ -154,7 +154,9 @@ void cons_listing_add(struct listing *l, const char *name) {
 /* The names in directory `fd` now, through a new open of it: a stream
  * shares its file offset with every dup of the fd, and the walk's ran to
  * the end. 0, 1 if it can no longer be listed, -1 if fatal. */
-static int relist(const struct fsops *ops, int fd, struct listing *now) {
+static int relist(const struct walk_ctx *wc, int fd, const struct belay_entry *e, struct listing *now) {
+    const struct fsops *ops = wc->ops;
+    const bool root = e->path_len == 1 && e->path[0] == '.';
     const int d = ops->openat(ops->ctx, fd, ".", O_RDONLY | O_DIRECTORY | O_CLOEXEC);
     if (d == -1) {
         if (cap_fatal_errno(errno)) {
@@ -167,8 +169,13 @@ static int relist(const struct fsops *ops, int fd, struct listing *now) {
     close(d);
     if (dir == NULL) return cap_fatal_errno(errno) ? -1 : 1;
     const char *name;
-    while ((name = ops->dir_next(ops->ctx, dir)) != NULL)
-        if (strcmp(name, ".") != 0 && strcmp(name, "..") != 0) cons_listing_add(now, name);
+    while ((name = ops->dir_next(ops->ctx, dir)) != NULL) {
+        if (strcmp(name, ".") == 0 || strcmp(name, "..") == 0) continue;
+        /* A partial directory's listing is the names the walk recorded
+         * (manifest-v5 V5-E3): the same rule picks them again. */
+        if (e->partial && !cap_partial_records(wc, fd, root ? "" : e->path, root ? 0 : e->path_len, name)) continue;
+        cons_listing_add(now, name);
+    }
     const int err = errno;
     ops->dir_close(ops->ctx, dir);
     return err != 0 ? 1 : 0;
@@ -182,7 +189,7 @@ static int relist(const struct fsops *ops, int fd, struct listing *now) {
 enum { RC_NONE, RC_LISTING, RC_ENTRY };
 
 static int recheck_kind(const struct belay_entry *e) {
-    if (e->type == BELAY_T_DIR && !e->unreadable && !e->is_mount)
+    if (e->type == BELAY_T_DIR && !e->unreadable && !e->is_mount && !e->not_read)
         return e->unstable ? RC_NONE : RC_LISTING;
     return RC_ENTRY;
 }
@@ -235,13 +242,21 @@ static int recheck_one(struct rstack *rs, struct walk_ctx *wc, const struct bela
         }
     }
     if (same) {
+        /* A not_read directory's size and times are not recorded, and a
+         * partial directory's move with children that are not (manifest-v5
+         * V5-4, V5-E3): for those, the object and its mode; a partial one's
+         * recorded names are re-listed below. */
         const struct ident now = ident_of_stat(&st);
-        same = ident_same(&now, &rec, ID_ALL);
+        same = ident_same(&now, &rec, e->not_read || e->partial ? ID_OBJECT | ID_MODE : ID_ALL);
+        /* Their owner and group are recorded and compared (V5-D4), and no
+         * ctime stands in for them here as it does for every other entry. */
+        if (same && (e->not_read || e->partial))
+            same = (uint32_t)st.st_uid == e->uid && (uint32_t)st.st_gid == e->gid;
     }
     if (same && kind == RC_LISTING) {
         const int fd = rs->n && !(plen == 1 && path[0] == '.') ? rs->fd[rs->n - 1] : rs->root_fd;
         struct listing now = { 0, 0, 0 };
-        const int r = relist(wc->ops, fd, &now);
+        const int r = relist(wc, fd, e, &now);
         if (r == -1) return -1;
         same = r == 0 && now.n == seen->n && now.a == seen->a && now.b == seen->b;
     }

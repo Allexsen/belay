@@ -1380,7 +1380,7 @@ static void set_flag(struct belay_entry *e, enum entry_field f) {
     case F_PATH: case F_TYPE: case F_MODE: case F_UID: case F_GID: case F_SIZE: case F_MTIME:
     case F_CTIME: case F_INO: case F_DEV: case F_NLINK: case F_IFLAGS: case F_CAPS: case F_XATTRS:
     case F_XATTRS_SHA256: case F_SHA256: case F_RDEV: case F_LINK_TARGET: case F_TARGET_OUTSIDE:
-    case F_STORED: case F_COUNT:
+    case F_STORED: case F_NOT_READ: case F_PARTIAL: case F_META: case F_SEALED: case F_COUNT:
         BELAY_FAIL("flag field %d has no setter here", (int)f);
         break;
     }
@@ -1389,7 +1389,7 @@ static void set_flag(struct belay_entry *e, enum entry_field f) {
 /* manifest-v4 V4-D1..D3: a marked entry is unknown on either side, whatever
  * differs; its hash is never compared; on one side only, never added. */
 TEST(a_marked_entry_is_unknown_and_its_hash_never_compared) {
-    const struct diff_ctx ctx = { 0, 0, false };
+    const struct diff_ctx ctx = { 0, 0, false, false };
     static struct belay_entry b, a;
     struct verdict v;
     memset(&b, 0, sizeof b);
@@ -1442,7 +1442,10 @@ TEST(a_marked_entry_is_unknown_and_its_hash_never_compared) {
     b.raced = true;                                         /* its own two flags: both */
     REQUIRE(classify_one(&b, true, ANC_NONE, &v) == 0);
     ASSERT_EQ_INT((int)(DRBIT(DR_RACED) | DRBIT(DR_WRITER_OPEN)), (int)v.reasons);
-    ASSERT_EQ_INT(DR_COUNT - 1, DR_WRITER_OPEN);            /* last among the reasons (V4-D4) */
+    /* last among the reasons of v4 (V4-D4); v5's two come after it, in this order (V5-D5) */
+    ASSERT_EQ_INT(DR_WRITER_OPEN + 1, DR_NOT_READ);
+    ASSERT_EQ_INT(DR_NOT_READ + 1, DR_SEALED_KEY);
+    ASSERT_EQ_INT(DR_COUNT - 1, DR_SEALED_KEY);
 }
 
 /* V4-D2 where the values are not `changed`'s: across a type change a side's
@@ -1479,7 +1482,7 @@ TEST(no_flag_combination_on_either_side_is_unchanged) {
     static const enum entry_field flags[] = { F_RACED, F_WRITER_OPEN, F_UNSTABLE, F_UNVERIFIED, F_UNREADABLE,
                                               F_MOUNT, F_XATTRS_UNKNOWN };
     const int nf = (int)(sizeof flags / sizeof flags[0]);
-    const struct diff_ctx ctx = { 0, 0, false };
+    const struct diff_ctx ctx = { 0, 0, false, false };
     static struct belay_entry base, b, a;
     int checked = 0;
     for (int t = 0; t < ENTRY_TYPE_COUNT; t++) {

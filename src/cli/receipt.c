@@ -368,6 +368,7 @@ static int record(const struct jval *r, struct ctx *x, const struct receipt_opts
     const struct jval *cnr = jget(r, "content_not_read");
     const bool not_read = cnr != NULL && cnr->t == J_ARR && cnr->n > 0;
     const bool sealed = is_dir && (has(jget(r, "unknown"), "unreadable") || has(jget(r, "unknown"), "mount") ||
+                                   has(jget(r, "unknown"), "not_read") ||     /* manifest v5: not entered, by rule */
                                    ((strcmp(outcome, "added") == 0 || strcmp(outcome, "type_changed") == 0) &&
                                     (has(cnr, "unreadable") || has(cnr, "mount"))));
     bool sealed_said = false;

@@ -135,6 +135,11 @@ int cmd_baseline(int argc, char **argv, FILE *out, FILE *err) {
             json = true;
             continue;
         }
+        /* watch-system WS-5, manifest-v5 V5-R4: said before anything is read or written */
+        if (!strcmp(a, "--system") || !strcmp(a, "--system-root")) {
+            fprintf(err, CLI_NOT_FOR_SYSTEM, "baseline export");
+            return EXIT_REFUSED;
+        }
         if (!strcmp(a, "--scope")) val = &scope;
         else if (!strcmp(a, "--docker")) val = &docker;
         else if (!strcmp(a, "--out")) val = &outp;
@@ -168,6 +173,8 @@ int cmd_baseline(int argc, char **argv, FILE *out, FILE *err) {
         return rc;
     }
     struct pkg_list pk = { 0 };
+    /* V5-R4: a scope whose manifest has roots is a system watch's, with or without the flag */
+    if ((rc = cli_refuse_system(&st, 0, "baseline export", err)) != 0) goto done;
     const int in = docker != NULL ? 0 : inside_scope(outp, st.scope.path);   /* a container's scope is not the host's */
     if (in != 0) {
         if (in == 1) belay_err_set(BELAY_ERR_INVALID, 0, "--out %s is inside the scope: the bundle must leave it", outp);
@@ -176,7 +183,7 @@ int cmd_baseline(int argc, char **argv, FILE *out, FILE *err) {
     }
     if (protect != NULL && (rc = exclusions_cover(&st, &spec, err)) != 0) goto done;
 
-    const struct capture_req req = { "check", false, false, 0, protect != NULL ? PROTECT_HASH_MAX_BYTES : 0, false, false };
+    const struct capture_req req = { "check", false, false, 0, protect != NULL ? PROTECT_HASH_MAX_BYTES : 0, false, false, false };
     struct checkpoint c;
     char manifest[PATH_MAX + 160], sha[65];
     if (state_capture(&st, &req, &c) == -1) { rc = cli_failed(err); goto done; }
@@ -313,6 +320,10 @@ int cmd_verify(int argc, char **argv, FILE *out, FILE *err) {
             exit_code = true;
             continue;
         }
+        if (!strcmp(a, "--system") || !strcmp(a, "--system-root")) {    /* WS-5, V5-R4 */
+            fprintf(err, CLI_NOT_FOR_SYSTEM, "verify");
+            return EXIT_REFUSED;
+        }
         if (!strcmp(a, "--scope")) val = &scope;
         else if (!strcmp(a, "--docker")) val = &docker;
         else if (!strcmp(a, "--baseline")) val = &baseline;
@@ -351,6 +362,25 @@ int cmd_verify(int argc, char **argv, FILE *out, FILE *err) {
     if ((docker != NULL ? scope_resolve_docker(docker, scope, true, &sc, err) : scope_resolve(scope, &sc)) == -1) {
         protect_free(&spec);
         return cli_failed(err);
+    }
+
+    /* V5-R4: refused for a scope whose manifest has roots -- its latest
+     * checkpoint's, in the scope's own state (read, never written here), or
+     * the one --to names. Before the bundle is read or anything is made. */
+    if (docker == NULL) {
+        struct state own;
+        if (cli_open_scope(sc.path, NULL, false, &own, err) != 0) {
+            protect_free(&spec);
+            return EXIT_FAILED;
+        }
+        rc = cli_refuse_system(&own, 0, "verify", err);
+        if (rc == 0 && to_id != 0 && state_checkpoint_exists(&own, to_id) == 1) rc = cli_refuse_system(&own, to_id, "verify", err);
+        state_close(&own);
+        belay_err_clear();
+        if (rc) {
+            protect_free(&spec);
+            return rc;
+        }
     }
 
     /* a work directory made fresh: verify's own state, never one prepared */
@@ -402,7 +432,7 @@ int cmd_verify(int argc, char **argv, FILE *out, FILE *err) {
         static struct excludes ignored;         /* its own exclusions, against the spec too (PS-C2) */
         if ((rc = bundle_excludes(after, &ignored, protect != NULL ? &spec : NULL, err)) != 0) goto done;
     } else {
-        const struct capture_req req = { "check", false, false, 0, bd.meta.hash_max_bytes, false, false };
+        const struct capture_req req = { "check", false, false, 0, bd.meta.hash_max_bytes, false, false, false };
         struct checkpoint c;
         if (state_capture(&st, &req, &c) == -1) { rc = cli_failed(err); goto done; }
         state_manifest(&st, c.id, after, sizeof after);

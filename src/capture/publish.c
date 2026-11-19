@@ -30,7 +30,7 @@ static int by_path(const void *a, const void *b) {
 static int format_header(FILE *f, long long created, const char *scope_real,
                          const struct belay_excluded *xs, size_t nx, long long walk_start_ns,
                          unsigned long long hash_max, unsigned long long store_max,
-                         const char *src_docker, const char *src_image, char *buf) {
+                         const char *src_docker, const char *src_image, const struct header5 *v5, char *buf) {
     /* Same rule as entry paths: JSON for valid UTF-8, base64 otherwise.
      * Before, a non-UTF-8 scope was written raw and the line was not JSON. */
     const size_t sl = strlen(scope_real);
@@ -70,9 +70,19 @@ static int format_header(FILE *f, long long created, const char *scope_real,
     /* Version 3 (test/expect/manifest-v3.md): where the capture came from.
      * The ids are checked where they are taken (docker.c): hex and "sha256:". */
     if ((src_docker == NULL
-             ? fprintf(f, ",\"%s\":null}", HEADER3_FIELDS[H3_SOURCE].name)
-             : fprintf(f, ",\"%s\":{\"%s\":\"%s\",\"%s\":\"%s\"}}", HEADER3_FIELDS[H3_SOURCE].name,
+             ? fprintf(f, ",\"%s\":null", HEADER3_FIELDS[H3_SOURCE].name)
+             : fprintf(f, ",\"%s\":{\"%s\":\"%s\",\"%s\":\"%s\"}", HEADER3_FIELDS[H3_SOURCE].name,
                        SOURCE_FIELDS[SRC_DOCKER].name, src_docker, SOURCE_FIELDS[SRC_IMAGE].name, src_image)) < 0) {
+        belay_err_set(BELAY_ERR_IO, errno, "manifest: header write failed");
+        return -1;
+    }
+    /* Version 5 (manifest-v5.md V5-3, V5-10; its addendum V5-A1): how many
+     * root lines follow (cap_write_roots), the sealing key's id when an
+     * entry is sealed, and the basis: a walk. */
+    w = fprintf(f, ",\"%s\":%zu", HEADER5_FIELDS[H5_ROOTS].name, v5 != NULL ? v5->n : (size_t)0);
+    if (w >= 0 && v5 != NULL && v5->sealed_key != NULL)
+        w = fprintf(f, ",\"%s\":\"%s\"", HEADER5_FIELDS[H5_SEALED_KEY].name, v5->sealed_key);
+    if (w < 0 || fprintf(f, ",\"%s\":\"walk\"}", HEADER5_FIELDS[H5_BASIS].name) < 0) {
         belay_err_set(BELAY_ERR_IO, errno, "manifest: header write failed");
         return -1;
     }
@@ -84,7 +94,7 @@ static int format_header(FILE *f, long long created, const char *scope_real,
  * leaving a manifest nothing can read (decision 112). */
 int cap_write_header(const struct fsops *ops, FILE *f, const char *scope_real,
                      const struct belay_excluded *xs, size_t nx, int64_t walk_start_ns,
-                     const struct belay_manifest_opts *opts, char *buf) {
+                     const struct belay_manifest_opts *opts, const struct header5 *v5, char *buf) {
     struct timespec now;
     ops->clock(ops->ctx, &now);
     const long long created = (long long)ident_ns((int64_t)now.tv_sec, now.tv_nsec);
@@ -98,7 +108,7 @@ int cap_write_header(const struct fsops *ops, FILE *f, const char *scope_real,
     const int r = format_header(m, created, scope_real, xs, nx, walk_start_ns > 0 ? walk_start_ns : 0,
                                 (unsigned long long)opts->hash_max_bytes,
                                 (unsigned long long)opts->store_max_bytes, opts->source_docker,
-                                opts->source_docker != NULL ? opts->source_image : NULL, buf);
+                                opts->source_docker != NULL ? opts->source_image : NULL, v5, buf);
     if (fclose(m) != 0 && r == 0) {
         free(line);
         belay_err_set(BELAY_ERR_NOMEM, errno, "manifest: header");
@@ -122,6 +132,25 @@ int cap_write_header(const struct fsops *ops, FILE *f, const char *scope_real,
     if (!ok) {
         belay_err_set(BELAY_ERR_IO, errno, "manifest: header write failed");
         return -1;
+    }
+    return 0;
+}
+
+/* One line per root, directly after the header, in the order given (sorted:
+ * roots_check): {"root": path, "class": ..., "found": ...}, root_b64 for a
+ * path that is not UTF-8 (manifest-v5-addendum V5-A1). */
+int cap_write_roots(FILE *f, const struct header5 *v5, char *buf) {
+    for (size_t i = 0; i < v5->n; i++) {
+        const char *rp = v5->roots[i].path;
+        const size_t rl = strlen(rp);
+        const bool utf8 = belay_utf8_valid(rp, rl);
+        if ((utf8 ? belay_json_escape(buf, LINE_CAP, rp, rl) : belay_base64_encode(buf, LINE_CAP, rp, rl)) == -1) return -1;
+        if (fprintf(f, "{\"%s\":\"%s\",\"%s\":\"%s\",\"%s\":%s}\n", utf8 ? ROOT_FIELDS[RT_PATH].name : ROOT_FIELDS[RT_PATH].alt,
+                    buf, ROOT_FIELDS[RT_CLASS].name, ROOT_CLASSES[v5->roots[i].cls], ROOT_FIELDS[RT_FOUND].name,
+                    v5->found[i] ? "true" : "false") < 0) {
+            belay_err_set(BELAY_ERR_IO, errno, "manifest: write failed");
+            return -1;
+        }
     }
     return 0;
 }
@@ -156,7 +185,7 @@ long belay_manifest_header_bound(const char *scope_real, const char *const *path
     /* the widest source: a container's */
     static const char D[] = "0000000000000000000000000000000000000000000000000000000000000000";
     const int r = format_header(m, (long long)INT64_MIN, scope_real, xs, nx, (long long)INT64_MIN,
-                                UINT64_MAX, UINT64_MAX, D, "sha256:" "0000000000000000000000000000000000000000000000000000000000000000", buf);
+                                UINT64_MAX, UINT64_MAX, D, "sha256:" "0000000000000000000000000000000000000000000000000000000000000000", NULL, buf);
     const int c = fclose(m);
     free(buf);
     free(line);

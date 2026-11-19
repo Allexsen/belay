@@ -191,13 +191,13 @@ static int as_a_container_s(const char *manifest) {
     const size_t n = fread(buf, 1, sizeof buf - 1, f);
     fclose(f);
     buf[n] = '\0';
-    char *nl = strchr(buf, '\n'), *src = strstr(buf, "\"source\":null}");
+    char *nl = strchr(buf, '\n'), *src = strstr(buf, "\"source\":null,");   /* v5's keys follow it */
     if (nl == NULL || src == NULL || src > nl) return -1;
     if ((f = fopen(manifest, "w")) == NULL) return -1;
     fwrite(buf, 1, (size_t)(src - buf), f);
     fputs("\"source\":{\"docker\":\"4f1c0e8a9b7d6c5e4f3a2b1c0d9e8f7a6b5c4d3e2f1a0b9c8d7e6f5a4b3c2d1e\","
-          "\"image\":\"sha256:91ef0af61f39ece4d6710e465df5ed6c91ef0af61f39ece4d6710e465df5ed6c\"}}", f);
-    fputs(nl, f);
+          "\"image\":\"sha256:91ef0af61f39ece4d6710e465df5ed6c91ef0af61f39ece4d6710e465df5ed6c\"}", f);
+    fputs(src + strlen("\"source\":null"), f);
     return fclose(f);
 }
 
@@ -229,7 +229,7 @@ static int verify_steps(int layers) {
     FILE *out = open_memstream(&g_out, &on);
     if (state_open(&sc, true, &st, stderr) == -1) goto done;
     if (bundle_read(g_bundle, g_sha, work, before, st.store, &bd) == -1) goto done;
-    const struct capture_req req = { "check", false, false, 0, bd.meta.hash_max_bytes, false, false };
+    const struct capture_req req = { "check", false, false, 0, bd.meta.hash_max_bytes, false, false, false };
     struct checkpoint c;
     if (state_capture(&st, &req, &c) == -1) goto done;
     state_manifest(&st, c.id, after, sizeof after);

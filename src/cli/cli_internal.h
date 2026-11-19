@@ -19,6 +19,23 @@ int  cli_failed(FILE *err);                     /* belay_err as one line; EXIT_R
 void cli_err_line(FILE *err);                   /* belay_err as one line */
 int  cli_open_scope(const char *scope, const char *docker, bool create, struct state *st, FILE *err);   /* 0, or an exit code; docker NULL: the host */
 
+/* --system (watch-system.md WS-1): it takes the place of --scope, and the
+ * scope is `/`. `system_root` is the undocumented --system-root DIR, which
+ * points the system scope at a directory instead: for tests, which must
+ * never capture the machine they run on. Sets *scope; 0, or an exit code
+ * with one line on `err` (--scope given too; --docker, whose `/` is not read
+ * by roots in this version). */
+int  cli_system_scope(bool system, const char *system_root, const char **scope, const char *docker, FILE *err);
+/* manifest-v5 V5-R4: 0, or EXIT_REFUSED with its line when the scope's
+ * latest checkpoint -- or checkpoint `id`, when not 0 -- has a manifest
+ * with roots: `what` is not designed for a system watch. */
+int  cli_refuse_system(const struct state *st, long id, const char *what, FILE *err);
+/* watch-system WS-1: `--scope /` without --system is refused for a command
+ * that captures (check, mark, diff): 0, or EXIT_REFUSED with its line.
+ * `resolved` is the scope as resolved; `docker` not NULL: a container's. */
+int  cli_refuse_root(const char *resolved, bool system, const char *docker, FILE *err);
+#define CLI_NOT_FOR_SYSTEM "belay: refused: %s is not designed for a system watch\n"
+
 /* The receipt's mode lookup: a forward-only cursor on each manifest, as
  * records arrive in path order; its classifier (git on the scope as it is
  * now); and every path either side of a diff did not walk, once. */

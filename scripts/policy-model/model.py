@@ -405,6 +405,39 @@ P67 New with G3-2 (diff-fields, "The trailer"). "Its directories carrying `unrea
     and never the manifest trailer's own `unreadable`. The harness mounts nothing, so only an
     unreadable directory is ever counted here.
 
+P72 New with manifest v5 (manifest-v5.md; the numbers P71 is another branch's). V5-R2: "belay
+    writes v5"; V5-2: `roots` "empty for a capture of a whole scope, which is then as v4 in every
+    other respect". Every capture here is of a whole scope, so the model holds each manifest
+    belay writes -- the bundle's and every checkpoint's -- to: `belay_manifest` 5; the header's
+    keys v4's, then `roots` (`[]`), then `basis`, and no `sealed_key` (V5-3: "absent when no
+    entry is `sealed`"; nothing is sealed where there is no root); the trailer's keys v4's, then
+    `not_read`, `meta`, `sealed`, `carried`, `racy`, valued `0`, `0`, `0`, `0`, `[]`; no entry
+    carrying `not_read`, `partial`, `meta` or `sealed` (each needs a root or a rule about one).
+    `basis` is read as `walk`: V5-10 allows `events`, and V5-11/V5-12 say what a walk's trailer
+    holds; that these captures are walks is checkpoint-v3 C3-4 ("always `walk` until the
+    recorder exists"), not a row of manifest-v5.md. Nothing else of v5 is modelled: no scenario
+    has a root, so V5-E1..E9, V5-3..V5-6 on entries and V5-D1..D6 are never reached; the diff
+    and policy are v4's ("as v4 in every other respect").
+
+P73 New with V5-R1, V5-R4 and V4-R7's rule ("a bundle carries the manifest belay writes"; B-4
+    "reads manifest v5 where it says v4"). A bundle holding a v2, v3 or v4 manifest stays
+    accepted, each "by its own key set, strictly", read as "`roots` empty, no entry flagged,
+    `basis` `walk`" (V5-R2): the harness writes such a manifest with exactly its version's keys.
+    What a strict reader refuses, read from "each by its own key set, strictly": a v5 manifest
+    lacking a v5 key of its header or trailer, and a v4 one carrying a v5 key; the bundle is
+    then one "a row breaks" (exit 4, as V4-R3's refusals are, P39's order). Not built, because
+    the rows do not say a reader checks them: a `sealed_key` with no sealed entry, a count that
+    is not the entries', a `racy` path with no entry.
+
+P74 New with V5-R4. "A bundle whose manifest has `roots` is rejected by every reader": the row
+    gives the scope's refusal an exit code and words (exit 3, `not designed for a system watch`)
+    and this one neither. Read: export cannot have written it (it refuses such a scope), so it
+    is a bundle a row breaks -- exit 4, where B-R6 puts it, before the scope and source
+    refusals. The other reading: exit 3 with the system watch's words. The harness's bundle
+    lists every child of the scope root as a `content` root and marks `.` `partial` (V5-E3), so
+    that nothing else in it is wrong. The first half of V5-R4 (a scope captured with roots) is
+    not reached: this harness has no system watch to capture.
+
 P70 New with diff-fields O10 (checkpoint-v3 G2-5). "An `added` record": a path in the after
     manifest only whose outcome the one-sided rules leave `added`; one that is `unknown` there
     (below a directory not listed before, `raced`, a writer) keeps `unknown` and carries none
@@ -2451,16 +2484,25 @@ def verify_refusal(exported, spec_raw, digest_given, digest_true, excluded_after
 # The bundle as export writes it (baseline-bundle.md B-1..B-7), checked against what the model
 # expects of it: the layout and the package lines exactly; the manifest only as B-4 describes it.
 
-MANIFEST_VERSION = 4                  # V4-1, V4-R4: belay writes v4 only
+MANIFEST_VERSION = 5                  # V5-1, V5-R2: belay writes v5 only
 V1_HEADER = ("belay_manifest", "created_ns", "scopes", "hash", "hash_max_bytes", "store_max_bytes")
 V4_HEADER = V1_HEADER + ("excluded", "walk_start_ns", "source")           # v2's, then V3-2
 ENTRY_KEY_ORDER = ("path", "type", "mode", "uid", "gid", "size", "mtime_ns", "ctime_ns", "ino", "dev",
                    "nlink", "iflags", "caps", "xattrs", "xattrs_sha256", "xattrs_unknown", "sha256",
                    "unverified", "unstable", "rdev", "link_target", "target_outside_scope", "stored",
-                   "mount", "unreadable", "raced", "writer_open")         # manifest-v1; V4's line
+                   "mount", "unreadable", "raced", "writer_open",         # manifest-v1; V4's line
+                   "not_read", "partial", "meta", "sealed")               # V5's key order
+V5_ENTRY_FLAGS = ("not_read", "partial", "meta", "sealed")                # V5-4, V5-4b, V5-5, V5-6
 V3_TRAILER = ("belay_manifest_end", "vanished", "unreadable", "unstable", "mounts", "raced", "trusted",
               "reference", "read_all")
 V4_TRAILER = V3_TRAILER + ("writer_open", "unguarded")                    # V4-3, V4-4
+# manifest-v5.md, "Key order": "The header: v4's keys, then `roots`, `sealed_key`, `basis`. The
+# trailer: v4's, then V5-7, V5-8, V5-9, V5-11, V5-12."
+V5_HEADER_ADDS = ("roots", "sealed_key", "basis")
+V5_HEADER = V4_HEADER + ("roots", "basis")                                # a whole scope: no `sealed_key` (V5-3, P72)
+V5_TRAILER_ADDS = ("not_read", "meta", "sealed", "carried", "racy")
+V5_TRAILER = V4_TRAILER + V5_TRAILER_ADDS
+V5_WHOLE_SCOPE = {"not_read": 0, "meta": 0, "sealed": 0, "carried": 0, "racy": []}   # V5-7..V5-12, a walk with no root
 
 
 def read_manifest(content):
@@ -2485,23 +2527,32 @@ def marked_entry_problem(o):
 
 
 def manifest_problems(content, B, unguarded):
-    """What a capture's v4 manifest must be (the V4 rows), against the model's entries `B`:
-    problems found (strings). `unguarded`: the trailer's expected count, or None when the
-    harness could not tell it."""
+    """What a capture's manifest must be: v5 of a whole scope (the V5 rows, P72), the V4 rows
+    as they were, against the model's entries `B`: problems found (strings). `unguarded`: the
+    trailer's expected count, or None when the harness could not tell it."""
     problems = []
     mh, entries, mt = read_manifest(content)
     if mh.get("belay_manifest") != MANIFEST_VERSION:
-        problems.append("V4-1: belay_manifest %r" % (mh.get("belay_manifest"),))
+        problems.append("V5-1: belay_manifest %r" % (mh.get("belay_manifest"),))
     keys = tuple("scopes" if k == "scopes_b64" else k for k in mh)
-    if keys != V4_HEADER:
-        problems.append("V4: the header's keys %r" % (keys,))
-    if tuple(mt) != V4_TRAILER:
-        problems.append("V4-3,V4-4: the trailer's keys %r" % (tuple(mt),))
+    if keys != V5_HEADER:
+        problems.append("V5: the header's keys %r" % (keys,))
+    if mh.get("roots") != [] or type(mh.get("roots")) is not list:
+        problems.append("V5-2: roots %r for a capture of a whole scope" % (mh.get("roots"),))
+    if mh.get("basis") != "walk":
+        problems.append("V5-10: basis %r" % (mh.get("basis"),))
+    if tuple(mt) != V5_TRAILER:
+        problems.append("V5, V4-3, V4-4: the trailer's keys %r" % (tuple(mt),))
+    for k, want in V5_WHOLE_SCOPE.items():
+        if k in mt and (mt[k] != want or type(mt[k]) is not type(want)):
+            problems.append("V5-7..V5-12: the trailer's %s %r for a walk of a whole scope" % (k, mt[k]))
     marked = set()
     for o in entries:
         ks = ["path" if k == "path_b64" else "link_target" if k == "link_target_b64" else k for k in o]
         if ks != [k for k in ENTRY_KEY_ORDER if k in ks] or set(ks) - set(ENTRY_KEY_ORDER):
-            problems.append("V4: an entry's keys in the wrong order: %r" % (ks,))
+            problems.append("V5: an entry's keys in the wrong order: %r" % (ks,))
+        if set(ks) & set(V5_ENTRY_FLAGS):
+            problems.append("V5-4..V5-6: an entry of a whole scope carries %r" % (sorted(set(ks) & set(V5_ENTRY_FLAGS)),))
         if "writer_open" in o:
             marked.add(entry_path(o))
             why = marked_entry_problem(o)
@@ -2525,16 +2576,24 @@ def unguarded_count(B, answered):
 
 
 def downgrade_manifest(content, version):
-    """The bytes an earlier release would have written for this capture (V4-R4): version 2 or 3,
-    no v4 key, and for 2 no `source`."""
+    """The bytes an earlier release would have written for this capture (V4-R4, V5-R2): version
+    2, 3 or 4, with exactly that version's keys -- no v5 key, below 4 no v4 key, and for 2 no
+    `source` (V5-R1: "each by its own key set, strictly")."""
     mh, entries, mt = read_manifest(content)
-    if any("writer_open" in o for o in entries):
-        raise ValueError("no earlier version can hold writer_open")
+    if any(set(o) & set(V5_ENTRY_FLAGS) for o in entries) or mh.get("roots"):
+        raise ValueError("no earlier version can hold a root or a v5 flag")
+    if version < 4 and any("writer_open" in o for o in entries):
+        raise ValueError("no version before 4 can hold writer_open")
     mh["belay_manifest"] = version
+    for k in V5_HEADER_ADDS:
+        mh.pop(k, None)
+    for k in V5_TRAILER_ADDS:
+        mt.pop(k)
     if version < 3:
         mh.pop("source")
-    for k in ("writer_open", "unguarded"):
-        mt.pop(k)
+    if version < 4:
+        for k in ("writer_open", "unguarded"):
+            mt.pop(k)
     return b"".join(enc(o).encode("utf-8") + b"\n" for o in [mh] + entries + [mt])
 
 
@@ -2582,14 +2641,35 @@ def apply_flags(entries, flags):
 
 
 def break_manifest(content, how):
-    """A manifest V4-R2 or V4-R3 has a strict reader refuse. `how` names the break."""
+    """A manifest V4-R2 or V4-R3, or V5-R1 or V5-R4, has a strict reader refuse. `how` names the
+    break; `v3-...` is a v3 manifest but for the one v4 key it names, `v4-...` a v4 one but for
+    the v5 key."""
+    if how.startswith(("v3-", "v4-")):
+        content = downgrade_manifest(content, 4)
     mh, entries, mt = read_manifest(content)
     plain = next(o for o in entries if o["type"] == "reg" and "stored" not in o)
-    if how == "trailer-missing-writer-open":
+    if how == "v5-missing-roots":                                                    # V5-2 "always", V5-R1
+        mh.pop("roots")
+    elif how == "v5-missing-basis":                                                  # V5-10 "always"
+        mh.pop("basis")
+    elif how in ("v5-missing-not-read", "v5-missing-meta", "v5-missing-sealed", "v5-missing-carried", "v5-missing-racy"):
+        mt.pop(how[len("v5-missing-"):].replace("-", "_"))                           # V5-7..V5-12 "always"
+    elif how == "v5-basis-order":                                                    # "then `roots`, `sealed_key`, `basis`"
+        mh["roots"] = mh.pop("roots")
+    elif how == "v4-with-roots":                                                     # V5-R1: v4 by v4's key set
+        mh["roots"] = []
+    elif how == "v4-with-racy":
+        mt["racy"] = []
+    elif how == "v5-roots":                                                          # V5-R4, P74
+        top = sorted(entry_path(o) for o in entries if b"/" not in entry_path(o) and entry_path(o) != b".")
+        mh = {k: ([{"path": p.decode("utf-8"), "class": "content", "found": True} for p in top] if k == "roots" else v)
+              for k, v in mh.items()}
+        next(o for o in entries if entry_path(o) == b".")["partial"] = True          # V5-E3
+    elif how == "trailer-missing-writer-open":
         mt.pop("writer_open")
     elif how == "trailer-missing-unguarded":
         mt.pop("unguarded")
-    elif how == "v3-with-trailer-key":
+    elif how == "v3-with-trailer-key":                                               # v3's keys and `unguarded`
         mh["belay_manifest"] = 3
         mt.pop("writer_open")
     elif how == "v3-with-entry-key":

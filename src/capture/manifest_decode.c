@@ -10,13 +10,14 @@
 #include "belay/path.h"
 
 #include <stdbool.h>
+#include <stdlib.h>
 #include <string.h>
 
 /* Entry keys in canonical order: the schema's fields, each followed by its
  * base64 spelling where it has one. */
 static size_t entry_keys(const char *keys[2 * F_COUNT], uint64_t version) {
     size_t n = 0;
-    const size_t fields = version >= 4 ? F_COUNT : F_V1_COUNT;     /* each version by its own keys */
+    const size_t fields = ENTRY_FIELDS_OF(version);                /* each version by its own keys */
     for (size_t f = 0; f < fields; f++) {
         keys[n++] = ENTRY_FIELDS[f].name;
         if (ENTRY_FIELDS[f].alt != NULL) keys[n++] = ENTRY_FIELDS[f].alt;
@@ -329,15 +330,19 @@ static int decode_field(const struct obj *o, enum entry_field f, struct belay_en
         if (tp == NULL) return lex_corrupt("entry has no type");
         return type_from(tp, &e->type);
     }
+    /* V5-E8: required on every entry but a not_read directory, where the
+     * schema's rule refuses them. */
+    case F_SIZE: case F_MTIME: case F_CTIME: case F_NLINK:
+        if (lex_get(o, ENTRY_FIELDS[F_NOT_READ].name) != NULL && lex_get(o, k) == NULL) return 0;
+        if (f == F_SIZE)  return get_u64(o, k, true, &e->size, NULL);
+        if (f == F_MTIME) return get_i64(o, k, &e->mtime_ns);
+        if (f == F_CTIME) return get_i64(o, k, &e->ctime_ns);
+        return get_u64(o, k, true, &e->nlink, NULL);
     case F_MODE:  return get_u32(o, k, &e->mode);
     case F_UID:   return get_u32(o, k, &e->uid);
     case F_GID:   return get_u32(o, k, &e->gid);
-    case F_SIZE:  return get_u64(o, k, true, &e->size, NULL);
-    case F_MTIME: return get_i64(o, k, &e->mtime_ns);
-    case F_CTIME: return get_i64(o, k, &e->ctime_ns);
     case F_INO:   return get_u64(o, k, true, &e->ino, NULL);
     case F_DEV:   return get_u64(o, k, true, &e->dev, NULL);
-    case F_NLINK: return get_u64(o, k, true, &e->nlink, NULL);
     case F_IFLAGS: return get_u64(o, k, false, &e->iflags, &e->has_iflags);
     case F_CAPS:  return get_caps(o, k, e);
     case F_XATTRS: {
@@ -380,6 +385,10 @@ static int decode_field(const struct obj *o, enum entry_field f, struct belay_en
     case F_UNREADABLE: return get_flag(o, k, &e->unreadable);
     case F_RACED:      return get_flag(o, k, &e->raced);
     case F_WRITER_OPEN: return get_flag(o, k, &e->writer_open);
+    case F_NOT_READ:   return get_flag(o, k, &e->not_read);
+    case F_PARTIAL:    return get_flag(o, k, &e->partial);
+    case F_META:       return get_flag(o, k, &e->meta);
+    case F_SEALED:     return get_flag(o, k, &e->sealed);
     case F_COUNT:      break;
     }
     return lex_corrupt("internal error: no decoder for a field");
@@ -389,7 +398,7 @@ const enum entry_field DECODE_ORDER[F_COUNT] = {
     F_PATH, F_TYPE, F_MODE, F_UID, F_GID, F_SIZE, F_INO, F_DEV, F_NLINK, F_MTIME, F_CTIME,
     F_SHA256, F_STORED, F_UNVERIFIED, F_UNSTABLE, F_TARGET_OUTSIDE, F_MOUNT, F_UNREADABLE,
     F_RACED, F_RDEV, F_IFLAGS, F_CAPS, F_XATTRS, F_XATTRS_SHA256, F_XATTRS_UNKNOWN,
-    F_LINK_TARGET, F_WRITER_OPEN,
+    F_LINK_TARGET, F_WRITER_OPEN, F_NOT_READ, F_PARTIAL, F_META, F_SEALED,
 };
 
 int decode_entry(const struct obj *o, uint64_t version, struct belay_entry *e) {
@@ -418,14 +427,32 @@ static int get_text(const struct obj *o, const char *key, char *out, size_t cap)
     return 0;
 }
 
-int decode_trailer(const struct obj *o, uint64_t version, uint64_t v[TR_COUNT], struct belay_manifest_stats *t) {
-    const char *keys[TR_COUNT + TR2_COUNT + TR4_COUNT];
+/* A racy line (manifest-v5-addendum V5-A2): {"racy": <an entry's path>},
+ * or racy_b64 when it is not UTF-8. */
+int decode_racy_line(const struct obj *o, char *path, size_t cap, size_t *len) {
+    const char *keys[2] = { RACY_FIELD.name, RACY_FIELD.alt };
+    if (lex_order(o, keys, 2) == -1) return -1;
+    bool have;
+    if (get_bytes(o, RACY_FIELD.name, RACY_FIELD.alt, path, cap, len, &have) == -1) return -1;
+    if (!have || *len == 0 || check_canonical(path, *len) == -1) {
+        belay_err_clear();
+        return lex_corrupt("a racy path is not a canonical relative path");
+    }
+    return 0;
+}
+
+int decode_trailer(const struct obj *o, const struct belay_manifest_header *h, uint64_t v[TR_COUNT],
+                   struct belay_manifest_stats *t) {
+    const uint64_t version = h->version;
+    const char *keys[TR_COUNT + TR2_COUNT + TR4_COUNT + TR5_COUNT];
     size_t n = 0;
     for (size_t i = 0; i < TR_COUNT; i++) keys[n++] = TRAILER_FIELDS[i].name;
     if (version >= 2)
         for (size_t i = 0; i < TR2_COUNT; i++) keys[n++] = TRAILER2_FIELDS[i].name;
     if (version >= 4)
         for (size_t i = 0; i < TR4_COUNT; i++) keys[n++] = TRAILER4_FIELDS[i].name;
+    if (version >= 5)
+        for (size_t i = 0; i < TR5_COUNT; i++) keys[n++] = TRAILER5_FIELDS[i].name;
     if (lex_order(o, keys, n) == -1) return -1;
     for (size_t i = 0; i < TR_COUNT; i++)
         if (get_u64(o, keys[i], true, &v[i], NULL) == -1) return -1;
@@ -454,6 +481,28 @@ int decode_trailer(const struct obj *o, uint64_t version, uint64_t v[TR_COUNT], 
     if (unguarded > v[TR_ENTRIES]) return lex_corrupt("trailer has more unguarded files than entries");
     t->writer_open = (size_t)wopen;
     t->unguarded = (size_t)unguarded;
+    if (version < 5) return 0;
+    /* Version 5 (V5-7 to V5-12): three counts the reader checks against the
+     * entries, and how the capture was taken. A walk carries nothing over and
+     * names no racy path. */
+    uint64_t nr, meta, sealed, carried, racy;
+    if (get_u64(o, TRAILER5_FIELDS[TR5_NOT_READ].name, true, &nr, NULL) == -1 ||
+        get_u64(o, TRAILER5_FIELDS[TR5_META].name, true, &meta, NULL) == -1 ||
+        get_u64(o, TRAILER5_FIELDS[TR5_SEALED].name, true, &sealed, NULL) == -1 ||
+        get_u64(o, TRAILER5_FIELDS[TR5_CARRIED].name, true, &carried, NULL) == -1 ||
+        get_u64(o, TRAILER5_FIELDS[TR5_RACY].name, true, &racy, NULL) == -1)
+        return -1;
+    if (racy > BELAY_RACY_MAX) return lex_corrupt("too many racy paths");
+    if (carried > v[TR_ENTRIES]) return lex_corrupt("trailer carries more entries than it has");
+    if (!h->basis_events && carried != 0) return lex_corrupt("a walk carries no entry");
+    if (!h->basis_events && racy != 0) return lex_corrupt("a walk names no racy path");
+    if ((sealed != 0) != (h->sealed_key[0] != '\0'))
+        return lex_corrupt(sealed != 0 ? "sealed entries without a sealed_key" : "a sealed_key without sealed entries");
+    t->not_read = (size_t)nr;
+    t->meta = (size_t)meta;
+    t->sealed = (size_t)sealed;
+    t->carried = (size_t)carried;
+    t->racy_listed = (size_t)racy;
     return 0;
 }
 
@@ -514,6 +563,70 @@ static int decode_source(const struct obj *o, struct belay_manifest_header *h) {
     return 0;
 }
 
+/* A root line (manifest-v5-addendum V5-A1): {"root" | "root_b64", "class",
+ * "found"} in that order; the path relative and canonical, never ".". */
+int decode_root_line(const struct obj *o, char *path, size_t cap, size_t *len, struct belay_root *r) {
+    const char *keys[RT_COUNT + 1] = { ROOT_FIELDS[RT_PATH].name, ROOT_FIELDS[RT_PATH].alt, ROOT_FIELDS[RT_CLASS].name,
+                                       ROOT_FIELDS[RT_FOUND].name };
+    if (lex_order(o, keys, RT_COUNT + 1) == -1) return -1;
+    bool have;
+    if (get_bytes(o, keys[0], keys[1], path, cap, len, &have) == -1) return -1;
+    const struct pair *cp = lex_get(o, keys[2]), *fp = lex_get(o, keys[3]);
+    if (!have || cp == NULL || fp == NULL) return lex_corrupt("a root line needs root, class and found");
+    if (*len == 0 || (*len == 1 && path[0] == '.') || check_canonical(path, *len) == -1) {
+        belay_err_clear();
+        return lex_corrupt("a root's path is not a canonical relative path");
+    }
+    memset(r, 0, sizeof *r);
+    if (cp->kind == V_STR && cp->vlen == 7 && memcmp(cp->val, "content", 7) == 0) r->cls = BELAY_ROOT_CONTENT;
+    else if (cp->kind == V_STR && cp->vlen == 8 && memcmp(cp->val, "metadata", 8) == 0) r->cls = BELAY_ROOT_METADATA;
+    else return lex_corrupt("a root's class is not content or metadata");
+    if (fp->kind != V_TRUE && fp->kind != V_FALSE) return bad_kind("a root's found", "exactly true or false");
+    r->found = fp->kind == V_TRUE;
+    return 0;
+}
+
+bool belay_manifest_same_roots(const struct belay_manifest_header *a, const struct belay_manifest_header *b) {
+    if (a->n_roots != b->n_roots) return false;
+    for (size_t i = 0; i < a->n_roots; i++)
+        if (a->roots == NULL || b->roots == NULL || strcmp(a->roots[i].path, b->roots[i].path) != 0 || a->roots[i].cls != b->roots[i].cls ||
+            a->roots[i].found != b->roots[i].found)
+            return false;
+    return true;
+}
+
+bool belay_manifest_lists_root(const struct belay_manifest_header *h, const char *path, size_t len) {
+    size_t lo = 0, hi = h->roots != NULL ? h->n_roots : 0;
+    while (lo < hi) {
+        const size_t mid = lo + (hi - lo) / 2;
+        const char *r = h->roots[mid].path;
+        const size_t rl = strlen(r), m = rl < len ? rl : len;
+        int c = memcmp(r, path, m);
+        if (c == 0) c = rl < len ? -1 : rl > len ? 1 : 0;
+        if (c == 0) return true;
+        if (c < 0) lo = mid + 1;
+        else hi = mid;
+    }
+    return false;
+}
+
+bool belay_manifest_root_below(const struct belay_manifest_header *h, const char *path, size_t len) {
+    /* the roots below `path` start with path + "/" and sort together */
+    size_t lo = 0, hi = h->roots != NULL ? h->n_roots : 0;
+    while (lo < hi) {
+        const size_t mid = lo + (hi - lo) / 2;
+        const char *r = h->roots[mid].path;
+        const size_t rl = strlen(r), m = rl < len ? rl : len;
+        int c = memcmp(r, path, m);
+        if (c == 0) c = rl <= len ? -1 : (unsigned char)r[len] < '/' ? -1 : 1;
+        if (c < 0) lo = mid + 1;
+        else hi = mid;
+    }
+    if (lo >= (h->roots != NULL ? h->n_roots : 0)) return false;
+    const char *r = h->roots[lo].path;
+    return strlen(r) > len + 1 && memcmp(r, path, len) == 0 && r[len] == '/';
+}
+
 bool belay_manifest_same_source(const struct belay_manifest_header *a, const struct belay_manifest_header *b) {
     return strcmp(a->source_docker, b->source_docker) == 0 && strcmp(a->source_image, b->source_image) == 0;
 }
@@ -534,14 +647,35 @@ int decode_header(const struct obj *o, struct belay_manifest_header *h, struct b
     h->version = ver;
     /* Each version by its own key set: a v1 header carrying a v2 key is
      * refused as an unknown key, a v2 header missing one below. */
-    const char *keys[2 * H_COUNT + H2_COUNT + H3_COUNT];
+    const char *keys[2 * H_COUNT + H2_COUNT + H3_COUNT + H5_COUNT];
     size_t nk = header_keys(keys);
     if (ver >= 2)
         for (size_t i = 0; i < H2_COUNT; i++) keys[nk++] = HEADER2_FIELDS[i].name;
     if (ver >= 3)
         for (size_t i = 0; i < H3_COUNT; i++) keys[nk++] = HEADER3_FIELDS[i].name;
+    if (ver >= 5)
+        for (size_t i = 0; i < H5_COUNT; i++) keys[nk++] = HEADER5_FIELDS[i].name;
     if (lex_order(o, keys, nk) == -1) return -1;
     if (ver >= 3 && decode_source(o, h) == -1) return -1;
+    if (ver >= 5) {
+        /* V5-2, V5-3, V5-10: the roots, the sealing key's id when any entry
+         * is sealed (the trailer's count decides), and the basis. */
+        uint64_t nroots;
+        if (get_u64(o, HEADER5_FIELDS[H5_ROOTS].name, true, &nroots, NULL) == -1) return -1;
+        if (nroots > ROOTS_MAX) return lex_corrupt("too many roots");
+        h->n_roots = (size_t)nroots;            /* V5-A1: the lines follow; the reader keeps them */
+        const struct pair *sk = lex_get(o, HEADER5_FIELDS[H5_SEALED_KEY].name);
+        if (sk != NULL) {
+            if (sk->kind != V_STR || !lhex(sk->val, sk->vlen, BELAY_SEALED_KEY_HEX))
+                return bad_kind(HEADER5_FIELDS[H5_SEALED_KEY].name, "16 lowercase hex digits");
+            memcpy(h->sealed_key, sk->val, BELAY_SEALED_KEY_HEX);
+        }
+        const struct pair *bp = lex_get(o, HEADER5_FIELDS[H5_BASIS].name);
+        if (bp == NULL) return lex_corrupt("missing basis");
+        if (bp->kind == V_STR && bp->vlen == 6 && memcmp(bp->val, "events", 6) == 0) h->basis_events = true;
+        else if (!(bp->kind == V_STR && bp->vlen == 4 && memcmp(bp->val, "walk", 4) == 0))
+            return lex_corrupt("basis is not walk or events");
+    }
     if (ver >= 2) {
         if (get_i64(o, HEADER2_FIELDS[H2_WALK_START].name, &h->walk_start_ns) == -1) return -1;
         if (h->walk_start_ns < 0) return lex_corrupt("walk_start_ns is negative");

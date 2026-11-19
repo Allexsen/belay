@@ -15,7 +15,8 @@
 #include <stdint.h>
 
 /*
- *  Directories recorded but not descended (unreadable, or a mount point):
+ *  Directories recorded but not descended (unreadable, a mount point, or
+ *  from version 5 `not_read`):
  *  nothing may appear below them.
  *
  *  Entries are strictly sorted, so a sealed directory D can still have an
@@ -41,6 +42,8 @@
 
 struct stream {
     size_t n_entries, n_unreadable, n_unstable, n_mounts, n_raced, n_writer_open;
+    size_t n_not_read, n_meta, n_sealed_flag;   /* version 5's flags */
+    size_t n_racy;              /* racy lines read (V5-A2); the reader counts them */
     size_t n_sealing;           /* directories nothing below which was read, the root included */
     bool   have_root;
     bool   root_unreadable;
@@ -50,16 +53,20 @@ struct stream {
     bool   have_prev;
 
     size_t sealed[SEALED_MAX];  /* lengths of sealed prefixes of prev */
+    unsigned char sealed_by_rule[SEALED_MAX];   /* that one is `not_read` (V5-E2), for the message */
     size_t n_sealed;
     size_t dirs[SEALED_MAX];    /* lengths of recorded directories, prefixes of prev */
+    unsigned char dir_partial[SEALED_MAX];  /* that one carries `partial` (version 5) */
+    bool   root_partial, root_sealed;       /* the scope root's, for stream_end */
     size_t n_dirs;
 };
 
 /* One entry, in file order. 0, or -1 with the error set. */
-int stream_entry(struct stream *s, const struct belay_entry *e);
+int stream_entry(struct stream *s, const struct belay_manifest_header *h, const struct belay_entry *e);
 
 /* The trailer's values (indexed by enum trailer_field) against what was
  * read. 0, or -1. */
-int stream_end(const struct stream *s, const uint64_t v[TR_COUNT], size_t writer_open);
+int stream_end(const struct stream *s, const struct belay_manifest_header *h, const uint64_t v[TR_COUNT],
+               const struct belay_manifest_stats *t);
 
 #endif

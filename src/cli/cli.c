@@ -53,6 +53,8 @@ static const char USAGE[] =
     "  help [command]                        this, or one command's options\n"
     "  --version\n"
     "\n"
+    "  --system in place of --scope DIR on check, mark, diff, log, manifest: the machine's /, read by a\n"
+    "    fixed list of roots (docs/cli.md); baseline export and verify refuse it\n"
     "  --docker CONTAINER on any of these: the scope is a path inside a Docker container, read from its\n"
     "                                        layers on the host (Linux, root; export and verify: paused)\n"
     "exit codes: 0 done, 1 diff --exit-code found a change (verify: a violation), 2 usage, 3 refused, 4 failed\n";
@@ -168,8 +170,8 @@ void cli_err_line(FILE *err) { err_line(err); }
 /* ---- options ---- */
 
 struct opts {
-    const char *scope, *since, *to, *add, *remove, *docker;
-    bool json, full, exit_code, all, full_every_set, keep;
+    const char *scope, *since, *to, *add, *remove, *docker, *system_root;
+    bool json, full, exit_code, all, full_every_set, keep, system;
     long full_every;
 };
 
@@ -184,6 +186,11 @@ static int parse(int argc, char **argv, struct opts *o, FILE *err) {
         else if (!strcmp(a, "--keep")) o->keep = true;
         else if (!strcmp(a, "--exit-code")) o->exit_code = true;
         else if (!strcmp(a, "--all")) o->all = true;
+        else if (!strcmp(a, "--system")) {
+            if (o->system) return usage(err, "--system given twice");
+            o->system = true;
+        }
+        else if (!strcmp(a, "--system-root")) val = &o->system_root;    /* cli_system_scope */
         else if (!strcmp(a, "--scope")) val = &o->scope;
         else if (!strcmp(a, "--docker")) val = &o->docker;
         else if (!strcmp(a, "--since")) val = &o->since;
@@ -217,8 +224,54 @@ static int parse(int argc, char **argv, struct opts *o, FILE *err) {
             *val = argv[++i];
         }
     }
+    if (o->system || o->system_root != NULL) {
+        const int rc = cli_system_scope(o->system, o->system_root, &o->scope, o->docker, err);
+        if (rc) return rc;
+        o->system = true;
+    }
     if (o->scope == NULL) return usage(err, "--scope DIR is required");
     return 0;
+}
+
+int cli_system_scope(bool system, const char *system_root, const char **scope, const char *docker, FILE *err) {
+    if (*scope != NULL || (system && system_root != NULL)) return usage(err, "--system takes the place of --scope");
+    if (docker != NULL) {
+        fputs("belay: refused: --system with --docker is not implemented in this version\n", err);
+        return EXIT_REFUSED;
+    }
+    *scope = system_root != NULL ? system_root : "/";
+    return 0;
+}
+
+int cli_refuse_root(const char *resolved, bool system, const char *docker, FILE *err) {
+    if (system || docker != NULL || strcmp(resolved, "/") != 0) return 0;
+    fputs("belay: refused: not capturing /: too wide. --system reads the machine by its roots\n", err);
+    return EXIT_REFUSED;
+}
+
+int cli_refuse_system(const struct state *st, long id, const char *what, FILE *err) {
+    if (id == 0) {
+        struct checkpoint *list = NULL;
+        size_t n = 0;
+        if (st->cp_fd == -1) return 0;                      /* never captured */
+        if (state_list(st, &list, &n) == -1) return failed(err);
+        id = n > 0 ? list[n - 1].id : 0;
+        free(list);
+        if (id == 0) return 0;
+    }
+    struct manifest_file mf;
+    struct belay_manifest_reader *r = NULL;
+    if (manifest_acquire_header(st, id, &mf) == -1) return failed(err);
+    if (belay_manifest_open_header(mf.path, &r) == -1) {
+        manifest_release(&mf);
+        return failed(err);
+    }
+    const bool roots = belay_manifest_header(r)->n_roots > 0;
+    belay_manifest_close(r);
+    manifest_release(&mf);
+    if (!roots) return 0;
+    fprintf(err, CLI_NOT_FOR_SYSTEM, what);
+    return EXIT_REFUSED;
 }
 
 /* Strict (review 2026-10-31, Phase 5, 10): digits, no leading zero, at
@@ -258,7 +311,7 @@ static void json_checkpoint(FILE *out, const struct state *st, const struct chec
     char src[200] = "null";             /* CK-16: the manifest's source (manifest-v3 V3-2) */
     struct manifest_file mf;
     const bool have = manifest_acquire_header(st, c->id, &mf) == 0;
-    if (have && belay_manifest_open(mf.path, &r) == 0) {
+    if (have && belay_manifest_open_header(mf.path, &r) == 0) {
         const struct belay_manifest_header *h = belay_manifest_header(r);
         if (h->source_docker[0] != '\0')
             snprintf(src, sizeof src, "{\"docker\":\"%s\",\"image\":\"%s\"}", h->source_docker, h->source_image);
@@ -317,7 +370,7 @@ static void capture_notes(FILE *out, const struct state *st, const struct checkp
     struct belay_manifest_reader *r = NULL;
     struct manifest_file mf;
     const bool have = manifest_acquire_header(st, c->id, &mf) == 0;
-    if (have && belay_manifest_open(mf.path, &r) == 0) {
+    if (have && belay_manifest_open_header(mf.path, &r) == 0) {
         excluded_notes(out, belay_manifest_header(r), "not recorded");
         belay_manifest_close(r);
         manifest_release(&mf);
@@ -489,7 +542,11 @@ static int cmd_capture(const struct opts *o, const char *kind, FILE *out, FILE *
     struct state st;
     int rc = open_scope(o, true, &st, err);
     if (rc) return rc;
-    const struct capture_req req = { kind, strcmp(kind, "mark") == 0, o->full, o->full_every, 0, o->keep, false };
+    if ((rc = cli_refuse_root(st.scope.path, o->system, o->docker, err)) != 0) {
+        state_close(&st);
+        return rc;
+    }
+    const struct capture_req req = { kind, strcmp(kind, "mark") == 0, o->full, o->full_every, 0, o->keep, false, o->system };
     struct checkpoint c;
     if (state_capture(&st, &req, &c) == -1) {
         rc = failed(err);
@@ -555,6 +612,10 @@ static int cmd_diff(const struct opts *o, FILE *out, FILE *err) {
      * a diff of a scope never captured leaves no state behind (D8). */
     int rc = open_scope(o, false, &st, err);
     if (rc) return rc;
+    if ((rc = cli_refuse_root(st.scope.path, o->system, o->docker, err)) != 0) {     /* WS-1 */
+        state_close(&st);
+        return rc;
+    }
     struct checkpoint *list = NULL, now = { 0 };
     size_t n = 0;
     struct manifest_file mf_a = { .temporary = false }, mf_b = { .temporary = false };
@@ -572,7 +633,7 @@ static int cmd_diff(const struct opts *o, FILE *out, FILE *err) {
     if (!have_from || !have_to) {
         fprintf(err, "belay: no checkpoint %ld of ", have_from ? to : from);
         receipt_fputs(err, st.scope.path);
-        fputs(" (belay log --scope lists them)\n", err);
+        fputs(o->system ? " (belay log --system lists them)\n" : " (belay log --scope lists them)\n", err);
         rc = EXIT_USAGE;
         goto done;
     }
@@ -599,7 +660,7 @@ static int cmd_diff(const struct opts *o, FILE *out, FILE *err) {
     }
     if (to == 0) {
         /* Q3: the capture is kept as a checkpoint, prefiltered as a mark. */
-        const struct capture_req req = { "diff", true, false, o->full_every, 0, false, false };
+        const struct capture_req req = { "diff", true, false, o->full_every, 0, false, false, o->system };
         if (state_capture(&st, &req, &now) == -1) { rc = failed(err); goto done; }
         to = now.id;
         snprintf(label_b, sizeof label_b, "now (checkpoint %ld)", to);
@@ -735,6 +796,7 @@ static int run(int argc, char **argv, FILE *out, FILE *err) {
     if (strcmp(cmd, "mark") && o.keep) return usage(err, "--keep is mark's");
     if ((!strcmp(cmd, "check") || !strcmp(cmd, "log") || !strcmp(cmd, "exclude")) && o.full_every_set)
         return usage(err, "--full-every is mark's and diff's");
+    if (!strcmp(cmd, "exclude") && o.system) return usage(err, "--system is check's, mark's, diff's, log's and manifest's");
     if (strcmp(cmd, "exclude") && (o.add || o.remove)) return usage(err, "--add and --remove are exclude's");
     if (!strcmp(cmd, "exclude") && o.json) return usage(err, "exclude has no --json");
     if (!strcmp(cmd, "exclude")) return cmd_exclude(&o, out, err);

@@ -166,6 +166,8 @@ struct capture_req {
     uint64_t hash_max_bytes;    /* 0: the default; raised with a protect spec (protect-spec PS-C3) */
     bool keep;                  /* mark --keep (KP-1) */
     bool watch;                 /* a step of `belay watch`: the checkpoint is the watch's (WR-14) */
+    bool system;                /* --system: the scope is a machine's `/`, read by its roots
+                                   (watch-system.md WS-6 to WS-9), resolved at every capture */
 };
 
 /* The state root's path relative to the scope, when its resolved path is

@@ -96,13 +96,13 @@ static void schema_invariants(const struct belay_manifest_header *h, const struc
     /* 2 */ if (P_XATTRS && P_XSHA) abort();
     /* 3 */ if (P_XUNK && (P_XATTRS || P_XSHA || P_CAPS)) abort();
     /* 4 */ if (!reg && P_CAPS) abort();
-    /* 5 */ if (reg && (int)P_SHA + (int)P_UNVER != 1) abort();
+    /* 5, as V5-E1 amends it */ if (reg && (int)P_SHA + (int)P_UNVER + (int)e->meta != 1) abort();
     /* 6 */ if (reg && (P_UNSTAB || P_UNREAD) && !P_UNVER) abort();
     /* 7 */ if (reg && P_UNSTAB && P_UNREAD) abort();
     /* 8 */ if (reg && P_MOUNT && (P_UNSTAB || P_UNREAD)) abort();
     /* 9 */ if (dir && (P_SHA || P_UNVER || P_STORED)) abort();
-    /* 10 */ if (dir && P_RACED && !(P_UNREAD || P_MOUNT)) abort();
-    /* 11 */ if (dir && (int)P_UNREAD + (int)P_UNSTAB + (int)P_MOUNT > 1) abort();
+    /* 10, as V5-E2 amends it */ if (dir && P_RACED && !(P_UNREAD || P_MOUNT || e->not_read)) abort();
+    /* 11, likewise */ if (dir && (int)P_UNREAD + (int)P_UNSTAB + (int)P_MOUNT + (int)e->not_read > 1) abort();
     /* 12 */ if (lnk && (P_SHA || P_UNVER || P_STORED || P_UNSTAB)) abort();
     /* 13 */ if (node && (P_SHA || P_UNVER || P_STORED || P_UNSTAB || P_UNREAD)) abort();
     /* 14 */ if (P_STORED && (!P_SHA || strcmp(e->stored_hex, e->sha256_hex) != 0)) abort();
@@ -114,6 +114,23 @@ static void schema_invariants(const struct belay_manifest_header *h, const struc
     /* 20 */ if (P_OUTSIDE && e->link_target_len == 0) abort();
     /* 21 */ if (P_MOUNT && P_SHA) abort();
     /* 22 */ if (P_MOUNT && (P_IFLAGS || P_CAPS || P_XATTRS || P_XSHA || P_XUNK)) abort();
+    /* Version 5, by hand from test/expect/manifest-v5.md (V5-4, V5-4b, V5-5,
+     * V5-6, V5-R1, V5-3): the four flags only in a v5 manifest and only on
+     * their type; what each excludes; a sealed entry only under a header
+     * that names the key. (V5-E8's absent keys are not visible in a decoded
+     * entry; the reader's tests hold them.) */
+    if ((e->not_read || e->partial || e->meta || e->sealed) && h->version < 5) abort();
+    if (!dir && (e->not_read || e->partial)) abort();
+    if (e->partial && (e->not_read || P_UNREAD || P_MOUNT)) abort();
+    if (!reg && (e->meta || e->sealed)) abort();
+    if (e->meta && (P_SHA || P_UNVER || P_STORED)) abort();
+    if (e->sealed && (!P_SHA || P_STORED)) abort();
+    if (e->sealed && h->sealed_key[0] == '\0') abort();
+    if (h->version < 5 && (h->n_roots != 0 || h->basis_events || h->sealed_key[0] != '\0')) abort();
+    for (size_t i = 0; i < h->n_roots; i++) {
+        const char *rp = h->roots[i].path;
+        if (rp == NULL || rp[0] == '\0' || rp[0] == '/' || (i > 0 && strcmp(h->roots[i - 1].path, rp) >= 0)) abort();
+    }
     /* header 1 */
     if (reg && P_SHA && e->size > h->hash_max_bytes) abort();
     if (reg && P_UNVER && !P_UNSTAB && !P_UNREAD && !P_MOUNT && e->size <= h->hash_max_bytes) abort();
@@ -225,7 +242,31 @@ int LLVMFuzzerTestOneInput(const uint8_t *data, size_t size) {
     struct belay_manifest_reader *r;
     if (belay_manifest_open(path, &r) == 0) {
         static struct belay_entry e;
-        while (belay_manifest_next(r, &e) == 1) check_entry(belay_manifest_header(r), &e);
+        int got;
+        while ((got = belay_manifest_next(r, &e)) == 1) check_entry(belay_manifest_header(r), &e);
+        /* manifest-v5-addendum V5-A1, V5-A2, by hand: as many roots as the
+         * header counts; the racy paths the trailer counts, at most 65,536,
+         * none empty or holding a NUL, strictly sorted, and only in a v5
+         * manifest that is not a walk's. */
+        const struct belay_manifest_header *h = belay_manifest_header(r);
+        if (h->n_roots > 0 && h->roots == NULL) abort();
+        if (got == 0) {
+            const size_t n = belay_manifest_trailer(r)->racy_listed;
+            if (n > 65536 || (n > 0 && (h->version < 5 || !h->basis_events))) abort();
+            const char *prev = NULL, *q = NULL;
+            size_t pl = 0;
+            for (size_t i = 0; i < n; i++) {
+                const size_t l = belay_manifest_racy(r, i, &q);
+                if (l == 0 || q == NULL || memchr(q, '\0', l) != NULL) abort();
+                if (prev != NULL) {
+                    const int c = memcmp(prev, q, pl < l ? pl : l);
+                    if (c > 0 || (c == 0 && pl >= l)) abort();
+                }
+                prev = q;
+                pl = l;
+            }
+            if (belay_manifest_racy(r, n, &q) != 0) abort();
+        }
         belay_manifest_close(r);
     }
     belay_err_clear();

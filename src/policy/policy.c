@@ -600,7 +600,7 @@ static void protected(struct state *s, const char *p, size_t n, const struct bel
      * list after them, as it came */
     static const char *const ORDER[] = { "unverified", "unstable", "unreadable", "raced", "mount",
                                          "xattrs_unknown", "iflags_unknown", "not_captured", "listing_incomplete",
-                                         "writer_open" };
+                                         "writer_open", "not_read", "sealed_key" };     /* manifest-v5 V5-D5 */
     const char *sorted[16];
     size_t ns = 0;
     for (size_t o = 0; o < sizeof ORDER / sizeof ORDER[0]; o++)

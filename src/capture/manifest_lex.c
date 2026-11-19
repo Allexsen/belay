@@ -110,6 +110,10 @@ static int scan_flat(const char *p, const char *lim, const char **end) {
         } else if (p < lim && (*p == '-' || (*p >= '0' && *p <= '9'))) {
             if (scan_int(p, lim, &e) == -1) return -1;
             p = e;
+        } else if (lim - p >= 4 && memcmp(p, "true", 4) == 0) {
+            p += 4;                             /* version 5: a root's `found` */
+        } else if (lim - p >= 5 && memcmp(p, "false", 5) == 0) {
+            p += 5;
         } else {
             return lex_corrupt("malformed value in an array element");
         }
@@ -119,8 +123,16 @@ static int scan_flat(const char *p, const char *lim, const char **end) {
     }
 }
 
+static int object(const char *s, size_t len, struct obj *o, bool flat);
+
 /* Parses one whole line into `o`. Duplicate keys are rejected. */
-int lex_object(const char *s, size_t len, struct obj *o) {
+int lex_object(const char *s, size_t len, struct obj *o) { return object(s, len, o, false); }
+int lex_root_line(const char *s, size_t len, struct obj *o) { return object(s, len, o, true); }
+
+/* `flat`: an array's element or a nested object, where `false` is a value
+ * (version 5: a root's `found`). On a line of its own it never is: a flag
+ * is absent or `true`. */
+static int object(const char *s, size_t len, struct obj *o, bool flat) {
     const char *p = s, *lim = s + len;
     o->n = 0;
     if (p >= lim || *p != '{') return lex_corrupt("line is not an object");
@@ -159,6 +171,11 @@ int lex_object(const char *s, size_t len, struct obj *o) {
             pr->val = p;
             pr->vlen = 4;
             p += 4;
+        } else if (flat && lim - p >= 5 && memcmp(p, "false", 5) == 0) {
+            pr->kind = V_FALSE;
+            pr->val = p;
+            pr->vlen = 5;
+            p += 5;
         } else if (lim - p >= 4 && memcmp(p, "null", 4) == 0) {
             pr->kind = V_NULL;                  /* version 3: `source` */
             pr->val = p;
@@ -256,7 +273,7 @@ int lex_order(const struct obj *o, const char *const *order, size_t n) {
 
 int lex_sub(const struct pair *p, struct obj *out) {
     if (p->kind != V_OBJ) return lex_corrupt("not an object");
-    return lex_object(p->val, p->vlen, out);
+    return object(p->val, p->vlen, out, true);
 }
 
 int lex_elem(const struct pair *arr, size_t i, struct obj *out) {
@@ -264,9 +281,18 @@ int lex_elem(const struct pair *arr, size_t i, struct obj *out) {
     const char *p = arr->val, *lim = arr->val + arr->vlen, *e = p;
     for (size_t k = 0; ; k++) {
         if (scan_flat(p, lim, &e) == -1) return -1;
-        if (k == i) return lex_object(p, (size_t)(e - p), out);
+        if (k == i) return object(p, (size_t)(e - p), out, true);
         p = e + 1;                          /* past the ',' */
     }
+}
+
+int lex_elem_next(const struct pair *arr, const char **pos, struct obj *out) {
+    if (arr->kind != V_OBJS) return lex_corrupt("no such array element");
+    const char *lim = arr->val + arr->vlen, *p = *pos == NULL ? arr->val : *pos, *e = p;
+    if (p >= lim) return lex_corrupt("no such array element");
+    if (scan_flat(p, lim, &e) == -1 || object(p, (size_t)(e - p), out, true) == -1) return -1;
+    *pos = e + 1;                           /* past the ',' */
+    return 0;
 }
 
 const struct pair *lex_get(const struct obj *o, const char *key) {

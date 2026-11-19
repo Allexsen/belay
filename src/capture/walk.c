@@ -38,14 +38,42 @@ int cap_emit_scratch(struct walk_ctx *wc) { return cap_emit(wc, &wc->e, NULL); }
  * name that vanished and came back before the walk ended is then a listing
  * change, never a file missing from a directory recorded as complete. */
 enum visited { VISIT_RECORDED = 1, VISIT_GONE, VISIT_INCOMPLETE,
-               VISIT_EXCLUDED  /* belay's own state directory (opts->exclude): listed, not walked */ };
+               VISIT_EXCLUDED, /* belay's own state directory (opts->exclude): listed, not walked */
+               VISIT_SKIPPED   /* a partial directory's child that is not recorded (V5-E3): not in
+                                  its listing either, which the re-check filters the same way */ };
+
+/* V5-E3, for a child already stat'ed: a root, a directory, or a link
+ * directly under the scope root -- or (manifest-v5-addendum V5-A4) a link
+ * standing where a directory on the way to a root is looked for: recorded as
+ * the link it is, never followed, so the roots below it are not found. */
+static bool partial_records(int match, const struct stat *st, bool top) {
+    return match == RM_EXACT || S_ISDIR(st->st_mode) || (S_ISLNK(st->st_mode) && (top || match == RM_ABOVE));
+}
+
+bool cap_partial_records(const struct walk_ctx *wc, int dfd, const char *dir, size_t dir_len, const char *name) {
+    char rel[PATH_CAP];
+    const size_t nl = strlen(name), need = dir_len + (dir_len ? 1 : 0) + nl;
+    if (need >= sizeof rel) return false;           /* the walk could not name it either */
+    memcpy(rel, dir, dir_len);
+    if (dir_len) rel[dir_len] = '/';
+    memcpy(rel + dir_len + (dir_len ? 1 : 0), name, nl);
+    size_t idx;
+    bool below;
+    const int m = roots_match(wc->opts, rel, need, &idx, &below);
+    if (m == RM_EXACT) return true;
+    struct stat st;
+    bool mr, mk;
+    if (cap_stat_entry(wc, dfd, name, &st, &mr, &mk) == -1) return false;
+    return partial_records(m, &st, dir_len == 0);
+}
 
 /* Records one entry and, for directories, recurses. Takes the parent dirfd and
  * the entry name; never a path string. Returns an enum visited, or -1. */
 static int visit(int parent_fd, const char *name, char *rel, size_t relsz,
-                 size_t rel_len, int depth, struct walk_ctx *wc) {
+                 size_t rel_len, int depth, struct walk_ctx *wc, const struct zone *z) {
     struct belay_entry *e = &wc->e;
     int cfd = -1;
+    struct zone cz = *z;            /* the entry's own zone, when it is a directory */
 
     for (int attempt = 0; ; attempt++) {
         struct stat st;
@@ -63,6 +91,41 @@ static int visit(int parent_fd, const char *name, char *rel, size_t relsz,
             /* EIO, or EACCES from an LSM: this entry cannot be recorded at all,
              * so the PARENT's listing is incomplete -- reported to cap_walk(). */
             return VISIT_INCOMPLETE;
+        }
+
+        /*
+         *  Version 5, a capture of roots (manifest-v5.md): what this entry
+         *  is by the roots. In a partial directory only the roots, the
+         *  directories and (under the scope root) the links are recorded
+         *  (V5-E3): a file's name in a home directory is nobody's business.
+         *  A longer root wins over a shorter (watch-system WS-9): its class
+         *  holds from its own path down.
+         */
+        bool rule_not_read = false, plain = false, is_root = false;
+        size_t root_at = 0;
+        cz = *z;
+        cz.top = false;
+        if (wc->opts->n_roots > 0) {
+            size_t ri = 0;
+            bool below = false;
+            const int m = z->partial || z->below ? roots_match(wc->opts, rel, rel_len, &ri, &below) : RM_NONE;
+            if (z->partial && !partial_records(m, &st, z->top)) return VISIT_SKIPPED;
+            cz.partial = false;
+            if (m == RM_EXACT) {
+                is_root = true;             /* found, unless the scope excludes it (below) */
+                root_at = ri;
+                cz.cls = wc->opts->roots[ri].cls == BELAY_ROOT_METADATA ? CLS_METADATA : CLS_CONTENT;
+                plain = wc->opts->roots[ri].plain;
+            } else if (z->partial) {
+                /* On the way to a root: partial in its turn. Any other
+                 * directory is not entered. (A link is recorded as it is.) */
+                if (m == RM_ABOVE && S_ISDIR(st.st_mode)) cz.partial = true;
+                else if (S_ISDIR(st.st_mode)) rule_not_read = true;
+            }
+            /* watch-system WS-8: the directories under the roots that are not entered. */
+            if (!cz.partial && S_ISDIR(st.st_mode) && roots_not_read(wc->opts, rel, rel_len)) rule_not_read = true;
+            cz.below = below && S_ISDIR(st.st_mode);
+            cz.closed = z->closed || (S_ISDIR(st.st_mode) && !(st.st_mode & S_IXOTH));
         }
 
         /* Not walked: belay's own state directory (Q6), by identity, or a
@@ -117,12 +180,16 @@ static int visit(int parent_fd, const char *name, char *rel, size_t relsz,
             x->ino = (uint64_t)st.st_ino;
             return VISIT_EXCLUDED;
         }
-        {
+        if (is_root) wc->root_found[root_at] = true;
+        if (!rule_not_read) {       /* a not_read directory's ctime is not recorded (V5-4) */
             const int64_t ct = ident_of_stat(&st).ctime_ns;
             if (ct > wc->newest_ctime_ns) wc->newest_ctime_ns = ct;
         }
         memset(e, 0, sizeof *e);
         wc->extras_done = false;
+        wc->cls = cz.cls;
+        wc->closed = z->closed;     /* the directories above it: its own mode is the file's */
+        wc->plain = plain;
         if (rel_len >= sizeof e->path) {
             belay_err_set(BELAY_ERR_RANGE, 0, "manifest: path too long");
             return -1;
@@ -131,8 +198,20 @@ static int visit(int parent_fd, const char *name, char *rel, size_t relsz,
         e->path_len = rel_len;
         cap_fill_from_stat(e, &st);
 
-        /* A mount root of any type is a capture boundary (cap_crossed). */
-        const bool crossed = cap_crossed(wc, &st, mount_root, mount_known);
+        /* V5-4: not entered, by rule. No listing, no open, nothing read: its
+         * type, mode, owner and identity are what is recorded; the four
+         * fields that move with every file made inside are not. Whether it
+         * is a mount is not asked: belay does not look inside either way. */
+        if (rule_not_read) {
+            e->not_read = true;
+            e->size = e->nlink = 0;
+            e->mtime_ns = e->ctime_ns = 0;
+            return cap_emit_scratch(wc) == -1 ? -1 : VISIT_RECORDED;
+        }
+
+        /* A mount root of any type is a capture boundary (cap_crossed),
+         * unless the capture has roots and enters its filesystem (V5-E6). */
+        const bool crossed = cap_boundary(wc, parent_fd, name, &st, mount_root, mount_known);
 
         int r = V_OK;
         if (crossed) {
@@ -186,10 +265,11 @@ static int visit(int parent_fd, const char *name, char *rel, size_t relsz,
         close(cfd);
         return -1;
     }
+    e->partial = cz.partial;        /* opened: not unreadable, not a mount (V5-4b) */
     memcpy(dir, e, sizeof *dir);
 
     struct listing seen = { 0, 0, 0 };
-    int r = cap_walk(cfd, rel, relsz, rel_len, depth + 1, wc, &seen);
+    int r = cap_walk(cfd, rel, relsz, rel_len, depth + 1, wc, &seen, &cz);
     if (r == W_INCOMPLETE) {
         outcome_apply(dir, FACET_LISTING, OUT_CHANGED, &wc->tally);
         r = 0;
@@ -210,7 +290,7 @@ static int visit(int parent_fd, const char *name, char *rel, size_t relsz,
  *  directory unstable rather than failing the whole check.
  */
 int cap_walk(int dfd, char *rel, size_t relsz, size_t rel_len,
-                int depth, struct walk_ctx *wc, struct listing *seen) {
+                int depth, struct walk_ctx *wc, struct listing *seen, const struct zone *z) {
     const struct fsops *ops = wc->ops;
     void *d = ops->dir_open(ops->ctx, dfd);
     if (d == NULL) {
@@ -245,13 +325,13 @@ int cap_walk(int dfd, char *rel, size_t relsz, size_t rel_len,
             continue;
         }
 
-        const int v = visit(dfd, dname, rel, relsz, (size_t)nlen, depth, wc);
+        const int v = visit(dfd, dname, rel, relsz, (size_t)nlen, depth, wc, z);
         rel[rel_len] = '\0';
         if (v == -1) { rc = -1; break; }
         if (v == VISIT_RECORDED || v == VISIT_EXCLUDED)
             cons_listing_add(seen, dname);                     /* what the re-list must match */
         else if (v == VISIT_INCOMPLETE) incomplete = true;
-        else BELAY_CHECK(v == VISIT_GONE, (ops->dir_close(ops->ctx, d), -1));
+        else BELAY_CHECK(v == VISIT_GONE || v == VISIT_SKIPPED, (ops->dir_close(ops->ctx, d), -1));
     }
 
     ops->dir_close(ops->ctx, d);

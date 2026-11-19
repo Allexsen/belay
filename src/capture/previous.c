@@ -100,6 +100,52 @@ bool prev_trusted(const struct prev_rec *r, const struct stat *st, int64_t refer
            r->mtime_ns == s.mtime_ns && r->ctime_ns == s.ctime_ns && r->ctime_ns < reference_ns;
 }
 
+/* Makes the indexed record of every entry `rd` (read to its end) names racy
+ * unusable. 0; 1 when the manifest cannot be read again; -1 (memory). */
+static int distrust_racy(struct belay_manifest_reader *rd, struct prev_index *p) {
+    const size_t n = belay_manifest_trailer(rd)->racy_listed;
+    size_t bytes = 0;
+    const char *q;
+    for (size_t i = 0; i < n; i++) bytes += belay_manifest_racy(rd, i, &q) + 1;
+    char *paths = malloc(bytes + 1);            /* the reader's own go with the rewind */
+    size_t *len = malloc((n + 1) * sizeof *len);
+    struct belay_entry *e = malloc(sizeof *e);
+    int rc = -1;
+    if (paths == NULL || len == NULL || e == NULL) {
+        belay_err_set(BELAY_ERR_NOMEM, 0, "mark: out of memory");
+        goto out;
+    }
+    size_t w = 0;
+    for (size_t i = 0; i < n; i++) {
+        len[i] = belay_manifest_racy(rd, i, &q);
+        memcpy(paths + w, q, len[i] + 1);
+        w += len[i] + 1;
+    }
+    rc = 1;
+    if (belay_manifest_rewind(rd) == -1) { belay_err_clear(); goto out; }
+    size_t i = 0, at = 0;
+    int got;
+    while (i < n && (got = belay_manifest_next(rd, e)) == 1) {
+        const size_t m = e->path_len < len[i] ? e->path_len : len[i];
+        int c = memcmp(e->path, paths + at, m);
+        if (c == 0) c = (e->path_len > len[i]) - (e->path_len < len[i]);
+        if (c < 0) continue;
+        if (c == 0 && p->nslot != 0) {
+            const size_t j = find_slot(p, e->dev, e->ino);
+            if (p->slot[j] != 0) p->rec[p->slot[j] - 1].size = UINT64_MAX;
+        }
+        at += len[i] + 1;
+        i++;
+    }
+    if (i == n) rc = 0;
+    else belay_err_clear();
+out:
+    free(paths);
+    free(len);
+    free(e);
+    return rc;
+}
+
 /* Whether `path` is at or below a path this capture excludes (opts). */
 static bool now_excluded(const struct belay_manifest_opts *opts, const char *path, size_t len) {
     for (size_t i = 0; i < opts->n_exclude_paths; i++) {
@@ -134,6 +180,7 @@ int prev_load(const struct fsops *ops, const char *path, const char *scope, uint
     info->hash_max_bytes = h->hash_max_bytes;
     info->walk_start_ns = h->walk_start_ns;              /* v2's header; 0 for v1 (one source) */
     info->store_max_bytes = h->store_max_bytes;
+    memcpy(info->sealed_key, h->sealed_key, sizeof info->sealed_key);
     struct prev_index *p = calloc(1, sizeof *p);
     if (p == NULL) {
         belay_err_set(BELAY_ERR_NOMEM, 0, "mark: out of memory");
@@ -163,7 +210,7 @@ int prev_load(const struct fsops *ops, const char *path, const char *scope, uint
             info->newest_validated_ns = e->ctime_ns;
         if (e->type != BELAY_T_REG || !e->has_hash || (e->raced && !e->writer_open) || e->unstable) continue;
         struct prev_rec r = { e->dev, e->ino, e->size, e->mtime_ns, e->ctime_ns, e->mode,
-                              e->has_stored, { 0 } };
+                              e->has_stored, e->sealed, { 0 } };
         /* Marked: indexed, never to match (V4-R6). Skipping it would leave a
          * hard link's unmarked name to speak for the inode. */
         if (e->writer_open) r.size = UINT64_MAX;
@@ -178,6 +225,12 @@ int prev_load(const struct fsops *ops, const char *path, const char *scope, uint
         rc = 1;
         *why = "the previous checkpoint cannot be read";
     }
+    /* V5-E7, V5-A2: an entry the previous manifest names racy is never
+     * trusted. The racy lines follow the entries, and the index is by inode:
+     * so the entries are read once more, and the record of each one named is
+     * made one that matches nothing (as a marked entry's, V4-R6). */
+    if (got == 0 && rc == 0 && belay_manifest_trailer(rd)->racy_listed != 0) rc = distrust_racy(rd, p);
+    if (rc == 1) *why = "the previous checkpoint cannot be read";
     belay_manifest_close(rd);
     if (rc != 0) {
         prev_free(p);

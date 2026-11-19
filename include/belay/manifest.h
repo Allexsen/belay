@@ -18,9 +18,9 @@
 #include <stddef.h>
 #include <stdint.h>
 
-/* The version belay writes; its reader reads 1 and 2, each by its own key
- * set (test/expect/manifest-v2.md, V2-R1..R3). */
-#define BELAY_MANIFEST_VERSION 4
+/* The version belay writes; its reader reads 1 to 5, each by its own key
+ * set (test/expect/manifest-v2.md, V2-R1..R3; manifest-v5.md, V5-R1). */
+#define BELAY_MANIFEST_VERSION 5
 #define BELAY_MANIFEST_VERSION_MIN 1
 
 /* What a capture did not walk (v2's `excluded`). */
@@ -33,6 +33,26 @@ struct belay_excluded {
     enum belay_exclude_reason reason;
     uint64_t dev, ino;
 };
+
+/*
+ *  Version 5: a capture that reads a listed set of roots of one scope
+ *  (test/expect/manifest-v5.md). A root is a path relative to the scope with
+ *  a class: under a `content` root files are read and hashed, under a
+ *  `metadata` root they are statted and opened, never read (`meta`), unless
+ *  setuid, setgid or carrying a file capability. No roots: the whole scope,
+ *  as before version 5.
+ */
+enum belay_root_class { BELAY_ROOT_CONTENT, BELAY_ROOT_METADATA };
+struct belay_root {
+    const char *path;           /* relative to the scope, canonical, UTF-8, NUL-terminated */
+    enum belay_root_class cls;
+    bool found;                 /* a header's: it was there. Ignored in opts: the walk says */
+    bool plain;                 /* opts only: a file never sealed, whatever its mode or the
+                                   directories above it (V5-E5: the shell startup files) */
+};
+#define BELAY_SEALING_KEY_BYTES 32
+#define BELAY_SEALED_KEY_HEX 16         /* the header's `sealed_key`: hex digits of sha256(key) */
+#define BELAY_RACY_MAX 65536            /* V5-12 */
 
 /* Defaults; overridable per run. */
 #define BELAY_XATTRS_INLINE_MAX 8192u   /* larger sets: digest only */
@@ -163,6 +183,14 @@ struct belay_entry {
      */
     bool     raced;
     bool     writer_open;   /* a writer at the start or end of the read: the hash may be torn */
+
+    /* Version 5 (test/expect/manifest-v5.md). */
+    bool     not_read;      /* a directory not entered, by rule: no listing taken; its size,
+                               mtime_ns, ctime_ns and nlink are not recorded (0 here) */
+    bool     partial;       /* a directory on the way to a root: only the children the roots
+                               name, its directories and (under the scope root) links recorded */
+    bool     meta;          /* a regular file statted and opened, never read: no hash */
+    bool     sealed;        /* sha256 is HMAC-SHA256 under the state's sealing key */
 };
 
 struct belay_manifest_opts {
@@ -237,6 +265,22 @@ struct belay_manifest_opts {
     /* Version 3's `source` (manifest-v3 V3-2): both NULL for `null`, both
      * set for a container capture -- its id and its image's id. */
     const char *source_docker, *source_image;
+
+    /*
+     *  Version 5: the roots this capture looks for, sorted bytewise by path,
+     *  each once (belay_system_roots gives the system's). n_roots 0: the
+     *  whole scope. `not_read`: directories under the roots that are not
+     *  entered, exact relative paths. With roots, a mount point is entered
+     *  when the platform says its filesystem is a local disk's (V5-E6).
+     */
+    const struct belay_root *roots;
+    size_t   n_roots;
+    const char *const *not_read;
+    size_t   n_not_read;
+    /* The state's sealing key file (V5-R3): read, or made (32 random bytes,
+     * mode 600) by the first capture that seals a file; never rewritten.
+     * NULL: a file that must be sealed fails the capture. */
+    const char *sealing_key_path;
 };
 
 /* What one write observed. Also recorded in the manifest's trailer line. */
@@ -253,10 +297,15 @@ struct belay_manifest_stats {
     size_t writer_open;  /* entries flagged writer_open (v4; 0 before) */
     size_t unguarded;    /* files read and hashed with no answer from the writer
                             probe (v4; 0 before): test/expect/manifest-v4.md */
-    size_t sealing;      /* directories flagged unreadable or mount: nothing below
-                            them was looked at. Counted from the entries, by a
+    size_t sealing;      /* directories flagged unreadable, mount or not_read: nothing
+                            below them was looked at. Counted from the entries, by a
                             capture and by a reader; no trailer key holds it
                             (test/expect/checkpoint-v3.md, C3-3) */
+    size_t not_read, meta, sealed;   /* entries carrying each flag (v5; 0 before) */
+    size_t carried;      /* v5: entries taken from the previous manifest without a stat;
+                            0 for a walk */
+    size_t racy_listed;  /* v5, from a reader: paths the trailer's `racy` names (a walk
+                            writes none) */
     size_t store_failed;  /* capture only, 0 from a trailer: copies the content
                              store failed to keep; those entries are recorded
                              without `stored` */
@@ -330,7 +379,7 @@ struct belay_manifest_reader;
 
 /* The manifest's header line. Available as soon as open succeeds. */
 struct belay_manifest_header {
-    uint64_t version;           /* 1, 2 or 3 */
+    uint64_t version;           /* 1 to 5 */
     int64_t  created_ns;
     char     scope[4096];       /* the resolved scope root, NUL-terminated */
     uint64_t hash_max_bytes;
@@ -343,7 +392,37 @@ struct belay_manifest_header {
      * walker was all they had -- manifest-v3 V3-R3): */
     char     source_docker[65];  /* the container's id */
     char     source_image[72];   /* "sha256:" and its image's id */
+    /* Version 5 (0, "" and false before it: V5-R2). n_roots is the header's
+     * count (manifest-v5-addendum V5-A1); `roots` the root lines read after
+     * it, the reader's, sorted, each path NUL-terminated -- NULL from
+     * belay_manifest_open_header, which reads no line but the header. */
+    const struct belay_root *roots;
+    size_t   n_roots;
+    char     sealed_key[BELAY_SEALED_KEY_HEX + 1];   /* "" when absent */
+    bool     basis_events;       /* `basis` is "events"; false: "walk" */
 };
+
+/* Whether two headers list the same roots (V5-D6). */
+bool belay_manifest_same_roots(const struct belay_manifest_header *a, const struct belay_manifest_header *b);
+/* Whether a header's roots list `path` (found or not). */
+bool belay_manifest_lists_root(const struct belay_manifest_header *h, const char *path, size_t len);
+/* Whether some root of the header lies below `path` (it is on the way to one). */
+bool belay_manifest_root_below(const struct belay_manifest_header *h, const char *path, size_t len);
+
+/* The roots of a capture of a whole machine whose `/` is the directory
+ * `scope` (test/expect/watch-system.md, WS-6 to WS-9), resolved as the
+ * machine is now: malloc'd, sorted, for belay_manifest_opts. `not_read`
+ * points at static strings. 0, or -1 with belay_err. */
+struct belay_system_roots {
+    struct belay_root *roots;
+    size_t n_roots;
+    const char *const *not_read;
+    size_t n_not_read;
+    char *names;                /* what the roots' paths point into */
+};
+int  belay_system_roots(const char *scope, struct belay_system_roots *out);
+void belay_system_roots_free(struct belay_system_roots *r);
+
 
 /* Whether two manifests' sources are equal (manifest-v3 V3-R4): only then
  * do they compare. */
@@ -374,7 +453,15 @@ int belay_manifest_digest(const struct belay_manifest_reader *r, char hex[65]);
 int belay_manifest_rewind(struct belay_manifest_reader *r);
 
 int  belay_manifest_open(const char *path, struct belay_manifest_reader **out);
+/* The header line alone, of a file that may hold no more (a delta keeps a
+ * manifest's header as it is): header->n_roots is its count and
+ * header->roots NULL; belay_manifest_next fails. 0, or -1. */
+int  belay_manifest_open_header(const char *path, struct belay_manifest_reader **out);
 int  belay_manifest_next(struct belay_manifest_reader *r, struct belay_entry *e);
+/* The `i`th racy path (V5-A2), in byte order, once belay_manifest_next has
+ * returned 0: its length with *path set (NUL-terminated, the reader's), or
+ * 0 past the last. The trailer's racy_listed is how many there are. */
+size_t belay_manifest_racy(const struct belay_manifest_reader *r, size_t i, const char **path);
 void belay_manifest_close(struct belay_manifest_reader *r);
 
 #endif /* BELAY_MANIFEST_H */
