@@ -248,7 +248,10 @@ a spec it refuses is a usage error (exit 2).
 
 A protect spec is version 2 (`"belay_protect": 2`; [protect-spec-v2.md](../test/expect/protect-spec-v2.md)).
 `no_write` forbids changing a path, and deleting it too: deleting is a write to the file's existence.
-`no_delete` alone forbids deleting and allows writing; `no_create` forbids a new file. A version 1 spec is
+`no_delete` alone forbids deleting and allows writing; `no_create` forbids a new file. `no_delete`
+alone reads existence only: a file that is there but could not be read is no finding under it,
+and one whose presence cannot be told (below a directory that could not be listed) is
+`protected_path_unverifiable`. A version 1 spec is
 refused, with a message saying so; a bundle exported with one must be exported again.
 
 After the episode -- every process of the policy stopped first -- `belay verify` records `DIR`
@@ -420,7 +423,11 @@ unreadable, nothing below it was seen`); when the newer side has such directorie
 the counts says how many (`nothing seen below 2 directories`). A regular file modified by what belay
 could compare (its size), whose content it did not read on a side, says so at the end of its line,
 with the reasons (`M shadow   size 530 -> 542, mtime_ns; content not read (unreadable)`; in
-`--json`, the record's `content_not_read`). There is no "provisional" banner; when entries changed
+`--json`, the record's `content_not_read`). So does a new file that was not read (`A newfile
+content not read (unreadable)`), and a new directory nothing was seen below (`A newdir   nothing
+below it was seen`); a privilege row for such a directory ends `; nothing below it was seen`.
+These rows never fold, wherever they are: not past the cut, not into a `git-ignored:` line, not
+into `git bookkeeping:`. There is no "provisional" banner; when entries changed
 while they were read (raced, unstable or vanished), one line counts them for each side: those of
 the newer side are settled by running belay again; those of an earlier checkpoint stay in any diff
 from it. Past 50 events, or 50 untracked changes (or changes by path, without git), the rest fold
