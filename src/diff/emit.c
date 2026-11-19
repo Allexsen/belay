@@ -253,8 +253,8 @@ int emit_path(struct emitter *em, const struct belay_entry *before,
         }
         if (ap(&b, "]") == -1) return -1;
     }
-    if (v->not_read) {                  /* pin O9: where `unknown` would stand, never with it */
-        BELAY_CHECK(v->outcome == D_MODIFIED || v->outcome == D_METADATA_ONLY, -1);
+    if (v->not_read) {                  /* pins O9, O10: where `unknown` would stand, never with it */
+        BELAY_CHECK(v->outcome == D_MODIFIED || v->outcome == D_METADATA_ONLY || v->outcome == D_ADDED, -1);
         if (ap(&b, ",\"%s\":[", R[DF_CONTENT_NOT_READ].name) == -1) return -1;
         const char *sep = "";
         for (int r = DR_FIRST; r < DR_COUNT; r++) {

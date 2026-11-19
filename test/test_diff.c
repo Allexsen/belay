@@ -374,6 +374,38 @@ TEST(a_modified_file_whose_content_was_not_read_says_why) {
     ASSERT_TRUE(has("l", "\"outcome\":\"modified\"") && !has("l", "content_not_read"));
 }
 
+/* O10 (checkpoint-v3 G2-5): an added entry says what of it was not read -- a
+ * regular file by O9's rule for one side, a directory that was not listed or
+ * is a mount root. No other type, and never a removed entry. */
+TEST(an_added_entry_that_was_not_read_says_why) {
+    static const struct { struct me e; const char *want; } C[] = {
+        { { .type = "reg", .size = 3, .unreadable = true }, "\"type\":\"reg\",\"content_not_read\":[\"unreadable\"]}" },
+        { { .type = "reg", .size = 3, .unstable = true }, "\"type\":\"reg\",\"content_not_read\":[\"unstable\"]}" },
+        { { .type = "reg", .size = 3, .mount = true, .dev = 2 }, "\"type\":\"reg\",\"content_not_read\":[\"mount\"]}" },
+        { { .type = "reg", .size = 3000 }, "\"type\":\"reg\",\"content_not_read\":[\"unverified\"]}" },
+        { { .type = "dir", .unreadable = true }, "\"type\":\"dir\",\"content_not_read\":[\"unreadable\"]}" },
+        { { .type = "dir", .mount = true, .dev = 2 }, "\"type\":\"dir\",\"content_not_read\":[\"mount\"]}" },
+        { { .type = "reg", .size = 3, .sha = HA }, "\"type\":\"reg\"}" },
+        { { .type = "dir" }, "\"type\":\"dir\"}" },
+        { { .type = "dir", .unstable = true }, "\"type\":\"dir\"}" },
+        { { .type = "lnk", .unreadable = true }, "\"type\":\"lnk\"}" },
+    };
+    for (size_t i = 0; i < sizeof C / sizeof C[0]; i++) {
+        struct me e = C[i].e;
+        e.path = "n";
+        for (int removed = 0; removed < 2; removed++) {
+            m_begin(removed ? "after" : "before", "/s", 1000); ROOT(); m_end();
+            m_begin(removed ? "before" : "after", "/s", 1000); ROOT(); m_entry(e); m_end();
+            REQUIRE(run() == 0);
+            const char *r = record("n");
+            if (removed ? (r == NULL || strstr(r, "\"outcome\":\"removed\"") == NULL || strstr(r, "content_not_read") != NULL)
+                        : (r == NULL || strstr(r, "\"outcome\":\"added\"") == NULL || strstr(r, C[i].want) == NULL))
+                BELAY_FAIL("case %zu, %s: want %s in %s", i, removed ? "removed" : "added",
+                           removed ? "no content_not_read" : C[i].want, r ? r : "(no record)");
+        }
+    }
+}
+
 /* Decided F2: a tree that changed while it was walked makes the whole result
  * provisional (manifest-v1, obligations on a consumer), and only the trailers
  * say so for `vanished`, which leaves no record. */
@@ -1632,6 +1664,7 @@ int main(void) {
     RUN(a_manifest_with_an_orphan_is_refused_with_no_output);
     RUN(the_trailer_counts_each_sides_sealed_directories);
     RUN(a_modified_file_whose_content_was_not_read_says_why);
+    RUN(an_added_entry_that_was_not_read_says_why);
     RUN(a_tree_that_changed_while_walked_makes_the_diff_provisional);
     RUN(the_output_is_never_an_input_however_spelled);
     RUN(the_trailer_names_both_inputs_by_their_digest);

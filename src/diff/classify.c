@@ -166,5 +166,10 @@ int classify_one(const struct belay_entry *present, bool is_after, enum anc abse
         if (present->writer_open) v->reasons |= DRBIT(DR_WRITER_OPEN);
     }
     v->outcome = v->reasons ? D_UNKNOWN : is_after ? D_ADDED : D_REMOVED;
+    /* An added entry says what of it was not read (pin O10): a file's
+     * content, as O9 has it for a side; a directory's listing. */
+    if (v->outcome == D_ADDED && present->type == BELAY_T_REG) v->not_read = not_read(present);
+    if (v->outcome == D_ADDED && present->type == BELAY_T_DIR)
+        v->not_read = (present->unreadable ? DRBIT(DR_UNREADABLE) : 0) | (present->is_mount ? DRBIT(DR_MOUNT) : 0);
     return 0;
 }
