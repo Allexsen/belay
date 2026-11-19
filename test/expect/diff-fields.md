@@ -72,3 +72,12 @@ no prose behind it: the author approved it with this table (2026-10-30).
 | O6 | A field whose absence means `unknown` (`iflags`), present on one side only: `unknown` (reason `iflags_unknown`), unless the type differs, which gives `type_changed` (rule 2) -- or, with `raced`, `unknown` for the flags' reasons alone (O7). | independent re-check of the oracle edits, 2026-10-30, edit 1; rule 2; O1's form |
 | O7 | Across a type change no field is compared: `changed` is `["type"]`, and when `raced` makes the outcome `unknown` (rule 1) its reasons are those of the flags on either side, never a field's (no `iflags_unknown`). | diff-v1: "when the types are the same, of every field unknown under rule 4 (across a type change no field is compared)" |
 | O8 | `unverified` on a side that also carries `mount` adds no reason: a mounted regular file carries it because it is never read (manifest-v1 rules 5 and 21), and `mount` is that reason. `unverified` on the other side still gives its own. | independent review of the S6 completion, F7 (2026-10-30) |
+
+## The trailer
+
+The trailer's keys are diff-v1's ("Trailer") and manifest-v4's (V4-D5). This table holds the keys
+added after those, each with its rule.
+
+| id | key | type | rule | source |
+|---|---|---|---|---|
+| G3-2 | `before_sealing`, `after_sealing` | int | Each manifest's entries nothing below which was looked at: its directories carrying `unreadable` or `mount` (checkpoint-v3 C3-3), counted from its entries. In that order, after every key the trailer has. | checkpoint-v3, "The lines", G3-2; measured as an unprivileged user on a mode-700 directory, 2026-11-18: a file added in it changes nothing in the diff but the directory's own line |
