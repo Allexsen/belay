@@ -435,6 +435,6 @@ as `\xNN`, a backslash as `\\`. A type change that is also a privilege change sa
 [schema/checkpoint.v3.json](../schema/checkpoint.v3.json). A path that is not UTF-8 is given in
 base64 as `scope_b64` or `manifest_b64` in place of `scope` or `manifest`. checkpoint.v3 adds
 `unreadable` and `sealing` (the two counts of the checkpoint's line, 0 included), `basis` (`walk`),
-`carried` (`0`) and `runtime_sha256` (`null`): the last three have one value in this release. A
-checkpoint made before it is printed by `log` as the checkpoint.v2 record it was, without the five
-keys.
+`carried` (`0`), and `runtime_sha256`, `journal_seq` and `shadow_lines_sha256` (each `null`): the
+last five have one value in this release. A checkpoint made before it is printed by `log` as the
+checkpoint.v2 record it was, without the seven keys.

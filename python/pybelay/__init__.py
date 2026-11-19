@@ -101,7 +101,7 @@ class Prefilter:
 
 @dataclasses.dataclass(frozen=True)
 class Checkpoint:
-    """checkpoint.v3 (PY-R1). The five fields it adds are `None` for a checkpoint
+    """checkpoint.v3 (PY-R1). The seven fields it adds are `None` for a checkpoint
     made before it, which `log` prints as it did (C3-7, C3-8): not recorded,
     never 0."""
     id: int
@@ -125,10 +125,12 @@ class Checkpoint:
     basis: Optional[str] = None         # C3-4: "walk" or "events"
     carried: Optional[int] = None       # C3-5
     runtime_sha256: Optional[str] = None    # C3-6: None when it has none, too
+    journal_seq: Optional[int] = None       # C3-6a: None when not taken under a kernel record, too
+    shadow_lines_sha256: Optional[str] = None   # C3-6b: None when it has none, too
 
 
 # What checkpoint.v3 added to v2: a checkpoint made before it has none of them.
-_V3_KEYS = ("unreadable", "sealing", "basis", "carried", "runtime_sha256")
+_V3_KEYS = ("unreadable", "sealing", "basis", "carried", "runtime_sha256", "journal_seq", "shadow_lines_sha256")
 
 
 def _checkpoint(obj: dict) -> Checkpoint:
