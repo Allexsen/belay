@@ -116,7 +116,7 @@ looked at, so a change there is that directory's one `unknown` record at most. N
 | `after_writer_open` | int | The second manifest's `writer_open`. |
 | `before_unguarded` | int | The first manifest's `unguarded`: files hashed with no answer from the writer probe. `0` before manifest v4. |
 | `after_unguarded` | int | The second manifest's `unguarded`. |
-| `before_sealing` | int | The first manifest's directories carrying `unreadable` or `mount`, counted from its entries: nothing below them was looked at (test/expect/diff-fields.md, "The trailer"). |
+| `before_sealing` | int | The first manifest's directories carrying `unreadable`, `mount` or (manifest v5) `not_read`, counted from its entries: nothing below them was looked at (test/expect/diff-fields.md, "The trailer"). |
 | `after_sealing` | int | The second manifest's, likewise. |
 <!-- END GENERATED: diff-trailer -->
 
