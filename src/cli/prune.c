@@ -855,10 +855,16 @@ done:
 /* belay manifest (ST-8): for whatever needs a manifest, rather than reading the
  * state directory. */
 int cmd_manifest(int argc, char **argv, FILE *out, FILE *err) {
-    const char *scope = NULL, *docker = NULL, *id_text = NULL;
+    const char *scope = NULL, *docker = NULL, *id_text = NULL, *system_root = NULL;
+    bool system = false;
     for (int i = 2; i < argc; i++) {
+        if (!strcmp(argv[i], "--system") && !system) {      /* watch-system WS-1 */
+            system = true;
+            continue;
+        }
         const char **val = !strcmp(argv[i], "--scope") ? &scope : !strcmp(argv[i], "--docker") ? &docker
-                         : !strcmp(argv[i], "--id") ? &id_text : NULL;
+                         : !strcmp(argv[i], "--id") ? &id_text
+                         : !strcmp(argv[i], "--system-root") ? &system_root : NULL;
         char why[256];
         if (val == NULL || i + 1 >= argc || *val != NULL) {
             snprintf(why, sizeof why, "%s: unknown, given twice, or missing its value", argv[i]);
@@ -867,6 +873,10 @@ int cmd_manifest(int argc, char **argv, FILE *out, FILE *err) {
         *val = argv[++i];
     }
     const long id = state_id_parse(id_text);
+    if (system || system_root != NULL) {
+        const int sr = cli_system_scope(system, system_root, &scope, docker, err);
+        if (sr) return sr;
+    }
     if (scope == NULL) return cli_usage(err, "--scope DIR is required");
     if (id == 0) return cli_usage(err, "--id needs a checkpoint id");
     struct state st;

@@ -924,8 +924,26 @@ int state_capture(struct state *st, const struct capture_req *req, struct checkp
         .expect_root = true, .root_dev = st->scope.dev, .root_ino = st->scope.ino,
     };
     struct belay_manifest_stats s;
-    if (state_capture_hook != NULL) state_capture_hook(st->scope.path);
+    struct belay_system_roots sys = { 0 };
+    char key[PATH_MAX + 80];
     int rc = -1;
+    if (req->system) {
+        /* The roots as the machine is now (WS-6: etc/passwd as it is when the
+         * capture starts), and where the state's sealing key is, or will be
+         * once a file must be sealed (manifest-v5 V5-R3). */
+        if (st->scope.docker[0] != '\0') {
+            belay_err_set(BELAY_ERR_INVALID, 0, "--system with --docker is not implemented in this version");
+            goto out;
+        }
+        if (belay_system_roots(st->scope.path, &sys) == -1) goto out;
+        snprintf(key, sizeof key, "%s/sealing.key", st->dir);
+        o.roots = sys.roots;
+        o.n_roots = sys.n_roots;
+        o.not_read = sys.not_read;
+        o.n_not_read = sys.n_not_read;
+        o.sealing_key_path = key;
+    }
+    if (state_capture_hook != NULL) state_capture_hook(st->scope.path);
     if (capture_scope(st, manifest, &o, &s) == -1) goto out;
     if (previous != NULL && !s.prefilter && s.prefilter_skipped != NULL) {
         snprintf(c.full_reason, sizeof c.full_reason, "%s", s.prefilter_skipped);
@@ -961,6 +979,7 @@ int state_capture(struct state *st, const struct capture_req *req, struct checkp
     *out = c;
     rc = 0;
 out:
+    belay_system_roots_free(&sys);
     close(dfd);
     return rc;
 }
