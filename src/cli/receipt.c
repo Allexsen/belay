@@ -362,6 +362,14 @@ static int record(const struct jval *r, struct ctx *x, const struct receipt_opts
     else sbf(&b, "(no path)");
     if (ign_edit) sbf(&b, "   (git-ignored)");
     const size_t said = b.n;            /* the line up to its path */
+    /* A directory belay could not list or did not enter is this one line,
+     * whatever changed below it (checkpoint-v3, G3-1, G3-4): unknown for
+     * that, or added so (O10). */
+    const struct jval *cnr = jget(r, "content_not_read");
+    const bool not_read = cnr != NULL && cnr->t == J_ARR && cnr->n > 0;
+    const bool sealed = is_dir && (has(jget(r, "unknown"), "unreadable") || has(jget(r, "unknown"), "mount") ||
+                                   (strcmp(outcome, "added") == 0 && (has(cnr, "unreadable") || has(cnr, "mount"))));
+    bool sealed_said = false;
     if (why.n) {
         sbf(&b, "   ");
         if (strcmp(outcome, "type_changed") == 0) {     /* the type change is said too (D8) */
@@ -374,10 +382,8 @@ static int record(const struct jval *r, struct ctx *x, const struct receipt_opts
     } else if (strcmp(outcome, "unknown") == 0) {
         sbf(&b, "   unknown: ");
         list(&b, jget(r, "unknown"));
-        /* A directory belay could not list or did not enter is this one line,
-         * whatever changed below it (checkpoint-v3, G3-1). */
-        if (is_dir && (has(jget(r, "unknown"), "unreadable") || has(jget(r, "unknown"), "mount")))
-            sbf(&b, ", nothing below it was seen");
+        if (sealed) sbf(&b, ", nothing below it was seen");
+        sealed_said = sealed;
     } else if (strcmp(outcome, "type_changed") == 0) {
         sbf(&b, "   ");
         escs(&b, jget(r, "type_before"));
@@ -389,13 +395,16 @@ static int record(const struct jval *r, struct ctx *x, const struct receipt_opts
     }
     /* What was compared proves the change; the content was not read
      * (checkpoint-v3, G2-2). After whatever the line says so far. */
-    const struct jval *cnr = jget(r, "content_not_read");
-    if (cnr != NULL && cnr->t == J_ARR && cnr->n > 0) {
+    if (sealed && !sealed_said) {       /* on a line that says something else, or nothing (G3-4) */
+        sbf(&b, "%snothing below it was seen", b.n > said ? "; " : "   ");
+    } else if (not_read && !is_dir) {
         sbf(&b, "%s", b.n > said ? "; " : "   ");
         sbf(&b, "content not read (");
         list(&b, cnr);
         sbf(&b, ")");
     }
+    /* Neither is ever folded: each is named on its own line (G2-4, G3-4). */
+    const bool named = not_read || sealed;
     free(why.p);
     /* A record past the 4,096-finding cap ends in an and_more finding
      * standing for n more: counted, not shown as one (review 2026-11-01,
@@ -424,7 +433,7 @@ static int record(const struct jval *r, struct ctx *x, const struct receipt_opts
         const size_t rl = plen - (size_t)gp - 4;
         const bool hooks = (rl >= 6 && memcmp(rest, "/hooks", 6) == 0 && (rl == 6 || rest[6] == '/'));
         const struct jval *f = jget(r, "findings");
-        if (o->all || unknown || hooks || !(x->git_events || !any_git(f) || only_in_place(f)))
+        if (o->all || unknown || named || hooks || !(x->git_events || !any_git(f) || only_in_place(f)))
             return keep(&x->gitvis, b.p, false, o->all);
         free(b.p);
         struct tally *t = tally(&x->git, path, (size_t)gp);
@@ -448,7 +457,7 @@ static int record(const struct jval *r, struct ctx *x, const struct receipt_opts
         const size_t kl = sl != NULL ? (size_t)(sl - path) : is_dir ? plen : 0;
         /* an unknown row folds under its directory, counted by reason; a
          * file at the top is under none, and stays named */
-        if (o->all || (unknown && kl == 0)) return keep(&x->ignored, b.p, false, o->all);
+        if (o->all || (unknown && kl == 0) || named) return keep(&x->ignored, b.p, false, o->all);
         free(b.p);
         char *key = malloc(kl + 2);
         if (key == NULL) { belay_err_set(BELAY_ERR_NOMEM, 0, "receipt: out of memory"); return -1; }
@@ -468,7 +477,7 @@ static int record(const struct jval *r, struct ctx *x, const struct receipt_opts
         return 0;
     }
     if (x->cls != NULL && c == GC_TRACKED) return keep(&x->tracked, b.p, false, o->all);
-    return keep(&x->other, b.p, !unknown, o->all);
+    return keep(&x->other, b.p, !unknown && !named, o->all);
 }
 
 static int event(const struct jval *e, struct lines *ev, const struct receipt_opts *o) {

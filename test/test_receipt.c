@@ -604,6 +604,76 @@ TEST(the_note_follows_the_path_when_the_line_says_nothing_else) {
                                "      content unavailable (after): missing\n") != NULL);
 }
 
+/* G2-4: a row that says content was not read is never folded -- not past
+ * the 50-row cut, not into what git ignores, not into git's bookkeeping. */
+TEST(a_row_whose_content_was_not_read_never_folds) {
+    static char diff[1 << 16];
+#define NOT_READ(p) "{\"path\":\"" p "\",\"outcome\":\"modified\",\"type\":\"reg\",\"changed\":[\"size\"]," \
+                    "\"before\":{\"size\":5},\"after\":{\"size\":9},\"content_not_read\":[\"unreadable\"]}\n"
+    size_t w = (size_t)snprintf(diff, sizeof diff, "%s", HEAD NOT_READ(".git/secretcfg"));
+    for (int i = 0; i < 60; i++)
+        w += (size_t)snprintf(diff + w, sizeof diff - w, "{\"path\":\"a%03d.txt\",\"outcome\":\"added\",\"type\":\"reg\"}\n", i);
+    w += (size_t)snprintf(diff + w, sizeof diff - w, "%s",
+        "{\"path\":\"out/a.o\",\"outcome\":\"added\",\"type\":\"reg\"}\n"
+        NOT_READ("out/key")
+        "{\"path\":\"out/new\",\"outcome\":\"added\",\"type\":\"reg\",\"content_not_read\":[\"unreadable\"]}\n"
+        NOT_READ("x.log")
+        NOT_READ("zz-key")
+        "{\"path\":\"zz-new\",\"outcome\":\"added\",\"type\":\"reg\",\"content_not_read\":[\"unverified\"]}\n"
+        TRAIL("4", "63", "0", "0", "0", "0", "0"));
+#undef NOT_READ
+    g_class = fake_class;
+    g_class_fails = false;
+    ASSERT_EQ_INT(0, render(diff, false));
+    static const char *const NAMED[] = {
+        "  M .git/secretcfg   size 5 -> 9; content not read (unreadable)\n",
+        "  M out/key   size 5 -> 9; content not read (unreadable)\n",
+        "  A out/new   content not read (unreadable)\n",
+        "  M x.log   size 5 -> 9; content not read (unreadable)\n",
+        "  M zz-key   size 5 -> 9; content not read (unreadable)\n",
+        "  A zz-new   content not read (unverified)\n",
+    };
+    for (size_t i = 0; i < sizeof NAMED / sizeof NAMED[0]; i++)
+        if (strstr(g_text, NAMED[i]) == NULL) BELAY_FAIL("not named: %s", NAMED[i]);
+    /* the rest folds as before, and the counts are of what was folded */
+    ASSERT_TRUE(strstr(g_text, "  and 10 more (--all shows them)\n") != NULL);
+    ASSERT_TRUE(strstr(g_text, "  git-ignored: 1 change under out/\n") != NULL);
+    ASSERT_TRUE(strstr(g_text, "git bookkeeping") == NULL && strstr(g_text, "in the top directory") == NULL);
+    g_class_fails = true;                       /* without git: by path, the cut still spares them */
+    ASSERT_EQ_INT(0, render(diff, false));
+    ASSERT_TRUE(strstr(g_text, "  M zz-key   size 5 -> 9; content not read (unreadable)\n") != NULL);
+    ASSERT_TRUE(strstr(g_text, "  A zz-new   content not read (unverified)\n") != NULL);
+    g_class = NULL;
+    g_class_fails = false;
+}
+
+/* G3-4: every line naming a directory nothing was seen below says so --
+ * a privilege row, an added directory, and a git-ignored one, which is
+ * named and not counted into its directory's line. G2-5: an added file. */
+TEST(every_line_for_a_directory_nothing_was_seen_below_says_so) {
+    static const char diff[] = HEAD
+        "{\"path\":\"bin/tool\",\"outcome\":\"unknown\",\"type\":\"dir\",\"changed\":[\"mode\"],"
+        "\"before\":{\"mode\":16877},\"after\":{\"mode\":17408},\"unknown\":[\"unreadable\",\"iflags_unknown\"]}\n"
+        "{\"path\":\"newdir\",\"outcome\":\"added\",\"type\":\"dir\",\"content_not_read\":[\"unreadable\"]}\n"
+        "{\"path\":\"newfile\",\"outcome\":\"added\",\"type\":\"reg\",\"content_not_read\":[\"unreadable\"]}\n"
+        "{\"path\":\"newmnt\",\"outcome\":\"added\",\"type\":\"dir\",\"content_not_read\":[\"mount\"]}\n"
+        "{\"path\":\"out/gone\",\"outcome\":\"unknown\",\"type\":\"dir\",\"unknown\":[\"listing_incomplete\"]}\n"
+        "{\"path\":\"out/sealed\",\"outcome\":\"unknown\",\"type\":\"dir\",\"unknown\":[\"unreadable\"]}\n"
+        "{\"path\":\"plain\",\"outcome\":\"added\",\"type\":\"dir\"}\n"
+        TRAIL("0", "4", "0", "3", "0", "0", "0");
+    g_class = fake_class;
+    g_class_fails = false;
+    ASSERT_EQ_INT(0, render(diff, false));
+    ASSERT_TRUE(strstr(g_text, "  ? bin/tool   setuid added (mode 0755 -> 4755); nothing below it was seen\n") != NULL);
+    ASSERT_TRUE(strstr(g_text, "  A newdir   nothing below it was seen\n") != NULL);
+    ASSERT_TRUE(strstr(g_text, "  A newmnt   nothing below it was seen\n") != NULL);
+    ASSERT_TRUE(strstr(g_text, "  A newfile   content not read (unreadable)\n") != NULL);
+    ASSERT_TRUE(strstr(g_text, "  A plain\n") != NULL);
+    ASSERT_TRUE(strstr(g_text, "  ? out/sealed   unknown: unreadable, nothing below it was seen\n") != NULL);
+    ASSERT_TRUE(strstr(g_text, "  git-ignored: 1 unknown under out/ (listing_incomplete 1)\n") != NULL);
+    g_class = NULL;
+}
+
 /* G3-2: the summary says how many directories of the after side nothing was
  * seen below; nothing when there is none, or when the trailer has no count. */
 TEST(the_summary_counts_the_directories_nothing_was_seen_below) {
@@ -636,6 +706,8 @@ int main(void) {
     RUN(unknown_records_never_fold);
     RUN(an_unknown_directory_nothing_was_seen_below_says_so);
     RUN(a_changed_file_whose_content_was_not_read_says_so);
+    RUN(a_row_whose_content_was_not_read_never_folds);
+    RUN(every_line_for_a_directory_nothing_was_seen_below_says_so);
     RUN(the_note_follows_the_path_when_the_line_says_nothing_else);
     RUN(the_summary_counts_the_directories_nothing_was_seen_below);
     RUN(a_diff_of_another_version_is_rejected_and_b64_scopes_shown);
