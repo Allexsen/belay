@@ -53,6 +53,8 @@ static const char USAGE[] =
     "  help [command]                        this, or one command's options\n"
     "  --version\n"
     "\n"
+    "  --system in place of --scope DIR on check, mark, diff, log, manifest: the machine's /, read by a\n"
+    "    fixed list of roots (docs/cli.md); baseline export and verify refuse it\n"
     "  --docker CONTAINER on any of these: the scope is a path inside a Docker container, read from its\n"
     "                                        layers on the host (Linux, root; export and verify: paused)\n"
     "exit codes: 0 done, 1 diff --exit-code found a change (verify: a violation), 2 usage, 3 refused, 4 failed\n";
