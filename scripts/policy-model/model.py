@@ -386,6 +386,9 @@ P65 New with P-G2 and PV2-7 (checkpoint-v3 G2-3). G2-3 alone reads "a protected 
     `content_not_read`. Nothing in policy.v1's output changes, and no code of this model's
     policy did; `reasons` are "the entry's flags, every one set, in the row's order":
     `unverified`, `unreadable`, where `content_not_read` is `["unreadable"]`.
+    OPEN: belay answers the other way for `no_delete`. The scenario is in gen.OPEN_QUESTIONS, which
+    run.py prints on every run and does not count, until a pin row says which sides `no_delete`
+    reads.
 
 P66 New with O9. "A `modified` or `metadata_only` record": the second cannot occur. Each of the
     four flags makes content unknown, and diff-v1's rule 3 gives `unknown` before rule 4 unless

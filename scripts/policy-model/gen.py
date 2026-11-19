@@ -1118,6 +1118,38 @@ BLOB = b"\x00\x01 no copy is kept of a binary file\n"
 BIG = 4294967296 + 1
 
 
+# OPEN QUESTIONS: scenarios whose expected result the pins do not determine. Each is a question
+# for the author, not a disagreement: run.py prints the list on every run with the model's answer
+# and belay's, does not count it, and fails when an entry names no scenario, when its scenario no
+# longer disagrees, or when it disagrees in another way than `belay` records here (so an entry
+# cannot outlive its question). An entry leaves this list when a pin row answers it.
+#   name      the scenario
+#   rows      the pin rows in tension
+#   model     the reading model.py takes, and what it gives
+#   other     the other reading, and what it gives
+#   binary    what belay does, in words
+#   belay     the disagreements that are this question: (what run.py compares, words belay's side
+#             of it must hold); every one must occur, and no other may
+OPEN_QUESTIONS = [
+    {"name": "g2-rewritten-unreadable-after-no-delete",
+     "rows": ["protect-spec PS-M5 (\"on a side its modes read\")", "protect-spec PS-M2 (`no_delete`: \"a path matched before\")",
+              "protect-spec-v2 PV2-5, PV2-7", "policy-v1 P-G2", "checkpoint-v3 G2-3"],
+     "model": "`no_delete` reads the before side only (PS-M2 names no other; model.py P6, P65): a file there and hashed "
+              "at reset, rewritten and unreadable after, under a rule with `no_delete` alone, gives no flag; exit 0",
+     "other": "`no_delete` reads the after side too, as `no_write` does, or any protected path whose record carries "
+              "`content_not_read` is unverifiable (G2-3, P-G2's first sentence): `protected_path_unverifiable`, "
+              "reasons `unverified`, `unreadable`; exit 1",
+     "binary": "the other reading here: `protected_path_unverifiable` from the after entry's flags; and so did "
+               "0.1.0-alpha.9+19, before `content_not_read` existed. Yet the mirror (unreadable at reset, readable "
+               "after, `no_create` alone: g2-rewritten-unreadable-before-no-create) gives no flag in both, so belay "
+               "does not read every side under every mode",
+     "belay": [("verify's exit code", "1"),
+               ("verify line 2", '["flag","protected_path_unverifiable"]'),
+               ("verify line 2", '["reasons",["unverified","unreadable"]]'),
+               ("verify line 3, belay only", '["protected_path_unverifiable",1]')]},
+]
+
+
 def not_read_scenarios():
     """diff-fields O9 and "The trailer" G3-2, policy-v1 P-G2, protect-spec-v2 PV2-7: a file whose
     record is `modified` though a capture did not read it, and directories nothing below which
