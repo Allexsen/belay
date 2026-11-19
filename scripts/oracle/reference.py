@@ -119,6 +119,13 @@ Ambiguities in O9 and G3-2 (N1-N6), where they are decided:
   N9 O10, "No other type": an added symlink carrying `unreadable` (its
      target not read) carries no `content_not_read`.
 
+  N10 O11 ("placed as O10 places it", which is "after `type`, before
+     `findings`"): a `type_changed` record has `type_before`, `changed` and
+     its values between those two; read with O9's "where `unknown` would,
+     after the values". The record must be `type_changed`: a raced type
+     change is `unknown` and carries none ("no record has both"). The
+     reason is the directory's one flag (manifest-v1 rule 11).
+
 Ambiguities this file resolves one way (questions for the author) are
 marked "ambiguity I<n>" where they are decided (VA<n> for diff-values.md,
 G<n> for git's events, E12; G1 and G4 are settled by the prose, which now
@@ -607,7 +614,7 @@ def load_fields():
     for name, ok in need.items():
         if name not in fields or not ok(fields[name]):
             raise SystemExit('pin: row %r no longer says what reference.py assumes' % name)
-    for r in ('O1', 'O2', 'O3', 'O4', 'O5', 'O6', 'O7', 'O8', 'O9', 'O10'):
+    for r in ('O1', 'O2', 'O3', 'O4', 'O5', 'O6', 'O7', 'O8', 'O9', 'O10', 'O11'):
         if r not in rules:
             raise SystemExit('pin: outcome rule %s missing' % r)
     # The words of each rule that both_sides() relies on.
@@ -635,6 +642,10 @@ def load_fields():
         # O10, in added_not_read(): the outcome, the two types and their
         # reasons, never `removed`, and where the key stands.
         'O10': O10_WORDS,
+        # O11, in diff(): a type change into a sealing directory.
+        'O11': ['A `type_changed` record whose entry after is a directory carrying `unreadable` '
+                'or `mount` carries `content_not_read` with that reason, placed as O10 places '
+                'it. No other `type_changed` record carries it'],
     }
     for r, words in said.items():
         for w in words:
@@ -3280,6 +3291,13 @@ def diff(before, after, store=None):
             # `type`, before `findings`."
             cnr = added_not_read(a, traces[p])
             if cnr:
+                rec[CONTENT_NOT_READ] = cnr
+        if out == 'type_changed' and a['type'] == 'dir':
+            # O11: "whose entry after is a directory carrying `unreadable` or
+            # `mount` carries `content_not_read` with that reason" (N10).
+            cnr = [f for f in NOT_READ_FLAGS if f in SEALING_FLAGS and a.get(f)]
+            if cnr:
+                traces[p].append('O11')
                 rec[CONTENT_NOT_READ] = cnr
         # "For a path that is not `unchanged`, the interpreter that claims it
         # adds **findings** to its record" -- `findings` "absent when none".

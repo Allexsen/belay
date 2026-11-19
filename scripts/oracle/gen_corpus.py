@@ -52,7 +52,7 @@ marked entry has no counterpart before v4 (V4-R2), so it is written in v4 only.
 (Tree.unguarded); it counts files read, so it stays within the hashed, unmarked
 files less `trusted` (V4-4). writer_open() builds the gate's v4 items.
 
-`content_not_read` and the sealing counts (test/expect/diff-fields.md O9, O10
+`content_not_read` and the sealing counts (test/expect/diff-fields.md O9, O10, O11
 and "The trailer", G3-2): not_read() builds the gate's items -- a regular file in
 each state of its content before against each after, with its size different
 or the same, and trees with and without sealing directories.
@@ -5062,6 +5062,43 @@ def not_read(w, rng):
         return t, a
     w.targeted(rng, 'a regular file unstable, its path not UTF-8, on one side only (O10)', build,
                nr=['an added regular file not read, its path not UTF-8'])
+
+    # O11: a type change into a directory nothing was seen below.
+    for how, item, raced in (
+            ('unreadable', 'a type change into an unreadable directory: content_not_read (O11)', 0),
+            ('mount', 'a type change into a mount directory: content_not_read (O11)', 0),
+            (None, 'a type change into a directory with no flag: no content_not_read', 0),
+            ('unreadable', 'a raced type change into an unreadable directory: unknown, no '
+                           'content_not_read', 1)):
+        def build(rng):
+            t, e = base(rng)
+            a = t.copy()
+            d = clear_flags(new_entry(rng, a, e['path'], 'dir', extras=False), a, rng)
+            d.update({k: e[k] for k in ('uid', 'gid', 'ino', 'dev')})
+            if how:
+                d[how] = True
+            if how == 'mount':
+                d['dev'] = other_dev(a, rng)
+            if raced:
+                d['raced'] = True
+            t.e[e['path']], a.e[e['path']] = in_state(e, 'hashed', t, rng, 1), d
+            return t, a
+        w.targeted(rng, 'a regular file becomes a directory %s%s (O11)'
+                   % (how or 'with no flag', ', raced' if raced else ''), build,
+                   nr=[item] + ['a type change from an unreadable directory: no content_not_read']
+                   * (how == 'unreadable' and not raced))
+    def build(rng):                             # the index: its finding needs no copy
+        t = interp_tree(rng)
+        path = rng.choice(REPOS) + b'.git/index'
+        ensure_dirs(t, rng, path)
+        a = t.copy()
+        t.e[path] = in_state(file_at(rng, t, path, stored=False), 'hashed', t, rng, 1)
+        d = clear_flags(new_entry(rng, a, path, 'dir', extras=False), a, rng)
+        d['unreadable'] = True
+        a.e[path] = d
+        return t, a
+    w.targeted(rng, 'a git index becomes an unreadable directory (O11, before findings)', build,
+               nr=['a type change into a sealing directory, on a record with findings (O11)'])
 
     # G3-2: each manifest's directories carrying `unreadable` or `mount`.
     def sealed(rng, t, how):
