@@ -1105,6 +1105,15 @@ TEST(a_header_alone_gives_the_count) {
     static struct belay_entry e;
     ASSERT_EQ_INT(-1, belay_manifest_next(r, &e));          /* a header, not a manifest to read on */
     belay_manifest_close(r);
+    /* nor when the file does hold the rest */
+    f = fopen(g_m, "wb");
+    REQUIRE(f != NULL);
+    fputs(H5 ROOT_ T5(1, 0, 0, 0), f);
+    fclose(f);
+    REQUIRE(belay_manifest_open_header(g_m, &r) == 0);
+    ASSERT_EQ_INT(-1, belay_manifest_next(r, &e));
+    ASSERT_EQ_INT(-1, belay_manifest_rewind(r));
+    belay_manifest_close(r);
 }
 
 /* The resolved roots drive a capture: a home under a metadata root is
