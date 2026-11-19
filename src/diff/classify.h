@@ -22,6 +22,8 @@ struct verdict {
     enum diff_outcome outcome;
     uint32_t changed;           /* FBIT: compared fields that differ */
     uint32_t reasons;           /* DRBIT: why unknown (outcome unknown only) */
+    uint32_t not_read;          /* DRBIT: why a regular file's content was not read on a side,
+                                   when the outcome is modified or metadata_only (pin O9) */
     bool dir_timestamps;        /* unchanged, a directory whose own timestamps differ (F5) */
 };
 

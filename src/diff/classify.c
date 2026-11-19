@@ -63,6 +63,15 @@ static int differs(const struct diff_ctx *ctx, enum entry_field f, const struct 
     return NO_ANSWER;
 }
 
+/* Why one side's content was not read, for a regular file (pin O9).
+ * `unverified` beside unstable, unreadable or mount is there because of
+ * them and adds nothing; alone it is the hash limit. */
+static uint32_t not_read(const struct belay_entry *e) {
+    const uint32_t r = (e->unstable ? DRBIT(DR_UNSTABLE) : 0) | (e->unreadable ? DRBIT(DR_UNREADABLE) : 0) |
+                       (e->is_mount ? DRBIT(DR_MOUNT) : 0);
+    return r != 0 ? r : e->unverified ? DRBIT(DR_UNVERIFIED) : 0;
+}
+
 int classify_both(const struct diff_ctx *ctx, const struct belay_entry *b,
                   const struct belay_entry *a, struct verdict *v) {
     memset(v, 0, sizeof *v);                                /* D_UNDECIDED */
@@ -137,6 +146,9 @@ int classify_both(const struct diff_ctx *ctx, const struct belay_entry *b,
                                                        differs(ctx, F_CTIME, b, a) == 1);
     }
     if (v->outcome == D_UNKNOWN) v->reasons = reasons;
+    /* A change proved by what was compared, of a file not read: said (O9). */
+    if ((v->outcome == D_MODIFIED || v->outcome == D_METADATA_ONLY) && a->type == BELAY_T_REG)
+        v->not_read = not_read(b) | not_read(a);
     BELAY_CHECK(v->outcome != D_UNDECIDED, -1);
     return 0;
 }

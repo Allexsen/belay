@@ -109,7 +109,7 @@ enum diff_header_field { DH_VERSION, DH_SCOPES, DH_BEFORE_CREATED, DH_AFTER_CREA
                          DH_BEFORE_EXCLUDED, DH_AFTER_EXCLUDED,
                          DH_COUNT };
 enum diff_record_field { DF_PATH, DF_OUTCOME, DF_TYPE, DF_TYPE_BEFORE, DF_CHANGED, DF_BEFORE,
-                         DF_AFTER, DF_UNKNOWN, DF_FINDINGS, DF_COUNT };
+                         DF_AFTER, DF_UNKNOWN, DF_CONTENT_NOT_READ, DF_FINDINGS, DF_COUNT };
 extern const struct line_field_def DIFF_HEADER_FIELDS[DH_COUNT];
 extern const struct line_field_def DIFF_RECORD_FIELDS[DF_COUNT];
 /* The trailer: DIFF_TRAILER_END, then one count per outcome, named as the

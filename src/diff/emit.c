@@ -253,6 +253,17 @@ int emit_path(struct emitter *em, const struct belay_entry *before,
         }
         if (ap(&b, "]") == -1) return -1;
     }
+    if (v->not_read) {                  /* pin O9: where `unknown` would stand, never with it */
+        BELAY_CHECK(v->outcome == D_MODIFIED || v->outcome == D_METADATA_ONLY, -1);
+        if (ap(&b, ",\"%s\":[", R[DF_CONTENT_NOT_READ].name) == -1) return -1;
+        const char *sep = "";
+        for (int r = DR_FIRST; r < DR_COUNT; r++) {
+            if (!(v->not_read & DRBIT(r))) continue;
+            if (ap(&b, "%s\"%s\"", sep, DIFF_REASONS[r].name) == -1) return -1;
+            sep = ",";
+        }
+        if (ap(&b, "]") == -1) return -1;
+    }
     if (findings != NULL && findings_count(findings) > 0) {
         if (fwrite(b.p, 1, b.w, em->f) != b.w || findings_write(findings, em->f) == -1) {
             belay_err_set(BELAY_ERR_IO, errno, "diff: write failed");

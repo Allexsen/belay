@@ -325,6 +325,55 @@ TEST(the_trailer_counts_each_sides_sealed_directories) {
     ASSERT_TRUE(strstr(g_text, ",\"before_sealing\":0,\"after_sealing\":1}\n") != NULL);
 }
 
+/* O9 (checkpoint-v3 G2-1): a regular file whose size proves it modified, but
+ * whose content was not read on a side, says so and why. `unverified` beside
+ * `unstable`, `unreadable` or `mount` on a side is there because of them and
+ * adds nothing; alone it is the hash limit. The order is `unknown`'s. */
+TEST(a_modified_file_whose_content_was_not_read_says_why) {
+    static const struct { struct me b, a; const char *want; } C[] = {
+        { { .sha = HA }, { .unreadable = true }, "\"content_not_read\":[\"unreadable\"]}" },
+        { { .unreadable = true }, { .sha = HA }, "\"content_not_read\":[\"unreadable\"]}" },
+        { { .sha = HA }, { .unstable = true }, "\"content_not_read\":[\"unstable\"]}" },
+        { { .sha = HA }, { .mount = true, .dev = 2 }, "\"content_not_read\":[\"mount\"]}" },
+        { { .sha = HA }, { .sha = NULL }, "\"content_not_read\":[\"unverified\"]}" },          /* over the limit */
+        { { .unreadable = true }, { .sha = NULL }, "\"content_not_read\":[\"unverified\",\"unreadable\"]}" },
+        { { .unstable = true }, { .mount = true, .dev = 2 }, "\"content_not_read\":[\"unstable\",\"mount\"]}" },
+        { { .unstable = true }, { .unreadable = true }, "\"content_not_read\":[\"unstable\",\"unreadable\"]}" },
+    };
+    for (size_t i = 0; i < sizeof C / sizeof C[0]; i++) {
+        struct me b = C[i].b, a = C[i].a;
+        b.path = a.path = "f";
+        b.type = a.type = "reg";
+        b.size = 3000;
+        a.size = 4000;
+        /* a side with a hash was within its limit; one without was past it, or flagged */
+        m_begin("before", "/s", b.sha ? 9000 : 1000); ROOT(); m_entry(b); m_end();
+        m_begin("after", "/s", a.sha ? 9000 : 1000); ROOT(); m_entry(a); m_end();
+        REQUIRE(run() == 0);
+        if (!has("f", "\"outcome\":\"modified\"") || !has("f", C[i].want) || has("f", "\"unknown\""))
+            BELAY_FAIL("case %zu: want %s in %s", i, C[i].want, record("f") ? record("f") : "(no record)");
+    }
+    /* both sides hashed: absent */
+    m_begin("before", "/s", 9000); ROOT(); E(.path = "f", .type = "reg", .size = 3, .sha = HA); m_end();
+    m_begin("after", "/s", 9000); ROOT(); E(.path = "f", .type = "reg", .size = 4, .sha = HB); m_end();
+    REQUIRE(run() == 0);
+    ASSERT_TRUE(has("f", "\"outcome\":\"modified\"") && !has("f", "content_not_read"));
+    /* nothing proves a change: unknown as before, with its own reasons and no new key */
+    m_begin("before", "/s", 9000); ROOT(); E(.path = "f", .type = "reg", .size = 3, .sha = HA); m_end();
+    m_begin("after", "/s", 9000); ROOT(); E(.path = "f", .type = "reg", .size = 3, .unreadable = true); m_end();
+    REQUIRE(run() == 0);
+    ASSERT_TRUE(has("f", "\"outcome\":\"unknown\",\"type\":\"reg\",\"unknown\":[\"unverified\",\"unreadable\"]}"));
+    ASSERT_TRUE(!has("f", "content_not_read"));
+    /* a type change compares no field: no key; nor has a symlink any content to hash */
+    m_begin("before", "/s", 9000); ROOT(); E(.path = "f", .type = "reg", .size = 3, .unreadable = true);
+    E(.path = "l", .type = "lnk", .target = "a"); m_end();
+    m_begin("after", "/s", 9000); ROOT(); E(.path = "f", .type = "dir");
+    E(.path = "l", .type = "lnk", .size = 5, .unreadable = true); m_end();
+    REQUIRE(run() == 0);
+    ASSERT_TRUE(has("f", "\"outcome\":\"type_changed\"") && !has("f", "content_not_read"));
+    ASSERT_TRUE(has("l", "\"outcome\":\"modified\"") && !has("l", "content_not_read"));
+}
+
 /* Decided F2: a tree that changed while it was walked makes the whole result
  * provisional (manifest-v1, obligations on a consumer), and only the trailers
  * say so for `vanished`, which leaves no record. */
@@ -1582,6 +1631,7 @@ int main(void) {
     RUN(absence_below_an_incomplete_or_sealed_directory_is_unknown);
     RUN(a_manifest_with_an_orphan_is_refused_with_no_output);
     RUN(the_trailer_counts_each_sides_sealed_directories);
+    RUN(a_modified_file_whose_content_was_not_read_says_why);
     RUN(a_tree_that_changed_while_walked_makes_the_diff_provisional);
     RUN(the_output_is_never_an_input_however_spelled);
     RUN(the_trailer_names_both_inputs_by_their_digest);

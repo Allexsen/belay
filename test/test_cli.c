@@ -1053,6 +1053,34 @@ TEST(a_capture_says_what_it_could_not_read) {
     sh("chmod 700 '%s/secret' '%s/vault'", g_scope, g_scope);
 }
 
+/* G2-1, G2-2 end to end: a file rewritten that belay cannot read is modified
+ * by its size, and both outputs say its content was not read. */
+TEST(a_rewritten_file_that_cannot_be_read_says_so) {
+    if (geteuid() == 0) SKIP("root reads anything");
+    fresh();
+    sh("printf 'k\\n' > '%s/shadow' && chmod 000 '%s/shadow'", g_scope, g_scope);
+    ASSERT_EQ_INT(0, belay("check", "--scope", g_scope, NULL));
+    sh("chmod 600 '%s/shadow' && printf 'longer now\\n' > '%s/shadow' && chmod 000 '%s/shadow'", g_scope, g_scope, g_scope);
+    ASSERT_EQ_INT(1, belay("diff", "--scope", g_scope, "--since", "1", "--exit-code", NULL));
+    ASSERT_TRUE(strstr(g_out, "  M shadow   size 2 -> 11, mtime_ns; content not read (unreadable)\n") != NULL);
+    ASSERT_EQ_INT(0, belay("diff", "--scope", g_scope, "--since", "1", "--to", "2", "--json", NULL));
+    ASSERT_TRUE(strstr(g_out, "{\"path\":\"shadow\",\"outcome\":\"modified\",\"type\":\"reg\",\"changed\":[\"size\",\"mtime_ns\"],") != NULL);
+    ASSERT_TRUE(strstr(g_out, "},\"content_not_read\":[\"unreadable\"]}\n") != NULL);
+}
+
+/* The same for a file over the hash limit (64 MiB), which root cannot read
+ * past either: `unverified` alone. */
+TEST(a_rewritten_file_over_the_hash_limit_says_so) {
+    fresh();
+    sh("truncate -s 67108865 '%s/big'", g_scope);
+    ASSERT_EQ_INT(0, belay("check", "--scope", g_scope, NULL));
+    sh("truncate -s 67108866 '%s/big'", g_scope);
+    ASSERT_EQ_INT(0, belay("diff", "--scope", g_scope, "--since", "1", NULL));
+    ASSERT_TRUE(strstr(g_out, "  M big   size 67108865 -> 67108866, mtime_ns; content not read (unverified)\n") != NULL);
+    ASSERT_EQ_INT(0, belay("diff", "--scope", g_scope, "--since", "1", "--to", "2", "--json", NULL));
+    ASSERT_TRUE(strstr(g_out, "},\"content_not_read\":[\"unverified\"]}\n") != NULL);
+}
+
 /* G1-1: nothing is added when everything was read. C3-2 to C3-6: the keys
  * are there all the same, each in its place. */
 TEST(a_capture_that_read_everything_adds_nothing_to_its_line) {
@@ -2011,6 +2039,8 @@ int main(void) {
     RUN(prune_reports_exactly_what_it_frees_through_a_chain);
     RUN(checkpoint_v2_says_how_it_is_stored);
     RUN(a_capture_says_what_it_could_not_read);
+    RUN(a_rewritten_file_that_cannot_be_read_says_so);
+    RUN(a_rewritten_file_over_the_hash_limit_says_so);
     RUN(a_capture_that_read_everything_adds_nothing_to_its_line);
     RUN(a_checkpoint_made_before_v3_prints_as_it_did);
     RUN(log_names_excludes_of_a_delta);
