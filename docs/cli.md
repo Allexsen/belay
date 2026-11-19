@@ -428,7 +428,8 @@ could compare (its size), whose content it did not read on a side, says so at th
 with the reasons (`M shadow   size 530 -> 542, mtime_ns; content not read (unreadable)`; in
 `--json`, the record's `content_not_read`). So does a new file that was not read (`A newfile
 content not read (unreadable)`), and a new directory nothing was seen below (`A newdir   nothing
-below it was seen`); a privilege row for such a directory ends `; nothing below it was seen`.
+below it was seen`); a privilege row for such a directory ends `; nothing below it was seen`, and
+so does the line of a path that became one (`T tofile   reg -> dir; nothing below it was seen`).
 These rows never fold, wherever they are: not past the cut, not into a `git-ignored:` line, not
 into `git bookkeeping:`. There is no "provisional" banner; when entries changed
 while they were read (raced, unstable or vanished), one line counts them for each side: those of
