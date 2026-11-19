@@ -26,6 +26,7 @@ says only what differs with `--system`.
 | WS-3c | The receipt's `kernel record` line counts the steps that had no line of their own for this reason: `; 2 steps reported late (walks of 61 s, 74 s)`. |
 | WS-4 | Not root: everything runs; the receipt opens as WS-R2 says. `--docker` needs root, as today. |
 | WS-5 | `baseline export`, `verify` and `--protect` with `--system`: refused (manifest-v5 V5-R4). |
+| WS-5a | Whether a scope is a system watch is a property of its state, not of one command line. A capturing command (`check`, `mark`, `diff` to now) given `--scope` for a scope whose state holds a checkpoint with roots is refused, exit 3, naming `--system`; so is `--system` for a scope whose latest checkpoint has none. Nothing is captured and nothing is stored. `--scope /` is refused for these commands as it is for `watch` (WS-1). Run on the step-2 build by an independent reviewer: after system captures of a tree, `mark --scope` on the same tree took a whole-scope capture into the same state and stored four files the system captures had sealed. |
 
 ## The roots
 
