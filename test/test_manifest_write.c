@@ -544,7 +544,7 @@ TEST(header_records_version_and_scope) {
     ASSERT_TRUE(strstr(g_header, ",\"excluded\":[],\"walk_start_ns\":") != NULL);
     /* walked where belay ran: source null (manifest-v3 V3-2); then v5's keys: no roots, a walk */
     const size_t hl = strlen(g_header);
-    static const char TAIL[] = ",\"source\":null,\"roots\":[],\"basis\":\"walk\"}\n";
+    static const char TAIL[] = ",\"source\":null,\"roots\":0,\"basis\":\"walk\"}\n";
     ASSERT_TRUE(hl > sizeof TAIL && strcmp(g_header + hl - (sizeof TAIL - 1), TAIL) == 0);
     ASSERT_TRUE(strstr(g_header, "\"hash\":\"sha256\"") != NULL);
     ASSERT_TRUE(strstr(g_header, "\"scopes\"") != NULL);

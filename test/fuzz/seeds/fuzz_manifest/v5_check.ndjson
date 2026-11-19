@@ -1,4 +1,4 @@
-{"belay_manifest":5,"created_ns":1,"scopes":["/s"],"hash":"sha256","hash_max_bytes":67108864,"store_max_bytes":65536,"excluded":[],"walk_start_ns":0,"source":null,"roots":[],"basis":"walk"}
+{"belay_manifest":5,"created_ns":1,"scopes":["/s"],"hash":"sha256","hash_max_bytes":67108864,"store_max_bytes":65536,"excluded":[],"walk_start_ns":0,"source":null,"roots":0,"basis":"walk"}
 {"path":".","type":"dir","mode":16877,"uid":0,"gid":0,"size":4096,"mtime_ns":5,"ctime_ns":5,"ino":7,"dev":1,"nlink":2}
 {"path":"f","type":"reg","mode":33188,"uid":0,"gid":0,"size":0,"mtime_ns":5,"ctime_ns":5,"ino":9,"dev":1,"nlink":1,"sha256":"e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"}
-{"belay_manifest_end":2,"vanished":0,"unreadable":0,"unstable":0,"mounts":0,"raced":0,"trusted":0,"reference":"none","read_all":"check","writer_open":0,"unguarded":0,"not_read":0,"meta":0,"sealed":0,"carried":0,"racy":[]}
+{"belay_manifest_end":2,"vanished":0,"unreadable":0,"unstable":0,"mounts":0,"raced":0,"trusted":0,"reference":"none","read_all":"check","writer_open":0,"unguarded":0,"not_read":0,"meta":0,"sealed":0,"carried":0,"racy":0}

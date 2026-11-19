@@ -35,10 +35,12 @@ static char g_dir[512], g_tree[600], g_m[600], g_m2[600], g_key[600];
            "\"store_max_bytes\":65536,\"excluded\":[],\"walk_start_ns\":0,\"source\":null"
 #define H4 "{\"belay_manifest\":4," H_ "}\n"
 #define H5X(extra) "{\"belay_manifest\":5," H_ extra "}\n"
-#define H5 H5X(",\"roots\":[],\"basis\":\"walk\"")
-#define ROOTS1 ",\"roots\":[{\"path\":\"etc\",\"class\":\"content\",\"found\":true}," \
-               "{\"path\":\"home/u/.ssh\",\"class\":\"content\",\"found\":false}," \
-               "{\"path\":\"usr\",\"class\":\"metadata\",\"found\":true}]"
+#define H5 H5X(",\"roots\":0,\"basis\":\"walk\"")
+/* V5-A1: the header's count, then one line per root. V5-A2: one line per racy path. */
+#define H5R(n) H5X(",\"roots\":" #n ",\"basis\":\"walk\"")
+#define RL(p, c, f) "{\"root\":\"" p "\",\"class\":\"" c "\",\"found\":" f "}\n"
+#define RC(p) "{\"racy\":\"" p "\"}\n"
+#define ROOTS1 RL("etc", "content", "true") RL("home/u/.ssh", "content", "false") RL("usr", "metadata", "true")
 #define KEYID "0123456789abcdef"
 #define HEX "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
 #define ST_ "\"size\":1,\"mtime_ns\":1,\"ctime_ns\":1,"
@@ -55,7 +57,7 @@ static char g_dir[512], g_tree[600], g_m[600], g_m2[600], g_key[600];
     "\"raced\":0,\"trusted\":0,\"reference\":\"none\",\"read_all\":\"check\",\"writer_open\":0,\"unguarded\":0"
 #define T4(n) T4_(n) "}\n"
 #define T5X(n, nr, meta, sealed, tail) T4_(n) ",\"not_read\":" #nr ",\"meta\":" #meta ",\"sealed\":" #sealed tail "}\n"
-#define T5(n, nr, meta, sealed) T5X(n, nr, meta, sealed, ",\"carried\":0,\"racy\":[]")
+#define T5(n, nr, meta, sealed) T5X(n, nr, meta, sealed, ",\"carried\":0,\"racy\":0")
 
 static struct belay_entry g_e[64];
 static size_t g_n;
@@ -110,7 +112,7 @@ TEST(v5_of_a_whole_scope_reads) {
 
 /* V5-2: the roots, each with its class and whether it was found. */
 TEST(v5_roots_are_read) {
-    REQUIRE(read_text(H5X(ROOTS1 ",\"basis\":\"walk\"") DIR_(".", ",\"partial\":true") T5(1, 0, 0, 0)) == 0);
+    REQUIRE(read_text(H5R(3) ROOTS1 DIR_(".", ",\"partial\":true") T5(1, 0, 0, 0)) == 0);
     REQUIRE(g_h.n_roots == 3);
     ASSERT_EQ_STR("etc", g_roots[0].path);
     ASSERT_TRUE(g_roots[0].cls == BELAY_ROOT_CONTENT && g_roots[0].found);
@@ -132,15 +134,15 @@ TEST(each_version_is_read_by_its_own_keys) {
     ASSERT_EQ_INT(0, (int)(g_t.not_read + g_t.meta + g_t.sealed + g_t.carried + g_t.racy_listed));
     ASSERT_TRUE(!ent("f")->meta && !ent("f")->sealed && !ent(".")->partial && !ent(".")->not_read);
     static const struct { const char *what, *text, *msg; } C[] = {
-        { "v6", "{\"belay_manifest\":6," H_ ",\"roots\":[],\"basis\":\"walk\"}\n" ROOT_ T5(1, 0, 0, 0), "format version 6" },
+        { "v6", "{\"belay_manifest\":6," H_ ",\"roots\":0,\"basis\":\"walk\"}\n" ROOT_ T5(1, 0, 0, 0), "format version 6" },
         { "v5 header without roots", H5X(",\"basis\":\"walk\"") ROOT_ T5(1, 0, 0, 0), "missing roots" },
-        { "v5 header without basis", H5X(",\"roots\":[]") ROOT_ T5(1, 0, 0, 0), "missing basis" },
-        { "v5 header, basis first", H5X(",\"basis\":\"walk\",\"roots\":[]") ROOT_ T5(1, 0, 0, 0), "canonical order" },
-        { "v4 header with roots", "{\"belay_manifest\":4," H_ ",\"roots\":[]}\n" ROOT_ T4(1), "unknown key \"roots\"" },
+        { "v5 header without basis", H5X(",\"roots\":0") ROOT_ T5(1, 0, 0, 0), "missing basis" },
+        { "v5 header, basis first", H5X(",\"basis\":\"walk\",\"roots\":0") ROOT_ T5(1, 0, 0, 0), "canonical order" },
+        { "v4 header with roots", "{\"belay_manifest\":4," H_ ",\"roots\":0}\n" ROOT_ T4(1), "unknown key \"roots\"" },
         { "v4 header with basis", "{\"belay_manifest\":4," H_ ",\"basis\":\"walk\"}\n" ROOT_ T4(1), "unknown key \"basis\"" },
         { "v5 with a v4 trailer", H5 ROOT_ T4(1), "missing not_read" },
-        { "v5 trailer without racy", H5 ROOT_ T5X(1, 0, 0, 0, ",\"carried\":0"), "racy" },
-        { "v5 trailer without carried", H5 ROOT_ T5X(1, 0, 0, 0, ",\"racy\":[]"), "missing carried" },
+        { "v5 trailer without racy", H5 ROOT_ T5X(1, 0, 0, 0, ",\"carried\":0"), "missing racy" },
+        { "v5 trailer without carried", H5 ROOT_ T5X(1, 0, 0, 0, ",\"racy\":0"), "missing carried" },
         { "v4 with a v5 trailer", H4 ROOT_ T5(1, 0, 0, 0), "unknown key \"not_read\"" },
         { "v4 entry with meta", H4 ROOT_ REG_("f", ",\"meta\":true") T4(2), "unknown key \"meta\"" },
         { "v4 entry with sealed", H4 ROOT_ REG_("f", SHA_ ",\"sealed\":true") T4(2), "unknown key \"sealed\"" },
@@ -158,24 +160,40 @@ TEST(each_version_is_read_by_its_own_keys) {
 
 /* V5-2, V5-3, V5-10: the header's values. */
 TEST(v5_header_values_are_checked) {
-#define RT(p, c, f) "{\"path\":\"" p "\",\"class\":\"" c "\",\"found\":" f "}"
-#define HR(roots) H5X(",\"roots\":[" roots "],\"basis\":\"walk\"") DIR_(".", ",\"partial\":true") T5(1, 0, 0, 0)
+#define PR_ DIR_(".", ",\"partial\":true")
     static const struct { const char *what, *text, *msg; } C[] = {
-        { "roots out of order", HR(RT("usr", "metadata", "true") "," RT("etc", "content", "true")), "roots out of order" },
-        { "a root twice", HR(RT("etc", "content", "true") "," RT("etc", "content", "true")), "roots out of order" },
-        { "a class unknown", HR(RT("etc", "contents", "true")), "class is not content or metadata" },
-        { "found a string", HR("{\"path\":\"etc\",\"class\":\"content\",\"found\":\"true\"}"), "true or false" },
-        { "found missing", HR("{\"path\":\"etc\",\"class\":\"content\"}"), "path, class and found" },
-        { "a root's keys out of order", HR("{\"class\":\"content\",\"path\":\"etc\",\"found\":true}"), "canonical order" },
-        { "a root with another key", HR("{\"path\":\"etc\",\"class\":\"content\",\"found\":true,\"n\":1}"), "unknown key" },
-        { "the scope root as a root", HR(RT(".", "content", "true")), "canonical relative path" },
-        { "an absolute root", HR(RT("/etc", "content", "true")), "canonical relative path" },
-        { "a root with ..", HR(RT("etc/../x", "content", "true")), "canonical relative path" },
-        { "roots not objects", H5X(",\"roots\":[\"etc\"],\"basis\":\"walk\"") ROOT_ T5(1, 0, 0, 0), "array of objects" },
-        { "a basis unknown", H5X(",\"roots\":[],\"basis\":\"stat\"") ROOT_ T5(1, 0, 0, 0), "basis is not walk or events" },
-        { "sealed_key too short", H5X(",\"roots\":[],\"sealed_key\":\"0123\",\"basis\":\"walk\"") ROOT_ T5(1, 0, 0, 0), "16 lowercase hex" },
-        { "sealed_key upper case", H5X(",\"roots\":[],\"sealed_key\":\"0123456789ABCDEF\",\"basis\":\"walk\"") ROOT_ T5(1, 0, 0, 0), "16 lowercase hex" },
-        { "sealed_key, nothing sealed", H5X(",\"roots\":[],\"sealed_key\":\"" KEYID "\",\"basis\":\"walk\"") ROOT_ T5(1, 0, 0, 0),
+        /* V5-A1: the count is the number of root lines; they come before the first entry, sorted, each once */
+        { "the old array of roots", H5X(",\"roots\":[],\"basis\":\"walk\"") ROOT_ T5(1, 0, 0, 0), "\"roots\" must be a non-negative integer" },
+        { "fewer root lines than the count", H5R(3) RL("etc", "content", "true") RL("usr", "metadata", "true") PR_ T5(1, 0, 0, 0),
+          "the header says 3 roots, read 2" },
+        { "no root line at all", H5R(1) PR_ T5(1, 0, 0, 0), "the header says 1 roots, read 0" },
+        { "more root lines than the count", H5R(1) RL("etc", "content", "true") RL("usr", "metadata", "true") PR_ T5(1, 0, 0, 0),
+          "a root line past the header's count" },
+        { "a root line with no count", H5 RL("etc", "content", "true") ROOT_ T5(1, 0, 0, 0), "a root line past the header's count" },
+        { "a root line after an entry", H5R(1) RL("etc", "content", "true") PR_ RL("usr", "metadata", "true") T5(1, 0, 0, 0),
+          "a root line past the header's count" },
+        { "a root line not found, after an entry", H5R(1) RL("etc", "content", "true") PR_ RL("usr", "metadata", "false") T5(1, 0, 0, 0),
+          "a root line past the header's count" },
+        { "a root line in a v4 manifest", H4 RL("etc", "content", "true") ROOT_ T4(1), "unknown key \"root\"" },
+        { "the file ends in the roots", H5R(2) RL("etc", "content", "true"), "the header says 2 roots, read 1" },
+        { "roots out of order", H5R(2) RL("usr", "metadata", "true") RL("etc", "content", "true") PR_ T5(1, 0, 0, 0), "roots out of order" },
+        { "a root twice", H5R(2) RL("etc", "content", "true") RL("etc", "content", "true") PR_ T5(1, 0, 0, 0), "roots out of order" },
+        { "a class unknown", H5R(1) RL("etc", "contents", "true") PR_ T5(1, 0, 0, 0), "class is not content or metadata" },
+        { "found a string", H5R(1) "{\"root\":\"etc\",\"class\":\"content\",\"found\":\"true\"}\n" PR_ T5(1, 0, 0, 0), "exactly true or false" },
+        { "found null", H5R(1) "{\"root\":\"etc\",\"class\":\"content\",\"found\":null}\n" PR_ T5(1, 0, 0, 0), "exactly true or false" },
+        { "found missing", H5R(1) "{\"root\":\"etc\",\"class\":\"content\"}\n" PR_ T5(1, 0, 0, 0), "root, class and found" },
+        { "a root's keys out of order", H5R(1) "{\"root\":\"etc\",\"found\":true,\"class\":\"content\"}\n" PR_ T5(1, 0, 0, 0), "canonical order" },
+        { "a root with another key", H5R(1) "{\"root\":\"etc\",\"class\":\"content\",\"found\":true,\"n\":1}\n" PR_ T5(1, 0, 0, 0), "unknown key" },
+        { "the scope root as a root", H5R(1) RL(".", "content", "true") PR_ T5(1, 0, 0, 0), "canonical relative path" },
+        { "an absolute root", H5R(1) RL("/etc", "content", "true") PR_ T5(1, 0, 0, 0), "canonical relative path" },
+        { "a root with ..", H5R(1) RL("etc/../x", "content", "true") PR_ T5(1, 0, 0, 0), "canonical relative path" },
+        { "root and root_b64", H5R(1) "{\"root\":\"etc\",\"root_b64\":\"/w==\",\"class\":\"content\",\"found\":true}\n" PR_ T5(1, 0, 0, 0), "both root and root_b64" },
+        { "root_b64 of UTF-8", H5R(1) "{\"root_b64\":\"ZXRj\",\"class\":\"content\",\"found\":true}\n" PR_ T5(1, 0, 0, 0), "is valid UTF-8" },
+        { "roots negative", H5X(",\"roots\":-1,\"basis\":\"walk\"") ROOT_ T5(1, 0, 0, 0), "non-negative integer" },
+        { "a basis unknown", H5X(",\"roots\":0,\"basis\":\"stat\"") ROOT_ T5(1, 0, 0, 0), "basis is not walk or events" },
+        { "sealed_key too short", H5X(",\"roots\":0,\"sealed_key\":\"0123\",\"basis\":\"walk\"") ROOT_ T5(1, 0, 0, 0), "16 lowercase hex" },
+        { "sealed_key upper case", H5X(",\"roots\":0,\"sealed_key\":\"0123456789ABCDEF\",\"basis\":\"walk\"") ROOT_ T5(1, 0, 0, 0), "16 lowercase hex" },
+        { "sealed_key, nothing sealed", H5X(",\"roots\":0,\"sealed_key\":\"" KEYID "\",\"basis\":\"walk\"") ROOT_ T5(1, 0, 0, 0),
           "a sealed_key without sealed entries" },
         { "sealed, no sealed_key", H5 ROOT_ REG_("f", SHA_ ",\"sealed\":true") T5(2, 0, 0, 1), "sealed entries without a sealed_key" },
         { "false on a line of its own", H5 ROOT_ REG_("f", SHA_ ",\"sealed\":false") T5(2, 0, 0, 0), "malformed value" },
@@ -185,47 +203,73 @@ TEST(v5_header_values_are_checked) {
         if (r != -1) { BELAY_FAIL("%s: read, want refused", C[i].what); continue; }
         if (strstr(belay_err_msg(), C[i].msg) == NULL) BELAY_FAIL("%s: \"%s\", want \"%s\"", C[i].what, belay_err_msg(), C[i].msg);
     }
-    REQUIRE(read_text(H5X(",\"roots\":[],\"sealed_key\":\"" KEYID "\",\"basis\":\"walk\"") ROOT_
+    REQUIRE(read_text(H5X(",\"roots\":0,\"sealed_key\":\"" KEYID "\",\"basis\":\"walk\"") ROOT_
                       REG_("f", SHA_ ",\"sealed\":true") T5(2, 0, 0, 1)) == 0);
     ASSERT_EQ_STR(KEYID, g_h.sealed_key);
     ASSERT_TRUE(ent("f")->sealed);
+    /* a path that is not UTF-8: root_b64, in byte order with the others */
+    REQUIRE(read_text(H5R(2) RL("etc", "content", "true") "{\"root_b64\":\"/w==\",\"class\":\"metadata\",\"found\":false}\n"
+                      PR_ T5(1, 0, 0, 0)) == 0);
+    REQUIRE(g_h.n_roots == 2);
+    ASSERT_TRUE(g_roots[1].path[0] == (char)0xff && g_roots[1].path[1] == '\0' && g_roots[1].cls == BELAY_ROOT_METADATA);
 }
 
 /* V5-7 to V5-12: the trailer's counts are the entries', a walk carries
  * nothing and names no racy path, an event capture's racy paths are sorted. */
 TEST(v5_trailer_values_are_checked) {
-#define HE H5X(",\"roots\":[],\"basis\":\"events\"")
+#define HE H5X(",\"roots\":0,\"basis\":\"events\"")
     static const struct { const char *what, *text, *msg; } C[] = {
         { "not_read miscounted", H5 ROOT_ NR_("d", "") T5(2, 0, 0, 0), "not_read" },
         { "meta miscounted", H5 ROOT_ REG_("f", ",\"meta\":true") T5(2, 0, 2, 0), "meta" },
-        { "sealed miscounted", H5X(",\"roots\":[],\"sealed_key\":\"" KEYID "\",\"basis\":\"walk\"") ROOT_
+        { "sealed miscounted", H5X(",\"roots\":0,\"sealed_key\":\"" KEYID "\",\"basis\":\"walk\"") ROOT_
           REG_("f", SHA_ ",\"sealed\":true") T5(2, 0, 0, 2), "sealed" },
-        { "a walk that carries", H5 ROOT_ T5X(1, 0, 0, 0, ",\"carried\":1,\"racy\":[]"), "a walk carries no entry" },
-        { "a walk with racy paths", H5 ROOT_ T5X(1, 0, 0, 0, ",\"carried\":0,\"racy\":[\"f\"]"), "a walk names no racy path" },
-        { "carried over the entries", HE ROOT_ T5X(1, 0, 0, 0, ",\"carried\":2,\"racy\":[]"), "carries more entries" },
-        { "racy out of order", HE ROOT_ T5X(1, 0, 0, 0, ",\"carried\":0,\"racy\":[\"b\",\"a\"]"), "racy paths out of order" },
-        { "racy twice", HE ROOT_ T5X(1, 0, 0, 0, ",\"carried\":0,\"racy\":[\"a\",\"a\"]"), "racy paths out of order" },
-        { "a racy path absolute", HE ROOT_ T5X(1, 0, 0, 0, ",\"carried\":0,\"racy\":[\"/a\"]"), "canonical relative path" },
-        { "racy and racy_b64", HE ROOT_ T5X(1, 0, 0, 0, ",\"carried\":0,\"racy\":[],\"racy_b64\":[\"/w==\"]"), "exactly one of racy" },
-        { "racy_b64 all UTF-8", HE ROOT_ T5X(1, 0, 0, 0, ",\"carried\":0,\"racy_b64\":[\"YQ==\"]"), "all UTF-8" },
-        { "racy an integer", HE ROOT_ T5X(1, 0, 0, 0, ",\"carried\":0,\"racy\":3"), "array of strings" },
+        { "a walk that carries", H5 ROOT_ T5X(1, 0, 0, 0, ",\"carried\":1,\"racy\":0"), "a walk carries no entry" },
+        { "a walk with racy paths", H5 ROOT_ REG_("f", SHA_) RC("f") T5X(2, 0, 0, 0, ",\"carried\":0,\"racy\":1"), "a walk names no racy path" },
+        /* V5-A2: the count is the number of racy lines; they come after the last entry, sorted, each naming an entry */
+        { "the old array of racy paths", HE ROOT_ T5X(1, 0, 0, 0, ",\"carried\":0,\"racy\":[]"), "\"racy\" must be a non-negative integer" },
+        { "fewer racy lines than the count", HE ROOT_ REG_("a", SHA_) REG_("b", SHA_) RC("a") T5X(3, 0, 0, 0, ",\"carried\":0,\"racy\":2"),
+          "trailer says 2 racy, read 1" },
+        { "more racy lines than the count", HE ROOT_ REG_("a", SHA_) REG_("b", SHA_) RC("a") RC("b") T5X(3, 0, 0, 0, ",\"carried\":0,\"racy\":1"),
+          "trailer says 1 racy, read 2" },
+        { "racy lines and a count of 0", HE ROOT_ REG_("a", SHA_) RC("a") T5X(2, 0, 0, 0, ",\"carried\":0,\"racy\":0"), "trailer says 0 racy, read 1" },
+        { "a racy line naming no entry", HE ROOT_ REG_("a", SHA_) REG_("c", SHA_) RC("b") T5X(3, 0, 0, 0, ",\"carried\":0,\"racy\":1"),
+          "a racy line names no entry" },
+        { "a racy line past the last entry", HE ROOT_ REG_("a", SHA_) RC("a") RC("z") T5X(2, 0, 0, 0, ",\"carried\":0,\"racy\":2"),
+          "a racy line names no entry" },
+        { "an entry after a racy line", HE ROOT_ REG_("a", SHA_) RC("a") REG_("b", SHA_) T5X(3, 0, 0, 0, ",\"carried\":0,\"racy\":1"),
+          "an entry after a racy line" },
+        { "a racy line in a v4 manifest", H4 ROOT_ REG_("a", SHA_) RC("a") T4(2), "unknown key \"racy\"" },
+        { "a racy line with another key", HE ROOT_ REG_("a", SHA_) "{\"racy\":\"a\",\"type\":\"reg\"}\n" T5X(2, 0, 0, 0, ",\"carried\":0,\"racy\":1"),
+          "unknown key" },
+        { "carried over the entries", HE ROOT_ T5X(1, 0, 0, 0, ",\"carried\":2,\"racy\":0"), "carries more entries" },
+        { "racy out of order", HE ROOT_ REG_("a", SHA_) REG_("b", SHA_) RC("b") RC("a") T5X(3, 0, 0, 0, ",\"carried\":0,\"racy\":2"), "racy paths out of order" },
+        { "racy twice", HE ROOT_ REG_("a", SHA_) RC("a") RC("a") T5X(2, 0, 0, 0, ",\"carried\":0,\"racy\":2"), "racy paths out of order" },
+        { "a racy path absolute", HE ROOT_ REG_("a", SHA_) "{\"racy\":\"/a\"}\n" T5X(2, 0, 0, 0, ",\"carried\":0,\"racy\":1"), "canonical relative path" },
+        { "racy and racy_b64", HE ROOT_ REG_("a", SHA_) "{\"racy\":\"a\",\"racy_b64\":\"/w==\"}\n" T5X(2, 0, 0, 0, ",\"carried\":0,\"racy\":1"), "both racy and racy_b64" },
+        { "racy_b64 of UTF-8", HE ROOT_ REG_("a", SHA_) "{\"racy_b64\":\"YQ==\"}\n" T5X(2, 0, 0, 0, ",\"carried\":0,\"racy\":1"), "is valid UTF-8" },
+        { "racy_b64 in the trailer", HE ROOT_ T5X(1, 0, 0, 0, ",\"carried\":0,\"racy_b64\":0"), "unknown key \"racy_b64\"" },
     };
     for (size_t i = 0; i < sizeof C / sizeof C[0]; i++) {
         const int r = read_text(C[i].text);
         if (r != -1) { BELAY_FAIL("%s: read, want refused", C[i].what); continue; }
         if (strstr(belay_err_msg(), C[i].msg) == NULL) BELAY_FAIL("%s: \"%s\", want \"%s\"", C[i].what, belay_err_msg(), C[i].msg);
     }
-    REQUIRE(read_text(HE ROOT_ REG_("a", SHA_) REG_("b", SHA_) T5X(3, 0, 0, 0, ",\"carried\":1,\"racy\":[\"a\",\"b\"]")) == 0);
+    REQUIRE_MSG(read_text(HE ROOT_ REG_("a", SHA_) REG_("b", SHA_) RC(".") RC("b") T5X(3, 0, 0, 0, ",\"carried\":1,\"racy\":2")) == 0,
+                "%s", belay_err_msg());
+    ASSERT_EQ_INT(3, (int)g_n);                     /* a racy line is no entry */
     ASSERT_TRUE(g_h.basis_events);
     ASSERT_EQ_INT(1, (int)g_t.carried);
     ASSERT_EQ_INT(2, (int)g_t.racy_listed);
-    REQUIRE(read_text(HE ROOT_ T5X(1, 0, 0, 0, ",\"carried\":0,\"racy_b64\":[\"YQ==\",\"/w==\"]")) == 0);
+    /* a path that is not UTF-8: racy_b64, on its own line */
+    REQUIRE_MSG(read_text(HE ROOT_ REG_("a", SHA_) "{\"path_b64\":\"/w==\",\"type\":\"reg\",\"mode\":33188,\"uid\":0,\"gid\":0,"
+                          "\"size\":0,\"mtime_ns\":1,\"ctime_ns\":1,\"ino\":3,\"dev\":1,\"nlink\":1" SHA_ "}\n"
+                          RC("a") "{\"racy_b64\":\"/w==\"}\n" T5X(3, 0, 0, 0, ",\"carried\":0,\"racy\":2")) == 0, "%s", belay_err_msg());
     ASSERT_EQ_INT(2, (int)g_t.racy_listed);
 }
 
 /* V5-4, V5-4b, V5-5, V5-6 and the entry rules V5-E1, V5-E2, V5-E8. */
 TEST(v5_entry_rules) {
-#define K5 H5X(",\"roots\":[],\"sealed_key\":\"" KEYID "\",\"basis\":\"walk\"")
+#define K5 H5X(",\"roots\":0,\"sealed_key\":\"" KEYID "\",\"basis\":\"walk\"")
     static const struct { const char *what, *text, *msg; } C[] = {
         /* V5-4, V5-E8 */
         { "not_read with size", H5 ROOT_ DIRX("d", "\"size\":1,", ",\"not_read\":true") T5(2, 1, 0, 0), "on a not_read directory" },
@@ -235,7 +279,7 @@ TEST(v5_entry_rules) {
         { "a directory without size", H5 ROOT_ DIRX("d", "\"mtime_ns\":1,\"ctime_ns\":1,", NL_) T5(2, 0, 0, 0), "missing size" },
         { "a directory without nlink", H5 ROOT_ DIRX("d", ST_, "") T5(2, 0, 0, 0), "missing nlink" },
         { "not_read on a file", H5 ROOT_ REG_("f", SHA_ ",\"not_read\":true") T5(2, 1, 0, 0), "on a non-directory" },
-        { "not_read and unreadable", H5 ROOT_ DIRX("d", "", ",\"unreadable\":true,\"not_read\":true") T5X(2, 1, 0, 0, ",\"carried\":0,\"racy\":[]"),
+        { "not_read and unreadable", H5 ROOT_ DIRX("d", "", ",\"unreadable\":true,\"not_read\":true") T5X(2, 1, 0, 0, ",\"carried\":0,\"racy\":0"),
           "exclusive" },
         { "not_read and mount", H5 ROOT_ DIRX("d", "", ",\"mount\":true,\"not_read\":true") T5(2, 1, 0, 0), "exclusive" },
         { "not_read and unstable", H5 ROOT_ DIRX("d", "", ",\"unstable\":true,\"not_read\":true") T5(2, 1, 0, 0), "exclusive" },
@@ -269,7 +313,7 @@ TEST(v5_entry_rules) {
                       REG_("s", SHA_ ",\"writer_open\":true,\"sealed\":true")
                       "{\"belay_manifest_end\":6,\"vanished\":0,\"unreadable\":0,\"unstable\":1,\"mounts\":0,\"raced\":1,"
                       "\"trusted\":0,\"reference\":\"none\",\"read_all\":\"check\",\"writer_open\":1,\"unguarded\":0,"
-                      "\"not_read\":2,\"meta\":1,\"sealed\":1,\"carried\":0,\"racy\":[]}\n") == 0);
+                      "\"not_read\":2,\"meta\":1,\"sealed\":1,\"carried\":0,\"racy\":0}\n") == 0);
     ASSERT_TRUE(ent(".")->partial && ent("a")->not_read && ent("b")->raced && ent("c")->partial && ent("c")->unstable);
     ASSERT_TRUE(ent("m")->meta && !ent("m")->has_hash && ent("s")->sealed && ent("s")->writer_open);
     ASSERT_EQ_INT(2, (int)g_t.not_read);
@@ -407,6 +451,17 @@ static int capture_roots(const char *out, const char *previous, struct belay_man
     return r;
 }
 
+static char *slurp(const char *path) {
+    char *text = NULL;
+    size_t cap = 0;
+    FILE *f = fopen(path, "rb");
+    if (f == NULL) return NULL;
+    const ssize_t n = getdelim(&text, &cap, '\0', f);
+    fclose(f);
+    if (n < 0) { free(text); return NULL; }
+    return text;
+}
+
 /* The line of `out` whose path is `path`, or the header ("") / trailer (NULL). */
 static char g_line[70000];
 static const char *line_of(const char *out, const char *path) {
@@ -469,9 +524,9 @@ TEST(a_whole_scope_is_written_as_v5_with_no_roots) {
     const struct belay_manifest_opts o = { .hash_max_bytes = 1u << 20, .store_max_bytes = 4096 };
     REQUIRE(capture_write(&g_ops, g_m2, g_tree, &o, NULL) == 0);
     ASSERT_TRUE(strncmp(line_of(g_m2, ""), "{\"belay_manifest\":5,", 20) == 0);
-    ASSERT_TRUE(strstr(line_of(g_m2, ""), ",\"source\":null,\"roots\":[],\"basis\":\"walk\"}\n") != NULL);
+    ASSERT_TRUE(strstr(line_of(g_m2, ""), ",\"source\":null,\"roots\":0,\"basis\":\"walk\"}\n") != NULL);
     ASSERT_TRUE(strstr(line_of(g_m2, NULL), ",\"unguarded\":") != NULL);
-    ASSERT_TRUE(strstr(line_of(g_m2, NULL), ",\"not_read\":0,\"meta\":0,\"sealed\":0,\"carried\":0,\"racy\":[]}\n") != NULL);
+    ASSERT_TRUE(strstr(line_of(g_m2, NULL), ",\"not_read\":0,\"meta\":0,\"sealed\":0,\"carried\":0,\"racy\":0}\n") != NULL);
     /* nothing of version 5 on an entry: a mode-640 file is read and hashed plainly, a
      * directory is entered, a file under the root is recorded */
     ASSERT_TRUE(strstr(line_of(g_m2, "etc/shadow"), "\"sealed\"") == NULL);
@@ -525,8 +580,20 @@ TEST(roots_make_partial_and_not_read_directories) {
         const bool absent = strcmp(ROOTS[i].path, "home/u/.profile") == 0 || strcmp(ROOTS[i].path, "home/u/.config/systemd/user") == 0;
         if (g_roots[i].found == absent) BELAY_FAIL("%s: found %d", ROOTS[i].path, (int)g_roots[i].found);
     }
-    ASSERT_TRUE(strstr(line_of(g_m2, ""), "{\"path\":\"home/u/.profile\",\"class\":\"content\",\"found\":false}") != NULL);
-    ASSERT_TRUE(strstr(line_of(g_m2, ""), "{\"path\":\"usr\",\"class\":\"metadata\",\"found\":true}") != NULL);
+    /* V5-A1: the header's count, then one line per root, before the first entry */
+    char count[64];
+    snprintf(count, sizeof count, ",\"roots\":%zu,\"sealed_key\":\"", sizeof ROOTS / sizeof ROOTS[0]);
+    ASSERT_TRUE(strstr(line_of(g_m2, ""), count) != NULL);
+    char *all = slurp(g_m2);
+    REQUIRE(all != NULL);
+    const char *l2 = strchr(all, '\n') + 1;
+    static const char FIRST[] = "{\"root\":\"etc\",\"class\":\"content\",\"found\":true}\n";
+    ASSERT_TRUE(strncmp(l2, FIRST, sizeof FIRST - 1) == 0);
+    ASSERT_TRUE(strstr(all, "\n{\"root\":\"home/u/.profile\",\"class\":\"content\",\"found\":false}\n") != NULL);
+    const char *last_root = strstr(all, "\n{\"root\":\"var\",\"class\":\"metadata\",\"found\":true}\n{\"path\":");
+    ASSERT_TRUE(last_root != NULL && strstr(last_root + 1, "\n{\"root\":") == NULL);
+    ASSERT_TRUE(strstr(all, ",\"carried\":0,\"racy\":0}\n") != NULL && strstr(all, "{\"racy\":") == NULL);
+    free(all);
 }
 
 /* V5-E4, V5-5: under a metadata root a file is not read, unless it is
@@ -698,34 +765,40 @@ TEST(mark_trusts_by_class_and_by_key) {
     ASSERT_TRUE(strcmp(sealed0, want) != 0);
 }
 
-/* V5-E7: an entry the previous trailer names racy is never trusted. This
- * build writes no such manifest; one that does is not used for trust at all. */
-TEST(a_previous_manifest_naming_racy_entries_is_not_used) {
+/* V5-E7, V5-A2: an entry the previous manifest names racy is never trusted;
+ * the others are. This build writes no racy line, so the previous manifest
+ * is a real capture's with its basis, one racy line and the count written in
+ * by hand. */
+TEST(mark_never_trusts_an_entry_the_previous_manifest_names_racy) {
     tree();
     char first[700], edited[700];
     snprintf(first, sizeof first, "%s/first.ndjson", g_dir);
     snprintf(edited, sizeof edited, "%s/events.ndjson", g_dir);
+    struct belay_manifest_stats st;
     REQUIRE(capture_roots(first, NULL, NULL) == 0);
+    REQUIRE(capture_roots(g_m2, first, &st) == 0 && st.prefilter);
+    const size_t all = st.trusted;
     FILE *in = fopen(first, "rb"), *out = fopen(edited, "wb");
     REQUIRE(in != NULL && out != NULL);
     static char line[70000];
     int edits = 0;
     while (fgets(line, sizeof line, in) != NULL) {
-        char *b = strstr(line, ",\"basis\":\"walk\"}"), *r = strstr(line, ",\"racy\":[]}");
+        char *b = strstr(line, ",\"basis\":\"walk\"}"), *r = strstr(line, ",\"racy\":0}");
         if (b != NULL) { snprintf(b, 32, ",\"basis\":\"events\"}\n"); edits++; }
-        if (r != NULL) { snprintf(r, 40, ",\"racy\":[\"etc/passwd\"]}\n"); edits++; }
+        if (r != NULL) {
+            fputs("{\"racy\":\"etc/passwd\"}\n{\"racy\":\"usr/local/bin/l\"}\n", out);
+            snprintf(r, 40, ",\"racy\":2}\n");
+            edits++;
+        }
         fputs(line, out);
     }
     fclose(in);
     fclose(out);
     REQUIRE(edits == 2);
-    struct belay_manifest_stats st;
-    REQUIRE(capture_roots(g_m2, edited, &st) == 0);
-    ASSERT_TRUE(!st.prefilter);
-    ASSERT_EQ_INT(0, (int)st.trusted);
-    REQUIRE(st.prefilter_skipped != NULL);
-    ASSERT_TRUE(strstr(st.prefilter_skipped, "racy") != NULL);
-    ASSERT_TRUE(strstr(line_of(g_m2, NULL), "names racy entries") != NULL);      /* the trailer's read_all */
+    REQUIRE_MSG(capture_roots(g_m2, edited, &st) == 0, "%s", belay_err_msg());
+    REQUIRE_MSG(st.prefilter, "the prefilter was not used: %s", st.prefilter_skipped ? st.prefilter_skipped : "?");
+    ASSERT_EQ_INT((int)all - 2, (int)st.trusted);   /* the two named were read; every other file trusted */
+    ASSERT_TRUE(strstr(line_of(g_m2, NULL), ",\"racy\":0}") != NULL);
 }
 
 /* ---------- injected: mounts, a file that cannot be opened, changes during the walk ---------- */
@@ -969,6 +1042,71 @@ TEST(system_roots_homes) {
     belay_system_roots_free(&g_sr);
 }
 
+/* V5-A1: with one line per root no number of homes is too many (in the
+ * header's array, about 60 were: the line limit). */
+TEST(five_hundred_homes_are_captured) {
+    tree();
+    char p[1200];
+    snprintf(p, sizeof p, "%s/etc/passwd", g_tree);
+    FILE *f = fopen(p, "wb");
+    REQUIRE(f != NULL);
+    mk("home/many", 0755);
+    for (int i = 0; i < 500; i++) {
+        char rel[64];
+        snprintf(rel, sizeof rel, "home/many/user%03d", i);
+        mk(rel, 0755);
+        fprintf(f, "user%03d:x:%d:%d::/%s:/bin/sh\n", i, 2000 + i, 2000 + i, rel);
+    }
+    fclose(f);
+    wr("home/many/user250/.bashrc", "export B=2\n", 0644);
+    pause_ms(30);
+    REQUIRE(belay_system_roots(g_tree, &g_sr) == 0);
+    ASSERT_TRUE(g_sr.n_roots >= 500 * 14);
+    const struct belay_manifest_opts o = {
+        .hash_max_bytes = 1u << 20, .roots = g_sr.roots, .n_roots = g_sr.n_roots,
+        .not_read = g_sr.not_read, .n_not_read = g_sr.n_not_read, .sealing_key_path = g_key,
+    };
+    struct belay_manifest_stats st;
+    const size_t n = g_sr.n_roots;
+    const int rc = capture_write(&g_ops, g_m2, g_tree, &o, &st);
+    belay_system_roots_free(&g_sr);
+    REQUIRE_MSG(rc == 0, "%s", belay_err_msg());
+    /* and it reads back, every root there */
+    struct belay_manifest_reader *r;
+    REQUIRE_MSG(belay_manifest_open(g_m2, &r) == 0, "%s", belay_err_msg());
+    const struct belay_manifest_header *h = belay_manifest_header(r);
+    ASSERT_EQ_INT((int)n, (int)h->n_roots);
+    ASSERT_TRUE(belay_manifest_lists_root(h, "home/many/user499/.ssh", 22));
+    ASSERT_TRUE(belay_manifest_lists_root(h, "home/many/user250/.bashrc", 25));
+    static struct belay_entry e;
+    int got, homes = 0, found = 0;
+    while ((got = belay_manifest_next(r, &e)) == 1) {
+        if (e.path_len == 17 && memcmp(e.path, "home/many/user", 14) == 0 && e.partial) homes++;
+        if (e.path_len == 25 && memcmp(e.path, "home/many/user250/.bashrc", 25) == 0) found++;
+    }
+    ASSERT_EQ_INT(0, got);
+    ASSERT_EQ_INT(500, homes);
+    ASSERT_EQ_INT(1, found);
+    belay_manifest_close(r);
+}
+
+/* A reader of the header line alone (a delta holds no more of a manifest)
+ * has the count of roots, and no root. */
+TEST(a_header_alone_gives_the_count) {
+    FILE *f = fopen(g_m, "wb");
+    REQUIRE(f != NULL);
+    fputs(H5R(3), f);
+    fclose(f);
+    struct belay_manifest_reader *r;
+    ASSERT_EQ_INT(-1, belay_manifest_open(g_m, &r));        /* as a manifest it is cut short */
+    REQUIRE_MSG(belay_manifest_open_header(g_m, &r) == 0, "%s", belay_err_msg());
+    ASSERT_EQ_INT(3, (int)belay_manifest_header(r)->n_roots);
+    ASSERT_TRUE(belay_manifest_header(r)->roots == NULL);
+    static struct belay_entry e;
+    ASSERT_EQ_INT(-1, belay_manifest_next(r, &e));          /* a header, not a manifest to read on */
+    belay_manifest_close(r);
+}
+
 /* The resolved roots drive a capture: a home under a metadata root is
  * walked as metadata with its .ssh as content (WS-9), a home outside the
  * roots is partial (WS-8). */
@@ -1031,7 +1169,9 @@ int main(void) {
     RUN(the_key_is_made_only_when_needed);
     RUN(roots_that_are_not_a_sorted_list_are_refused);
     RUN(mark_trusts_by_class_and_by_key);
-    RUN(a_previous_manifest_naming_racy_entries_is_not_used);
+    RUN(mark_never_trusts_an_entry_the_previous_manifest_names_racy);
+    RUN(five_hundred_homes_are_captured);
+    RUN(a_header_alone_gives_the_count);
     RUN(a_mount_is_entered_by_its_filesystem_type);
     RUN(a_meta_file_that_cannot_be_opened_is_still_meta);
     RUN(the_recheck_looks_at_what_was_recorded);

@@ -1719,7 +1719,7 @@ TEST(an_exclude_list_whose_header_could_not_fit_is_refused) {
         "\"ino\":18446744073709551615},{\"path\":\"a\",\"reason\":\"user\",\"dev\":18446744073709551615,"
         "\"ino\":18446744073709551615}],\"walk_start_ns\":-9223372036854775808,"
         "\"source\":{\"docker\":\"0000000000000000000000000000000000000000000000000000000000000000\",\"image\":\"sha256:0000000000000000000000000000000000000000000000000000000000000000\"},"
-        "\"roots\":[],\"basis\":\"walk\"}";         /* a scope with excludes has no roots, so no sealed_key */
+        "\"roots\":0,\"basis\":\"walk\"}";         /* a scope with excludes has no roots, so no sealed_key */
     ASSERT_EQ_INT((int)strlen(widest), (int)belay_manifest_header_bound("/s", one, 1, ".st"));
     /* By hand, all twenty: the capture fails and says why. */
     sh("cd '%s' && find d* -mindepth 15 -maxdepth 15 -type d > '%s/excludes'", g_scope, d);

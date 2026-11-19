@@ -242,7 +242,31 @@ int LLVMFuzzerTestOneInput(const uint8_t *data, size_t size) {
     struct belay_manifest_reader *r;
     if (belay_manifest_open(path, &r) == 0) {
         static struct belay_entry e;
-        while (belay_manifest_next(r, &e) == 1) check_entry(belay_manifest_header(r), &e);
+        int got;
+        while ((got = belay_manifest_next(r, &e)) == 1) check_entry(belay_manifest_header(r), &e);
+        /* manifest-v5-addendum V5-A1, V5-A2, by hand: as many roots as the
+         * header counts; the racy paths the trailer counts, at most 65,536,
+         * none empty or holding a NUL, strictly sorted, and only in a v5
+         * manifest that is not a walk's. */
+        const struct belay_manifest_header *h = belay_manifest_header(r);
+        if (h->n_roots > 0 && h->roots == NULL) abort();
+        if (got == 0) {
+            const size_t n = belay_manifest_trailer(r)->racy_listed;
+            if (n > 65536 || (n > 0 && (h->version < 5 || !h->basis_events))) abort();
+            const char *prev = NULL, *q = NULL;
+            size_t pl = 0;
+            for (size_t i = 0; i < n; i++) {
+                const size_t l = belay_manifest_racy(r, i, &q);
+                if (l == 0 || q == NULL || memchr(q, '\0', l) != NULL) abort();
+                if (prev != NULL) {
+                    const int c = memcmp(prev, q, pl < l ? pl : l);
+                    if (c > 0 || (c == 0 && pl >= l)) abort();
+                }
+                prev = q;
+                pl = l;
+            }
+            if (belay_manifest_racy(r, n, &q) != 0) abort();
+        }
         belay_manifest_close(r);
     }
     belay_err_clear();

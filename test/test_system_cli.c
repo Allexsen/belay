@@ -97,12 +97,14 @@ TEST(check_captures_the_roots) {
     ASSERT_TRUE(strstr(g_out, ",\"unreadable\":0,\"sealing\":3,") != NULL);
     REQUIRE(belay("manifest", "--system-root", g_tree, "--id", "1", NULL) == 0);
     ASSERT_TRUE(strstr(mline(""), "{\"belay_manifest\":5,") != NULL);
-    ASSERT_TRUE(strstr(mline(""), ",\"roots\":[{\"path\":\"boot\",\"class\":\"metadata\",\"found\":false},") != NULL);
-    ASSERT_TRUE(strstr(mline(""), "{\"path\":\"etc\",\"class\":\"content\",\"found\":true}") != NULL);
-    ASSERT_TRUE(strstr(mline(""), "{\"path\":\"home/u/.ssh\",\"class\":\"content\",\"found\":false}") != NULL);
-    ASSERT_TRUE(strstr(mline(""), "{\"path\":\"home/u/.bashrc\",\"class\":\"content\",\"found\":true}") != NULL);
-    ASSERT_TRUE(strstr(mline(""), "{\"path\":\"root/.zshrc\",\"class\":\"content\",\"found\":false}") != NULL);
-    ASSERT_TRUE(strstr(mline(""), "{\"path\":\"usr\",\"class\":\"metadata\",\"found\":true}") != NULL);
+    /* V5-A1: a count in the header, one line per root after it */
+    ASSERT_TRUE(strstr(mline(""), ",\"roots\":41,\"sealed_key\":\"") != NULL);     /* 13 fixed, 14 for each of two homes */
+    ASSERT_TRUE(strstr(g_out, "\"}\n{\"root\":\"boot\",\"class\":\"metadata\",\"found\":false}\n") != NULL);
+    ASSERT_TRUE(strstr(g_out, "\n{\"root\":\"etc\",\"class\":\"content\",\"found\":true}\n") != NULL);
+    ASSERT_TRUE(strstr(g_out, "\n{\"root\":\"home/u/.ssh\",\"class\":\"content\",\"found\":false}\n") != NULL);
+    ASSERT_TRUE(strstr(g_out, "\n{\"root\":\"home/u/.bashrc\",\"class\":\"content\",\"found\":true}\n") != NULL);
+    ASSERT_TRUE(strstr(g_out, "\n{\"root\":\"root/.zshrc\",\"class\":\"content\",\"found\":false}\n") != NULL);
+    ASSERT_TRUE(strstr(g_out, "\n{\"root\":\"usr\",\"class\":\"metadata\",\"found\":true}\n") != NULL);
     ASSERT_TRUE(strstr(mline(""), "\"sealed_key\":\"") != NULL && strstr(mline(""), ",\"basis\":\"walk\"}") != NULL);
     ASSERT_TRUE(strstr(mline("."), ",\"partial\":true}") != NULL);
     ASSERT_TRUE(strstr(mline("home/u"), ",\"partial\":true}") != NULL);
@@ -127,7 +129,7 @@ TEST(check_captures_the_roots) {
     /* a scope captured without it is a whole scope, as before: no roots, no key use */
     REQUIRE(belay("check", "--scope", g_tree, NULL) == 0);
     REQUIRE(belay("manifest", "--scope", g_tree, "--id", "3", NULL) == 0);
-    ASSERT_TRUE(strstr(mline(""), ",\"roots\":[],\"basis\":\"walk\"}") != NULL);
+    ASSERT_TRUE(strstr(mline(""), ",\"roots\":0,\"basis\":\"walk\"}") != NULL);
     ASSERT_TRUE(mline("top.txt")[0] != '\0' && strstr(mline("etc/shadow"), "sealed") == NULL);
 }
 
