@@ -1489,6 +1489,15 @@ def writer_scenarios():
           spec_of(rule("tests/**", "no_write")), verify={"manifest": "v3"}, tags=["P41"]))
     add(S("verify-v3-bundle-packages", BASE + FOO, [("write", CORE, b"x = 1\n")], spec_of(frozen=True), verify={"manifest": "v3"}, tags=["P41"]))
     add(S("verify-v4-unguarded-at-its-bound", BASE, [], None, verify={"manifest": "unguarded-max"}))
+    # -- V5-R1, V5-R2, V5-R4 (P73, P74): a v4 bundle is read as before; a strict reader's refusals
+    add(S("verify-v4-bundle", BASE, [("write", "tests/test_api.py", TEST_API.replace(b"        assert True\n", b""))],
+          spec_of(rule("tests/**", "no_write")), verify={"manifest": "v4"}, tags=["P73"]))
+    add(S("verify-v4-bundle-packages", BASE + FOO, [("write", CORE, b"x = 1\n")], spec_of(frozen=True), verify={"manifest": "v4"},
+          tags=["P73"]))
+    for how in ("v5-missing-roots", "v5-missing-basis", "v5-missing-not-read", "v5-missing-meta", "v5-missing-sealed",
+                "v5-missing-carried", "v5-missing-racy", "v5-basis-order", "v4-with-roots", "v4-with-racy", "v5-roots"):
+        add(S("verify-v5-refused-" + how, BASE + [("file", "data/blob.bin", BLOB)], [], None, verify={"manifest": "break:" + how},
+              refusal="verify:" + how, tags=["P74"] if how == "v5-roots" else ["P73"]))
     for how in ("trailer-missing-writer-open", "trailer-missing-unguarded", "v3-with-trailer-key", "v3-with-entry-key",
                 "count-too-low", "count-too-high", "unguarded-too-large", "false", "not-a-bool", "on-stored", "on-dir", "on-unverified", "no-hash"):
         tree = BASE + [("file", "data/blob.bin", BLOB)] + ([("sparse", "data/big.bin", 67108865)] if how == "on-unverified" else [])

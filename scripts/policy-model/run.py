@@ -350,8 +350,8 @@ def corrupt_bundle(data, how):
 
 
 def rewrite_manifest(data, how, flags=None):
-    """The bundle with its manifest member rewritten: "v2" or "v3" (as an earlier release wrote
-    it), "container" (a host reader's source), "other-scope" (the bundle's and its manifest's
+    """The bundle with its manifest member rewritten: "v2", "v3" or "v4" (as an earlier release
+    wrote it, with that version's keys only), "container" (a host reader's source), "other-scope" (the bundle's and its manifest's
     scopes another path), "flags" (these entries flagged, `flags` as model.flag_manifest takes it)
     "unguarded-max" (model.unguarded_at_most) or "break:<how>" (model.break_manifest). -> (bytes, its manifest's sha256, its source)."""
     out = []
@@ -367,7 +367,7 @@ def rewrite_manifest(data, how, flags=None):
         if hdr.get("member") == "manifest":
             first, rest = content.split(b"\n", 1)
             mh = json.loads(first)
-            if how in ("v2", "v3"):
+            if how in ("v2", "v3", "v4"):
                 content = model.downgrade_manifest(content, int(how[1]))
             elif how == "unguarded-max":
                 content = model.unguarded_at_most(content)
