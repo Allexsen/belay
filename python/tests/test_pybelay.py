@@ -71,6 +71,45 @@ class Calls(Base):
         self.assertEqual(r.stdout.strip(), "mismatch", r.stderr)
         self.assertFalse(os.path.exists(os.path.join(self.t, "state", "scopes")))   # nothing ran
 
+    def test_a_checkpoint_says_what_was_not_read(self):
+        """checkpoint-v3 C3-2 to C3-7: the five fields."""
+        c = pybelay.check(self.scope)
+        self.assertEqual((c.unreadable, c.sealing, c.basis, c.carried, c.runtime_sha256), (0, 0, "walk", 0, None))
+        if os.geteuid() == 0:
+            self.skipTest("root reads anything: the counts stay 0")
+        os.mkdir(os.path.join(self.scope, "secret"))
+        self.write("secret/a", "a\n")
+        self.write("shadow", "k\n")
+        os.chmod(os.path.join(self.scope, "shadow"), 0)
+        os.chmod(os.path.join(self.scope, "secret"), 0)
+        try:
+            c = pybelay.check(self.scope)
+            self.assertEqual((c.unreadable, c.sealing), (2, 1))
+            d = pybelay.diff(self.scope, 1, 2)
+            self.assertEqual((d.trailer["before_sealing"], d.trailer["after_sealing"]), (0, 1))
+        finally:
+            os.chmod(os.path.join(self.scope, "secret"), 0o700)
+
+    def test_a_checkpoint_made_before_v3_has_none_never_zero(self):
+        """C3-7, C3-8: a v2 record read from an older state."""
+        pybelay.check(self.scope)
+        scopes = os.path.join(self.t, "state", "scopes")
+        meta = os.path.join(scopes, os.listdir(scopes)[0], "checkpoints", "1", "meta.json")
+        with open(meta) as f:
+            m = json.load(f)
+        self.assertEqual((m.pop("unreadable"), m.pop("sealing")), (0, 0))     # as the older belay wrote it
+        with open(meta, "w") as f:
+            f.write(json.dumps(m, separators=(",", ":")) + "\n")
+        new = pybelay.mark(self.scope)
+        old = pybelay.log(self.scope)[0]
+        self.assertEqual((old.id, old.entries), (1, new.entries))
+        self.assertEqual((old.unreadable, old.sealing, old.basis, old.carried, old.runtime_sha256), (None,) * 5)
+        self.assertEqual((new.unreadable, new.sealing, new.basis), (0, 0, "walk"))
+        line = pybelay._run(["log", "--scope", self.scope, "--json"])[0][1]
+        del line["sealing"]                                         # some of the five is neither version
+        with self.assertRaises(pybelay.FormatError):
+            pybelay._checkpoint(line)
+
     def test_an_unknown_key_is_a_format_error(self):
         line = pybelay._run(["check", "--scope", self.scope, "--json"])[0][0]
         line["nope"] = 1

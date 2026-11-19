@@ -103,7 +103,7 @@ TEST(a_usage_error_is_one_line_and_ids_are_strict) {
     ASSERT_EQ_INT(2, belay("check", "--scope", g_scope, "--full-every", "3", NULL));
     ASSERT_EQ_INT(2, belay("log", "--scope", g_scope, "--full-every", "3", NULL));
     ASSERT_EQ_INT(0, belay("help", "check", NULL));
-    ASSERT_TRUE(strstr(g_out, "schema/checkpoint.v2.json") != NULL);
+    ASSERT_TRUE(strstr(g_out, "schema/checkpoint.v3.json") != NULL);
 }
 
 TEST(help_and_version_exit_0) {
@@ -267,9 +267,11 @@ TEST(mark_says_when_it_reads_every_file) {
     fresh();
     ASSERT_EQ_INT(0, belay("mark", "--scope", g_scope, "--json", NULL));
     ASSERT_TRUE(strstr(g_out, "\"full_reason\":\"no checkpoint before\"") != NULL);
-    /* checkpoint.v1 CK-16 (decision 210): the manifest's source, last; a walk here is null */
-    const size_t ol = strlen(g_out);
-    ASSERT_TRUE(ol > 46 && strcmp(g_out + ol - 46, ",\"source\":null,\"stored\":\"whole\",\"kept\":false}\n") == 0);
+    /* checkpoint.v1 CK-16 (decision 210): the manifest's source, a walk here is null;
+     * checkpoint.v3 C3-4 to C3-6: basis and carried before it, runtime_sha256 last */
+    static const char end[] = ",\"basis\":\"walk\",\"carried\":0,\"source\":null,\"stored\":\"whole\",\"kept\":false,\"runtime_sha256\":null}\n";
+    const size_t ol = strlen(g_out), el = sizeof end - 1;
+    ASSERT_TRUE(ol > el && strcmp(g_out + ol - el, end) == 0);
     ASSERT_EQ_INT(0, belay("mark", "--scope", g_scope, "--json", NULL));
     ASSERT_TRUE(strstr(g_out, "\"used\":true") != NULL);
     /* The state directory is on the scope's filesystem here: the previous
@@ -1015,6 +1017,91 @@ TEST(checkpoint_v2_says_how_it_is_stored) {
     ASSERT_TRUE(two != NULL && three != NULL);
     ASSERT_TRUE(strstr(two, "\"manifest\":null") != NULL && strstr(two, "\"manifest\":null") < three);
     ASSERT_TRUE(strstr(two, "\"stored\":\"delta\"") < three && strstr(two, "\"kept\":false") < three);
+}
+
+/* checkpoint-v3 G1-1, G1-2, C3-2, C3-3: a capture says how many entries it
+ * could not read, and below how many directories it saw nothing; the diff's
+ * receipt says the same of the directory (G3-1) and of the after side (G3-2). */
+TEST(a_capture_says_what_it_could_not_read) {
+    if (geteuid() == 0) SKIP("root reads anything");
+    fresh();
+    sh("printf 'k\\n' > '%s/shadow' && chmod 000 '%s/shadow'", g_scope, g_scope);
+    ASSERT_EQ_INT(0, belay("check", "--scope", g_scope, NULL));         /* a file alone: no directory */
+    ASSERT_TRUE(strstr(g_out, "  5 entries, 1 could not be read\n") != NULL);
+    sh("mkdir '%s/secret' && printf 'a\\n' > '%s/secret/a' && chmod 000 '%s/secret'", g_scope, g_scope, g_scope);
+    ASSERT_EQ_INT(0, belay("check", "--scope", g_scope, NULL));
+    ASSERT_TRUE(strstr(g_out, "check 2  ") == g_out);
+    ASSERT_TRUE(strstr(g_out, "  6 entries, 2 could not be read, nothing seen below 1 directory\n") != NULL);
+    ASSERT_EQ_INT(0, belay("check", "--scope", g_scope, "--json", NULL));
+    ASSERT_TRUE(strstr(g_out, "\"vanished\":0,\"unreadable\":2,\"sealing\":1,\"provisional\":false,") != NULL);
+    /* a file added where belay cannot look: one line, which says so */
+    sh("chmod 700 '%s/secret' && printf 'b\\n' > '%s/secret/b' && chmod 000 '%s/secret'", g_scope, g_scope, g_scope);
+    ASSERT_EQ_INT(0, belay("diff", "--scope", g_scope, "--since", "2", NULL));
+    ASSERT_TRUE(strstr(g_out, "  ? secret   unknown: unreadable, nothing below it was seen\n") != NULL);
+    ASSERT_TRUE(strstr(g_out, "\n  nothing seen below 1 directory\n") != NULL);
+    ASSERT_EQ_INT(0, belay("diff", "--scope", g_scope, "--since", "2", "--to", "3", "--json", NULL));
+    ASSERT_TRUE(strstr(g_out, ",\"before_sealing\":1,\"after_sealing\":1}\n") != NULL);
+    sh("mkdir '%s/vault' && chmod 000 '%s/vault'", g_scope, g_scope);
+    ASSERT_EQ_INT(0, belay("mark", "--scope", g_scope, NULL));
+    ASSERT_TRUE(strstr(g_out, "mark 5  ") == g_out);
+    ASSERT_TRUE(strstr(g_out, "  7 entries, 3 could not be read, nothing seen below 2 directories, ") != NULL);
+    ASSERT_TRUE(strstr(g_out, " files not read again (unchanged)\n") != NULL);
+    ASSERT_EQ_INT(0, belay("log", "--scope", g_scope, NULL));
+    ASSERT_TRUE(strstr(g_out, "  5 entries, 1 could not be read\ncheck 2  ") != NULL);
+    ASSERT_TRUE(strstr(g_out, "  6 entries, 2 could not be read, nothing seen below 1 directory\ncheck 3  ") != NULL);
+    ASSERT_TRUE(strstr(g_out, "  7 entries, 3 could not be read, nothing seen below 2 directories, ") != NULL);
+    sh("chmod 700 '%s/secret' '%s/vault'", g_scope, g_scope);
+}
+
+/* G1-1: nothing is added when everything was read. C3-2 to C3-6: the keys
+ * are there all the same, each in its place. */
+TEST(a_capture_that_read_everything_adds_nothing_to_its_line) {
+    fresh();
+    ASSERT_EQ_INT(0, belay("check", "--scope", g_scope, NULL));
+    ASSERT_TRUE(strstr(g_out, "  4 entries\n") != NULL && strstr(g_out, "could not") == NULL && strstr(g_out, "nothing seen") == NULL);
+    ASSERT_EQ_INT(0, belay("mark", "--scope", g_scope, NULL));
+    ASSERT_TRUE(strstr(g_out, "  4 entries, 2 files not read again (unchanged)\n") != NULL);
+    ASSERT_EQ_INT(0, belay("log", "--scope", g_scope, NULL));
+    ASSERT_TRUE(strstr(g_out, "could not") == NULL && strstr(g_out, "nothing seen") == NULL);
+    ASSERT_EQ_INT(0, belay("mark", "--scope", g_scope, "--json", NULL));
+    ASSERT_TRUE(strstr(g_out, "\"vanished\":0,\"unreadable\":0,\"sealing\":0,\"provisional\":false,\"excluded\":0,") != NULL);
+    ASSERT_TRUE(strstr(g_out, "\"full_reason\":\"\"},\"basis\":\"walk\",\"carried\":0,\"source\":null,"
+                              "\"stored\":\"whole\",\"kept\":false,\"runtime_sha256\":null}\n") != NULL);
+    ASSERT_EQ_INT(0, belay("diff", "--scope", g_scope, "--since", "1", NULL));
+    ASSERT_TRUE(strstr(g_out, "nothing seen") == NULL);
+}
+
+/* C3-8: a checkpoint made before v3 stays as stored, and `log` prints for it
+ * what it printed before -- a checkpoint.v2 record, a line with no count:
+ * not recorded is not zero, and its manifest is not read to fill one in.
+ * The record is the one v0.1.0-alpha.9 wrote, byte for byte. */
+TEST(a_checkpoint_made_before_v3_prints_as_it_did) {
+    fresh();
+    const bool locked = geteuid() != 0;         /* with something unread, where that can be made */
+    if (locked) sh("printf 'k\\n' > '%s/shadow' && chmod 000 '%s/shadow'", g_scope, g_scope);
+    ASSERT_EQ_INT(0, belay("check", "--scope", g_scope, NULL));
+    ASSERT_TRUE(holds("printf '%%s\\n' '{\"id\":1,\"kind\":\"check\",\"created_ns\":1795083560663239172,\"scope\":\"%s\","
+                      "\"entries\":%d,\"raced\":0,\"unstable\":0,\"vanished\":0,\"provisional\":false,\"excluded\":0,"
+                      "\"prefilter\":{\"used\":false,\"reference\":\"none\",\"trusted\":0,\"racy\":0,\"full_reason\":\"\"},"
+                      "\"since_full\":0}' > \"$d/checkpoints/1/meta.json\"", g_scope, locked ? 5 : 4));
+    ASSERT_EQ_INT(0, belay("mark", "--scope", g_scope, NULL));
+    ASSERT_EQ_INT(0, belay("log", "--scope", g_scope, NULL));
+    char want[200];
+    snprintf(want, sizeof want, "check 1  2026-11-19T10:19:20Z  %d entries\nmark 2  ", locked ? 5 : 4);
+    ASSERT_TRUE(strstr(g_out, want) == g_out);
+    if (locked) ASSERT_TRUE(strstr(g_out, "  5 entries, 1 could not be read, ") != NULL);     /* the mark, made now */
+    ASSERT_EQ_INT(0, belay("log", "--scope", g_scope, "--json", NULL));
+    char *two = strstr(g_out, "{\"id\":2,");
+    REQUIRE(two != NULL);
+    ASSERT_TRUE(strstr(two, "\"unreadable\":") != NULL && strstr(two, "\"runtime_sha256\":null}\n") != NULL);
+    two[0] = '\0';                               /* the first line alone */
+    static const char *const NEW[] = { "\"unreadable\"", "\"sealing\"", "\"basis\"", "\"carried\"", "\"runtime_sha256\"" };
+    for (size_t i = 0; i < sizeof NEW / sizeof NEW[0]; i++)
+        if (strstr(g_out, NEW[i]) != NULL) BELAY_FAIL("a checkpoint made before v3 prints %s", NEW[i]);
+    ASSERT_TRUE(strstr(g_out, "\"unstable\":0,\"vanished\":0,\"provisional\":false,\"excluded\":0,\"excluded_paths\":[],"
+                              "\"prefilter\":{\"used\":false,\"reference\":\"none\",\"trusted\":0,\"racy\":0,\"full_reason\":\"\"},"
+                              "\"source\":null,\"stored\":\"") != NULL);
+    ASSERT_TRUE(strstr(g_out, "\"kept\":false}\n") != NULL && strstr(g_out, "\"kept\":false}\n")[14] == '\0');
 }
 
 /* log reads a delta's header without a rebuild, and says the same. */
@@ -1922,6 +2009,9 @@ int main(void) {
     RUN(prune_through_a_chain_leaves_what_stays_readable);
     RUN(prune_reports_exactly_what_it_frees_through_a_chain);
     RUN(checkpoint_v2_says_how_it_is_stored);
+    RUN(a_capture_says_what_it_could_not_read);
+    RUN(a_capture_that_read_everything_adds_nothing_to_its_line);
+    RUN(a_checkpoint_made_before_v3_prints_as_it_did);
     RUN(log_names_excludes_of_a_delta);
     RUN(manifest_refuses_what_is_not_there);
     RUN(prune_takes_the_lock_to_remove);

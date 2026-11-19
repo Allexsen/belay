@@ -99,6 +99,10 @@ struct checkpoint {
     char kind[8];               /* "check", "mark", "diff" */
     int64_t created_ns;
     uint64_t entries, raced, unstable, vanished, excluded;
+    bool counts_unread;         /* checkpoint.v3: the two below were recorded (C3-8: an
+                                   older checkpoint's were not, which is not 0) */
+    uint64_t unreadable;        /* entries whose content or listing could not be read */
+    uint64_t sealing;           /* directories nothing below which was looked at */
     bool provisional;
     bool full;                  /* every file read (no prefilter) */
     char full_reason[160];      /* why a mark read every file */

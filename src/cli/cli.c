@@ -60,7 +60,7 @@ static const char USAGE[] =
 static const struct { const char *cmd, *text; } HELP[] = {
     { "check", "usage: belay check --scope DIR [--json]\n"
                "  Records DIR as a new checkpoint in the state directory, reading every file.\n"
-               "  --json  print the checkpoint as one JSON object (schema/checkpoint.v2.json)\n" },
+               "  --json  print the checkpoint as one JSON object (schema/checkpoint.v3.json)\n" },
     { "mark",  "usage: belay mark --scope DIR [--full] [--full-every N] [--keep] [--json]\n"
                "  A checkpoint after the scope's latest: a file that cannot have changed since --\n"
                "  same inode, mode, size, mtime and ctime, ctime before the reference point -- is\n"
@@ -68,7 +68,7 @@ static const struct { const char *cmd, *text; } HELP[] = {
                "  --full, every N marks (default 50; 0: never), when ctime is seen going\n"
                "  backwards, or when the previous checkpoint cannot be used; the output says why.\n"
                "  --keep  a kept checkpoint is never pruned\n"
-               "  --json  print the checkpoint as one JSON object (schema/checkpoint.v2.json)\n" },
+               "  --json  print the checkpoint as one JSON object (schema/checkpoint.v3.json)\n" },
     { "diff",  "usage: belay diff --scope DIR --since ID [--to ID] [--full-every N] [--json] [--exit-code] [--all]\n"
                "  What changed from checkpoint ID: to checkpoint --to, or to the scope now, which\n"
                "  is kept as a new checkpoint.\n"
@@ -133,7 +133,7 @@ static const struct { const char *cmd, *text; } HELP[] = {
                "  matching belay watch commands, and prints the hook's reply. Exits 0 always.\n" },
     { "log",   "usage: belay log --scope DIR [--json]\n"
                "  The scope's checkpoints: id, kind, time, entries.\n"
-               "  --json  one checkpoint a line (schema/checkpoint.v2.json)\n" },
+               "  --json  one checkpoint a line (schema/checkpoint.v3.json)\n" },
 };
 
 /* belay_err's message as one line: it may name a path, escaped as the
@@ -273,15 +273,24 @@ static void json_checkpoint(FILE *out, const struct state *st, const struct chec
     if (have) manifest_release(&mf);
     belay_err_clear();
     snprintf(xs + xw, sizeof xs - xw, "]");
+    /* checkpoint.v3 (C3-2 to C3-6). A checkpoint made before it prints as it
+     * did, without the five keys (C3-8). No capture is from events yet, and
+     * none has a runtime record: `walk`, 0 and null. */
+    char unread[96] = "";
+    if (c->counts_unread)
+        snprintf(unread, sizeof unread, "\"unreadable\":%llu,\"sealing\":%llu,",
+                 (unsigned long long)c->unreadable, (unsigned long long)c->sealing);
     fprintf(out, "{\"id\":%ld,\"kind\":\"%s\",\"created_ns\":%lld,%s,%s,"
-                 "\"entries\":%llu,\"raced\":%llu,\"unstable\":%llu,\"vanished\":%llu,\"provisional\":%s,"
+                 "\"entries\":%llu,\"raced\":%llu,\"unstable\":%llu,\"vanished\":%llu,%s\"provisional\":%s,"
                  "\"excluded\":%llu,\"excluded_paths\":%s,\"prefilter\":{\"used\":%s,\"reference\":\"%s\",\"trusted\":%llu,"
-                 "\"racy\":%llu,\"full_reason\":\"%s\"},\"source\":%s,\"stored\":\"%s\",\"kept\":%s}\n",
+                 "\"racy\":%llu,\"full_reason\":\"%s\"},%s\"source\":%s,\"stored\":\"%s\",\"kept\":%s%s}\n",
             c->id, c->kind, (long long)c->created_ns, esc, mesc, (unsigned long long)c->entries,
             (unsigned long long)c->raced, (unsigned long long)c->unstable, (unsigned long long)c->vanished,
-            c->provisional ? "true" : "false", (unsigned long long)c->excluded, xs, c->full ? "false" : "true",
-            state_reference(c), (unsigned long long)c->trusted, (unsigned long long)c->racy, why, src,
-            delta ? "delta" : "whole", c->kept ? "true" : "false");
+            unread, c->provisional ? "true" : "false", (unsigned long long)c->excluded, xs, c->full ? "false" : "true",
+            state_reference(c), (unsigned long long)c->trusted, (unsigned long long)c->racy, why,
+            c->counts_unread ? "\"basis\":\"walk\",\"carried\":0," : "", src,
+            delta ? "delta" : "whole", c->kept ? "true" : "false",
+            c->counts_unread ? ",\"runtime_sha256\":null" : "");
 }
 
 /* What a manifest's header says was not walked, one line each (Q6;
@@ -418,6 +427,13 @@ static void text_checkpoint(FILE *out, const struct state *st, const struct chec
     char t[32];
     iso(c->created_ns, t, sizeof t);
     fprintf(out, "%s %ld  %s  %llu entries", c->kind, c->id, t, (unsigned long long)c->entries);
+    /* Said, never silent: what was not read (checkpoint-v3, G1-1, G1-2). A
+     * checkpoint made before v3 recorded neither count, so says nothing. */
+    if (c->counts_unread && c->unreadable)
+        fprintf(out, ", %llu could not be read", (unsigned long long)c->unreadable);
+    if (c->counts_unread && c->sealing)
+        fprintf(out, ", nothing seen below %llu director%s", (unsigned long long)c->sealing,
+                c->sealing == 1 ? "y" : "ies");
     if (!c->full) {
         fprintf(out, ", %llu files not read again (unchanged)", (unsigned long long)c->trusted);
         /* Said, never silent: the weaker reference point (docs/cli.md;
