@@ -491,7 +491,9 @@ static void protected(struct state *s, const char *p, size_t n, const struct bel
         const bool exact = r->has_sha256 && r->path_len == n && memcmp(r->path, p, n) == 0;
         if (!mb && !ma && !exact) continue;
         if (first == -1) first = (int)i;
-        if (r->modes & (PROTECT_NO_WRITE | PROTECT_NO_DELETE)) {
+        /* no_delete reads existence only (protect-spec-v2 PV2-8): it reads
+         * no entry, on either side. */
+        if (r->modes & PROTECT_NO_WRITE) {
             read_before = read_before || mb;
             read_after = read_after || ma;
         }
@@ -561,7 +563,9 @@ static void protected(struct state *s, const char *p, size_t n, const struct bel
     /* PS-M5: what cannot be shown intact, on a side the rules read */
     const char *reasons[16];
     size_t nr = 0;
-    if (unknown) {
+    if (unknown && b != NULL && a != NULL && !read_before && !read_after) {
+        /* there on both sides, under no_delete alone: it exists (PV2-8) */
+    } else if (unknown) {
         const struct jval *u = jget(&d->v, "unknown");
         for (size_t j = 0; u != NULL && u->t == J_ARR && j < u->n && nr < 16; j++)
             if (u->kids[j].t == J_STR) reasons[nr++] = u->kids[j].s;
