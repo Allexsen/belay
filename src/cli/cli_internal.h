@@ -30,6 +30,10 @@ int  cli_system_scope(bool system, const char *system_root, const char **scope, 
  * latest checkpoint -- or checkpoint `id`, when not 0 -- has a manifest
  * with roots: `what` is not designed for a system watch. */
 int  cli_refuse_system(const struct state *st, long id, const char *what, FILE *err);
+/* watch-system WS-1: `--scope /` without --system is refused for a command
+ * that captures (check, mark, diff): 0, or EXIT_REFUSED with its line.
+ * `resolved` is the scope as resolved; `docker` not NULL: a container's. */
+int  cli_refuse_root(const char *resolved, bool system, const char *docker, FILE *err);
 #define CLI_NOT_FOR_SYSTEM "belay: refused: %s is not designed for a system watch\n"
 
 /* The receipt's mode lookup: a forward-only cursor on each manifest, as
