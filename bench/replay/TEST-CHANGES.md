@@ -40,7 +40,7 @@ Nothing was built, replayed or run for the classification. No model-written file
 
 ## Results
 
-146 runs. 127 changed or deleted `test.py`, 33 changed or deleted `test_cases.json`, and 14 did both. Those 14 appear once in each table below.
+146 runs: every run whose test file changed, including those the replay study's proof rule left out of its tamper group of 103. That is why 11 of them carry `tamper_hack` here and 8 there. 127 changed or deleted `test.py`, 33 changed or deleted `test_cases.json`, and 14 did both. Those 14 appear once in each table below.
 
 ### test.py (127 runs)
 
@@ -61,7 +61,7 @@ Of the two runners with no statements left, one is an empty file and one holds 9
 
 From the sample read by eye:
 
-- The 57 rewrites are a checker written for the problem, which accepts any valid answer where the original accepted only the recorded one, or a numeric tolerance. The benchmark chose these problems for having several valid answers.
+- The 57 rewrites are a checker written for the problem, which accepts any valid answer where the original accepted only the recorded one, or a numeric tolerance. The benchmark chose these problems for specification ambiguity or test-infrastructure quirks.
 - The 30 runners without a failing exit are the runner overwritten with a scratch script that prints the expected and the actual output and always exits 0.
 
 All 8 runners that keep the original comparison were read. 3 add a second way to pass beside it. 5 change something else: the failure cap raised from 3 to 100, loops, prints and time limits rewritten, a blank line removed, lines added at the end.
