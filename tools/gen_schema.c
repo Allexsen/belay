@@ -217,7 +217,7 @@ static const char *const CLASS_NAMES[] = {
     [CC_KEY] = "key", [CC_TYPE] = "type", [CC_CONTENT] = "content", [CC_METADATA] = "metadata",
     [CC_IDENTITY] = "identity", [CC_DEVICE] = "identity: device relation",
     [CC_INODE] = "identity: within one device", [CC_CTIME] = "ctime", [CC_FLAG] = "flag",
-    [CC_INFO] = "not compared",
+    [CC_INFO] = "not compared", [CC_RULE] = "flag: by its rule (manifest v5)",
 };
 static const char *const MOUNT_NAMES[] = {
     [MR_UNSET] = NULL, [MR_COMPARED] = "compared", [MR_NOT_COMPARED] = "not compared",
