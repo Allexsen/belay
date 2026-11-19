@@ -41,6 +41,7 @@
 
 struct stream {
     size_t n_entries, n_unreadable, n_unstable, n_mounts, n_raced, n_writer_open;
+    size_t n_sealing;           /* directories nothing below which was read, the root included */
     bool   have_root;
     bool   root_unreadable;
 

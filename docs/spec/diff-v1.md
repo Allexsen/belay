@@ -81,7 +81,10 @@ obligations on a consumer), and a `vanished` path has no record that could say s
 this diff read them; a reader accepts nothing after a manifest's trailer, so that is the whole
 file. Last, `before_writer_open`, `after_writer_open`, `before_unguarded` and `after_unguarded` are
 each manifest's own trailer counts (manifest v4; `0` for a manifest before it). None of the four
-is in `provisional`.
+is in `provisional`. After those, `before_sealing` and `after_sealing` are each manifest's
+directories carrying `unreadable` or `mount`, counted from its entries: nothing below them was
+looked at, so a change there is that directory's one `unknown` record at most. Neither is in
+`provisional`.
 
 <!-- BEGIN GENERATED: diff-trailer -->
 <!-- From src/schema/diff_schema.c by tools/gen_schema.c. Edit there, then `make gen`. -->
@@ -111,6 +114,8 @@ is in `provisional`.
 | `after_writer_open` | int | The second manifest's `writer_open`. |
 | `before_unguarded` | int | The first manifest's `unguarded`: files hashed with no answer from the writer probe. `0` before manifest v4. |
 | `after_unguarded` | int | The second manifest's `unguarded`. |
+| `before_sealing` | int | The first manifest's directories carrying `unreadable` or `mount`, counted from its entries: nothing below them was looked at (test/expect/diff-fields.md, "The trailer"). |
+| `after_sealing` | int | The second manifest's, likewise. |
 <!-- END GENERATED: diff-trailer -->
 
 ## Outcomes

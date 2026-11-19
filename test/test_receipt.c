@@ -551,6 +551,51 @@ TEST(files_hashed_unguarded_are_said_on_one_line) {
     ASSERT_TRUE(strstr(g_text, "concurrent writer") == NULL);
 }
 
+/* G3-1 (checkpoint-v3.md, "The lines"): a directory belay could not list, or
+ * a mount root it did not enter, is one line in the diff however much changed
+ * below it, so the line says so. A file has nothing below it. */
+TEST(an_unknown_directory_nothing_was_seen_below_says_so) {
+    static char diff[4096];
+    snprintf(diff, sizeof diff, HEAD
+        "{\"path\":\"deep\",\"outcome\":\"unknown\",\"type\":\"dir\",\"unknown\":[\"unstable\",\"unreadable\"]}\n"
+        "{\"path\":\"file\",\"outcome\":\"unknown\",\"type\":\"reg\",\"unknown\":[\"unverified\",\"unreadable\"]}\n"
+        "{\"path\":\"filemount\",\"outcome\":\"unknown\",\"type\":\"reg\",\"unknown\":[\"mount\"]}\n"
+        "{\"path\":\"mnt\",\"outcome\":\"unknown\",\"type\":\"dir\",\"unknown\":[\"mount\"]}\n"
+        "{\"path\":\"moving\",\"outcome\":\"unknown\",\"type\":\"dir\",\"unknown\":[\"raced\"]}\n"
+        "{\"path\":\"secret\",\"outcome\":\"unknown\",\"type\":\"dir\",\"unknown\":[\"unreadable\"]}\n"
+        "%s", TRAIL("0", "0", "0", "6", "0", "0", "0"));
+    ASSERT_EQ_INT(0, render(diff, false));
+    ASSERT_TRUE(strstr(g_text, "  ? secret   unknown: unreadable, nothing below it was seen\n") != NULL);
+    ASSERT_TRUE(strstr(g_text, "  ? mnt   unknown: mount, nothing below it was seen\n") != NULL);
+    ASSERT_TRUE(strstr(g_text, "  ? deep   unknown: unstable, unreadable, nothing below it was seen\n") != NULL);
+    ASSERT_TRUE(strstr(g_text, "  ? file   unknown: unverified, unreadable\n") != NULL);
+    ASSERT_TRUE(strstr(g_text, "  ? filemount   unknown: mount\n") != NULL);
+    ASSERT_TRUE(strstr(g_text, "  ? moving   unknown: raced\n") != NULL);
+}
+
+/* G3-2: the summary says how many directories of the after side nothing was
+ * seen below; nothing when there is none, or when the trailer has no count. */
+TEST(the_summary_counts_the_directories_nothing_was_seen_below) {
+    static char diff[2048], end[1024];
+    static const struct { const char *tail, *want; } C[] = {
+        { ",\"before_sealing\":0,\"after_sealing\":1}\n", "  nothing seen below 1 directory\n" },
+        { ",\"before_sealing\":5,\"after_sealing\":2}\n", "  nothing seen below 2 directories\n" },
+        { ",\"before_sealing\":3,\"after_sealing\":0}\n", NULL },
+        { "}\n", NULL },
+    };
+    for (size_t i = 0; i < sizeof C / sizeof C[0]; i++) {
+        snprintf(end, sizeof end, "%s", TRAIL("0", "0", "0", "0", "0", "0", "0"));
+        char *close_brace = strrchr(end, '}');
+        REQUIRE(close_brace != NULL);
+        snprintf(close_brace, sizeof end - (size_t)(close_brace - end), "%s", C[i].tail);
+        snprintf(diff, sizeof diff, "%s%s", HEAD, end);
+        ASSERT_EQ_INT(0, render(diff, false));
+        if (C[i].want != NULL) {
+            if (strstr(g_text, C[i].want) == NULL) BELAY_FAIL("case %zu: no line %s", i, C[i].want);
+        } else if (strstr(g_text, "nothing seen below") != NULL) BELAY_FAIL("case %zu: a line for no directory", i);
+    }
+}
+
 int main(void) {
     RUN(a_receipt_puts_events_then_privilege_then_changes);
     RUN(long_sections_fold_but_privilege_never_does);
@@ -558,6 +603,8 @@ int main(void) {
     RUN(a_truncated_or_malformed_diff_renders_nothing);
     RUN(privilege_is_found_whatever_the_path_and_the_outcome);
     RUN(unknown_records_never_fold);
+    RUN(an_unknown_directory_nothing_was_seen_below_says_so);
+    RUN(the_summary_counts_the_directories_nothing_was_seen_below);
     RUN(a_diff_of_another_version_is_rejected_and_b64_scopes_shown);
     RUN(a_line_of_many_strings_is_read_in_linear_memory);
     RUN(invisible_and_invalid_bytes_are_shown_and_a_type_change_is_said);
