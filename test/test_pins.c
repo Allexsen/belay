@@ -29,6 +29,7 @@
 
 #define DIFF_PIN   "test/expect/diff-fields.md"
 #define V4_PIN     "test/expect/manifest-v4.md"
+#define V5_PIN     "test/expect/manifest-v5.md"
 #define PV2_PIN    "test/expect/protect-spec-v2.md"
 #define FORMAT_PIN "test/expect/manifest-v1.md"
 #define KINDS_PIN  "test/expect/finding-kinds.md"
@@ -138,6 +139,8 @@ static const struct cls_word CLASS_WORDS[] = {
     { "identity: within one device", CC_INODE, US_NONE }, { "ctime", CC_CTIME, US_NONE },
     { "flag: content unknown", CC_FLAG, US_CONTENT }, { "flag: metadata unknown", CC_FLAG, US_METADATA },
     { "flag: everything unknown", CC_FLAG, US_ALL }, { "not compared", CC_INFO, US_NONE },
+    /* manifest-v5 V5-D1's row for `meta`: a flag whose effect its rule decides */
+    { "flag: content unknown when any other field differs", CC_RULE, US_NONE },
 };
 struct abs_word { const char *word; enum absent_means am; };
 static const struct abs_word ABSENT_WORDS[] = {
@@ -161,15 +164,15 @@ static struct pin_row PIN[F_COUNT];
 
 /* writer_open's row is in the v4 pin (V4-D1), in diff-fields.md's columns,
  * escaped inside the rule's cell: diff-fields.md states the fields before v4. */
-static int load_v4_row(void) {
-    FILE *f = fopen(V4_PIN, "r");
+static int load_rule_row(const char *pin, const char *id, const char *start, enum entry_field field) {
+    FILE *f = fopen(pin, "r");
     if (f == NULL) return -1;
     static char line[4096];
     int found = -1;
     while (fgets(line, sizeof line, f) != NULL) {
-        const char *row = strncmp(line, "| V4-D1 |", 9) == 0 ? strstr(line, "`writer_open` \\| ") : NULL;
+        const char *row = strncmp(line, id, strlen(id)) == 0 ? strstr(line, start) : NULL;
         if (row == NULL) continue;
-        struct pin_row *r = &PIN[F_WRITER_OPEN];
+        struct pin_row *r = &PIN[field];
         r->set++;
         char cell[4][64];
         row = strstr(row, "\\| ") + 3;
@@ -192,11 +195,27 @@ static int load_v4_row(void) {
     return found;
 }
 
+static int load_v4_row(void) { return load_rule_row(V4_PIN, "| V4-D1 |", "`writer_open` \\| ", F_WRITER_OPEN); }
+
+/* Version 5's fields. `meta` has its row in the v5 pin (V5-D1), in
+ * diff-fields.md's columns, as writer_open has in v4's. The pin gives
+ * `not_read`, `partial` and `sealed` rules (V5-D4, V5-D4b, V5-D3) and no row:
+ * what those rules say of the columns is written here by hand, so the table
+ * cannot drift from them, and the rules themselves are tested in
+ * test_diff_v5.c. */
+static int load_v5_rows(void) {
+    if (load_rule_row(V5_PIN, "| V5-D1 |", "`meta \\| ", F_META) == -1) return -1;
+    PIN[F_NOT_READ] = (struct pin_row){ 1, CC_RULE, US_NONE, TBIT(BELAY_T_DIR), MR_COMPARED, AM_FLAG };   /* V5-D4 */
+    PIN[F_PARTIAL] = (struct pin_row){ 1, CC_INFO, US_NONE, TBIT(BELAY_T_DIR), MR_COMPARED, AM_FLAG };    /* V5-D4b: "not compared" */
+    PIN[F_SEALED] = (struct pin_row){ 1, CC_RULE, US_NONE, TBIT(BELAY_T_REG), MR_COMPARED, AM_FLAG };     /* V5-D3 */
+    return 0;
+}
+
 static int load_diff_pin(void) {
     static struct table t;
     if (read_table(DIFF_PIN, "field", &t) < 0) return -1;
     memset(PIN, 0, sizeof PIN);
-    if (load_v4_row() == -1) return -1;
+    if (load_v4_row() == -1 || load_v5_rows() == -1) return -1;
     for (int i = 0; i < t.n; i++) {
         if (t.cols[i] < 5) return -1;
         const int f = field_named(t.cell[i][0]);
@@ -274,7 +293,8 @@ static bool vary(struct belay_entry *a, int f) {
     case F_LINK_TARGET: if (!a->has_link_target) return false; a->link_target[0] = 'u'; return true;
     case F_PATH: case F_TYPE: case F_XATTRS_SHA256: case F_XATTRS_UNKNOWN: case F_UNVERIFIED:
     case F_UNSTABLE: case F_TARGET_OUTSIDE: case F_STORED: case F_MOUNT: case F_UNREADABLE:
-    case F_RACED: case F_WRITER_OPEN: case F_COUNT:
+    case F_RACED: case F_WRITER_OPEN: case F_NOT_READ: case F_PARTIAL: case F_META: case F_SEALED:
+    case F_COUNT:
         return false;
     }
     return false;
@@ -287,7 +307,7 @@ static enum diff_outcome expected(enum change_class cls) {
     case CC_CONTENT: return D_MODIFIED;
     case CC_METADATA: case CC_IDENTITY: case CC_DEVICE: case CC_INODE: case CC_CTIME:
         return D_METADATA_ONLY;
-    case CC_UNSET: case CC_KEY: case CC_TYPE: case CC_FLAG: case CC_INFO:
+    case CC_UNSET: case CC_KEY: case CC_TYPE: case CC_FLAG: case CC_INFO: case CC_RULE:
         return D_UNDECIDED;
     }
     return D_UNDECIDED;

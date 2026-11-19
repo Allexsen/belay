@@ -70,6 +70,12 @@ struct fsops {
     /* Scope properties, asked once per walk. */
     bool (*is_overlay)(void *ctx, int root_fd);
 
+    /* Whether the mount root `name` in `dfd` is of a filesystem a capture
+     * with roots enters (manifest-v5 V5-E6: ext2, ext3, ext4, xfs, btrfs,
+     * vfat, f2fs, zfs), asked without following a link or triggering an
+     * automount. False when the platform cannot tell. */
+    bool (*mount_enterable)(void *ctx, int dfd, const char *name);
+
     /* Whether, at this instant, some process has the regular file open for
      * writing or mapped shared-writable: 1 yes, 0 no, -1 cannot tell (no
      * facility on this platform or filesystem, or not permitted). Must not

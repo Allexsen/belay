@@ -12,7 +12,8 @@
  *    key     := '"' [a-z0-9_]+ '"'
  *    value   := string | integer | 'true' | '[' string (',' string)* ']'
  *             | '[' ']' | '[' flat (',' flat)* ']'        -- version 2
- *    flat    := '{' key ':' (string | integer) (',' key ':' (string | integer))* '}'
+ *    flat    := '{' key ':' fval (',' key ':' fval)* '}'
+ *    fval    := string | integer | 'true' | 'false'        -- the last two: version 5
  *    string  := '"' (byte >= 0x20 except '"' '\' | escape)* '"'
  *    escape  := '\"' | '\\' | '\b' | '\f' | '\n' | '\r' | '\t'
  *             | '\u00' hex hex   -- lowercase, only for control bytes that
@@ -44,7 +45,7 @@
 #define LINE_MAX_BYTES ((unsigned)BELAY_MANIFEST_LINE_MAX)   /* include/belay/manifest.h */
 #define MAX_PAIRS      32
 
-enum vkind { V_STR, V_INT, V_TRUE, V_ARR, V_OBJS, V_NULL, V_OBJ };
+enum vkind { V_STR, V_INT, V_TRUE, V_ARR, V_OBJS, V_NULL, V_OBJ, V_FALSE };
 /* V_ARR: strings (or none); V_OBJS: flat objects; V_NULL: `null`; V_OBJ: one flat
  * object (version 3: the header's `source`). */
 
@@ -77,6 +78,9 @@ int lex_order(const struct obj *o, const char *const *order, size_t n);
  * grammar, flat: string and integer values only). 0, or -1. */
 int lex_elem(const struct pair *arr, size_t i, struct obj *out);
 
+/* The elements of a V_OBJS value in turn: *pos NULL before the first, and
+ * arr->nelem calls at most. Linear in the array, where lex_elem is not. */
+int lex_elem_next(const struct pair *arr, const char **pos, struct obj *out);
 /* A V_OBJ value as an object (lex_object's grammar, flat). 0, or -1. */
 int lex_sub(const struct pair *p, struct obj *out);
 

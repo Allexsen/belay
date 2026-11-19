@@ -540,11 +540,12 @@ TEST(header_records_version_and_scope) {
     fx_write("h", "x", 1);
     size_t n = 0;
     ASSERT_EQ_INT(0, run_check(NULL, &n));
-    ASSERT_TRUE(strstr(g_header, "\"belay_manifest\":4,") != NULL);       /* v4: test/expect/manifest-v4.md */
+    ASSERT_TRUE(strstr(g_header, "\"belay_manifest\":5,") != NULL);       /* v5: test/expect/manifest-v5.md */
     ASSERT_TRUE(strstr(g_header, ",\"excluded\":[],\"walk_start_ns\":") != NULL);
-    /* walked where belay ran: source null, last (manifest-v3 V3-2) */
+    /* walked where belay ran: source null (manifest-v3 V3-2); then v5's keys: no roots, a walk */
     const size_t hl = strlen(g_header);
-    ASSERT_TRUE(hl > 16 && strcmp(g_header + hl - 16, ",\"source\":null}\n") == 0);
+    static const char TAIL[] = ",\"source\":null,\"roots\":[],\"basis\":\"walk\"}\n";
+    ASSERT_TRUE(hl > sizeof TAIL && strcmp(g_header + hl - (sizeof TAIL - 1), TAIL) == 0);
     ASSERT_TRUE(strstr(g_header, "\"hash\":\"sha256\"") != NULL);
     ASSERT_TRUE(strstr(g_header, "\"scopes\"") != NULL);
     fx_rm("h");

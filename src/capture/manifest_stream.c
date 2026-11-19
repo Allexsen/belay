@@ -36,7 +36,9 @@ int stream_entry(struct stream *s, const struct belay_entry *e) {
     while (s->n_sealed > 0 && s->sealed[s->n_sealed - 1] > common) s->n_sealed--;
     if (s->n_sealed > 0 && s->sealed[s->n_sealed - 1] == common) {
         const unsigned char next = (unsigned char)e->path[common];
-        if (next == '/') return lex_corrupt("entry below an unreadable or mounted directory");
+        if (next == '/')
+            return lex_corrupt(s->sealed_by_rule[s->n_sealed - 1] ? "entry below a not_read directory"
+                                                                  : "entry below an unreadable or mounted directory");
         if (next > '/') s->n_sealed--;
     }
     /* The parent: popped as the sealed stack is, then it must be the recorded
@@ -60,9 +62,10 @@ int stream_entry(struct stream *s, const struct belay_entry *e) {
         if (s->n_dirs == SEALED_MAX)            /* unreachable: see SEALED_MAX */
             return lex_corrupt("too many nested directories");
         s->dirs[s->n_dirs++] = e->path_len;
-        if (e->unreadable || e->is_mount) {
+        if (e->unreadable || e->is_mount || e->not_read) {
             if (s->n_sealed == SEALED_MAX)      /* unreachable: see SEALED_MAX */
                 return lex_corrupt("too many nested sealed directories");
+            s->sealed_by_rule[s->n_sealed] = e->not_read;
             s->sealed[s->n_sealed++] = e->path_len;
         }
     }
@@ -71,7 +74,8 @@ int stream_entry(struct stream *s, const struct belay_entry *e) {
         if (e->type != BELAY_T_DIR) return lex_corrupt("scope root is not a directory");
         if (e->is_mount) return lex_corrupt("scope root flagged as a mount");
         s->have_root = true;
-        s->root_unreadable = e->unreadable;
+        /* A not_read root was not entered either (V5-E2). */
+        s->root_unreadable = e->unreadable || e->not_read;
     }
     s->n_entries++;
     if (e->unreadable) s->n_unreadable++;
@@ -79,11 +83,21 @@ int stream_entry(struct stream *s, const struct belay_entry *e) {
     if (e->is_mount)   s->n_mounts++;
     if (e->raced)    s->n_raced++;
     if (e->writer_open) s->n_writer_open++;
-    if (e->type == BELAY_T_DIR && (e->unreadable || e->is_mount)) s->n_sealing++;
+    if (e->not_read) s->n_not_read++;
+    if (e->meta) s->n_meta++;
+    if (e->sealed) s->n_sealed_flag++;
+    if (e->type == BELAY_T_DIR && (e->unreadable || e->is_mount || e->not_read)) s->n_sealing++;
     return 0;
 }
 
-int stream_end(const struct stream *s, const uint64_t v[TR_COUNT], size_t writer_open) {
+int stream_end(const struct stream *s, const uint64_t v[TR_COUNT], const struct belay_manifest_stats *t) {
+    const size_t writer_open = t->writer_open;
+    if (t->not_read != s->n_not_read || t->meta != s->n_meta || t->sealed != s->n_sealed_flag) {
+        belay_err_set(BELAY_ERR_CORRUPT, 0, "manifest: trailer says %zu not_read / %zu meta / %zu sealed, "
+                      "read %zu / %zu / %zu", t->not_read, t->meta, t->sealed, s->n_not_read, s->n_meta,
+                      s->n_sealed_flag);
+        return -1;
+    }
     if (writer_open != s->n_writer_open) {
         belay_err_set(BELAY_ERR_CORRUPT, 0, "manifest: trailer says %zu writer_open, read %zu",
                       writer_open, s->n_writer_open);

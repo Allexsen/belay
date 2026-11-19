@@ -134,6 +134,7 @@ int prev_load(const struct fsops *ops, const char *path, const char *scope, uint
     info->hash_max_bytes = h->hash_max_bytes;
     info->walk_start_ns = h->walk_start_ns;              /* v2's header; 0 for v1 (one source) */
     info->store_max_bytes = h->store_max_bytes;
+    memcpy(info->sealed_key, h->sealed_key, sizeof info->sealed_key);
     struct prev_index *p = calloc(1, sizeof *p);
     if (p == NULL) {
         belay_err_set(BELAY_ERR_NOMEM, 0, "mark: out of memory");
@@ -163,7 +164,7 @@ int prev_load(const struct fsops *ops, const char *path, const char *scope, uint
             info->newest_validated_ns = e->ctime_ns;
         if (e->type != BELAY_T_REG || !e->has_hash || (e->raced && !e->writer_open) || e->unstable) continue;
         struct prev_rec r = { e->dev, e->ino, e->size, e->mtime_ns, e->ctime_ns, e->mode,
-                              e->has_stored, { 0 } };
+                              e->has_stored, e->sealed, { 0 } };
         /* Marked: indexed, never to match (V4-R6). Skipping it would leave a
          * hard link's unmarked name to speak for the inode. */
         if (e->writer_open) r.size = UINT64_MAX;
@@ -177,6 +178,13 @@ int prev_load(const struct fsops *ops, const char *path, const char *scope, uint
         belay_err_clear();
         rc = 1;
         *why = "the previous checkpoint cannot be read";
+    }
+    /* V5-E7: an entry the previous trailer names racy is never trusted. This
+     * build writes walks only, which name none; a manifest that does (an
+     * event capture's) is not used at all, rather than its list ignored. */
+    if (got == 0 && rc == 0 && belay_manifest_trailer(rd)->racy_listed != 0) {
+        rc = 1;
+        *why = "the previous checkpoint names racy entries";
     }
     belay_manifest_close(rd);
     if (rc != 0) {

@@ -16,6 +16,9 @@
 struct diff_ctx {
     uint64_t root_dev_before, root_dev_after;
     bool remounted;
+    /* manifest-v5 V5-D3: both manifests carry `sealed_key`, and it is equal:
+     * only then do two sealed hashes compare. */
+    bool sealed_comparable;
 };
 
 struct verdict {

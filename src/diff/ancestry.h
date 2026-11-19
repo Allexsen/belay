@@ -1,6 +1,6 @@
 /*
  *  For a path one manifest lacks: what that manifest's nearest recorded
- *  ancestor says about it -- sealed (an unreadable or mount directory:
+ *  ancestor says about it -- sealed (an unreadable, mount or not_read directory:
  *  nothing below was captured), incomplete (an unstable directory: its
  *  listing may miss names), raced (a non-directory that changed after it was
  *  recorded: it may have become a directory holding the path), or nothing
@@ -22,7 +22,9 @@
 #include <stddef.h>
 
 /* ANC_UNSET (0) is no answer at all; classify fails on it (audit 2026-10, R1). */
-enum anc { ANC_UNSET, ANC_NONE, ANC_INCOMPLETE, ANC_SEALED, ANC_RACED };
+enum anc { ANC_UNSET, ANC_NONE, ANC_INCOMPLETE, ANC_SEALED, ANC_RACED,
+           ANC_PARTIAL /* a partial directory (manifest-v5 V5-D4b): the caller decides by what
+                          the path is and by the side's roots; classify never sees it */ };
 
 #define ANC_PATH_MAX 4096
 
@@ -45,5 +47,7 @@ void ancestry_feed(struct ancestry *a, const struct belay_entry *e);
 /* The nearest recorded ancestor's kind for `path`, which this side lacks and
  * which sorts after every entry fed so far. */
 enum anc ancestry_of(struct ancestry *a, const char *path, size_t len);
+/* The same, and that ancestor's path length into *alen (0: the scope root). */
+enum anc ancestry_at(struct ancestry *a, const char *path, size_t len, size_t *alen);
 
 #endif

@@ -96,7 +96,7 @@ static uint32_t value_fields(const struct verdict *v, const struct belay_entry *
     if (!type_differs) return v->changed;
     uint32_t f = FBIT(F_MODE);
     switch (e->type) {
-    case BELAY_T_REG: f |= FBIT(F_SIZE) | (e->writer_open ? 0 : FBIT(F_SHA256)); break;    /* V4-D2 */
+    case BELAY_T_REG: f |= FBIT(F_SIZE) | (e->writer_open ? 0 : FBIT(F_SHA256)); break;    /* V4-D2; a sealed one: put_values */
     case BELAY_T_LNK: f |= FBIT(F_LINK_TARGET); break;
     case BELAY_T_CHR: case BELAY_T_BLK: f |= FBIT(F_RDEV); break;
     case BELAY_T_DIR: case BELAY_T_FIFO: case BELAY_T_SOCK: break;
@@ -126,6 +126,8 @@ static int put_values(struct emitter *em, enum diff_record_field key, const stru
          * target written on an unreadable link (it kept changing while read)
          * was recorded and is carried. */
         if (g == F_LINK_TARGET && e->unreadable && e->link_target_len == 0) continue;
+        /* manifest-v5 V5-D3: a record of a sealed entry never carries its hash. */
+        if (g == F_SHA256 && e->sealed) continue;
         if (!first) em->vals[w++] = ',';
         first = false;
         if (entry_put_field(e, g, em->vals, EMIT_VALUES_CAP - 1, &w) == -1) return -1;
@@ -195,7 +197,10 @@ int emit_header(struct emitter *em, const struct belay_manifest_header *hb,
         return -1;
     b.w--;                                                  /* the closing brace, reopened */
     if (excluded(em, &b, H[DH_BEFORE_EXCLUDED].name, hb) == -1 ||
-        excluded(em, &b, H[DH_AFTER_EXCLUDED].name, ha) == -1 || ap(&b, "}") == -1)
+        excluded(em, &b, H[DH_AFTER_EXCLUDED].name, ha) == -1 ||
+        /* manifest-v5 V5-D6 */
+        (!belay_manifest_same_roots(hb, ha) && ap(&b, ",\"%s\":true", H[DH_ROOTS_DIFFER].name) == -1) ||
+        ap(&b, "}") == -1)
         return -1;
     return put_line(em, &b);
 }
