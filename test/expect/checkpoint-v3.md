@@ -15,8 +15,10 @@ watch will need, so there is not a second one. Written by hand; approved by the 
 | C3-3 | `sealing` | int | Entries nothing below which was looked at: directories carrying `unreadable`, `mount` or (v5) `not_read`. After `unreadable`. |
 | C3-4 | `basis` | string | `walk` or `events` (kernel-record.md K7). Always `walk` until the recorder exists. After `prefilter`. |
 | C3-5 | `carried` | int | Entries taken from the previous manifest without a stat; `0` for a walk. After `basis`. |
-| C3-6 | `runtime_sha256` | string or null | The sha256 of the checkpoint's runtime record (runtime-v1.md), or null when it has none. Last. |
-| C3-7 | | | `schema/checkpoint.v3.json` replaces v2's. pybelay follows in the same release: `Checkpoint` gains the five fields; a v2 record read from an older state has `unreadable`, `sealing` as `None`, never `0`. |
+| C3-6 | `runtime_sha256` | string or null | The sha256 of the checkpoint's runtime record (runtime-v1.md), or null when it has none. After `kept`. |
+| C3-6a | `journal_seq` | int or null | The kernel record's journal sequence number of this checkpoint's barrier; null when the checkpoint was not taken under a kernel record. After `runtime_sha256`. |
+| C3-6b | `shadow_lines_sha256` | string or null | The sha256 of the checkpoint's per-line digest file for shadow/gshadow; null when it has none. Last. |
+| C3-7 | | | `schema/checkpoint.v3.json` replaces v2's. pybelay follows in the same release: `Checkpoint` gains the seven fields; a v2 record read from an older state has `unreadable`, `sealing` as `None`, never `0`. |
 | C3-8 | | | A checkpoint made before v3 stays as stored. `log` prints for it what it printed before: not recorded is not zero. belay does not read old manifests to fill the count in. |
 
 ## The lines
