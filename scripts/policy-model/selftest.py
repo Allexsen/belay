@@ -646,6 +646,28 @@ def fixture_not_read():
     check("PV2-8: another rule matching reads what it reads", kinds_of(nd + ',{"path":"g/x","mode":["no_create"]}', B, A),
           [("protected_path_unverifiable", ["unverified", "unreadable"])])
     check("PV2-8: two no_delete-only rules read nothing", kinds_of(nd + ',{"path":"g/x","mode":["no_delete"]}', B, S_), [])
+    # existence only where EVERY matching rule is no_delete alone (P68): else as before PV2-8
+    unv = ("protected_path_unverifiable", ["unverified", "unreadable"])
+    nc = '{"path":"g/x","mode":["no_create"]}'
+    hx = '{"path":"g/x","expected_sha256":"%s"}' % model.sha256(b"one\n")
+    for rules, name in ((nd + "," + nc, "no_delete, then no_create"), (nc + "," + nd, "no_create, then no_delete"),
+                        (nd + "," + hx, "no_delete, then a hash"), (hx + "," + nd, "a hash, then no_delete"),
+                        ('{"path":"g/**","mode":["no_delete","no_create"]}', "both modes in one rule")):
+        check("P68, %s: unreadable at reset, rewritten readable: unverifiable by its before entry" % name,
+              unv in kinds_of(rules, A, B), True)
+        check("P68, %s: unreadable at reset, removed: deleted and unverifiable" % name,
+              [k for k in kinds_of(rules, A, N_) if k[0] != "protected_hash_mismatch"], [("protected_path_deleted", None), unv])
+    # PV2-9, P-G4: a directory nothing was seen below, under no_delete alone
+    shut = dict(raw("dir", 0o40000, ino=5), readable=False)
+    T0 = dict(list(base.items()) + [(b"g/d", shut)])
+    T1 = dict(list(base.items()) + [(b"g/d", raw("dir", D, ino=5, mtime=200))])
+    check("PV2-9: sealed at reset, opened, a file below gone: unverifiable", kinds_of(nd, T0, T1),
+          [("protected_path_unverifiable", ["unreadable"])])
+    check("PV2-9: sealed on both sides", kinds_of(nd, T0, T0), [("protected_path_unverifiable", ["unreadable"])])
+    check("PV2-9: sealed after only", kinds_of(nd, T1, T0), [("protected_path_unverifiable", ["unreadable"])])
+    check("PV2-9: sealed at reset and removed: both (P71)", kinds_of(nd, T0, N_),
+          [("protected_path_deleted", None), ("protected_path_unverifiable", ["unreadable"])])
+    check("PV2-9: a file that is there is there", kinds_of(nd, A, A), [])
 
 
 def fixture_manifest_v4():

@@ -1193,6 +1193,35 @@ def not_read_scenarios():
           diff=True, tags=["P25", "P50", "P69"]))
     add(S("pv2-8-unreadable-directory-itself", SUBX, [("chmod", "grader/sub", 0o000)], spec_of(rule("grader/sub", "no_delete")),
           tags=["P25", "P68"]))
+    # -- existence only holds only where EVERY matching rule is `no_delete` alone (P68), and never
+    #    for a directory nothing was seen below (PV2-9, P71). run.py's gate requires each of these
+    #    by name (REQUIRED_SCENARIOS): their absence let a fail-open through.
+    key = "grader/key"
+    KEYX = BASE + [("file", key, b"k3y\n"), ("chmod", key, 0o000)]              # unreadable at reset
+    HK = sha(b"k3y\n")
+    EPISODES = (("rewritten", [("chmod", key, 0o644), ("write", key, b"another, longer key\n")]),
+                ("removed", [("rm", key)]),
+                ("to-dir", [("rm", key), ("dir", key)]))
+    for what, episode in EPISODES:
+        add(S("pv2-8-nd-nc-one-rule-" + what, KEYX, episode, spec_of(rule("grader/**", "no_delete", "no_create")),
+              tags=["P25", "P68"]))
+        add(S("pv2-8-nd-hash-one-rule-" + what, KEYX, episode, spec_of(rule(key, "no_delete", expected=HK)),
+              tags=["P7", "P25", "P68"]))
+    for other, orule in (("nc", rule(key, "no_create")), ("hash", rule(key, expected=HK))):
+        for what, episode in EPISODES[:2]:
+            add(S("pv2-8-nd-then-%s-%s" % (other, what), KEYX, episode, spec_of(rule("grader/**", "no_delete"), orule),
+                  tags=["P5", "P25", "P68"]))
+            add(S("pv2-8-%s-then-nd-%s" % (other, what), KEYX, episode, spec_of(orule, rule("grader/**", "no_delete")),
+                  tags=["P5", "P25", "P68"]))
+    CLOSED = SUBX + [("chmod", "grader/sub", 0o000)]                             # the directory mode 000 at reset
+    OPENED = [("chmod", "grader/sub", 0o755), ("rm", "grader/sub/x.txt")]
+    add(S("pv2-9-dir-opened-file-removed", CLOSED, OPENED, ND, diff=True, tags=["P25", "P69", "P71"]))
+    add(S("pv2-9-dir-opened-file-removed-closed-again", CLOSED, OPENED + [("chmod", "grader/sub", 0o000)], ND, diff=True,
+          tags=["P25", "P71"]))
+    add(S("pv2-9-sealed-dir-removed", CLOSED, [("chmod", "grader/sub", 0o755), ("rmtree", "grader/sub")], ND,
+          tags=["P25", "P71"]))
+    add(S("pv2-9-sealed-dir-rule-names-it", CLOSED, [], spec_of(rule("grader/sub", "no_delete")), tags=["P25", "P71"]))
+    add(S("pv2-9-unreadable-file-is-not-one", KEYX, [], ND, tags=["P25", "P71"]))
     # -- no size change: nothing proves `modified`, so `unknown` and no `content_not_read`
     add(S("g2-same-size-unreadable-after", SEC, [("write", sec, b"S3CRET\n"), ("chmod", sec, 0o000)], GW, diff=True,
           tags=["P25", "P29"]))

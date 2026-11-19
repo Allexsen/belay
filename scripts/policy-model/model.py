@@ -45,9 +45,10 @@ P5  protected_path_unverifiable's `rule`, "the first that matches it": the first
 
 P6  (For an `unknown`, see P50.) "On a side its modes read" (PS-M5): no_write reads before, and after when the path is
     there too ("matched before, on both sides"); no_create reads after,
-    whenever the path is there (unchanged included); expected_sha256 reads after. no_delete was
-    read as "reads before"; SETTLED otherwise by PV2-8 (P-G3): it "reads existence only", no
-    entry's flags on either side (P68).
+    whenever the path is there (unchanged included); expected_sha256 reads after. no_delete
+    reads before -- except where every rule matching the path is `no_delete` alone: PV2-8
+    (P-G3), it then "reads existence only", no entry's flags (P68), a sealed directory apart
+    (PV2-9, P71).
 
 P7  expected_sha256 against an after entry that is a regular file without a hash
     (`unverified`): no protected_hash_mismatch -- none of its `why` fits; PS-M5 says it, as
@@ -410,16 +411,29 @@ P70 New with diff-fields O10 (checkpoint-v3 G2-5). "An `added` record": a path i
     ("no record has both"). An added directory carrying `unstable` and an added symlink that
     could not be read carry none: O10 names two types and, for a directory, two flags.
 
-P68 New with PV2-8 and P-G3 ("`no_delete` reads existence only"). "A rule whose only mode is
-    `no_delete`": its `mode` is exactly `["no_delete"]` and it gives no `expected_sha256` ("A
-    rule that also has `no_write` or `no_create`, an `expected_sha256`, ... reads what it reads
-    today"). Such a rule reads no entry's flags. "Or another rule matching the path": where
-    several rules match, each is judged by itself -- the path is unverifiable by its entries'
-    flags on the sides the other rules read, and, `unknown` on both sides, when any rule that
-    matches is not such a rule; two `no_delete`-only rules together read nothing. The flag's
-    `rule` stays "the first that matches it" (P5), so it can name a `no_delete`-only rule when a
-    later rule is what cannot be verified; PV2-8 does not say otherwise. This also ends PV2-5's
-    and P54's `no_delete` half: flagged at reset and removed is protected_path_deleted alone.
+P68 New with PV2-8 and P-G3 ("`no_delete` reads existence only"); REPLACED by the author's
+    decision with PV2-9 (P-G4). "A rule whose only mode is `no_delete`": its `mode` is exactly
+    `["no_delete"]` and it gives no `expected_sha256`. This model first judged each matching
+    rule by itself; that reading is gone. PV2-9's words: "Where every rule matching a path has
+    `no_delete` as its only mode"; the author's: "not unverifiable under no_delete ALONE"; and
+    PV2-8's "or another rule matching the path, reads what it reads today". Read now: existence
+    only holds for a path only when EVERY rule that matches it is such a rule. Where any other
+    rule matches -- another mode, an `expected_sha256`, in either order -- the path is judged
+    exactly as before PV2-8: every `no_delete` reads the before side (P6 as it was), an
+    `unknown` on both sides is unverifiable, and flagged at reset then removed is both
+    protected_path_deleted and protected_path_unverifiable (PV2-5, P54).
+
+P71 New with PV2-9 and P-G4. "A matched directory nothing was seen below on a side -- its entry
+    there carries `unreadable` or `mount` -- is judged as PS-M5 judges it under any other mode
+    ... with the `reasons` PS-M5 gives." Read: on either side, the path on both sides or on one;
+    `reasons` are the record's `unknown` reasons when its outcome is `unknown`, else the flags
+    of the entries on the sides where it is sealed. A sealed directory REMOVED (unreadable at
+    reset, gone after) stands between two sentences: PV2-8's "One removed is
+    `protected_path_deleted` and nothing more, whatever its entry carried at reset", and PV2-9,
+    which says it amends PV2-8's "whatever its entries carry" (the both-sides sentence) but
+    whose own condition, "on a side", has no such limit and whose reason ("what the rules
+    protect below it has no entry on that side: it cannot be shown to exist") holds there too.
+    Read: PV2-9's condition decides -- deleted and unverifiable.
 
 P69 New with PV2-8. "Only when its existence after cannot be established: it is on one side only
     and its outcome is `unknown` -- as V4-S2 says of every rule". A path in the after manifest
@@ -1934,22 +1948,25 @@ def protected_flags(spec, recs, B, A, source=None):
                                       "%s: created where %s forbids it (no_create)" % (show(p), r.pattern),
                                       [p], prov))
                 break
-        # PS-M5 fail closed (P5, P6); PV2-8: a rule whose only mode is `no_delete` reads no flag
+        # PS-M5 fail closed (P5, P6)
         hit_sides = set()
         for r in matching:
             sides = set()
-            if "no_write" in r.modes and b is not None:                               # PV2-5
+            if ("no_write" in r.modes or "no_delete" in r.modes) and b is not None:
                 sides.add("before")
-                if a is not None:
+                if "no_write" in r.modes and a is not None:
                     sides.add("after")
             if ("no_create" in r.modes or r.expected is not None) and a is not None:
                 sides.add("after")
-            if "no_delete" in r.modes and not existence_only(r) and b is not None:    # as before PV2-8
-                sides.add("before")
             hit_sides |= sides
-        # an `unknown`: on one side only, under any rule (V4-S2, P50, P69); on both sides, under
-        # any rule but one that reads existence only (PV2-8: "it is there", P68)
-        unknown = unknown and (b is None or a is None or not all(existence_only(r) for r in matching))
+        if all(existence_only(r) for r in matching):
+            # PV2-8: every rule matching it is `no_delete` alone, so no entry's flags are read
+            # and an `unknown` on both sides is not unverifiable ("it is there"); one side only
+            # and `unknown` still is (V4-S2, P50, P69). PV2-9: but a directory nothing was seen
+            # below on a side is judged as under any other mode (P68, P71).
+            hit_sides = {s for s, e in (("before", b), ("after", a))
+                         if e is not None and e["type"] == "dir" and (e["unreadable"] or e["mount"])}
+            unknown = unknown and (b is None or a is None or bool(hit_sides))
         if hit_sides or unknown:
             ents = [e for s, e in (("before", b), ("after", a)) if s in hit_sides]
             flagged = [f for f in ENTRY_FLAGS if any(e[f] for e in ents)]
