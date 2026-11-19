@@ -255,15 +255,17 @@ TEST(a_system_scope_is_captured_only_with_the_flag) {
  * The refusing function is called here, never the commands: were it to
  * regress, a command on `/` would walk the machine. */
 TEST(the_root_directory_is_refused_without_the_flag) {
-    FILE *err = open_memstream(&g_err, &(size_t){ 0 });
     free(g_out);
-    g_out = NULL;
+    free(g_err);                        /* the last command's */
+    g_out = g_err = NULL;
+    size_t en = 0;
+    FILE *err = open_memstream(&g_err, &en);
     ASSERT_EQ_INT(3, cli_refuse_root("/", false, NULL, err));
     fclose(err);
     ASSERT_TRUE(strstr(g_err, "--system") != NULL && strstr(g_err, "refused") != NULL);
     free(g_err);
     g_err = NULL;
-    err = open_memstream(&g_err, &(size_t){ 0 });
+    err = open_memstream(&g_err, &en);
     ASSERT_EQ_INT(0, cli_refuse_root("/", true, NULL, err));            /* with the flag: the system scope */
     ASSERT_EQ_INT(0, cli_refuse_root("/", false, "container", err));    /* a container's own / (host-reader.md) */
     ASSERT_EQ_INT(0, cli_refuse_root("/srv", false, NULL, err));
