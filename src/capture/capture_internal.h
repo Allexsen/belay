@@ -139,6 +139,7 @@ bool cap_crossed(const struct walk_ctx *wc, const struct stat *st, bool mount_ro
 bool cap_boundary(const struct walk_ctx *wc, int dfd, const char *name, const struct stat *st,
                   bool mount_root, bool mount_known);
 int  cap_seal_key(struct walk_ctx *wc, bool create);
+void cap_wipe(void *p, size_t n);
 void cap_fill_from_stat(struct belay_entry *e, const struct stat *st);
 int  cap_read_extras(struct walk_ctx *wc, int fd, int pfd, const char *name,
                      const struct stat *st);

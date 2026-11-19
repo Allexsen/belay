@@ -406,6 +406,8 @@ struct belay_manifest_header {
 bool belay_manifest_same_roots(const struct belay_manifest_header *a, const struct belay_manifest_header *b);
 /* Whether a header's roots list `path` (found or not). */
 bool belay_manifest_lists_root(const struct belay_manifest_header *h, const char *path, size_t len);
+/* Whether some root of the header lies below `path` (it is on the way to one). */
+bool belay_manifest_root_below(const struct belay_manifest_header *h, const char *path, size_t len);
 
 /* The roots of a capture of a whole machine whose `/` is the directory
  * `scope` (test/expect/watch-system.md, WS-6 to WS-9), resolved as the

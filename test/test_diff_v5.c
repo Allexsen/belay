@@ -357,6 +357,23 @@ TEST(a_path_under_a_partial_directory_on_the_other_side) {
     IS("{\"path\":\"home/v\",\"outcome\":\"unknown\",\"type\":\"dir\",\"unknown\":[\"listing_incomplete\"]}", rec("home/v"));
 }
 
+/* manifest-v5-addendum V5-A4: a link where a directory on the way to a root
+ * is looked for is recorded, so replacing ~/.config by a link is a type
+ * change, and a link appearing there is added: its absence was known. */
+TEST(a_link_on_the_way_to_a_root) {
+    home_before();
+    m_new(HOME_ROOTS, NULL);
+    dir(".", P); dir("home", P); dir("home/u", P); lnk("home/u/.config"); lnk("home/u/.other");
+    m_write("after");
+    REQUIRE(run() == 0);
+    ASSERT_TRUE(strstr(rec("home/u/.config"), "\"outcome\":\"type_changed\",\"type\":\"lnk\",\"type_before\":\"dir\"") != NULL);
+    /* a link on the way to nothing is not such a name */
+    IS("{\"path\":\"home/u/.other\",\"outcome\":\"unknown\",\"type\":\"lnk\",\"unknown\":[\"not_captured\"]}", rec("home/u/.other"));
+    m_new(HOME_ROOTS, NULL); dir(".", P); dir("home", P); dir("home/u", P); m_write("before");
+    REQUIRE(run() == 0);
+    IS("{\"path\":\"home/u/.config\",\"outcome\":\"added\",\"type\":\"lnk\"}", rec("home/u/.config"));
+}
+
 /* V5-D5: `not_read` after `writer_open`, `sealed_key` after it. */
 TEST(the_new_reasons_come_last) {
     IS("{\"path\":\"f\",\"outcome\":\"unknown\",\"type\":\"reg\",\"unknown\":[\"writer_open\",\"not_read\"]}",
@@ -415,6 +432,7 @@ int main(void) {
     RUN(a_first_ssh_directory_in_a_home_is_added);
     RUN(a_first_user_unit_in_a_home_is_added);
     RUN(a_path_under_a_partial_directory_on_the_other_side);
+    RUN(a_link_on_the_way_to_a_root);
     RUN(the_new_reasons_come_last);
     RUN(an_added_meta_file_says_its_content_was_not_read);
     RUN(the_header_says_when_the_roots_differ);

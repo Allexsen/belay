@@ -387,6 +387,8 @@ static void tree(void) {
     wr("var/lib/x", "x\n", 0644);
     mk("root", 0700);
     wr("root/secret", "s3cret\n", 0644);
+    mk("root/open", 0755);
+    wr("root/open/deep", "deep\n", 0644);
     wr("root/.bashrc", "alias ll=ls\n", 0600);
     mk("home", 0755); mk("home/u", 0750); mk("home/u/.ssh", 0700); mk("home/u/Documents", 0755); mk("home/other", 0755);
     wr("home/u/.ssh/authorized_keys", "ssh-ed25519 AAAA u@h\n", 0600);
@@ -421,6 +423,9 @@ static const char *const NOT_READ[] = { "var/log" };
 
 static const struct fsops *g_real;
 static struct fsops g_ops;
+static int g_dir_syncs;             /* fsyncs of a directory, counted by the decorated ops */
+static ino_t g_gid_ino;             /* this inode is reported with another group ... */
+static bool g_gid_on;               /* ... once this is set */
 
 static struct belay_manifest_opts opts_roots(const char *previous) {
     const struct belay_manifest_opts o = {
@@ -647,6 +652,9 @@ TEST(a_file_others_cannot_read_is_sealed) {
     hmac_hex(key, "s3cret\n", want);
     ASSERT_TRUE(ent("root/secret")->sealed);
     ASSERT_EQ_STR(want, ent("root/secret")->sha256_hex);
+    /* any directory above it: root/open is 755 and still inside root */
+    REQUIRE(ent("root/open/deep") != NULL);
+    ASSERT_TRUE(ent("root/open/deep")->sealed);
     ASSERT_TRUE(ent("home/u/.ssh/authorized_keys")->sealed);
     /* readable by others, under directories they can search: plain */
     sha_hex("x\n", 2, want);
@@ -659,7 +667,7 @@ TEST(a_file_others_cannot_read_is_sealed) {
     ASSERT_EQ_STR(want, ent("root/.bashrc")->sha256_hex);
     /* not under a metadata root: a setuid file there is hashed plainly whatever its mode */
     ASSERT_TRUE(!ent("usr/bin/su")->sealed);
-    ASSERT_EQ_INT(3, (int)st.sealed);
+    ASSERT_EQ_INT(4, (int)st.sealed);
     /* the key is never rewritten: a second capture seals to the same hashes */
     char first[65];
     snprintf(first, sizeof first, "%s", ent("etc/shadow")->sha256_hex);
@@ -691,10 +699,28 @@ TEST(the_key_is_made_only_when_needed) {
     o.sealing_key_path = g_key;
     ASSERT_EQ_INT(-1, capture_write(&g_ops, g_m2, g_tree, &o, NULL));
     ASSERT_TRUE(strstr(belay_err_msg(), "not a sealing key") != NULL);
+    /* and says what to do about it, and what that costs */
+    ASSERT_TRUE(strstr(belay_err_msg(), "delete it") != NULL && strstr(belay_err_msg(), "unknown") != NULL);
     struct stat ks;
     REQUIRE(stat(g_key, &ks) == 0);
     ASSERT_EQ_INT(5, (int)ks.st_size);
     unlink(g_key);
+    /* 32 bytes that others can read are not a key either */
+    f = fopen(g_key, "wb");
+    REQUIRE(f != NULL);
+    fputs("0123456789abcdef0123456789abcdef", f);
+    fclose(f);
+    chmod(g_key, 0644);
+    ASSERT_EQ_INT(-1, capture_write(&g_ops, g_m2, g_tree, &o, NULL));
+    ASSERT_TRUE(strstr(belay_err_msg(), "not a sealing key") != NULL);
+    unlink(g_key);
+    /* a new key is in its directory for good: the directory is synced after the link */
+    g_dir_syncs = 0;
+    REQUIRE(capture_write(&g_ops, g_m2, g_tree, &o, NULL) == 0 && access(g_key, F_OK) == 0);
+    const int with_key = g_dir_syncs;
+    g_dir_syncs = 0;
+    REQUIRE(capture_write(&g_ops, g_m2, g_tree, &o, NULL) == 0);
+    ASSERT_EQ_INT(g_dir_syncs + 1, with_key);       /* one more than a capture that only reads the key */
 }
 
 /* The roots a caller gives are checked: sorted, canonical, each once. */
@@ -726,7 +752,7 @@ TEST(mark_trusts_by_class_and_by_key) {
     REQUIRE(capture_roots(g_m2, first, &st) == 0);
     REQUIRE_MSG(st.prefilter, "the prefilter was not used: %s", st.prefilter_skipped ? st.prefilter_skipped : "?");
     const size_t all = st.trusted;
-    ASSERT_TRUE(all >= 9);                          /* passwd, shadow, sub/x, su, (wall), l, secret, 2 x .bashrc, keys */
+    ASSERT_TRUE(all >= 10);                          /* passwd, shadow, sub/x, su, (wall), l, secret, 2 x .bashrc, keys */
     ASSERT_TRUE(ent("etc/shadow")->sealed);
     ASSERT_EQ_STR(sealed0, ent("etc/shadow")->sha256_hex);
     ASSERT_TRUE(ent("usr/bin/tool")->meta);
@@ -740,7 +766,7 @@ TEST(mark_trusts_by_class_and_by_key) {
     sha_hex("s3cret\n", 7, want);
     ASSERT_TRUE(!ent("root/secret")->sealed);
     ASSERT_EQ_STR(want, ent("root/secret")->sha256_hex);
-    ASSERT_EQ_INT((int)all - 1, (int)st.trusted);
+    ASSERT_EQ_INT((int)all - 2, (int)st.trusted);   /* and root/open/deep with it */
     REQUIRE(chmod(p, 0700) == 0);
     /* and back: sealed again, from a manifest where it was plain: read under the key */
     char plain[700];
@@ -756,7 +782,7 @@ TEST(mark_trusts_by_class_and_by_key) {
     unlink(g_key);
     REQUIRE(capture_roots(g_m2, first, &st) == 0);
     REQUIRE(st.prefilter);
-    ASSERT_EQ_INT((int)all - 3, (int)st.trusted);   /* shadow, root/secret, authorized_keys were read */
+    ASSERT_EQ_INT((int)all - 4, (int)st.trusted);   /* shadow, root/secret, root/open/deep, authorized_keys were read */
     uint8_t key2[32];
     REQUIRE(read_key(key2));
     ASSERT_TRUE(memcmp(key, key2, 32) != 0);
@@ -817,7 +843,20 @@ static int t_stat_mount(void *ctx, int dfd, const char *name, struct stat *st, b
     }
     *mk = true;
     if (g_mount_name != NULL && strcmp(name, g_mount_name) == 0) *mr = true;
+    if (g_gid_on && st->st_ino == g_gid_ino) st->st_gid += 1;
     return 0;
+}
+
+static int t_fstat(void *ctx, int fd, struct stat *st) {
+    const int r = g_real->fstat(ctx, fd, st);
+    if (r == 0 && g_gid_on && st->st_ino == g_gid_ino) st->st_gid += 1;
+    return r;
+}
+
+static int t_fsync(void *ctx, int fd) {
+    struct stat st;
+    if (fstat(fd, &st) == 0 && S_ISDIR(st.st_mode)) g_dir_syncs++;
+    return g_real->fsync(ctx, fd);
 }
 
 static bool t_enterable(void *ctx, int dfd, const char *name) {
@@ -849,6 +888,8 @@ static void decorate(void) {
     g_ops.mount_enterable = t_enterable;
     g_ops.openat = t_openat;
     g_ops.tmpfile_in = t_tmpfile_in;
+    g_ops.fstat = t_fstat;
+    g_ops.fsync = t_fsync;
 }
 
 /* V5-E6: a mount point under a root is entered when its filesystem is on
@@ -896,6 +937,13 @@ TEST(a_meta_file_that_cannot_be_opened_is_still_meta) {
 static void add_file_in_home(void) { wr("home/u/new-notes.txt", "n\n", 0644); wr("late.txt", "l\n", 0644); }
 static void add_dir_in_home(void) { mk("home/u/Music", 0755); }
 static void touch_not_read(void) { wr("home/other/g", "g\n", 0644); wr("var/log/more", "m\n", 0644); }
+static void regroup(void) { g_gid_on = true; }       /* as a chgrp would, without needing a second group */
+static ino_t ino_of(const char *rel) {
+    char p[1200];
+    struct stat st;
+    snprintf(p, sizeof p, "%s/%s", g_tree, rel);
+    return stat(p, &st) == 0 ? st.st_ino : 0;
+}
 static void chmod_not_read(void) {
     char p[1200];
     snprintf(p, sizeof p, "%s/home/other", g_tree);
@@ -929,6 +977,100 @@ TEST(the_recheck_looks_at_what_was_recorded) {
     REQUIRE(capture_roots(g_m2, NULL, &st) == 0 && g_action == NULL);
     ASSERT_EQ_INT(1, (int)st.raced);
     ASSERT_TRUE(ent("home/other")->raced && ent("home/other")->not_read);
+    /* so is its owner and group (V5-D4 compares them): a chgrp during the walk is raced */
+    tree();
+    g_gid_ino = ino_of("home/other");
+    g_tmpfiles = 0; g_action = regroup;
+    const int r1 = capture_roots(g_m2, NULL, &st);
+    g_gid_on = false;
+    REQUIRE(r1 == 0 && g_action == NULL);
+    ASSERT_EQ_INT(1, (int)st.raced);
+    ASSERT_TRUE(ent("home/other")->raced);
+    /* a partial directory's too: its listing is what no longer holds as recorded */
+    tree();
+    g_gid_ino = ino_of("home/u");
+    g_tmpfiles = 0; g_action = regroup;
+    const int r2 = capture_roots(g_m2, NULL, &st);
+    g_gid_on = false;
+    REQUIRE(r2 == 0 && g_action == NULL);
+    ASSERT_EQ_INT(1, (int)st.unstable);
+    ASSERT_TRUE(ent("home/u")->unstable && ent("home/u")->partial);
+}
+
+/* A root the scope excludes was not looked at: it is not `found`. */
+TEST(an_excluded_root_is_not_found) {
+    tree();
+    struct belay_manifest_opts o = opts_roots(NULL);
+    static const char *const X[] = { "etc" };
+    o.exclude_paths = X;
+    o.n_exclude_paths = 1;
+    REQUIRE(capture_write(&g_ops, g_m2, g_tree, &o, NULL) == 0);
+    char *all = slurp(g_m2);
+    REQUIRE(all != NULL);
+    ASSERT_TRUE(strstr(all, "\n{\"root\":\"etc\",\"class\":\"content\",\"found\":false}\n") != NULL);
+    ASSERT_TRUE(strstr(all, "{\"path\":\"etc\",\"reason\":\"user\",") != NULL && strstr(all, "\n{\"path\":\"etc/passwd\"") == NULL);
+    free(all);
+}
+
+/* V5-E5: the scope root's own search bit counts, like any directory's above a file. */
+TEST(a_scope_root_others_cannot_search_seals_everything_read) {
+    tree();
+    REQUIRE(chmod(g_tree, 0750) == 0);
+    struct belay_manifest_stats st;
+    REQUIRE(capture_roots(g_m2, NULL, &st) == 0);
+    REQUIRE(ent("etc/sub/x") != NULL && ent("etc/passwd") != NULL);
+    ASSERT_TRUE(ent("etc/sub/x")->sealed && ent("etc/passwd")->sealed);
+    ASSERT_TRUE(!ent("home/u/.bashrc")->sealed && ent("usr/bin/tool")->meta);    /* the exceptions stand */
+    chmod(g_tree, 0755);
+}
+
+/* V5-4: a not_read directory's ctime is not recorded, so it is no part of
+ * the newest ctime a later mark measures the clock by. */
+TEST(a_not_read_directory_s_ctime_is_not_the_newest) {
+    tree();
+    pause_ms(30);
+    wr("var/log/later", "l\n", 0644);            /* var/log's own ctime is now the newest in the scope */
+    char p[1200];
+    struct stat ls;
+    snprintf(p, sizeof p, "%s/var/log", g_tree);
+    REQUIRE(stat(p, &ls) == 0);
+#ifdef __APPLE__
+    const int64_t dir_ct = (int64_t)ls.st_ctimespec.tv_sec * 1000000000LL + ls.st_ctimespec.tv_nsec;
+#else
+    const int64_t dir_ct = (int64_t)ls.st_ctim.tv_sec * 1000000000LL + ls.st_ctim.tv_nsec;
+#endif
+    struct belay_manifest_stats st;
+    REQUIRE(capture_roots(g_m2, NULL, &st) == 0);
+    ASSERT_TRUE(st.newest_ctime_ns < dir_ct);
+}
+
+/* manifest-v5-addendum V5-A4: a symbolic link standing where a directory on
+ * the way to a root is looked for is recorded as a link, never followed; the
+ * roots below it are not found. */
+TEST(a_link_on_the_way_to_a_root_is_recorded) {
+    tree();
+    mk("home/u/.config", 0755); mk("home/u/.config/systemd", 0755); mk("home/u/.config/systemd/user", 0755);
+    wr("home/u/.config/systemd/user/x.service", "[Unit]\n", 0644);
+    REQUIRE(capture_roots(g_m2, NULL, NULL) == 0);
+    REQUIRE(ent("home/u/.config") != NULL && ent("home/u/.config/systemd/user/x.service") != NULL);
+    ASSERT_TRUE(ent("home/u/.config")->type == BELAY_T_DIR && ent("home/u/.config")->partial);
+    /* .config replaced by a link to a directory elsewhere that holds the same names */
+    char cmd[3000];
+    snprintf(cmd, sizeof cmd, "cd '%s/home/u' && mv .config ../elsewhere && ln -s ../elsewhere .config", g_tree);
+    REQUIRE(system(cmd) == 0);
+    struct belay_manifest_stats st;
+    REQUIRE(capture_roots(g_m2, NULL, &st) == 0);
+    REQUIRE_MSG(ent("home/u/.config") != NULL, "%s", "the link is not recorded");
+    ASSERT_TRUE(ent("home/u/.config")->type == BELAY_T_LNK);
+    ASSERT_EQ_STR("../elsewhere", ent("home/u/.config")->link_target);
+    ASSERT_TRUE(ent("home/u/.config/systemd") == NULL && ent("home/u/.config/systemd/user/x.service") == NULL);
+    char *all = slurp(g_m2);
+    REQUIRE(all != NULL);
+    ASSERT_TRUE(strstr(all, "\n{\"root\":\"home/u/.config/systemd/user\",\"class\":\"content\",\"found\":false}\n") != NULL);
+    free(all);
+    ASSERT_EQ_INT(0, (int)(st.unstable + st.raced));     /* the re-check counts the link as the walk did */
+    /* a link that is on the way to nothing is still nobody's business */
+    ASSERT_TRUE(ent("home/u/link") == NULL);
 }
 
 /* ---------- the roots of a system (watch-system.md WS-6 to WS-9) ---------- */
@@ -1116,6 +1258,80 @@ TEST(a_header_alone_gives_the_count) {
     belay_manifest_close(r);
 }
 
+/* etc/passwd is not ours: a line with a NUL byte or one too long to be a
+ * line is dropped alone; a last line without a newline is used; a passwd
+ * that is a link is not read at all. */
+TEST(system_roots_from_a_hostile_passwd) {
+    tree();
+    mk("home/a", 0755); mk("home/b", 0755); mk("home/c", 0755); mk("home/d", 0755); mk("home/e", 0755);
+    char p[1200];
+    snprintf(p, sizeof p, "%s/etc/passwd", g_tree);
+    FILE *f = fopen(p, "wb");
+    REQUIRE(f != NULL);
+    fwrite("x:x:1:1:ge\0cos:/home/a:/bin/sh\n", 1, 31, f);        /* a NUL inside the line */
+    fputs("b:x:2:2::/home/b:/bin/sh\n", f);
+    fputs("long:x:3:3::/home/d:", f);
+    for (int i = 0; i < 20000; i++) fputc('s', f);               /* longer than any line is read: not cut and used */
+    fputs("\n", f);
+    fwrite("e:x:6:6::/home/e\0:/bin/sh\n", 1, 26, f);             /* a NUL after the home: the line is no line */
+    fputs("c:x:4:4::/home/c:/bin/sh", f);                        /* no final newline */
+    fclose(f);
+    REQUIRE(belay_system_roots(g_tree, &g_sr) == 0);
+    ASSERT_TRUE(sroot("home/a/.ssh") == NULL);      /* its home field cannot be told from what follows the NUL */
+    ASSERT_TRUE(sroot("home/b/.ssh") != NULL);      /* the line after it is a line of its own */
+    ASSERT_TRUE(sroot("home/d/.ssh") == NULL);
+    ASSERT_TRUE(sroot("home/e/.ssh") == NULL);
+    ASSERT_TRUE(sroot("home/c/.ssh") != NULL);
+    belay_system_roots_free(&g_sr);
+    /* the same home on many lines: once, and no more roots than one home's */
+    f = fopen(p, "wb");
+    REQUIRE(f != NULL);
+    for (int i = 0; i < 2000; i++) fprintf(f, "u%d:x:%d:%d::/home/b:/bin/sh\n", i, i, i);
+    fclose(f);
+    REQUIRE(belay_system_roots(g_tree, &g_sr) == 0);
+    size_t under = 0;
+    for (size_t i = 0; i < g_sr.n_roots; i++) under += strncmp(g_sr.roots[i].path, "home/b/", 7) == 0;
+    ASSERT_EQ_INT(14, (int)under);
+    belay_system_roots_free(&g_sr);
+    /* etc/passwd a link: not followed, no homes */
+    char real[1300];
+    snprintf(real, sizeof real, "%s/etc/passwd.real", g_tree);
+    REQUIRE(rename(p, real) == 0 && symlink("passwd.real", p) == 0);
+    REQUIRE(belay_system_roots(g_tree, &g_sr) == 0);
+    ASSERT_TRUE(sroot("home/b/.ssh") == NULL && sroot("etc") != NULL);
+    belay_system_roots_free(&g_sr);
+}
+
+/* A home so deep that its roots would not fit a path is left out (it joins
+ * the homes WS-8a leaves out); the capture does not fail. */
+TEST(a_home_too_deep_for_its_roots_is_left_out) {
+    tree();
+    char comp[204], home[4200] = "home", cmd[9000];
+    memset(comp, 'd', 203);
+    comp[203] = '\0';
+    for (int i = 0; i < 20; i++) { strcat(home, "/"); strcat(home, comp); }      /* 4084 bytes */
+    snprintf(cmd, sizeof cmd, "cd '%s' && mkdir -p '%s'", g_tree, home);
+    REQUIRE(system(cmd) == 0);
+    char p[1200];
+    snprintf(p, sizeof p, "%s/etc/passwd", g_tree);
+    FILE *f = fopen(p, "wb");
+    REQUIRE(f != NULL);
+    fprintf(f, "deep:x:5:5::/%s:/bin/sh\nu:x:1000:1000::/home/u:/bin/sh\n", home);
+    fclose(f);
+    pause_ms(30);
+    REQUIRE(belay_system_roots(g_tree, &g_sr) == 0);
+    for (size_t i = 0; i < g_sr.n_roots; i++)
+        if (strncmp(g_sr.roots[i].path, "home/ddd", 8) == 0) { BELAY_FAIL("a root of the deep home: %.40s...", g_sr.roots[i].path); break; }
+    ASSERT_TRUE(sroot("home/u/.ssh") != NULL);
+    const struct belay_manifest_opts o = {
+        .hash_max_bytes = 1u << 20, .roots = g_sr.roots, .n_roots = g_sr.n_roots,
+        .not_read = g_sr.not_read, .n_not_read = g_sr.n_not_read, .sealing_key_path = g_key,
+    };
+    const int rc = capture_write(&g_ops, g_m2, g_tree, &o, NULL);
+    belay_system_roots_free(&g_sr);
+    REQUIRE_MSG(rc == 0, "%s", belay_err_msg());
+}
+
 /* The resolved roots drive a capture: a home under a metadata root is
  * walked as metadata with its .ssh as content (WS-9), a home outside the
  * roots is partial (WS-8). */
@@ -1184,6 +1400,12 @@ int main(void) {
     RUN(a_mount_is_entered_by_its_filesystem_type);
     RUN(a_meta_file_that_cannot_be_opened_is_still_meta);
     RUN(the_recheck_looks_at_what_was_recorded);
+    RUN(an_excluded_root_is_not_found);
+    RUN(a_scope_root_others_cannot_search_seals_everything_read);
+    RUN(a_not_read_directory_s_ctime_is_not_the_newest);
+    RUN(a_link_on_the_way_to_a_root_is_recorded);
+    RUN(system_roots_from_a_hostile_passwd);
+    RUN(a_home_too_deep_for_its_roots_is_left_out);
     RUN(system_roots_fixed);
     RUN(system_roots_homes);
     RUN(system_roots_capture);

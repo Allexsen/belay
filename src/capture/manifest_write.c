@@ -273,9 +273,10 @@ int capture_write_root(const struct fsops *ops, const char *out_path, const char
         close(ofd);
         goto cleanup;
     }
-    /* The header says `sealed_key` exactly when an entry is sealed (V5-3):
-     * an entry sealed during the walk may since have lost its hash to the
-     * re-check, so the entries are counted as they will be written. */
+    /* The header says `sealed_key` exactly when an entry is sealed (V5-3).
+     * The re-check only adds `raced` or `unstable`, never takes a hash away,
+     * so the entries sealed during the walk are the ones written; the output
+     * pass checks the two counts agree. */
     const struct header5 v5 = { opts->roots, wc->root_found, opts->n_roots,
                                 wc->sealed_entries > 0 ? wc->sealed_key_id : NULL };
     if (cap_write_header(ops, out, real, wc->xs, wc->excluded, walk_start_ns, opts, &v5, wc->line) == -1 ||
@@ -440,6 +441,7 @@ cleanup:
         free(wc->xs);
         free(wc->xlen);
         free(wc->root_found);
+        cap_wipe(wc->key, sizeof wc->key);      /* the sealing key does not outlive the capture */
         free(wc->abs);
         prev_free(wc->prev);
         belay_store_close(wc->store);
