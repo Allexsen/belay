@@ -693,25 +693,52 @@ def fixture_manifest_v4():
              "ctime_ns": 1, "ino": 92219, "dev": 2096, "nlink": 1, "iflags": 524288, "sha256": "e" * 64, "writer_open": True}
     root = {"path": ".", "type": "dir", "mode": 16877, "uid": 1000, "gid": 1000, "size": 4096, "mtime_ns": 1,
             "ctime_ns": 1, "ino": 2, "dev": 2096, "nlink": 2}
-    head = {"belay_manifest": 4, "created_ns": 1, "scopes": ["/w"], "hash": "sha256", "hash_max_bytes": 1, "store_max_bytes": 1,
-            "excluded": [], "walk_start_ns": 1, "source": None}
+    head = {"belay_manifest": 5, "created_ns": 1, "scopes": ["/w"], "hash": "sha256", "hash_max_bytes": 1, "store_max_bytes": 1,
+            "excluded": [], "walk_start_ns": 1, "source": None, "roots": [], "basis": "walk"}
     tail = {"belay_manifest_end": 2, "vanished": 0, "unreadable": 0, "unstable": 0, "mounts": 1, "raced": 0, "trusted": 0,
-            "reference": "none", "read_all": "check", "writer_open": 1, "unguarded": 0}
+            "reference": "none", "read_all": "check", "writer_open": 1, "unguarded": 0,
+            "not_read": 0, "meta": 0, "sealed": 0, "carried": 0, "racy": []}
     data = b"".join(model.enc(o).encode() + b"\n" for o in (head, root, entry, tail))
     B = {b".": {"writer_open": False}, b"data.bin": {"writer_open": True}}
     check("the pin's lines hold", model.manifest_problems(data, B, 0), [])
     check("another unguarded count is seen", len(model.manifest_problems(data, B, 3)), 1)
     check("an entry the model did not mark is seen", len(model.manifest_problems(data, {b".": B[b"."], b"data.bin": {"writer_open": False}}, 0)), 1)
-    check("writer_open after raced", model.ENTRY_KEY_ORDER[-2:], ("raced", "writer_open"))
-    check("the trailer's order", model.V4_TRAILER[-3:], ("read_all", "writer_open", "unguarded"))
+    check("writer_open after raced, then v5's four", model.ENTRY_KEY_ORDER[-6:],
+          ("raced", "writer_open", "not_read", "partial", "meta", "sealed"))
+    check("the trailer's order", model.V5_TRAILER[-8:],
+          ("read_all", "writer_open", "unguarded", "not_read", "meta", "sealed", "carried", "racy"))
+    check("the header's order", model.V5_HEADER[-3:], ("source", "roots", "basis"))
+    for what, old, new in (("v4's version", b'"belay_manifest":5', b'"belay_manifest":4'),
+                           ("a root", b'"roots":[]', b'"roots":[{"path":"etc","class":"content","found":true}]'),
+                           ("basis events", b'"basis":"walk"', b'"basis":"events"'),
+                           ("a sealed_key", b'"basis"', b'"sealed_key":"0123456789abcdef","basis"'),
+                           ("a meta count", b'"meta":0', b'"meta":1'),
+                           ("a racy path", b'"racy":[]', b'"racy":["data.bin"]'),
+                           ("no carried", b'"carried":0,', b""),
+                           ("a v5 flag on an entry", b',"writer_open":true', b',"writer_open":true,"sealed":true')):
+        assert old in data, what
+        check("V5, a whole scope's manifest: %s is seen" % what, len(model.manifest_problems(data.replace(old, new), B, 0)) >= 1, True)
+    h4, _e4, t4 = model.read_manifest(model.downgrade_manifest(data, 4))
+    check("v4 keeps writer_open and its counts, loses v5's keys",
+          (h4["belay_manifest"], tuple(h4) == model.V4_HEADER, tuple(t4) == model.V4_TRAILER), (4, True, True))
+    for how, where, key, there in (("v5-missing-basis", 0, "basis", False), ("v5-missing-racy", 2, "racy", False),
+                                   ("v4-with-roots", 0, "roots", True), ("v4-with-racy", 2, "racy", True)):
+        broken = model.read_manifest(model.break_manifest(data.replace(b',"writer_open":true', b""), how))
+        check("break %s" % how, (key in broken[where], broken[0]["belay_manifest"]), (there, int(how[1])))
+    hr, er, _tr = model.read_manifest(model.break_manifest(data.replace(b',"writer_open":true', b""), "v5-roots"))
+    check("V5-R4's bundle: every child a root, `.` partial",
+          (hr["roots"], er[0].get("partial"), list(hr)[-2:]),
+          ([{"path": "data.bin", "class": "content", "found": True}], True, ["roots", "basis"]))
     plain = data.replace(b',"writer_open":true', b"").replace(b'"writer_open":1', b'"writer_open":0')
     h3, _e3, t3 = model.read_manifest(model.downgrade_manifest(plain, 3))
-    check("v3 keeps source, loses both counts", (h3["belay_manifest"], "source" in h3, "writer_open" in t3, "unguarded" in t3), (3, True, False, False))
+    check("v3 keeps source, loses both counts and v5's keys",
+          (h3["belay_manifest"], "source" in h3, "writer_open" in t3, "unguarded" in t3, "roots" in h3, "racy" in t3),
+          (3, True, False, False, False, False))
     h2, _e2, _t2 = model.read_manifest(model.downgrade_manifest(plain, 2))
-    check("v2 loses source", (h2["belay_manifest"], "source" in h2), (2, False))
+    check("v2 loses source", (h2["belay_manifest"], "source" in h2, "basis" in h2), (2, False, False))
     hs, es_, ts = model.read_manifest(model.source_manifest(data, CONTAINER))
-    check("a source written in: the header's last key, nothing else moved (V3-2)",
-          (list(hs)[-1], hs["source"], [hs[k] for k in head if k != "source"], es_, ts),
+    check("a source written in: where it was, v5's keys after it, nothing else moved (V3-2)",
+          (list(hs)[-3], hs["source"], [hs[k] for k in head if k != "source"], es_, ts),
           ("source", CONTAINER, [head[k] for k in head if k != "source"], [root, entry], tail))
     flagged = model.flag_manifest(plain, {b"data.bin": ["raced", "writer_open"]})
     _h, es, tr = model.read_manifest(flagged)
