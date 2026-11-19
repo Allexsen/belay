@@ -537,6 +537,12 @@ static int read_meta(const struct state *st, const char *name, long id, struct c
     c->unstable = (uint64_t)jint(&v, "unstable", 0);
     c->vanished = (uint64_t)jint(&v, "vanished", 0);
     c->excluded = (uint64_t)jint(&v, "excluded", 0);
+    /* checkpoint.v3: both or neither; a checkpoint made before it has neither
+     * and stays so (C3-8). */
+    const struct jval *ur = jget(&v, "unreadable"), *sl = jget(&v, "sealing");
+    c->counts_unread = ur != NULL && ur->t == J_NUM && sl != NULL && sl->t == J_NUM;
+    c->unreadable = c->counts_unread ? (uint64_t)ur->i : 0;
+    c->sealing = c->counts_unread ? (uint64_t)sl->i : 0;
     const struct jval *p = jget(&v, "provisional");
     c->provisional = p != NULL && p->t == J_BOOL && p->b;
     const struct jval *used = jget(pf, "used");
@@ -708,18 +714,21 @@ static int write_meta(const struct state *st, int dfd, const struct checkpoint *
     if (state_json_member(scope, sizeof scope, "scope", st->scope.path) == -1 ||
         belay_json_escape(why, sizeof why, c->full_reason, strlen(c->full_reason)) == -1)
         return -1;
-    char since[40] = "";
+    char since[40] = "", unread[96] = "";
     if (c->has_since_full) snprintf(since, sizeof since, ",\"since_full\":%ld", c->since_full);
+    if (c->counts_unread)
+        snprintf(unread, sizeof unread, ",\"unreadable\":%llu,\"sealing\":%llu",
+                 (unsigned long long)c->unreadable, (unsigned long long)c->sealing);
     const int n = snprintf(buf, sizeof buf,
             "{\"id\":%ld,\"kind\":\"%s\",\"created_ns\":%lld,%s,\"entries\":%llu,"
             "\"raced\":%llu,\"unstable\":%llu,\"vanished\":%llu,\"provisional\":%s,\"excluded\":%llu,"
-            "\"prefilter\":{\"used\":%s,\"reference\":\"%s\",\"trusted\":%llu,\"racy\":%llu,\"full_reason\":\"%s\"}%s%s%s}\n",
+            "\"prefilter\":{\"used\":%s,\"reference\":\"%s\",\"trusted\":%llu,\"racy\":%llu,\"full_reason\":\"%s\"}%s%s%s%s}\n",
             c->id, c->kind, (long long)c->created_ns, scope, (unsigned long long)c->entries,
             (unsigned long long)c->raced, (unsigned long long)c->unstable, (unsigned long long)c->vanished,
             c->provisional ? "true" : "false", (unsigned long long)c->excluded,
             c->full ? "false" : "true", state_reference(c), (unsigned long long)c->trusted,
             (unsigned long long)c->racy, why, since, c->kept ? ",\"kept\":true" : "",
-            c->watch ? ",\"watch\":true" : "");
+            c->watch ? ",\"watch\":true" : "", unread);
     if (n < 0 || (size_t)n >= sizeof buf) {
         belay_err_set(BELAY_ERR_RANGE, 0, "%s: too large", shown);
         return -1;
@@ -930,6 +939,9 @@ int state_capture(struct state *st, const struct capture_req *req, struct checkp
     c.unstable = s.unstable;
     c.vanished = s.vanished;
     c.excluded = s.excluded;
+    c.counts_unread = true;
+    c.unreadable = s.unreadable;
+    c.sealing = s.sealing;
     c.provisional = s.raced || s.unstable || s.vanished;
     c.has_since_full = true;
     c.since_full = c.full ? 0 : since_full + 1;

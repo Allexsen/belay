@@ -1,7 +1,8 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "$id": "belay/checkpoint.v2",
+  "$id": "belay/checkpoint.v3",
   "title": "A checkpoint, as `belay check --json`, `belay mark --json` and `belay log --json` print it",
+  "description": "A checkpoint made before checkpoint.v3 stays as stored: `belay log --json` prints it as the checkpoint.v2 record it printed before, without `unreadable`, `sealing`, `basis`, `carried` and `runtime_sha256` (not recorded is not zero), and this schema does not describe that line.",
   "type": "object",
   "additionalProperties": false,
   "required": [
@@ -12,13 +13,18 @@
     "raced",
     "unstable",
     "vanished",
+    "unreadable",
+    "sealing",
     "provisional",
     "excluded",
     "excluded_paths",
     "prefilter",
+    "basis",
+    "carried",
     "source",
     "stored",
-    "kept"
+    "kept",
+    "runtime_sha256"
   ],
   "properties": {
     "id": {
@@ -71,6 +77,16 @@
     "vanished": {
       "type": "integer",
       "minimum": 0
+    },
+    "unreadable": {
+      "type": "integer",
+      "minimum": 0,
+      "description": "the manifest trailer's `unreadable`: entries whose content or listing could not be read"
+    },
+    "sealing": {
+      "type": "integer",
+      "minimum": 0,
+      "description": "directories nothing below which was looked at: those carrying `unreadable` or `mount`"
     },
     "provisional": {
       "type": "boolean"
@@ -151,6 +167,18 @@
         }
       }
     },
+    "basis": {
+      "enum": [
+        "walk",
+        "events"
+      ],
+      "description": "how the capture knew what to read; always `walk` in this release"
+    },
+    "carried": {
+      "type": "integer",
+      "minimum": 0,
+      "description": "entries taken from the previous manifest without a stat; 0 for a walk"
+    },
     "source": {
       "description": "the manifest's source (manifest v3): null for a scope walked where belay ran, or the container a host-reader capture read",
       "oneOf": [
@@ -186,6 +214,18 @@
     },
     "kept": {
       "type": "boolean"
+    },
+    "runtime_sha256": {
+      "oneOf": [
+        {
+          "type": "null"
+        },
+        {
+          "type": "string",
+          "pattern": "^[0-9a-f]{64}$"
+        }
+      ],
+      "description": "the sha256 of the checkpoint's runtime record, or null when it has none; always null in this release"
     }
   },
   "allOf": [
