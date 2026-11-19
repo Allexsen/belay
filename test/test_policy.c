@@ -868,6 +868,99 @@ TEST(no_delete_reads_existence_only) {
     HAS("protected_path_unverifiable", "grader/key", ",\"rule\":\"grader/**\",\"reasons\":[\"unverified\",\"unreadable\"],");
 }
 
+/* PV2-8 exempts a path only where every rule matching it has no_delete as
+ * its only mode. A rule with another mode beside no_delete, or an
+ * expected_sha256, and a path another such rule matches too, in either
+ * order, are judged as before PV2-8: the key was unreadable at reset, so
+ * whatever came of it cannot be verified (PS-M5, PV2-5). */
+TEST(no_delete_beside_anything_else_reads_what_it_read) {
+    if (geteuid() == 0) SKIP("root reads anything");
+#define SHA "\"expected_sha256\":\"dc51b8c96c2d745df3bd5590d990230a482fd247123599548e0632fdbf97fc22\""
+    static const struct { const char *name, *spec; bool sha; } S[] = {
+        { "no_delete and no_create in one rule",
+          "{\"belay_protect\":2,\"protect\":[{\"path\":\"grader/**\",\"mode\":[\"no_delete\",\"no_create\"]}]}", false },
+        { "no_delete with expected_sha256",
+          "{\"belay_protect\":2,\"protect\":[{\"path\":\"grader/key\",\"mode\":[\"no_delete\"]," SHA "}]}", true },
+        { "a no_delete rule, then a no_create rule",
+          "{\"belay_protect\":2,\"protect\":[{\"path\":\"grader/**\",\"mode\":[\"no_delete\"]},"
+          "{\"path\":\"grader/key\",\"mode\":[\"no_create\"]}]}", false },
+        { "a no_create rule, then a no_delete rule",
+          "{\"belay_protect\":2,\"protect\":[{\"path\":\"grader/key\",\"mode\":[\"no_create\"]},"
+          "{\"path\":\"grader/**\",\"mode\":[\"no_delete\"]}]}", false },
+        { "a no_delete rule, then one with expected_sha256",
+          "{\"belay_protect\":2,\"protect\":[{\"path\":\"grader/**\",\"mode\":[\"no_delete\"]},"
+          "{\"path\":\"grader/key\",\"mode\":[\"no_delete\"]," SHA "}]}", true },
+    };
+#undef SHA
+    static const struct { const char *name, *does; bool removed; } E[] = {
+        { "rewritten readable", "chmod 644 grader/key && printf 'another key\\n' > grader/key", false },
+        { "removed", "rm -f grader/key", true },
+        { "replaced by a directory", "rm -f grader/key && mkdir grader/key", false },
+    };
+    for (size_t i = 0; i < sizeof S / sizeof S[0]; i++)
+        for (size_t j = 0; j < sizeof E / sizeof E[0]; j++) {
+            fresh(S[i].spec);
+            sh("mkdir -p grader && printf 'k\\n' > grader/key && chmod 000 grader/key");
+            REQUIRE_MSG(export_(true) == EXIT_DONE, "%s", g_err);
+            sh("%s", E[j].does);
+            const int rc = verify_(true);
+            const char *r = record("protected_path_unverifiable", "grader/key");
+            if (rc != EXIT_CHANGES || r == NULL || strstr(r, ",\"reasons\":[\"unverified\",\"unreadable\"],") == NULL)
+                BELAY_FAIL("%s, %s: exit %d, %s in:\n%s", S[i].name, E[j].name, rc,
+                           r != NULL ? r : "no protected_path_unverifiable", g_out);
+            if (E[j].removed && record("protected_path_deleted", "grader/key") == NULL)
+                BELAY_FAIL("%s, removed: no protected_path_deleted in:\n%s", S[i].name, g_out);
+            if (S[i].sha && record("protected_hash_mismatch", "grader/key") == NULL)
+                BELAY_FAIL("%s, %s: no protected_hash_mismatch in:\n%s", S[i].name, E[j].name, g_out);
+        }
+}
+
+/* PV2-9: under no_delete alone, a directory nothing was seen below is still
+ * unverifiable -- what the rule protects below it has no entry, so a file
+ * deleted there leaves no record. Sealed at reset and opened after, or
+ * sealed on both sides. */
+TEST(under_no_delete_a_directory_nothing_was_seen_below_is_unverifiable) {
+    if (geteuid() == 0) SKIP("root reads anything");
+    static const char ONLY[] = "{\"belay_protect\":2,\"protect\":[{\"path\":\"grader/**\",\"mode\":[\"no_delete\"]}]}";
+    for (int closed_again = 0; closed_again < 2; closed_again++) {
+        fresh(ONLY);
+        sh("mkdir -p grader/sub && printf 'k\\n' > grader/sub/x && chmod 000 grader/sub");
+        REQUIRE_MSG(export_(true) == EXIT_DONE, "%s", g_err);
+        sh("chmod 755 grader/sub && rm grader/sub/x%s", closed_again ? " && chmod 000 grader/sub" : "");
+        const int rc = verify_(true);
+        sh("chmod 755 grader/sub");
+        if (rc != EXIT_CHANGES) BELAY_FAIL("%s: exit %d in:\n%s", closed_again ? "sealed on both sides" : "sealed at reset", rc, g_out);
+        HAS("protected_path_unverifiable", "grader/sub", ",\"rule\":\"grader/**\",\"reasons\":[\"unreadable\"");
+    }
+    fresh(ONLY);                                /* a directory that was listed is no finding */
+    sh("mkdir -p grader/sub && printf 'k\\n' > grader/sub/x");
+    REQUIRE_MSG(export_(true) == EXIT_DONE, "%s", g_err);
+    sh("chmod 700 grader/sub && touch grader/sub/y");
+    ASSERT_EQ_INT(EXIT_DONE, verify_(true));
+    ASSERT_EQ_INT(0, count("protected_path_unverifiable"));
+}
+
+/* PV2-8 for a flag other than unreadable: a writer holds the protected file
+ * at verify, so its outcome is unknown (writer_open). It is there. */
+TEST(under_no_delete_a_file_a_writer_holds_is_there) {
+#ifndef __linux__
+    SKIP("no lease facility here");
+#else
+    fresh("{\"belay_protect\":2,\"protect\":[{\"path\":\"grader/**\",\"mode\":[\"no_delete\"]}]}");
+    sh("mkdir -p grader && printf 'k\\n' > grader/key");
+    REQUIRE_MSG(export_(true) == EXIT_DONE, "%s", g_err);
+    char p[600];
+    snprintf(p, sizeof p, "%s/grader/key", g_scope);
+    const int w = open(p, O_WRONLY);
+    REQUIRE(w >= 0);
+    const int rc = verify_(true);
+    close(w);
+    ASSERT_EQ_INT(EXIT_DONE, rc);
+    ASSERT_EQ_INT(0, count("protected_path_unverifiable"));
+    ASSERT_TRUE(strstr(g_out, ",\"unknown\":1,") != NULL);       /* the diff could not tell; the rule does not ask */
+#endif
+}
+
 /* Found by policy.v1's separate author: a side never looked at (E11,
  * not_captured) is neither held nor absent -- nothing is counted. */
 TEST(a_side_never_looked_at_is_not_counted) {
@@ -1126,6 +1219,9 @@ int main(void) {
     RUN(verify_to_a_checkpoint_that_left_a_protected_path_out_is_refused);
     RUN(an_unverifiable_entry_names_every_flag_it_carries);
     RUN(no_delete_reads_existence_only);
+    RUN(no_delete_beside_anything_else_reads_what_it_read);
+    RUN(under_no_delete_a_directory_nothing_was_seen_below_is_unverifiable);
+    RUN(under_no_delete_a_file_a_writer_holds_is_there);
     RUN(a_protected_file_modified_and_not_read_is_written_and_unverifiable);
     RUN(a_side_never_looked_at_is_not_counted);
     RUN(a_path_not_utf8_reads_as_the_receipt_writes_it);

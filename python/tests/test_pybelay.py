@@ -93,9 +93,12 @@ class Calls(Base):
             os.chmod(os.path.join(self.scope, "shadow"), 0o600)
             self.write("shadow", "longer now\n")
             os.chmod(os.path.join(self.scope, "shadow"), 0)
+            self.write("newfile", "n\n")                         # diff-fields O10: an added file not read
+            os.chmod(os.path.join(self.scope, "newfile"), 0)
             d = pybelay.diff(self.scope, 2)                       # diff-fields O9
             self.assertEqual([(r.path, r.outcome, r.content_not_read) for r in d.records],
-                             [("secret", "unknown", None), ("shadow", "modified", ("unreadable",))])
+                             [("newfile", "added", ("unreadable",)), ("secret", "unknown", None),
+                              ("shadow", "modified", ("unreadable",))])
         finally:
             os.chmod(os.path.join(self.scope, "secret"), 0o700)
 

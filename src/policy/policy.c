@@ -484,6 +484,7 @@ static void protected(struct state *s, const char *p, size_t n, const struct bel
     const bool unknown = strcmp(outcome, "unknown") == 0;
     int first = -1;
     bool read_before = false, read_after = false, wrote = false, deleted = false, created = false, touched = false;
+    bool only_no_delete = true;         /* every rule matching the path has no_delete as its only mode */
     for (size_t i = 0; i < sp->n_rules; i++) {
         const struct protect_rule *r = &sp->rules[i];
         const bool mb = b != NULL && protect_match(r->path, r->path_len, p, n);
@@ -491,9 +492,8 @@ static void protected(struct state *s, const char *p, size_t n, const struct bel
         const bool exact = r->has_sha256 && r->path_len == n && memcmp(r->path, p, n) == 0;
         if (!mb && !ma && !exact) continue;
         if (first == -1) first = (int)i;
-        /* no_delete reads existence only (protect-spec-v2 PV2-8): it reads
-         * no entry, on either side. */
-        if (r->modes & PROTECT_NO_WRITE) {
+        only_no_delete = only_no_delete && r->modes == PROTECT_NO_DELETE && !r->has_sha256;
+        if (r->modes & (PROTECT_NO_WRITE | PROTECT_NO_DELETE)) {
             read_before = read_before || mb;
             read_after = read_after || ma;
         }
@@ -563,8 +563,18 @@ static void protected(struct state *s, const char *p, size_t n, const struct bel
     /* PS-M5: what cannot be shown intact, on a side the rules read */
     const char *reasons[16];
     size_t nr = 0;
-    if (unknown && b != NULL && a != NULL && !read_before && !read_after) {
-        /* there on both sides, under no_delete alone: it exists (PV2-8) */
+    /* no_delete reads existence only (protect-spec-v2 PV2-8): where every
+     * rule matching the path has it as its only mode, what the path's
+     * entries carry is not asked, and the path cannot be verified only when
+     * the diff could not tell whether it is there -- it is on one side and
+     * its outcome is unknown (V4-S2). Any other matching rule, and the path
+     * is judged as PS-M5 says. So is a directory nothing was seen below
+     * (PV2-9): what the rule protects there has no entry to be missed. */
+    const bool sealed = (b != NULL && b->type == BELAY_T_DIR && (b->unreadable || b->is_mount)) ||
+                        (a != NULL && a->type == BELAY_T_DIR && (a->unreadable || a->is_mount));
+    const bool one_side = (b == NULL) != (a == NULL);
+    if (only_no_delete && !sealed && !(unknown && one_side)) {
+        /* it is there, or it is gone and the diff says which */
     } else if (unknown) {
         const struct jval *u = jget(&d->v, "unknown");
         for (size_t j = 0; u != NULL && u->t == J_ARR && j < u->n && nr < 16; j++)
