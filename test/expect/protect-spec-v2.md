@@ -19,6 +19,7 @@ it (author, 2026-11-05): one meaning of `no_write` in the code, and no spec that
 | PV2-4 | `protected_path_deleted`'s text is `{path}: protected by {rule}, removed`, for both modes. Its `rule` is the pattern of the first rule that matches the path and has `no_write` or `no_delete`. Its fields, level and place in the flags' order are as policy-v1 says; this row replaces that row's text and its source. `belay_policy` stays 1: no key changes. |
 | PV2-5 | PS-M5's "a side its modes read": `no_write` reads the before side for deletion too. V4-S2 already covers a one-sided `unknown` path. A path flagged at reset (`unreadable`, `unverified`) and then removed gives both `protected_path_deleted` and `protected_path_unverifiable`, as under `no_delete`. |
 | PV2-6 | The bundle format does not change. A bundle holds its spec's digest, not its meaning: a bundle exported with a version 1 spec can only be verified with that spec, which is refused (PV2-1), so it must be exported again. A bundle exported without a spec is unaffected. |
+| PV2-7 | PS-M5 is unchanged by the diff's `content_not_read` (diff-fields O9), and already covers it: a path a rule matches whose record is `modified` or `metadata_only` and whose entry, on a side the rule's modes read, is `unverified`, `unstable`, `unreadable` or a `mount` is `protected_path_unverifiable`, as well as whatever its fields prove (policy-v1 P-G2). |
 
 ## Example
 

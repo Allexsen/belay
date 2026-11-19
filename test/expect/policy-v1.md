@@ -106,3 +106,9 @@ With `--exit-code`: 1 when any record is a `violation`, else 0; signals never fa
 150, Q8). Without it, 0 whatever was found. 2, 3 and 4 as every command's (docs/cli.md): a spec or
 argument refused (2); a bundle or spec whose digest is not the one given, an exclusion over a
 protected path, a `--to` checkpoint that trusted files (3); a corrupt bundle, an I/O error (4).
+
+## Rows added
+
+| id | rule |
+|---|---|
+| P-G2 | A diff record's `content_not_read` (diff-fields O9; checkpoint-v3 G2-3) is read as an `unknown` reason is: the path cannot be shown intact. It needs no new kind, field or key, and `belay_policy` stays 1: O9 takes it from the entry's flags, and `protected_path_unverifiable` already reads those flags on each side the rule's modes read (PS-M5), whatever the outcome. So a protected file whose record is `modified` with `content_not_read` gives `protected_path_unverifiable` as well as whatever its fields prove (`protected_path_written` for a `no_write` rule). Its `reasons` stay the entry's flags, every one set, in the row's order: `unverified`, `unreadable` for a file that could not be read, where `content_not_read` is `["unreadable"]`. |
