@@ -194,3 +194,5 @@
 2026-11-05T16:08:44+04:00	policy-model: protect spec version 2 -- no_write forbids deleting, version 1 refused
 # Inode flags (test/expect/inode-flags.md): the code commit fails make policy-model; the model's commit, next, passes.
 2026-11-10T16:44:02+04:00	verify, receipt: inode flags are a privilege change only as inode-flags.md says
+# Manifest v5: a work-in-progress commit made before the generated spec was regenerated (gen-check fails); the next commit passes.
+2026-11-19T22:29:55+04:00	manifest v5: reader, writer, the walk by roots, sealing, the diff rules (work in progress)
