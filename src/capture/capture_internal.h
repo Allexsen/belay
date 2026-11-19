@@ -80,6 +80,7 @@ struct walk_ctx {
      * conditions of the entry being captured are set by visit() from its
      * directory's zone before the entry is read. */
     bool  *root_found;          /* per opts->roots: the walk met it */
+    struct entered *entered;    /* the mounts entered (V5-A5), and the mount table once read */
     int    cls;                 /* CLS_* */
     bool   closed;              /* a directory from the scope root down to it has no search bit for others */
     bool   plain;               /* its root is never sealed (a shell startup file) */
@@ -98,6 +99,17 @@ struct walk_ctx {
 /* What a file is by its root (V5-E4, V5-E5): no roots (a whole scope, as
  * before version 5), a content root, a metadata root. */
 enum { CLS_WHOLE, CLS_CONTENT, CLS_METADATA };
+
+/* The filesystems a capture with roots has entered at a mount point
+ * (manifest-v5-addendum V5-A5): each device once, with the mount root it
+ * was entered at. A machine has a handful; past ENTERED_MAX no more are. */
+#define ENTERED_MAX 64
+struct entered {
+    uint64_t dev[ENTERED_MAX], ino[ENTERED_MAX];
+    size_t n;
+    bool asked;                 /* the mount table was asked for */
+    char *table;                /* the platform's, malloc'd, or NULL */
+};
 
 /* The directory a listing is of, for what is recorded of its children. */
 struct zone {

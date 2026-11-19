@@ -83,3 +83,43 @@ int roots_check(const struct belay_manifest_opts *o) {
         }
     return 0;
 }
+
+/*
+ *  manifest-v5 V5-E6 with its addendum V5-A5, from the mount table's text. A
+ *  line of /proc/self/mountinfo (proc(5)):
+ *      36 35 98:0 /mnt1 /mnt2 rw,noatime master:1 - ext3 /dev/root rw,errors=continue
+ *      id parent dev root  point  options  optional... - type source super-options
+ *  The mount is entered only when its `root` is "/" -- the whole filesystem,
+ *  not a directory or a file of it bound somewhere -- and its type, the
+ *  first field after the " - " separator, is on the list. Fields are
+ *  separated by single spaces and escape a space as \040, so the fourth
+ *  field is the root whatever the paths hold.
+ */
+bool fsops_mount_whole_listed(const char *mountinfo, uint64_t id) {
+    static const char *const ENTERED[] = { "ext2", "ext3", "ext4", "xfs", "btrfs", "vfat", "f2fs", "zfs" };
+    for (const char *l = mountinfo; l != NULL && *l != '\0'; ) {
+        const char *nl = strchr(l, '\n');
+        const size_t ll = nl != NULL ? (size_t)(nl - l) : strlen(l);
+        uint64_t got = 0;
+        size_t i = 0;
+        while (i < ll && l[i] >= '0' && l[i] <= '9') got = got * 10 + (uint64_t)(l[i++] - '0');
+        if (i > 0 && i < ll && l[i] == ' ' && got == id) {
+            const char *f = l;                  /* to the fourth field */
+            for (int k = 0; k < 3 && f != NULL; k++) {
+                f = memchr(f, ' ', ll - (size_t)(f - l));
+                if (f != NULL) f++;
+            }
+            if (f == NULL || (size_t)(f - l) + 2 > ll || f[0] != '/' || f[1] != ' ') return false;
+            const char *sep = NULL;             /* " - " after the optional fields */
+            for (const char *q = f; (size_t)(q - l) + 3 <= ll; q++)
+                if (q[0] == ' ' && q[1] == '-' && q[2] == ' ') { sep = q + 3; break; }
+            if (sep == NULL) return false;
+            const size_t tl = strcspn(sep, " \n");
+            for (size_t t = 0; t < sizeof ENTERED / sizeof ENTERED[0]; t++)
+                if (strlen(ENTERED[t]) == tl && (size_t)(sep - l) + tl <= ll && memcmp(ENTERED[t], sep, tl) == 0) return true;
+            return false;
+        }
+        l = nl != NULL ? nl + 1 : NULL;
+    }
+    return false;
+}

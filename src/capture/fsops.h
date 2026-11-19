@@ -70,11 +70,13 @@ struct fsops {
     /* Scope properties, asked once per walk. */
     bool (*is_overlay)(void *ctx, int root_fd);
 
-    /* Whether the mount root `name` in `dfd` is of a filesystem a capture
-     * with roots enters (manifest-v5 V5-E6: ext2, ext3, ext4, xfs, btrfs,
-     * vfat, f2fs, zfs), asked without following a link or triggering an
-     * automount. False when the platform cannot tell. */
-    bool (*mount_enterable)(void *ctx, int dfd, const char *name);
+    /* manifest-v5-addendum V5-A5. mount_id: the id of the mount the entry
+     * `name` in `dfd` is the root of, as the mount table names it, asked
+     * without following a link or triggering an automount: 0, or -1 where
+     * the platform has none. mountinfo: the mount table as Linux's
+     * /proc/self/mountinfo, malloc'd, or NULL; read once for a capture. */
+    int   (*mount_id)(void *ctx, int dfd, const char *name, uint64_t *id);
+    char *(*mountinfo)(void *ctx);
 
     /* Whether, at this instant, some process has the regular file open for
      * writing or mapped shared-writable: 1 yes, 0 no, -1 cannot tell (no
@@ -106,6 +108,15 @@ struct fsops {
      * sync before a manifest's rename uses it (decided 2026-10-31). */
     int (*barrier)(void *ctx, int fd);
 };
+
+/* Whether mount `id` of the table `mountinfo` is one a capture with roots
+ * may enter (V5-E6, V5-A5): of a listed filesystem type, and the mount of
+ * the whole filesystem (its root field is "/"). False for a NULL table. */
+bool fsops_mount_whole_listed(const char *mountinfo, uint64_t id);
+
+/* belay_system_roots (belay/manifest.h) through a given platform table. */
+struct belay_system_roots;
+int sysroots_resolve(const struct fsops *ops, const char *scope, struct belay_system_roots *out);
 
 /* The table for this platform. */
 const struct fsops *fsops_default(void);

@@ -19,6 +19,7 @@
 #include <stdbool.h>
 #include <linux/fs.h>                   /* FS_IOC_GETFLAGS */
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 #include <sys/ioctl.h>
 #include <sys/sysmacros.h>
@@ -106,28 +107,46 @@ static int linux_inode_flags(void *ctx, int fd, const struct stat *st, uint64_t 
     return 0;
 }
 
-/* manifest-v5 V5-E6, by <linux/magic.h>: ext2, ext3 and ext4 share one
- * number; zfs's is OpenZFS's ZFS_SUPER_MAGIC. O_PATH: the open triggers no
- * automount and needs no permission on the directory. */
-static bool linux_mount_enterable(void *ctx, int dfd, const char *name) {
+/* manifest-v5-addendum V5-A5: which mount an entry is the root of, by the
+ * id the mount table gives it (statx, Linux 5.8). No open, no automount, no
+ * link followed. */
+static int linux_mount_id(void *ctx, int dfd, const char *name, uint64_t *id) {
     (void)ctx;
-    static const unsigned long ENTERED[] = {
-        0xEF53,         /* ext2, ext3, ext4 */
-        0x58465342,     /* xfs */
-        0x9123683E,     /* btrfs */
-        0x4d44,         /* vfat (msdos) */
-        0xF2F52010,     /* f2fs */
-        0x2fc12fc1,     /* zfs */
-    };
-    const int fd = openat(dfd, name, O_PATH | O_NOFOLLOW | O_CLOEXEC);
-    if (fd == -1) return false;
-    struct statfs sfs;
-    bool yes = false;
-    if (fstatfs(fd, &sfs) == 0)
-        for (size_t i = 0; i < sizeof ENTERED / sizeof ENTERED[0]; i++)
-            if ((unsigned long)sfs.f_type == ENTERED[i]) yes = true;
+#if defined(STATX_MNT_ID)
+    struct statx sx;
+    const int flags = AT_SYMLINK_NOFOLLOW | AT_NO_AUTOMOUNT | (name[0] == '\0' ? AT_EMPTY_PATH : 0);
+    if (statx(dfd, name, flags, STATX_MNT_ID, &sx) != 0 || !(sx.stx_mask & STATX_MNT_ID)) return -1;
+    *id = sx.stx_mnt_id;
+    return 0;
+#else
+    (void)dfd; (void)name; (void)id;
+    return -1;
+#endif
+}
+
+/* The mount table, whole (a pseudo-file: read until it ends). */
+static char *linux_mountinfo(void *ctx) {
+    (void)ctx;
+    const int fd = open("/proc/self/mountinfo", O_RDONLY | O_CLOEXEC);
+    if (fd == -1) return NULL;
+    size_t cap = 1u << 16, n = 0;
+    char *buf = malloc(cap);
+    for (;;) {
+        if (buf == NULL) break;
+        if (n + 1 == cap) {
+            char *g = realloc(buf, cap *= 2);
+            if (g == NULL) { free(buf); buf = NULL; break; }
+            buf = g;
+        }
+        const ssize_t r = read(fd, buf + n, cap - n - 1);
+        if (r < 0 && errno == EINTR) continue;
+        if (r < 0) { free(buf); buf = NULL; break; }
+        if (r == 0) break;
+        n += (size_t)r;
+    }
     close(fd);
-    return yes;
+    if (buf != NULL) buf[n] = '\0';
+    return buf;
 }
 
 static bool linux_is_overlay(void *ctx, int root_fd) {
@@ -243,7 +262,8 @@ static const struct fsops linux_ops = {
     .xattr_get = linux_xattr_get,
     .inode_flags = linux_inode_flags,
     .is_overlay = linux_is_overlay,
-    .mount_enterable = linux_mount_enterable,
+    .mount_id = linux_mount_id,
+    .mountinfo = linux_mountinfo,
     .writer_present = linux_writer_present,
     .probe_begin = linux_probe_begin,
     .probe_end = linux_probe_end,

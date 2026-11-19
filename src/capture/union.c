@@ -672,9 +672,13 @@ static int u_inode_flags(void *ctx, int fd, const struct stat *st, uint64_t *out
 
 /* A container's layers hold no mounts of its own; what the engine mounts
  * into it is read as the container sees it or not at all (host-reader.md). */
-static bool u_mount_enterable(void *ctx, int dfd, const char *name) {
-    (void)ctx; (void)dfd; (void)name;
-    return false;
+static int u_mount_id(void *ctx, int dfd, const char *name, uint64_t *id) {
+    (void)ctx; (void)dfd; (void)name; (void)id;
+    return -1;
+}
+static char *u_mountinfo(void *ctx) {
+    (void)ctx;
+    return NULL;
 }
 
 static bool u_is_overlay(void *ctx, int root_fd) {
@@ -738,7 +742,7 @@ struct union_fs *union_new(const struct fsops *base, const int *layer_fds, size_
         .readlinkat = u_readlinkat, .read = u_read, .dir_open = u_dir_open, .dir_next = u_dir_next,
         .dir_close = u_dir_close, .xattr_source_open = u_xattr_source_open,
         .xattr_source_close = u_xattr_source_close, .xattr_list = u_xattr_list, .xattr_get = u_xattr_get,
-        .inode_flags = u_inode_flags, .is_overlay = u_is_overlay, .mount_enterable = u_mount_enterable, .writer_present = u_writer_present,
+        .inode_flags = u_inode_flags, .is_overlay = u_is_overlay, .mount_id = u_mount_id, .mountinfo = u_mountinfo, .writer_present = u_writer_present,
         .probe_begin = u_probe_begin, .probe_end = u_probe_end, .clock = u_clock, .tmpfile_in = u_tmpfile_in,
         .fsync = u_fsync, .barrier = u_barrier,
     };
