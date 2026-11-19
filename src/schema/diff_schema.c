@@ -221,4 +221,8 @@ const struct line_field_def DIFF_TRAILER_FIELDS[DT_COUNT] = {
         "The first manifest's `unguarded`: files hashed with no answer from the writer probe. `0` "
         "before manifest v4." },
     [DT_AFTER_UNGUARDED]    = { "after_unguarded", NULL, "int", "The second manifest's `unguarded`." },
+    [DT_BEFORE_SEALING]     = { "before_sealing", NULL, "int",
+        "The first manifest's directories carrying `unreadable` or `mount`, counted from its "
+        "entries: nothing below them was looked at (test/expect/diff-fields.md, \"The trailer\")." },
+    [DT_AFTER_SEALING]      = { "after_sealing", NULL, "int", "The second manifest's, likewise." },
 };

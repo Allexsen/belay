@@ -373,6 +373,10 @@ static int record(const struct jval *r, struct ctx *x, const struct receipt_opts
     } else if (strcmp(outcome, "unknown") == 0) {
         sbf(&b, "   unknown: ");
         list(&b, jget(r, "unknown"));
+        /* A directory belay could not list or did not enter is this one line,
+         * whatever changed below it (checkpoint-v3, G3-1). */
+        if (is_dir && (has(jget(r, "unknown"), "unreadable") || has(jget(r, "unknown"), "mount")))
+            sbf(&b, ", nothing below it was seen");
     } else if (strcmp(outcome, "type_changed") == 0) {
         sbf(&b, "   ");
         escs(&b, jget(r, "type_before"));
@@ -653,6 +657,10 @@ int receipt_render(FILE *diff, FILE *out, const struct receipt_opts *o) {
     if (ug[0] > 0 || ug[1] > 0)
         fprintf(out, "  hashed with no check for a concurrent writer: %lld before, %lld after\n",
                 (long long)(ug[0] > 0 ? ug[0] : 0), (long long)(ug[1] > 0 ? ug[1] : 0));
+    /* One line for where the after side was not looked at (G3-2). */
+    const int64_t sealing = jint(&trailer, "after_sealing", 0);
+    if (sealing > 0)
+        fprintf(out, "  nothing seen below %lld director%s\n", (long long)sealing, sealing == 1 ? "y" : "ies");
     const struct { const char *title; struct lines *l; } SEC[] = { { "events", &ev }, { "privilege", &x.priv } };
     for (size_t s = 0; s < 2; s++) {
         if (SEC[s].l->n == 0) continue;

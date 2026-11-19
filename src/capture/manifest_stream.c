@@ -79,6 +79,7 @@ int stream_entry(struct stream *s, const struct belay_entry *e) {
     if (e->is_mount)   s->n_mounts++;
     if (e->raced)    s->n_raced++;
     if (e->writer_open) s->n_writer_open++;
+    if (e->type == BELAY_T_DIR && (e->unreadable || e->is_mount)) s->n_sealing++;
     return 0;
 }
 

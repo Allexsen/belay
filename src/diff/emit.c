@@ -297,10 +297,15 @@ int emit_trailer(struct emitter *em, const struct diff_inputs *in) {
            in->before_sha256, DIFF_TRAILER_FIELDS[DT_AFTER_SHA256].name, in->after_sha256) == -1)
         return -1;
     /* Manifest v4 (V4-D5): after every key the trailer had; not in provisional (V4-D6). */
-    if (ap(&b, ",\"%s\":%zu,\"%s\":%zu,\"%s\":%zu,\"%s\":%zu}", DIFF_TRAILER_FIELDS[DT_BEFORE_WRITER_OPEN].name,
+    if (ap(&b, ",\"%s\":%zu,\"%s\":%zu,\"%s\":%zu,\"%s\":%zu", DIFF_TRAILER_FIELDS[DT_BEFORE_WRITER_OPEN].name,
            in->before->writer_open, DIFF_TRAILER_FIELDS[DT_AFTER_WRITER_OPEN].name, in->after->writer_open,
            DIFF_TRAILER_FIELDS[DT_BEFORE_UNGUARDED].name, in->before->unguarded,
            DIFF_TRAILER_FIELDS[DT_AFTER_UNGUARDED].name, in->after->unguarded) == -1)
+        return -1;
+    /* Last (diff-fields.md, "The trailer", G3-2): each side's directories
+     * nothing below which was looked at. */
+    if (ap(&b, ",\"%s\":%zu,\"%s\":%zu}", DIFF_TRAILER_FIELDS[DT_BEFORE_SEALING].name, in->before->sealing,
+           DIFF_TRAILER_FIELDS[DT_AFTER_SEALING].name, in->after->sealing) == -1)
         return -1;
     return put_line(em, &b);
 }

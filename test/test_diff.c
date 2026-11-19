@@ -293,6 +293,38 @@ TEST(a_mounted_file_is_unknown_for_mount_not_unverified) {
     ASSERT_TRUE(has("f", "\"unknown\":[\"unverified\",\"mount\"]}"));
 }
 
+/* G3-2 (diff-fields.md, "The trailer"): each side's directories nothing below
+ * which was looked at -- carrying `unreadable` or `mount` -- counted from its
+ * entries, last in the trailer. A file that could not be read, or a file that
+ * is a mount root, has nothing below it and is not counted. */
+TEST(the_trailer_counts_each_sides_sealed_directories) {
+    m_begin("before", "/s", 1000); ROOT();
+    E(.path = "f", .type = "reg", .size = 3, .unreadable = true);
+    E(.path = "m", .type = "dir", .mount = true, .dev = 2);
+    E(.path = "s", .type = "dir", .unreadable = true);
+    m_end();
+    m_begin("after", "/s", 1000); ROOT();
+    E(.path = "f", .type = "reg", .size = 3, .unreadable = true);
+    E(.path = "g", .type = "reg", .size = 3, .mount = true, .dev = 2);
+    E(.path = "m", .type = "dir", .mount = true, .dev = 2);
+    E(.path = "s", .type = "dir");
+    m_end();
+    REQUIRE(run() == 0);
+    const char *end = strstr(g_text, "{\"belay_diff_end\"");
+    REQUIRE(end != NULL);
+    ASSERT_TRUE(strstr(end, ",\"before_unguarded\":0,\"after_unguarded\":0,\"before_sealing\":2,\"after_sealing\":1}\n") != NULL);
+    /* none on either side: said as 0 */
+    m_begin("before", "/s", 1000); ROOT(); E(.path = "d", .type = "dir"); m_end();
+    m_begin("after", "/s", 1000); ROOT(); E(.path = "d", .type = "dir"); m_end();
+    REQUIRE(run() == 0);
+    ASSERT_TRUE(strstr(g_text, ",\"before_sealing\":0,\"after_sealing\":0}\n") != NULL);
+    /* a scope root that could not be listed is one */
+    m_begin("before", "/s", 1000); ROOT(); m_end();
+    m_begin("after", "/s", 1000); ROOT(.unreadable = true); m_end();
+    REQUIRE(run() == 0);
+    ASSERT_TRUE(strstr(g_text, ",\"before_sealing\":0,\"after_sealing\":1}\n") != NULL);
+}
+
 /* Decided F2: a tree that changed while it was walked makes the whole result
  * provisional (manifest-v1, obligations on a consumer), and only the trailers
  * say so for `vanished`, which leaves no record. */
@@ -1327,7 +1359,7 @@ TEST(a_marked_hash_is_in_no_value_and_each_side_has_its_counts) {
     ASSERT_TRUE(has("f", "\"unknown\":[\"writer_open\"]"));
     ASSERT_TRUE(has("f", "\"size\":3"));              /* the rest of V6 stands */
     ASSERT_TRUE(!has("f", "sha256"));
-    ASSERT_TRUE(strstr(g_text, "\"before_writer_open\":1,\"after_writer_open\":0,\"before_unguarded\":1,\"after_unguarded\":2}") != NULL);
+    ASSERT_TRUE(strstr(g_text, "\"before_writer_open\":1,\"after_writer_open\":0,\"before_unguarded\":1,\"after_unguarded\":2,\"before_sealing\":0,\"after_sealing\":0}") != NULL);
     ASSERT_TRUE(strstr(g_text, "\"provisional\":false") != NULL);
 }
 
@@ -1549,6 +1581,7 @@ int main(void) {
     RUN(unknown_attributes_never_read_as_unchanged);
     RUN(absence_below_an_incomplete_or_sealed_directory_is_unknown);
     RUN(a_manifest_with_an_orphan_is_refused_with_no_output);
+    RUN(the_trailer_counts_each_sides_sealed_directories);
     RUN(a_tree_that_changed_while_walked_makes_the_diff_provisional);
     RUN(the_output_is_never_an_input_however_spelled);
     RUN(the_trailer_names_both_inputs_by_their_digest);

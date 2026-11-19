@@ -196,6 +196,7 @@ static int parse_trailer(struct belay_manifest_reader *r, const struct obj *o) {
     r->trailer.unstable   = (size_t)v[TR_UNSTABLE];
     r->trailer.mounts     = (size_t)v[TR_MOUNTS];
     r->trailer.raced      = (size_t)v[TR_RACED];
+    r->trailer.sealing    = r->st.n_sealing;      /* counted, not read: no trailer key holds it */
     return 0;
 }
 

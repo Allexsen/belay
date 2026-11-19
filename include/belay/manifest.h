@@ -253,6 +253,10 @@ struct belay_manifest_stats {
     size_t writer_open;  /* entries flagged writer_open (v4; 0 before) */
     size_t unguarded;    /* files read and hashed with no answer from the writer
                             probe (v4; 0 before): test/expect/manifest-v4.md */
+    size_t sealing;      /* directories flagged unreadable or mount: nothing below
+                            them was looked at. Counted from the entries, by a
+                            capture and by a reader; no trailer key holds it
+                            (test/expect/checkpoint-v3.md, C3-3) */
     size_t store_failed;  /* capture only, 0 from a trailer: copies the content
                              store failed to keep; those entries are recorded
                              without `stored` */
