@@ -95,7 +95,7 @@ class Calls(Base):
             os.chmod(os.path.join(self.scope, "shadow"), 0)
             d = pybelay.diff(self.scope, 2)                       # diff-fields O9
             self.assertEqual([(r.path, r.outcome, r.content_not_read) for r in d.records],
-                             [("shadow", "modified", ("unreadable",))])
+                             [("secret", "unknown", None), ("shadow", "modified", ("unreadable",))])
         finally:
             os.chmod(os.path.join(self.scope, "secret"), 0o700)
 
