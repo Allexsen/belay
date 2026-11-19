@@ -8,6 +8,13 @@ name: release
 # at that commit, so the full test matrix (ci.yml) has already run there; this
 # workflow builds the shipped binaries and tests those.
 #
+# pybelay reaches PyPI from here too, and only from a published release: when
+# the draft is published by hand, `pypi` takes the release's wheels as they
+# are, checks them again and uploads them through PyPI's trusted publishing
+# (no token is stored). It runs in the `pypi` environment, whose required
+# reviewer approves every upload. `testpypi` is the same upload to
+# test.pypi.org of a release named by hand (Run workflow), for trials.
+#
 # Linux binaries are static (glibc, -static: no NSS or dlopen calls, so
 # nothing resolves at run time). macOS has no static linking; its binary links
 # only libSystem.
@@ -15,6 +22,13 @@ name: release
 on:
   push:
     tags: ['v*']
+  release:
+    types: [published]
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: 'A published release whose wheels go to test.pypi.org'
+        required: true
 
 permissions:
   contents: read
@@ -22,6 +36,7 @@ permissions:
 jobs:
   build:
     name: build ${{ matrix.target }}
+    if: github.event_name == 'push'
     runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: true
@@ -89,8 +104,8 @@ jobs:
   # carrying that target's binary of this release, taken from the release's
   # assets after their SHA256SUMS and provenance attestations are checked. The
   # key sets come from the linux-x86_64 binary (the formats are the release's,
-  # whatever the platform). Attached to the draft; never published to PyPI by
-  # this workflow (a release needs the author's OK).
+  # whatever the platform). Attached to the draft; `pypi` below uploads them
+  # once the release is published.
   wheels:
     name: pybelay wheels
     needs: draft
@@ -138,3 +153,59 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: gh release upload "$GITHUB_REF_NAME" wheels/*
+
+  # The wheels of a published release, to PyPI. Nothing is built here: the
+  # files are the release's, checked against WHEELS-SHA256SUMS and their
+  # provenance before they leave. An upload cannot be replaced, so this waits
+  # for the `pypi` environment's reviewer.
+  pypi:
+    name: pybelay to PyPI
+    if: github.event_name == 'release'
+    runs-on: ubuntu-24.04
+    environment:
+      name: pypi
+      url: https://pypi.org/project/pybelay/
+    permissions:
+      contents: read
+      id-token: write
+      attestations: read
+    steps:
+      - name: the release's wheels (WHEELS-SHA256SUMS, provenance)
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ github.event.release.tag_name }}
+        run: |
+          gh release download "$TAG" --repo "$GITHUB_REPOSITORY" -p '*.whl' -p WHEELS-SHA256SUMS -D wheels
+          (cd wheels && sha256sum -c WHEELS-SHA256SUMS && test "$(ls *.whl | wc -l)" = "$(wc -l < WHEELS-SHA256SUMS)")
+          for f in wheels/*.whl; do gh attestation verify "$f" --repo "$GITHUB_REPOSITORY"; done
+          rm wheels/WHEELS-SHA256SUMS
+      - uses: pypa/gh-action-pypi-publish@release/v1
+        with:
+          packages-dir: wheels
+
+  # The same, to test.pypi.org, for a release named by hand.
+  testpypi:
+    name: pybelay to TestPyPI
+    if: github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-24.04
+    environment:
+      name: testpypi
+      url: https://test.pypi.org/project/pybelay/
+    permissions:
+      contents: read
+      id-token: write
+      attestations: read
+    steps:
+      - name: the release's wheels (WHEELS-SHA256SUMS, provenance)
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ inputs.tag }}
+        run: |
+          gh release download "$TAG" --repo "$GITHUB_REPOSITORY" -p '*.whl' -p WHEELS-SHA256SUMS -D wheels
+          (cd wheels && sha256sum -c WHEELS-SHA256SUMS && test "$(ls *.whl | wc -l)" = "$(wc -l < WHEELS-SHA256SUMS)")
+          for f in wheels/*.whl; do gh attestation verify "$f" --repo "$GITHUB_REPOSITORY"; done
+          rm wheels/WHEELS-SHA256SUMS
+      - uses: pypa/gh-action-pypi-publish@release/v1
+        with:
+          packages-dir: wheels
+          repository-url: https://test.pypi.org/legacy/
