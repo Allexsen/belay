@@ -441,3 +441,8 @@ base64 as `scope_b64` or `manifest_b64` in place of `scope` or `manifest`. check
 `carried` (`0`), and `runtime_sha256`, `journal_seq` and `shadow_lines_sha256` (each `null`): the
 last five have one value in this release. A checkpoint made before it is printed by `log` as the
 checkpoint.v2 record it was, without the seven keys.
+
+Mixing versions over one state directory: a belay from before checkpoint.v3 reads state this one
+wrote and ignores the two counts. Its `prune --keep-id` rewrites the record of the checkpoint it
+keeps without them, and from then on `log` prints that checkpoint as it did before v3, with
+neither count on its line and none of the seven keys: no longer recorded, never zero.
