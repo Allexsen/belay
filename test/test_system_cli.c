@@ -6,7 +6,9 @@
  *  goes through `--system-root DIR`, the undocumented way to point the
  *  system scope at a directory, on a tree under the test's own temporary
  *  directory; belay's state is under it too (BELAY_STATE_DIR). `--system`
- *  itself appears only in commands that are refused before any capture.
+ *  itself appears only on commands that take no capture (log, manifest) or
+ *  have no scope without it (baseline export, verify), and are refused: were
+ *  a refusal to break, still nothing here would walk `/`.
  */
 #define _GNU_SOURCE
 
@@ -168,21 +170,21 @@ TEST(mark_diff_and_log_take_it) {
 /* WS-1's forms, and what this version does not take it on. */
 TEST(usage) {
     fresh();
-    ASSERT_EQ_INT(2, belay("check", "--system", "--scope", g_tree, NULL));
+    ASSERT_EQ_INT(2, belay("log", "--system", "--scope", g_tree, NULL));
     ASSERT_TRUE(strstr(g_err, "--system takes the place of --scope") != NULL);
     ASSERT_EQ_INT(2, belay("check", "--system-root", g_tree, "--scope", g_tree, NULL));
     ASSERT_EQ_INT(2, belay("manifest", "--system", "--scope", g_tree, "--id", "1", NULL));
     ASSERT_TRUE(strstr(g_err, "--system takes the place of --scope") != NULL);
     ASSERT_EQ_INT(2, belay("check", "--system-root", NULL));
-    ASSERT_EQ_INT(2, belay("check", "--system", "--system", NULL));
+    ASSERT_EQ_INT(2, belay("log", "--system", "--system", NULL));
     ASSERT_TRUE(strstr(g_err, "--system given twice") != NULL);
     ASSERT_EQ_INT(2, belay("exclude", "--system-root", g_tree, NULL));
     ASSERT_TRUE(strstr(g_err, "--system is check's, mark's, diff's, log's and manifest's") != NULL);
-    ASSERT_EQ_INT(2, belay("exclude", "--system", "--add", "x", NULL));
     /* a container's `/` (WS-1) is not read by roots yet: refused, loudly, before anything is read */
-    ASSERT_EQ_INT(3, belay("check", "--system", "--docker", "no-such-container", NULL));
+    ASSERT_EQ_INT(3, belay("log", "--system", "--docker", "no-such-container", NULL));
     ASSERT_TRUE(strstr(g_err, "--system with --docker") != NULL);
     ASSERT_EQ_INT(3, belay("manifest", "--system", "--docker", "no-such-container", "--id", "1", NULL));
+    ASSERT_EQ_INT(3, belay("check", "--system-root", g_tree, "--docker", "no-such-container", NULL));
     /* nothing was captured or written by any of these */
     char cmd[600];
     snprintf(cmd, sizeof cmd, "[ -z \"$(ls -A '%s')\" ]", g_state);
