@@ -16,6 +16,7 @@
 #include "belay/error.h"
 #include "belay/hash.h"
 #include "belay/store.h"
+#include "capture/outcome.h"
 
 #include <errno.h>
 #include <fcntl.h>
@@ -1645,10 +1646,36 @@ TEST(header_records_when_the_capture_ran) {
     ASSERT_TRUE(c >= lo && c <= hi);
 }
 
+/* checkpoint-v3 C3-3: what a capture counts as a directory nothing below
+ * which was looked at -- one carrying `unreadable` or `mount` -- from the
+ * entries as it emits them. A real mount needs privilege; the tally is the
+ * same function whatever set the flag. */
+TEST(a_capture_counts_the_directories_it_saw_nothing_below) {
+    struct belay_manifest_stats s = { 0 };
+    static struct belay_entry e;
+    static const struct { enum belay_entry_type t; bool unreadable, mount; } C[] = {
+        { BELAY_T_DIR, false, false }, { BELAY_T_DIR, true, false }, { BELAY_T_DIR, false, true },
+        { BELAY_T_DIR, true, true },   { BELAY_T_REG, true, false }, { BELAY_T_REG, false, true },
+        { BELAY_T_LNK, true, false },
+    };
+    for (size_t i = 0; i < sizeof C / sizeof C[0]; i++) {
+        memset(&e, 0, sizeof e);
+        e.type = C[i].t;
+        e.unreadable = C[i].unreadable;
+        e.is_mount = C[i].mount;
+        outcome_count(&s, &e);
+    }
+    ASSERT_EQ_INT(7, (int)s.entries);
+    ASSERT_EQ_INT(4, (int)s.unreadable);
+    ASSERT_EQ_INT(3, (int)s.mounts);
+    ASSERT_EQ_INT(3, (int)s.sealing);           /* the three directories, each once */
+}
+
 int main(void) {
     fx_init();
 
     RUN(records_regular_files_with_hashes);
+    RUN(a_capture_counts_the_directories_it_saw_nothing_below);
     RUN(entries_are_sorted_bytewise);
     RUN(symlinks_recorded_not_followed);
     RUN(dangling_symlink_is_recorded);
