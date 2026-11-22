@@ -320,7 +320,10 @@ TEST(a_first_ssh_directory_in_a_home_is_added) {
     m_write("after");
     REQUIRE(run() == 0);
     IS("{\"path\":\"home/u/.ssh\",\"outcome\":\"added\",\"type\":\"dir\"}", rec("home/u/.ssh"));
-    IS("{\"path\":\"home/u/.ssh/authorized_keys\",\"outcome\":\"added\",\"type\":\"reg\"}", rec("home/u/.ssh/authorized_keys"));
+    /* The fixture's file is sealed, as a capture made before sshkeys claimed it wrote it: sealed against
+     * the claim, so the record says it could not be interpreted (system-interpreters SI-2). The outcome stands. */
+    IS("{\"path\":\"home/u/.ssh/authorized_keys\",\"outcome\":\"added\",\"type\":\"reg\","
+       "\"findings\":[{\"kind\":\"could_not_interpret\",\"text\":\"could not interpret\"}]}", rec("home/u/.ssh/authorized_keys"));
     /* V5-D6 */
     ASSERT_TRUE(strstr(first_line(), ",\"roots_differ\":true}") != NULL);
     ASSERT_TRUE(strstr(last_line(), "\"added\":2,") != NULL && strstr(last_line(), "\"unknown\":0,") != NULL);
