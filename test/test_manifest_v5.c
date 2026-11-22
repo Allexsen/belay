@@ -708,7 +708,9 @@ TEST(a_file_others_cannot_read_is_sealed) {
     /* any directory above it: root/open is 755 and still inside root */
     REQUIRE(ent("root/open/deep") != NULL);
     ASSERT_TRUE(ent("root/open/deep")->sealed);
-    ASSERT_TRUE(ent("home/u/.ssh/authorized_keys")->sealed);
+    /* the exception: a file an interpreter claims to keep (sshkeys: authorized_keys,
+     * mode 600 under a 700 .ssh) is ordinary content, hashed plainly */
+    ASSERT_TRUE(!ent("home/u/.ssh/authorized_keys")->sealed);
     /* readable by others, under directories they can search: plain */
     sha_hex("x\n", 2, want);
     ASSERT_TRUE(!ent("etc/sub/x")->sealed);
@@ -720,7 +722,7 @@ TEST(a_file_others_cannot_read_is_sealed) {
     ASSERT_EQ_STR(want, ent("root/.bashrc")->sha256_hex);
     /* not under a metadata root: a setuid file there is hashed plainly whatever its mode */
     ASSERT_TRUE(!ent("usr/bin/su")->sealed);
-    ASSERT_EQ_INT(4, (int)st.sealed);
+    ASSERT_EQ_INT(3, (int)st.sealed);
     /* the key is never rewritten: a second capture seals to the same hashes */
     char first[65];
     snprintf(first, sizeof first, "%s", ent("etc/shadow")->sha256_hex);
@@ -835,7 +837,8 @@ TEST(mark_trusts_by_class_and_by_key) {
     unlink(g_key);
     REQUIRE(capture_roots(g_m2, first, &st) == 0);
     REQUIRE(st.prefilter);
-    ASSERT_EQ_INT((int)all - 4, (int)st.trusted);   /* shadow, root/secret, root/open/deep, authorized_keys were read */
+    ASSERT_EQ_INT((int)all - 3, (int)st.trusted);   /* shadow, root/secret, root/open/deep were read; authorized_keys,
+                                                       claimed and so never sealed, is trusted as any plain file */
     uint8_t key2[32];
     REQUIRE(read_key(key2));
     ASSERT_TRUE(memcmp(key, key2, 32) != 0);
@@ -1187,7 +1190,8 @@ TEST(a_scope_root_others_cannot_search_seals_everything_read) {
     struct belay_manifest_stats st;
     REQUIRE(capture_roots(g_m2, NULL, &st) == 0);
     REQUIRE(ent("etc/sub/x") != NULL && ent("etc/passwd") != NULL);
-    ASSERT_TRUE(ent("etc/sub/x")->sealed && ent("etc/passwd")->sealed);
+    ASSERT_TRUE(ent("etc/sub/x")->sealed);
+    ASSERT_TRUE(!ent("etc/passwd")->sealed);    /* claimed by accounts to keep: the exception stands here too */
     ASSERT_TRUE(!ent("home/u/.bashrc")->sealed && ent("usr/bin/tool")->meta);    /* the exceptions stand */
     chmod(g_tree, 0755);
 }

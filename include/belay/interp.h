@@ -199,6 +199,10 @@ int belay_lookup_want(struct belay_lookup *lk, const char *path, size_t len, boo
 /* The stored copies, for a looked-up entry (NULL: the diff has no store). */
 const struct belay_content *belay_lookup_content(const struct belay_lookup *lk);
 
+/* The per-line digest file of a side's capture (SA-6; belay_diff_opts):
+ * side 0 before, 1 after. NULL: none was given. */
+const char *belay_lookup_shadow_lines(const struct belay_lookup *lk, int side);
+
 /* Asks which package owns `path` (SI-5). 0; -1: out of memory. Past
  * BELAY_OWNER_ASKS the path is not asked, and its answer is "absent". */
 int belay_owner_ask(struct belay_lookup *lk, const char *path, size_t len);

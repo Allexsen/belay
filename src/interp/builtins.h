@@ -8,5 +8,7 @@
 #include "belay/interp.h"
 
 extern const struct belay_interp INTERP_TEXT, INTERP_PIP, INTERP_DPKG, INTERP_GIT;
+extern const struct belay_interp INTERP_ACCOUNTS, INTERP_SUDOERS, INTERP_CRON, INTERP_SYSTEMD, INTERP_SSHKEYS,
+                                 INTERP_TRUST;
 
 #endif

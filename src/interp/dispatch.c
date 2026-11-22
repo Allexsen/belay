@@ -44,6 +44,47 @@ static const struct rule rules[] = {
      * the store limit only: a long-lived reflog grows without bound. */
     { "*/.git/logs/HEAD",                 BELAY_INTERP_GIT,  BELAY_KEEP_STORE_BOUNDED },
     { "*/.git/logs/refs/*",               BELAY_INTERP_GIT,  BELAY_KEEP_STORE_BOUNDED },
+
+    /*
+     *  The system interpreters (test/expect/system-interpreters.md). What
+     *  they parse is kept whatever its mode: KEEP_STORE is the claim that
+     *  takes a file others cannot read out of the sealing rule (manifest-v5
+     *  V5-E5: sudoers is 0440, a crontab and authorized_keys 0600). What
+     *  they only name -- the scripts of the cron directories and of init.d,
+     *  the trust store's files -- is kept as any file is (small text), and
+     *  sealed like any file when others cannot read it. `*` spans `/`:
+     *  each interpreter checks the depth it means.
+     */
+    { "*/var/lib/apt/extended_states",    BELAY_INTERP_DPKG,     BELAY_KEEP_STORE },   /* SD-1 */
+
+    { "*/etc/passwd",                     BELAY_INTERP_ACCOUNTS, BELAY_KEEP_STORE },
+    { "*/etc/group",                      BELAY_INTERP_ACCOUNTS, BELAY_KEEP_STORE },
+
+    { "*/etc/sudoers",                    BELAY_INTERP_SUDOERS,  BELAY_KEEP_STORE },
+    { "*/etc/sudoers.d/*",                BELAY_INTERP_SUDOERS,  BELAY_KEEP_STORE },
+
+    { "*/etc/crontab",                    BELAY_INTERP_CRON,     BELAY_KEEP_STORE },
+    { "*/etc/cron.d/*",                   BELAY_INTERP_CRON,     BELAY_KEEP_STORE },
+    { "*/var/spool/cron/crontabs/*",      BELAY_INTERP_CRON,     BELAY_KEEP_STORE },
+    { "*/etc/cron.hourly/*",              BELAY_INTERP_CRON,     BELAY_KEEP_DEFAULT },
+    { "*/etc/cron.daily/*",               BELAY_INTERP_CRON,     BELAY_KEEP_DEFAULT },
+    { "*/etc/cron.weekly/*",              BELAY_INTERP_CRON,     BELAY_KEEP_DEFAULT },
+    { "*/etc/cron.monthly/*",             BELAY_INTERP_CRON,     BELAY_KEEP_DEFAULT },
+
+    /* The lib/systemd patterns match usr/lib/systemd too. */
+    { "*/etc/systemd/system/*",           BELAY_INTERP_SYSTEMD,  BELAY_KEEP_STORE },
+    { "*/etc/systemd/user/*",             BELAY_INTERP_SYSTEMD,  BELAY_KEEP_STORE },
+    { "*/lib/systemd/system/*",           BELAY_INTERP_SYSTEMD,  BELAY_KEEP_STORE },
+    { "*/lib/systemd/user/*",             BELAY_INTERP_SYSTEMD,  BELAY_KEEP_STORE },
+    { "*/.config/systemd/user/*",         BELAY_INTERP_SYSTEMD,  BELAY_KEEP_STORE },
+    { "*/etc/rc.local",                   BELAY_INTERP_SYSTEMD,  BELAY_KEEP_DEFAULT },
+    { "*/etc/init.d/*",                   BELAY_INTERP_SYSTEMD,  BELAY_KEEP_DEFAULT },
+
+    { "*/.ssh/authorized_keys",           BELAY_INTERP_SSHKEYS,  BELAY_KEEP_STORE },
+    { "*/.ssh/authorized_keys2",          BELAY_INTERP_SSHKEYS,  BELAY_KEEP_STORE },
+
+    { "*/etc/ssl/certs/*",                BELAY_INTERP_TRUST,    BELAY_KEEP_DEFAULT },
+    { "*/usr/local/share/ca-certificates/*", BELAY_INTERP_TRUST, BELAY_KEEP_DEFAULT },
 };
 
 /* diff-events E13. `config` will stand between trust and git. */

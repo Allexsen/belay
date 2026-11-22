@@ -7,6 +7,12 @@
 #define I_PIP  IN(BELAY_INTERP_PIP)
 #define I_DPKG IN(BELAY_INTERP_DPKG)
 #define I_GIT  IN(BELAY_INTERP_GIT)
+#define I_ACCOUNTS IN(BELAY_INTERP_ACCOUNTS)
+#define I_SUDOERS  IN(BELAY_INTERP_SUDOERS)
+#define I_CRON     IN(BELAY_INTERP_CRON)
+#define I_SYSTEMD  IN(BELAY_INTERP_SYSTEMD)
+#define I_SSHKEYS  IN(BELAY_INTERP_SSHKEYS)
+#define I_TRUST    IN(BELAY_INTERP_TRUST)
 #define S(n) { n, FT_STRING }
 #define N(n) { n, FT_INT }
 #define B(n) { n, FT_BOOL }
@@ -64,19 +70,31 @@ const struct finding_kind_def FINDING_KINDS[FK_COUNT] = {
         "not counted.",
         "reinstalled {name} {version} (files not counted)" },
     [FK_DPKG_INSTALLED] = { "dpkg_installed", I_DPKG, LV_EVENT,
-        { S("package"), S("arch"), S("version") }, "installed {package}:{arch} {version}",
-        "`installed` after and not before." },
+        { S("package"), S("arch"), S("version"), BO("auto") }, "installed {package}:{arch} {version}",
+        "`installed` after and not before."
+        " auto: `true` when the after-manifest's `var/lib/apt/extended_states` has a stanza for this "
+        "Package and Architecture with `Auto-Installed: 1`; `false` when it has none or it says `0`; "
+        "absent when that file is not in the scope or cannot be read (SD-1)." },
     [FK_DPKG_REMOVED] = { "dpkg_removed", I_DPKG, LV_EVENT, { S("package"), S("arch"), S("version") },
         "removed {package}:{arch} {version}", "`installed` before and not after." },
     [FK_DPKG_UPGRADED] = { "dpkg_upgraded", I_DPKG, LV_EVENT,
-        { S("package"), S("arch"), S("from"), S("to") }, "upgraded {package}:{arch} {from} -> {to}",
-        "`installed` on both sides; to higher (Debian version comparison)." },
+        { S("package"), S("arch"), S("from"), S("to"), BO("auto") }, "upgraded {package}:{arch} {from} -> {to}",
+        "`installed` on both sides; to higher (Debian version comparison)."
+        " auto: `true` when the after-manifest's `var/lib/apt/extended_states` has a stanza for this "
+        "Package and Architecture with `Auto-Installed: 1`; `false` when it has none or it says `0`; "
+        "absent when that file is not in the scope or cannot be read (SD-1)." },
     [FK_DPKG_DOWNGRADED] = { "dpkg_downgraded", I_DPKG, LV_EVENT,
-        { S("package"), S("arch"), S("from"), S("to") }, "downgraded {package}:{arch} {from} -> {to}",
-        "The same; to lower." },
+        { S("package"), S("arch"), S("from"), S("to"), BO("auto") }, "downgraded {package}:{arch} {from} -> {to}",
+        "The same; to lower."
+        " auto: `true` when the after-manifest's `var/lib/apt/extended_states` has a stanza for this "
+        "Package and Architecture with `Auto-Installed: 1`; `false` when it has none or it says `0`; "
+        "absent when that file is not in the scope or cannot be read (SD-1)." },
     [FK_DPKG_STATE_CHANGED] = { "dpkg_state_changed", I_DPKG, LV_EVENT,
-        { S("package"), S("arch"), S("from"), S("to") }, "{package}:{arch} {from} -> {to}",
-        "The Status field differs, no installed or removed event covering it." },
+        { S("package"), S("arch"), S("from"), S("to"), BO("auto") }, "{package}:{arch} {from} -> {to}",
+        "The Status field differs, no installed or removed event covering it."
+        " auto: `true` when the after-manifest's `var/lib/apt/extended_states` has a stanza for this "
+        "Package and Architecture with `Auto-Installed: 1`; `false` when it has none or it says `0`; "
+        "absent when that file is not in the scope or cannot be read (SD-1)." },
     [FK_GIT_HEAD_CHANGED] = { "git_head_changed", I_GIT, LV_PATH, { S("from"), S("to") },
         "HEAD {from} -> {to}", "`.git/HEAD`: the symbolic ref, or the commit it names." },
     [FK_GIT_REF_CREATED] = { "git_ref_created", I_GIT, LV_PATH, { S("ref"), S("to") },
@@ -133,6 +151,248 @@ const struct finding_kind_def FINDING_KINDS[FK_COUNT] = {
         "The branch names another commit, its reflog not saying how; from absent when its value "
         "before cannot be told (E12).",
         "{branch} now at {to}" },
+    [FK_USER_ADDED] = { "user_added", I_ACCOUNTS, LV_EVENT,
+        { S("name"), N("uid"), N("gid"), S("home"), S("shell"), NN("uid_min") },
+        "user {name} added: uid {uid}, home {home}, shell {shell}",
+        "A name in `passwd` after and not before (SA-1). uid_min: the `UID_MIN` of the "
+        "`etc/login.defs` beside that `passwd` in the after-manifest, when it has exactly one "
+        "`UID_MIN` line and its value is a decimal number; null otherwise -- not there, not kept, "
+        "or not one number (SA-2, SI-4)." },
+    [FK_USER_REMOVED] = { "user_removed", I_ACCOUNTS, LV_EVENT,
+        { S("name"), N("uid") },
+        "user {name} removed (uid {uid})",
+        "A name in `passwd` before and not after." },
+    [FK_USER_CHANGED] = { "user_changed", I_ACCOUNTS, LV_EVENT,
+        { S("name"), S("field"), S("from"), S("to") },
+        "user {name}: {field} {from} -> {to}",
+        "A name on both sides: one event per differing field of `uid`, `gid`, `gecos`, `home`, "
+        "`shell`, in that order, the values as written. A second name with uid 0 is no kind of "
+        "its own (SA-4)." },
+    [FK_USER_PASSWORD_IN_PASSWD] = { "user_password_in_passwd", I_ACCOUNTS, LV_EVENT,
+        { S("name") },
+        "user {name}: a password is set in passwd itself",
+        "The second field after is none of `x`, `*`, `!`, and not empty where the after-manifest "
+        "has an `etc/shadow` beside that `passwd`; and the name is new, or its second field "
+        "before was one of those or another value. The value is never copied." },
+    [FK_GROUP_ADDED] = { "group_added", I_ACCOUNTS, LV_EVENT,
+        { S("name"), N("gid") },
+        "group {name} added (gid {gid})",
+        "A name in `group` after and not before; or (SI-3) a name on both sides whose second or "
+        "third field differs: its line was removed and another added." },
+    [FK_GROUP_REMOVED] = { "group_removed", I_ACCOUNTS, LV_EVENT,
+        { S("name"), N("gid") },
+        "group {name} removed (gid {gid})",
+        "The reverse." },
+    [FK_GROUP_MEMBERS_CHANGED] = { "group_members_changed", I_ACCOUNTS, LV_EVENT,
+        { S("name"), L("added"), L("removed") },
+        "group {name}: added {added}; removed {removed}",
+        "A name on both sides whose fourth field differs as a set of names: those only after, "
+        "those only before, each sorted bytewise." },
+    [FK_PASSWORD_ENTRY_ADDED] = { "password_entry_added", I_ACCOUNTS, LV_EVENT,
+        { S("file"), S("name") },
+        "password database: entry added for {name}",
+        "A line of `shadow` or `gshadow` (`file`: its path), by its first field, whose keyed "
+        "digest is in the after capture's per-line digests and not in the before's (SA-6). Only "
+        "when both captures kept digests under one sealing key." },
+    [FK_PASSWORD_ENTRY_REMOVED] = { "password_entry_removed", I_ACCOUNTS, LV_EVENT,
+        { S("file"), S("name") },
+        "password database: entry removed for {name}",
+        "The reverse." },
+    [FK_PASSWORD_ENTRY_CHANGED] = { "password_entry_changed", I_ACCOUNTS, LV_EVENT,
+        { S("file"), S("name") },
+        "password database: entry changed for {name}",
+        "A first field on both sides whose line's keyed digest differs. No other part of the line "
+        "is known to belay." },
+    [FK_SUDO_RULE_ADDED] = { "sudo_rule_added", I_SUDOERS, LV_EVENT,
+        { S("path"), S("who"), S("hosts"), S("runas"), L("tags"), S("commands"), S("line") },
+        "sudo rule added in {path}: {line}",
+        "A logical line (SS-1) after and not before that is a user specification of the plain "
+        "form (SS-2): `who`, `hosts`, `commands` the text between its marks, trimmed; `runas` the "
+        "text inside `(...)`, empty when none is written; `tags` the `NAME:` words before the "
+        "first command, without the colon; `line` the logical line, its physical lines joined, "
+        "trimmed. Nothing is expanded, and nothing is said of what anyone may run (SS-5)." },
+    [FK_SUDO_RULE_REMOVED] = { "sudo_rule_removed", I_SUDOERS, LV_EVENT,
+        { S("path"), S("who"), S("hosts"), S("runas"), L("tags"), S("commands"), S("line") },
+        "sudo rule removed in {path}: {line}",
+        "The reverse." },
+    [FK_SUDO_LINE_ADDED] = { "sudo_line_added", I_SUDOERS, LV_EVENT,
+        { S("path"), S("line") },
+        "sudoers line added in {path}: {line}",
+        "Any other logical line that is not a comment or blank: an alias, `Defaults`, `@include`, "
+        "`@includedir`, `#include`, `#includedir`, and a user specification SS-2 does not cover." },
+    [FK_SUDO_LINE_REMOVED] = { "sudo_line_removed", I_SUDOERS, LV_EVENT,
+        { S("path"), S("line") },
+        "sudoers line removed in {path}: {line}",
+        "The reverse." },
+    [FK_SUDOERS_FILE_NOT_READ_BY_SUDO] = { "sudoers_file_not_read_by_sudo", I_SUDOERS, LV_EVENT,
+        { S("path"), S("why") },
+        "{path}: sudo does not read a file named like this ({why})",
+        "A file directly in `etc/sudoers.d`, added or changed in this diff, whose name contains "
+        "`.` (why: `a . in its name`) or ends `~` (why: `its name ends ~`) (SS-3). Its lines are "
+        "events all the same. No rule from the mode (SS-4)." },
+    [FK_CRON_JOB_ADDED] = { "cron_job_added", I_CRON, LV_EVENT,
+        { S("path"), S("schedule"), S("user"), S("command"), L("env"), SNO("owner"), SO("in_words") },
+        "cron job added in {path}: {schedule} {user} {command}",
+        "A job line (SC-1) after and not before: `schedule` its five fields joined by one space, "
+        "or its `@word`; `user` the sixth field in `etc/crontab` and `etc/cron.d/*`, the file's "
+        "name in `crontabs/*`; `command` the rest of the line as written; `env` the `SHELL`, "
+        "`PATH`, `MAILTO`, `CRON_TZ` lines in force above it in its file, as written. in_words: "
+        "only for the forms of SW-1 to SW-6, absent otherwise (SW-8). owner: the package that "
+        "owns the file (SI-5); null: in no package; absent: no dpkg database in the "
+        "after-manifest, or one that could not be read whole." },
+    [FK_CRON_JOB_REMOVED] = { "cron_job_removed", I_CRON, LV_EVENT,
+        { S("path"), S("schedule"), S("user"), S("command"), L("env"), SNO("owner"), SO("in_words") },
+        "cron job removed in {path}: {schedule} {user} {command}",
+        "The reverse; `owner` by the after-manifest all the same." },
+    [FK_CRON_ENV_CHANGED] = { "cron_env_changed", I_CRON, LV_EVENT,
+        { S("path"), S("name"), S("from"), S("to") },
+        "{path}: {name} {from} -> {to}",
+        "A `NAME=value` line added, removed or changed: a name with one such line on each side "
+        "whose values differ is one event; otherwise one event per line added (from empty) and "
+        "per line removed (to empty)." },
+    [FK_CRON_SCRIPT_ADDED] = { "cron_script_added", I_CRON, LV_EVENT,
+        { S("path"), SNO("owner") },
+        "{path} added",
+        "A file directly in `etc/cron.hourly`, `cron.daily`, `cron.weekly` or `cron.monthly`; "
+        "never read for meaning, and no schedule is claimed for it (SC-5). owner: the package "
+        "that owns it (SI-5); null: in no package; absent: no dpkg database in the "
+        "after-manifest, or one that could not be read whole." },
+    [FK_CRON_SCRIPT_REMOVED] = { "cron_script_removed", I_CRON, LV_EVENT,
+        { S("path"), SNO("owner") },
+        "{path} removed",
+        "The same, removed." },
+    [FK_CRON_SCRIPT_CHANGED] = { "cron_script_changed", I_CRON, LV_EVENT,
+        { S("path"), SNO("owner") },
+        "{path} changed",
+        "The same: its content, or its mode." },
+    [FK_CRON_FILE_NOT_RUN] = { "cron_file_not_run", I_CRON, LV_EVENT,
+        { S("path"), S("why") },
+        "{path}: cron does not run a file like this ({why})",
+        "Only where the after-manifest's dpkg database has the package `cron` installed (SC-2). A "
+        "file of `etc/cron.d` added or changed in this diff whose name has a character outside "
+        "`A-Za-z0-9_-` (why: `name`) or that group or others may write (why: `mode`) (SC-3); a "
+        "file of the four directories whose name has such a character (why: `name`) or that has "
+        "no execute bit (why: `not executable`) (SC-4)." },
+    [FK_UNIT_LINKED] = { "unit_linked", I_SYSTEMD, LV_EVENT,
+        { S("unit"), S("into"), S("target"), SNO("owner") },
+        "{unit} linked into {into}",
+        "A symbolic link added in a directory named `<x>.wants` or `<x>.requires` under a "
+        "directory systemd reads units from: `unit` the link's name, `into` `<x>`, `target` the "
+        "link's text. Under a home's `.config/systemd/user`, `unit` is prefixed by that "
+        "directory's path (SY-3a). Never `enabled` (SY-3). owner: the package that owns the file "
+        "the link's text names, read from the link's directory (SI-5); null: in no package; "
+        "absent: no dpkg database in the after-manifest, or one that could not be read whole." },
+    [FK_UNIT_UNLINKED] = { "unit_unlinked", I_SYSTEMD, LV_EVENT,
+        { S("unit"), S("into"), S("target"), SNO("owner") },
+        "{unit} unlinked from {into}",
+        "The same, removed." },
+    [FK_UNIT_MASKED] = { "unit_masked", I_SYSTEMD, LV_EVENT,
+        { S("unit") },
+        "{unit} masked",
+        "A unit name directly in `etc/systemd/system` or `etc/systemd/user` (or a home's "
+        "`.config/systemd/user`) that became a symbolic link to `/dev/null` or an empty file." },
+    [FK_UNIT_UNMASKED] = { "unit_unmasked", I_SYSTEMD, LV_EVENT,
+        { S("unit") },
+        "{unit} unmasked",
+        "One that stopped being that." },
+    [FK_UNIT_FILE_ADDED] = { "unit_file_added", I_SYSTEMD, LV_EVENT,
+        { S("path"), SNO("owner") },
+        "unit file {path} added",
+        "A regular file with a unit suffix (`.service`, `.socket`, `.device`, `.mount`, "
+        "`.automount`, `.swap`, `.target`, `.path`, `.timer`, `.slice`, `.scope`), or a file "
+        "under a `<unit>.d` directory. An empty one in `etc/systemd` is `unit_masked` instead. "
+        "owner: the package that owns it (SI-5); null: in no package; absent: no dpkg database in "
+        "the after-manifest, or one that could not be read whole." },
+    [FK_UNIT_FILE_REMOVED] = { "unit_file_removed", I_SYSTEMD, LV_EVENT,
+        { S("path"), SNO("owner") },
+        "unit file {path} removed",
+        "The same, removed." },
+    [FK_UNIT_FILE_CHANGED] = { "unit_file_changed", I_SYSTEMD, LV_EVENT,
+        { S("path"), SNO("owner") },
+        "unit file {path} changed",
+        "The same, its content changed." },
+    [FK_UNIT_OVERRIDES_PACKAGED] = { "unit_overrides_packaged", I_SYSTEMD, LV_EVENT,
+        { S("unit"), S("path"), S("over") },
+        "{path} takes the place of {over}",
+        "A unit file added under `etc/systemd/system` (or `etc/systemd/user`) while the "
+        "after-manifest has one of that name under `usr/lib/systemd/system` (`.../user`), or "
+        "under `lib/systemd/...`: `over` is that path." },
+    [FK_UNIT_ALIAS_ADDED] = { "unit_alias_added", I_SYSTEMD, LV_EVENT,
+        { S("alias"), S("target") },
+        "{alias} is a link to {target}",
+        "A symbolic link added directly in `etc/systemd/system` or `etc/systemd/user` (or a "
+        "home's `.config/systemd/user`), not to `/dev/null`: `target` its text." },
+    [FK_UNIT_ALIAS_REMOVED] = { "unit_alias_removed", I_SYSTEMD, LV_EVENT,
+        { S("alias"), S("target") },
+        "{alias} is no longer a link to {target}",
+        "The same, removed." },
+    [FK_INIT_SCRIPT_ADDED] = { "init_script_added", I_SYSTEMD, LV_EVENT,
+        { S("path"), SNO("owner"), B("executable") },
+        "init script {path} added",
+        "`etc/rc.local` or a file directly in `etc/init.d`; never read for meaning. executable: "
+        "whether any execute bit is set (SY-3b). owner: the package that owns it (SI-5); null: in "
+        "no package; absent: no dpkg database in the after-manifest, or one that could not be "
+        "read whole." },
+    [FK_INIT_SCRIPT_REMOVED] = { "init_script_removed", I_SYSTEMD, LV_EVENT,
+        { S("path"), SNO("owner"), B("executable") },
+        "init script {path} removed",
+        "The same, removed; executable: as it was." },
+    [FK_INIT_SCRIPT_CHANGED] = { "init_script_changed", I_SYSTEMD, LV_EVENT,
+        { S("path"), SNO("owner"), B("executable") },
+        "init script {path} changed",
+        "The same: its content, or its mode; executable: as it is after." },
+    [FK_TIMER_FILE_ADDED] = { "timer_file_added", I_SYSTEMD, LV_EVENT,
+        { S("path"), L("on_calendar"), SNO("owner"), SO("in_words") },
+        "timer {path} added: {on_calendar}",
+        "A `.timer` unit file added (it is a `unit_file_added` too): `on_calendar` its "
+        "`OnCalendar=` values as written, in order, or empty. in_words: SW-7, absent otherwise. A "
+        "changed timer whose `OnCalendar=` values differ is one removed and one added (SI-3). "
+        "owner: the package that owns it (SI-5); null: in no package; absent: no dpkg database in "
+        "the after-manifest, or one that could not be read whole." },
+    [FK_TIMER_FILE_REMOVED] = { "timer_file_removed", I_SYSTEMD, LV_EVENT,
+        { S("path"), L("on_calendar"), SNO("owner"), SO("in_words") },
+        "timer {path} removed: {on_calendar}",
+        "The same, removed." },
+    [FK_SSH_KEY_ADDED] = { "ssh_key_added", I_SSHKEYS, LV_EVENT,
+        { S("path"), S("type"), S("fingerprint"), S("comment"), L("options") },
+        "key added in {path}: {type} {fingerprint} {comment}",
+        "A key line (SK-1) of an `authorized_keys` or `authorized_keys2` whose `(type, "
+        "fingerprint)` is in the file after and not before, or whose options or comment differ "
+        "(SI-3: one removed, one added). fingerprint: `SHA256:` and the unpadded base64 of the "
+        "sha256 of the decoded key. options: as written, split at commas outside double quotes. "
+        "The event names the file, not whose login it opens (SK-2)." },
+    [FK_SSH_KEY_REMOVED] = { "ssh_key_removed", I_SSHKEYS, LV_EVENT,
+        { S("path"), S("type"), S("fingerprint"), S("comment"), L("options") },
+        "key removed in {path}: {type} {fingerprint} {comment}",
+        "The reverse." },
+    [FK_SSH_CA_ADDED] = { "ssh_ca_added", I_SSHKEYS, LV_EVENT,
+        { S("path"), S("type"), S("fingerprint"), S("comment"), L("options") },
+        "certificate authority added in {path}: {type} {fingerprint} {comment}",
+        "The same, for a key line whose options include `cert-authority`." },
+    [FK_SSH_CA_REMOVED] = { "ssh_ca_removed", I_SSHKEYS, LV_EVENT,
+        { S("path"), S("type"), S("fingerprint"), S("comment"), L("options") },
+        "certificate authority removed in {path}: {type} {fingerprint} {comment}",
+        "The reverse." },
+    [FK_TRUST_ANCHOR_ADDED] = { "trust_anchor_added", I_TRUST, LV_EVENT,
+        { S("path"), S("target"), SO("subject"), SO("fingerprint"), SNO("owner") },
+        "certificate added to the trust store: {subject} ({path})",
+        "A symbolic link or regular file added directly under `etc/ssl/certs` whose name ends "
+        "`.pem` or `.crt`, the bundle `ca-certificates.crt` aside (TS-1). target: the path, "
+        "relative to the scope, where the chain of links ends by the after-manifest (the path "
+        "itself for a regular file; where the chain leaves what the manifest records, the last "
+        "path it names). subject, fingerprint: from the PEM when the target's content is kept and "
+        "holds exactly one certificate; `subject` as `openssl x509 -noout -subject` prints it "
+        "after `subject=`, `fingerprint` the sha256 of the DER in uppercase hex pairs joined by "
+        "`:`; else both absent (TS-2). Not validated. owner: the package that owns the target "
+        "(SI-5); null: in no package; absent: no dpkg database in the after-manifest, or one that "
+        "could not be read whole.",
+        "certificate added to the trust store: {path}" },
+    [FK_TRUST_ANCHOR_REMOVED] = { "trust_anchor_removed", I_TRUST, LV_EVENT,
+        { S("path"), S("target"), SO("subject"), SO("fingerprint"), SNO("owner") },
+        "certificate removed from the trust store: {subject} ({path})",
+        "The same, removed: target, subject and fingerprint by the entries the diff was given and "
+        "the after-manifest; absent where they cannot be told.",
+        "certificate removed from the trust store: {path}" },
 };
 
 size_t finding_nfields(enum finding_kind k) {

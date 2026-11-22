@@ -27,6 +27,11 @@ struct belay_diff_opts {
     const char *store_dir;      /* the content store captures kept copies in; NULL: none,
                                    and a path whose interpreter needs content gets the
                                    finding content_unavailable, reason no_store */
+    /* The per-line digest files of the two captures (system-interpreters.md
+     * SA-6; a checkpoint's `shadow.lines`), for the accounts interpreter's
+     * password_entry_* events; NULL where a capture kept none: then no such
+     * event is given. Read, never written. */
+    const char *shadow_lines_before, *shadow_lines_after;
 };
 
 /*

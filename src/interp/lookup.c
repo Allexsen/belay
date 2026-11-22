@@ -33,6 +33,10 @@ void lookup_free(struct belay_lookup *lk) {
 
 size_t lookup_wanted(const struct belay_lookup *lk) { return lk->n; }
 
+const char *belay_lookup_shadow_lines(const struct belay_lookup *lk, int side) {
+    return lk != NULL && (side == 0 || side == 1) ? lk->shadow_lines[side] : NULL;
+}
+
 const struct belay_content *belay_lookup_content(const struct belay_lookup *lk) { return lk->content; }
 
 int belay_lookup_want(struct belay_lookup *lk, const char *path, size_t len, bool below,
