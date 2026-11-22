@@ -19,8 +19,8 @@ belay help [command]  |  belay <command> --help  |  belay --version
 Every command that takes `--scope` also takes `--docker CONTAINER`: the scope is then a path inside
 that container, read from its layers on the host (below).
 
-`check`, `mark`, `diff`, `log` and `manifest` take `--system` in the place of `--scope DIR`: the
-scope is the machine's `/`, read by a fixed list of roots ("--system", below).
+`check`, `mark`, `diff`, `log`, `manifest`, `prune` and `watch` take `--system` in the place of
+`--scope DIR`: the scope is the machine's `/`, read by a fixed list of roots ("--system", below).
 
 - **check** records `DIR` as a new checkpoint, reading every file (no prefilter) up to the hash
   limit: a file over 64 MiB is recorded `unverified`, without its hash.
@@ -367,8 +367,8 @@ against the kernel.
     belay mark  --system
     belay diff  --system --since 1
 
-`--system` takes the place of `--scope` on `check`, `mark`, `diff`, `log` and `manifest`, and on no
-other command yet. The scope is `/`; giving `--scope` too is a usage error. A capture does not read
+`--system` takes the place of `--scope` on `check`, `mark`, `diff`, `log`, `manifest`, `prune` and
+`watch` (below, "watch --system"). The scope is `/`; giving `--scope` too is a usage error. A capture does not read
 all of `/`: it reads a list of roots, and says in its manifest what it looked for (one line per
 root after the header, found or not, with the header's `roots` their number) and how it looked at
 every entry. The format is manifest version 5, pinned in
@@ -509,7 +509,67 @@ runtime
 **Refused.** `baseline export`, `verify` and a protect spec are not designed for a system watch:
 with `--system`, or for a scope whose latest checkpoint was taken with it, they exit 3. A bundle
 whose manifest has roots is rejected by every reader. `--system` with `--docker` is not implemented
-in this version and is refused (exit 3). `exclude`, `prune` and `watch` do not take `--system`.
+in this version and is refused (exit 3). `exclude` does not take `--system`.
+
+### watch --system
+
+```
+belay watch start    --system
+belay watch step     --system --session S [--begin ID | --finish ID] [--agent A] [--deadline SECONDS]
+belay watch receipt  --system [--max-lines N] [--path]
+belay watch stop     --system [--max-lines N] [--path]
+belay watch summary  --system --session S --since NAME
+belay watch mark     --system --session S --name NAME
+belay watch close    --system --session S (--id ID... | --all)
+belay watch patterns --system
+```
+
+What differs from a directory's watch is pinned in
+[watch-system.md](../test/expect/watch-system.md). `close` and `mark` take it as well: a summary
+needs a marker.
+
+- **start** takes the first capture and prints the receipt's opening lines; a second `start` while
+  the watch runs is refused (exit 3). **stop** prints the receipt and ends the watch.
+- **step**'s line reads the system's list, not a directory's: sudo rules and lines, keys and
+  certificate authorities added to `authorized_keys`, a user of uid 0 and the fields of a user
+  that decide what it runs as, members added to the groups that hold privilege, any change under
+  PAM, the loader's files, the name service, doas, polkit, sshd's files, apt's sources and keys,
+  the shell startup files (the system's and each home's), kernel modules and settings, the trust
+  store, firewall rule files, a unit override that sets what runs, a privilege change, a file
+  others cannot read outside `root` and the homes (named, never its content), a listener below
+  port 1024 whose program no package owns, and a unit added under a home's own unit directory are
+  flagged 🔴. New users and groups, cron jobs, timers, units, init scripts, packages, services and
+  listeners are named without a circle; one whose file no package owns has a line of its own
+  ending `, in no package`, and those of a package installed in the same step are counted (`and 6
+  others by packages installed here`). The files of the step's packages under `usr`, `var`, `opt`,
+  `srv`, `boot`, and anything under `var` no event names, are only counted: a step with nothing
+  else says `12 entries changed under usr, var`. When the roots differ from the step before (a
+  home added), the line ends `roots changed: +home/v/.ssh, ...`.
+
+  ```
+  belay: 🔴 outside tool calls: sudo rule added in etc/sudoers.d/90-u: u ALL=(ALL) NOPASSWD: ALL (sudo)
+  belay: outside tool calls: upgraded tool:amd64 1.0 -> 1.1 (packages) · 3 more: 3 modified
+  belay: outside tool calls: 1 entry changed under var
+  ```
+
+- **A walk longer than the step's time limit** (45 s) is not killed: it goes on in a process of its
+  own session, holding the state's lock, and the step prints
+  `walking (not root): not finished in 45 s; what changed will be in the next line` and exits 0.
+  A step while it runs prints `walk in progress since 14:03 (not root)`. The next step prints the
+  walk's line first, `since` the checkpoint before it, then its own; each change is said once.
+  A walk whose process died is said (`the last walk did not finish`) and taken again. Until the
+  kernel record (a later version), every capture of a system watch is a walk.
+- **receipt** and **stop** take a walk with no time limit (a line on standard error every 10 s
+  while they wait) and print the receipt in sections, each only when it has something:
+  `could not read` (and, not root, what that leaves out), `kernel record`, `end state`, then
+  `installed`, `services`, `running`, `listening`, `user`, `cron`, `sudo`, `ssh`, `setuid`,
+  `secret`, `trust`, `firewall`, `init`, `config`, `changes` (up to 20, then a count, and per
+  `usr`-like root the records folded into packages), `not compared`, `not read`. A config event of
+  a file of a package installed here is counted in `config`, not listed. In this version the kernel
+  record is always off: `kernel record: off: not root: a change put back is not seen`.
+- **patterns** prints the roots as the machine is now, with their classes and the entries of the
+  newest checkpoint under each, the directories not read, the homes of `etc/passwd` left out and
+  why (`/nonexistent: not there`, `/run/sshd: under run, not read`), then the flag list.
 
 ## A file being written while it is read
 

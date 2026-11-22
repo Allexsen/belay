@@ -128,7 +128,12 @@ TEST(start_opens_stop_closes_and_a_second_start_is_refused) {
     REQUIRE_MSG(sys("start") == 0, "%s%s", g_out, g_err);
     /* only with --system; and --system-root is its own */
     ASSERT_EQ_INT(2, belay("watch", "start", "--scope", g_tree));
-    ASSERT_EQ_INT(2, belay("watch", "mark", "--system-root", g_tree, "--session", "s1", "--name", "m"));
+    /* summary's marker: mark takes it too */
+    REQUIRE_MSG(belay("watch", "mark", "--system-root", g_tree, "--session", "s1", "--name", "m") == 0, "%s", g_out);
+    sh("cd '%s' && printf 'auth required pam_env.so\\n' >> etc/pam.d/sshd", g_tree);
+    REQUIRE(step() == 0);
+    REQUIRE_MSG(belay("watch", "summary", "--system-root", g_tree, "--session", "s1", "--since", "m") == 0, "%s", g_err);
+    ASSERT_TRUE(strstr(g_out, "belay: " RED " 1 flagged: etc/pam.d/sshd modified (pam)\n") == g_out);
     ASSERT_EQ_INT(2, belay("watch", "step", "--system", "--system-root", g_tree, "--session", "s1"));
     ASSERT_EQ_INT(2, belay("watch", "step", "--system-root", g_tree, "--scope", g_tree, "--session", "s1"));
     /* WS-1: prune takes it */
@@ -213,6 +218,38 @@ TEST(a_step_flags_and_notes_by_the_system_list) {
     sh("cd '%s' && mkdir -p etc/ufw && printf 'x\\n' > etc/ufw/user.rules", g_tree);
     REQUIRE(step() == 0);
     ASSERT_TRUE(strstr(g_out, "etc/ufw added (firewall)") != NULL);
+    /* F6: sshd's grammar, said by its event; the file is the event's */
+    sh("cd '%s' && mkdir -p etc/ssh && printf 'PermitRootLogin yes\\n' > etc/ssh/sshd_config", g_tree);
+    REQUIRE(step() == 0);
+    ASSERT_TRUE(strstr(g_out, "belay: " RED " outside tool calls: etc/ssh/sshd_config: \xe2\x80\xba PermitRootLogin added: yes (ssh)") == g_out);
+    ASSERT_TRUE(strstr(g_out, "sshd_config added") == NULL);
+    /* F7 */
+    sh("cd '%s' && mkdir -p etc/apt/sources.list.d && printf 'deb http://x y z\\n' > etc/apt/sources.list.d/x.list", g_tree);
+    REQUIRE(step() == 0);
+    ASSERT_TRUE(strstr(g_out, "etc/apt/sources.list.d added (package source)") != NULL);
+    /* F9: a key of a grammar no row reads; the path row flags it */
+    sh("cd '%s' && mkdir -p etc/sysctl.d && printf 'kernel.x = 1\\n' > etc/sysctl.d/90-x.conf", g_tree);
+    REQUIRE(step() == 0);
+    ASSERT_TRUE(strstr(g_out, "belay: " RED " outside tool calls: etc/sysctl.d added (kernel setting)") == g_out);
+    /* F11 */
+    sh("cd '%s' && printf 's\\n' > usr/bin/su2 && chmod 4755 usr/bin/su2", g_tree);
+    REQUIRE(step() == 0);
+    ASSERT_TRUE(strstr(g_out, "usr/bin/su2 ") != NULL && strstr(g_out, "(privilege)") != NULL && strstr(g_out, RED) != NULL);
+    /* F14: an anchor no package owns */
+    sh("cd '%s' && mkdir -p etc/ssl/certs && printf 'x\\n' > etc/ssl/certs/probe-ca.pem", g_tree);
+    REQUIRE(step() == 0);
+    ASSERT_TRUE(strstr(g_out, "belay: " RED " outside tool calls: certificate added to the trust store: ") == g_out);
+    ASSERT_TRUE(strstr(g_out, " (trust store)") != NULL);
+    /* F16: a unit of a home's own */
+    sh("cd '%s' && mkdir -p home/u/.config/systemd/user && printf '[Service]\\nExecStart=/bin/x\\n' > home/u/.config/systemd/user/x.service",
+       g_tree);
+    REQUIRE(step() == 0);
+    ASSERT_TRUE(strstr(g_out, "belay: " RED " outside tool calls: unit file home/u/.config/systemd/user/x.service added (services)") == g_out);
+    /* N2, N5: a cron job in no package, a line of its own */
+    sh("cd '%s' && printf '* * * * * root /bin/x\\n' > etc/cron.d/x", g_tree);
+    REQUIRE(step() == 0);
+    ASSERT_TRUE(strstr(g_out, "belay: cron job added in etc/cron.d/x: * * * * * root /bin/x, in no package\n") != NULL);
+    ASSERT_TRUE(strstr(g_out, RED) == NULL);
 }
 
 /* WS-F13, WS-N3, WS-N5 over a diff's runtime records: a listener below
