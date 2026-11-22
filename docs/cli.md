@@ -256,7 +256,8 @@ A protect spec is version 2 (`"belay_protect": 2`; [protect-spec-v2.md](../test/
 `no_delete` alone forbids deleting and allows writing; `no_create` forbids a new file. `no_delete`
 alone reads existence only: a file that is there but could not be read is no finding under it,
 and one whose presence cannot be told (below a directory that could not be listed) is
-`protected_path_unverifiable`, as is such a directory itself. That holds for a path only where
+`protected_path_unverifiable`, as is such a directory itself. A path created under `no_delete`
+alone is no finding, even when it could not be read. That holds for a path only where
 every rule matching it has `no_delete` as its only mode: with any other mode, or an
 `expected_sha256`, in the same rule or in another rule that matches the path, the path is judged
 as those read it. A version 1 spec is
