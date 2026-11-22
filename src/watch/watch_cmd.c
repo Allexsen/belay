@@ -392,7 +392,6 @@ int cmd_watch(int argc, char **argv, FILE *out, FILE *err) {
     const bool is_step = !strcmp(sub, "step"), is_close = !strcmp(sub, "close"), is_mark = !strcmp(sub, "mark"),
                is_summary = !strcmp(sub, "summary"), is_start = !strcmp(sub, "start"), is_stop = !strcmp(sub, "stop");
     if ((is_start || is_stop) && !system) { rc = cli_usage(err, "start and stop are a system watch's: give --system"); goto done; }
-    if (system && (is_close || is_mark)) { rc = cli_usage(err, "--system is start's, step's, receipt's, stop's, summary's and patterns'"); goto done; }
     if (!strcmp(sub, "patterns")) { rc = system ? cmd_patterns_system(scope, out, err) : cmd_patterns(scope, entries, out, err); goto done; }
     if (system && (is_start || is_stop || !strcmp(sub, "receipt"))) {
         /* WS-2, WS-3, K12: a walk under the lock, no time limit, a line on standard error every 10 s */
