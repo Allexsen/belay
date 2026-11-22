@@ -397,9 +397,9 @@ TEST(a_manifest_rewritten_between_the_diff_and_a_lookup_fails_the_diff) {
 }
 
 /* SI-1, E13: text, pip, dpkg, accounts, sudoers, cron, systemd, sshkeys,
- * trust, (config), git -- whatever order the events were added in. */
+ * trust, config, git -- whatever order the events were added in. */
 TEST(events_are_written_in_the_amended_order) {
-    static const enum belay_interp_id ADD[] = { BELAY_INTERP_GIT, BELAY_INTERP_TRUST, BELAY_INTERP_SSHKEYS,
+    static const enum belay_interp_id ADD[] = { BELAY_INTERP_GIT, BELAY_INTERP_CONFIG, BELAY_INTERP_TRUST, BELAY_INTERP_SSHKEYS,
         BELAY_INTERP_SYSTEMD, BELAY_INTERP_CRON, BELAY_INTERP_SUDOERS, BELAY_INTERP_ACCOUNTS, BELAY_INTERP_DPKG,
         BELAY_INTERP_PIP, BELAY_INTERP_TEXT };
     struct belay_events ev;
@@ -421,7 +421,7 @@ TEST(events_are_written_in_the_amended_order) {
         const char *q = strstr(l, "\"interp\":\"") + 10;
         snprintf(got + strlen(got), sizeof got - strlen(got), "%.*s ", (int)strcspn(q, "\""), q);
     }
-    ASSERT_EQ_STR("text pip dpkg accounts sudoers cron systemd sshkeys trust git ", got);
+    ASSERT_EQ_STR("text pip dpkg accounts sudoers cron systemd sshkeys trust config git ", got);
     free(out);
     events_free(&ev);
 }

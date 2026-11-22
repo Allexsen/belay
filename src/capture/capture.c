@@ -588,9 +588,11 @@ int cap_read_file(int pfd, const char *name, const struct stat *st, const char *
      * at every capture: they are never taken from a previous manifest. */
     const int shadow = seal && wc->lines != NULL ? cap_lines_which(rel, rel_len) : -1;
     bool want = !seal && wc->store != NULL && claim.keep != BELAY_KEEP_HASH &&
-                (claim.keep == BELAY_KEEP_STORE || e->size <= (claim.keep == BELAY_KEEP_STORE_BOUNDED
-                                                                   ? (uint64_t)BELAY_KEEP_BOUNDED_MAX
-                                                                   : wc->opts->store_max_bytes));
+                (claim.keep == BELAY_KEEP_STORE ||
+                 e->size <= (claim.keep == BELAY_KEEP_STORE_BOUNDED ? (uint64_t)BELAY_KEEP_BOUNDED_MAX
+                             : claim.keep == BELAY_KEEP_STORE_KEYED && wc->opts->store_max_bytes < BELAY_KEEP_KEYED_MAX
+                                 ? (uint64_t)BELAY_KEEP_KEYED_MAX
+                                 : wc->opts->store_max_bytes));
 
     /* mark's prefilter: unchanged since the previous manifest, by the rule
      * (previous.h), so not read -- its hash is the previous entry's. It is

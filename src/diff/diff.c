@@ -108,6 +108,19 @@ struct run {
     struct belay_entry *scratch;            /* one entry of a lookup pass */
 };
 
+/* config's second claim (system-config.md CF-6): it keys the file beside
+ * the interpreter that explains it, with events only -- it is given no
+ * findings, and the record stays the first claim's. Its failure is its
+ * own events' (E6). */
+static int second_claim(struct run *x, const struct belay_interp_input *in) {
+    const struct belay_interp *it = x->interp[BELAY_INTERP_CONFIG];
+    if (it->explain == NULL || !belay_interp_config_claims(in->abs_path, in->abs_len)) return 0;
+    if (it->end != NULL && events_claim(&x->events, BELAY_INTERP_CONFIG, in->path, in->path_len) == -1) return -1;
+    if (it->explain(x->state[BELAY_INTERP_CONFIG], in, NULL) == BELAY_INTERP_ERROR)
+        x->prepare_failed[BELAY_INTERP_CONFIG] = true;
+    return 0;
+}
+
 /* The interpreter that claims this path explains the change, if it can. What
  * it adds can only add to the record, and its failures stay in its own output
  * (R11): an error is the one finding could_not_interpret, and a finding that
@@ -129,18 +142,19 @@ static int explain(struct run *x, const struct belay_entry *b, const struct bela
     belay_interp_classify(x->abs, sl + sep + e->path_len, &claim);
     const enum belay_interp_id id = belay_interp_dispatch(&claim, b, a);
     const struct belay_interp *it = x->interp[id];
-    if (it->explain == NULL) return 0;
-    if (it->end != NULL && events_claim(&x->events, id, e->path, e->path_len) == -1) return -1;
-    findings_reset(&x->findings, id);
     const struct belay_interp_input in = { e->path, e->path_len, x->abs, sl + sep + e->path_len, b, a,
                                            DIFF_OUTCOMES[v->outcome].name, v->changed,
                                            x->content };
+    if (it->explain == NULL) return second_claim(x, &in);
+    if (it->end != NULL && events_claim(&x->events, id, e->path, e->path_len) == -1) return -1;
+    findings_reset(&x->findings, id);
     const enum belay_interp_result r = it->explain(x->state[id], &in, &x->findings);
     if (findings_oom(&x->findings)) return -1;
-    if (r == BELAY_INTERP_FINDINGS) return 0;
-    findings_reset(&x->findings, id);
-    if (r == BELAY_INTERP_DECLINE) return 0;
-    return findings_core(&x->findings, FK_COULD_NOT_INTERPRET);
+    if (r != BELAY_INTERP_FINDINGS) {
+        findings_reset(&x->findings, id);
+        if (r == BELAY_INTERP_ERROR && findings_core(&x->findings, FK_COULD_NOT_INTERPRET) == -1) return -1;
+    }
+    return second_claim(x, &in);
 }
 
 /* Each end hook, with the sink for its events; one that fails, or added an

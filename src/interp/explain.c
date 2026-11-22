@@ -21,6 +21,7 @@ static const struct belay_interp *const BUILTIN[BELAY_INTERP_COUNT] = {
     [BELAY_INTERP_SYSTEMD]  = &INTERP_SYSTEMD,
     [BELAY_INTERP_SSHKEYS]  = &INTERP_SSHKEYS,
     [BELAY_INTERP_TRUST]    = &INTERP_TRUST,
+    [BELAY_INTERP_CONFIG]   = &INTERP_CONFIG,
 };
 
 /* An id whose interpreter is not built declines, as binary does. */
