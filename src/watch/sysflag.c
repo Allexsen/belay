@@ -359,8 +359,30 @@ static int collect(struct sx *x, FILE *in) {
 
 /* ---- naming ---- */
 
+/* An event's or a runtime record's text as a line names it: escaped as the
+ * receipt escapes, and past TEXT_SHOWN characters cut at its end -- the
+ * middle of a key or a rule is what says which (LN-7 cuts paths). */
+#define TEXT_SHOWN 160
+static char *text_shown(const char *text) {
+    char *e = receipt_escaped(text, strlen(text));
+    if (e == NULL) return NULL;
+    size_t chars = 0, at = 0;
+    for (size_t i = 0; e[i] != '\0'; i++) {
+        if (((unsigned char)e[i] & 0xC0) == 0x80) continue;
+        if (chars++ == TEXT_SHOWN) { at = i; break; }
+    }
+    if (at == 0) return e;
+    char *out = malloc(at + 4);
+    if (out != NULL) {
+        memcpy(out, e, at);
+        memcpy(out + at, "\xe2\x80\xa6", 4);
+    }
+    free(e);
+    return out;
+}
+
 static int say(struct wflag *f, enum wkind kind, bool note, bool own, const char *text, const char *reason) {
-    char *shown = flag_shown(text, strlen(text));
+    char *shown = text_shown(text);
     if (shown == NULL) return nomem();
     const size_t cap = strlen(shown) + (reason != NULL ? strlen(reason) : 0) + 24;
     f->text = malloc(cap);
@@ -702,7 +724,7 @@ static int pass_records(struct sx *x, FILE *in, struct wstep *s) {
 }
 
 static int header_of(const char *path, struct belay_manifest_reader **r) {
-    return belay_manifest_open_header(path, r);
+    return belay_manifest_open(path, r);      /* the root lines follow the header (V5-A1) */
 }
 
 int sysflag_step(const char *diff, const char *before, const char *after, const char *store, receipt_mode_fn mode,
