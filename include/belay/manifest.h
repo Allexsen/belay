@@ -296,6 +296,22 @@ struct belay_manifest_opts {
      * mode 600) by the first capture that seals a file; never rewritten.
      * NULL: a file that must be sealed fails the capture. */
     const char *sealing_key_path;
+    /*
+     *  Where this capture's per-line digests of `etc/shadow` and
+     *  `etc/gshadow` are written (system-interpreters.md SA-6): when one of
+     *  them is read sealed, each of its lines is digested with HMAC-SHA256
+     *  under the sealing key as the file is hashed -- one read, the same
+     *  bytes -- and the file gets, mode 600, a header line
+     *  `{"belay_shadow_lines":1,"sealed_key":"<id>","files":[...]}` and one
+     *  line `{"file":"etc/shadow","name":"<the line's first field>","hmac":
+     *  "<64 hex>"}` per line that is not empty (`name_b64` when the name is
+     *  not UTF-8). No other part of a line is written anywhere. The two
+     *  files are read at every capture, never trusted to a previous
+     *  manifest. NULL, or neither file read sealed: no file is written. A
+     *  file of this name that is there is replaced or removed. Used with
+     *  roots and a sealing key only.
+     */
+    const char *shadow_lines_path;
 };
 
 /* What one write observed. Also recorded in the manifest's trailer line. */
@@ -321,6 +337,8 @@ struct belay_manifest_stats {
                             0 for a walk */
     size_t racy_listed;  /* v5, from a reader: paths the trailer's `racy` names (a walk
                             writes none) */
+    char   shadow_lines_sha256[65];  /* capture only: the sha256 of the per-line digest file it
+                                        wrote (opts->shadow_lines_path); "" when it wrote none */
     size_t store_failed;  /* capture only, 0 from a trailer: copies the content
                              store failed to keep; those entries are recorded
                              without `stored` */

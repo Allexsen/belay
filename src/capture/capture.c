@@ -53,7 +53,7 @@ static bool sniff_binary(const struct fsops *ops, int fd, unsigned char *buf) {
  * SNIFF_BYTES. 0, or -1 when the file could not be read. */
 static int hash_fd(const struct fsops *ops, int fd, unsigned char *buf, char hex_out[65],
                    uint64_t *nread, struct belay_store_tx *tx, bool *store_failed,
-                   bool *binary, const uint8_t *key) {
+                   bool *binary, const uint8_t *key, struct cap_lines *lines) {
     struct belay_sha256 c;
     belay_sha256_init(&c);
     /* `key` (BELAY_SEALING_KEY_BYTES): HMAC-SHA256 under it instead of the
@@ -79,6 +79,7 @@ static int hash_fd(const struct fsops *ops, int fd, unsigned char *buf, char hex
             if (memchr(buf, '\0', span) != NULL) *binary = true;
         }
         belay_sha256_update(&c, buf, (size_t)n);
+        if (lines != NULL) cap_lines_feed(lines, buf, (size_t)n);     /* SA-6: the same bytes, the same read */
         if (tx != NULL && belay_store_write(tx, buf, (size_t)n) == -1) {
             belay_err_clear();
             *store_failed = true;
@@ -583,6 +584,9 @@ int cap_read_file(int pfd, const char *name, const struct stat *st, const char *
         }
     }
     const bool seal = sealable && claim.keep != BELAY_KEEP_STORE;
+    /* SA-6: shadow and gshadow, read sealed, give their per-line digests,
+     * at every capture: they are never taken from a previous manifest. */
+    const int shadow = seal && wc->lines != NULL ? cap_lines_which(rel, rel_len) : -1;
     bool want = !seal && wc->store != NULL && claim.keep != BELAY_KEEP_HASH &&
                 (claim.keep == BELAY_KEEP_STORE || e->size <= (claim.keep == BELAY_KEEP_STORE_BOUNDED
                                                                    ? (uint64_t)BELAY_KEEP_BOUNDED_MAX
@@ -602,7 +606,7 @@ int cap_read_file(int pfd, const char *name, const struct stat *st, const char *
         /* V5-E9, V5-E7: trusted only in the class it has now, and a sealed
          * hash only under the key that made it. */
         const bool p_sealed = p != NULL && (p->flags & PF_SEALED), p_stored = p != NULL && (p->flags & PF_HAS_STORED);
-        if (prev_trusted(p, st, wc->reference_ns) && p_sealed == seal && (!seal || wc->prev_key_same)) {
+        if (shadow < 0 && prev_trusted(p, st, wc->reference_ns) && p_sealed == seal && (!seal || wc->prev_key_same)) {
             char hex[65];
             prev_hex(p, hex);
             /* A copy is recorded only as a full capture would record it: in
@@ -671,8 +675,11 @@ int cap_read_file(int pfd, const char *name, const struct stat *st, const char *
 
     uint64_t nread = 0;
     bool binary = false, store_failed = false;
+    if (shadow >= 0) cap_lines_begin(wc->lines, shadow, wc->key);
     const int h = hash_fd(wc->ops, fd, wc->readbuf, e->sha256_hex, &nread, want ? &tx : NULL,
-                          &store_failed, &binary, seal ? wc->key : NULL);
+                          &store_failed, &binary, seal ? wc->key : NULL, shadow >= 0 ? wc->lines : NULL);
+    /* Kept only when the read is one state of the file with no writer seen:
+     * decided below. */
     if (store_failed) {
         belay_store_abort(&tx);
         wc->store_failed++;
@@ -685,12 +692,14 @@ int cap_read_file(int pfd, const char *name, const struct stat *st, const char *
     }
     if (h != 0) {
         /* The file could not be read (EIO and friends): record it. */
+        if (shadow >= 0) cap_lines_end(wc->lines, false);
         if (want) belay_store_abort(&tx);
         close(fd);
         outcome_apply(e, FACET_CONTENT, OUT_DENIED, &wc->tally);
         return V_OK;
     }
     if (wc->ops->fstat(wc->ops->ctx, fd, &after) == -1) {
+        if (shadow >= 0) cap_lines_end(wc->lines, false);
         if (want) belay_store_abort(&tx);
         close(fd);
         outcome_apply(e, FACET_CONTENT, OUT_DENIED, &wc->tally);
@@ -699,6 +708,7 @@ int cap_read_file(int pfd, const char *name, const struct stat *st, const char *
     close(fd);
 
     const bool stable = cons_file_read(&before, &after, nread);
+    if (shadow >= 0) cap_lines_end(wc->lines, stable && writer_start != 1 && writer_end != 1);
     if (!stable) {
         /* The bytes read -- and any staged copy -- match no state of the file. */
         if (want) belay_store_abort(&tx);
