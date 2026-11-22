@@ -3397,8 +3397,83 @@ def cell_probes():
     return out
 
 
+ES_PATH = b"var/lib/apt/extended_states"
+
+
+def es_stanza(pkg, auto=b"1", arch=b"amd64"):
+    return b"Package: " + pkg + b"\nArchitecture: " + arch + b"\nAuto-Installed: " + auto + b"\n"
+
+
+def es_bytes(stanzas):
+    return b"".join(s + b"\n" for s in stanzas)
+
+
+def cell_dpkg_auto():
+    """SD-1: `auto` on the four kinds, from the after-manifest's
+    var/lib/apt/extended_states -- present and unchanged (the path is no
+    record, its copy still read), changed, absent on a side or both, not
+    parsable, its copy missing. (With no store a status gives no event at all, so
+    no `auto` to show.)"""
+    out = []
+    sp = b"var/lib/dpkg/status"
+    before_db = [stanza(b"keep", b"1.0"), stanza(b"u", b"1.0"), stanza(b"dn", b"2.0"),
+                 stanza(b"sc", b"1.0"), stanza(b"r", b"1.0"), stanza(b"m", b"1.0", arch=b"amd64")]
+    after_db = [stanza(b"keep", b"1.0"), stanza(b"u", b"2.0"), stanza(b"dn", b"1.0"),
+                stanza(b"sc", b"1.0", status=b"hold ok installed"), stanza(b"a", b"1.0"),
+                stanza(b"b", b"1.0"), stanza(b"c", b"1.0"), stanza(b"m", b"1.0", arch=b"amd64"),
+                stanza(b"m", b"1.0", arch=b"arm64")]
+    marks = es_bytes([es_stanza(b"a"), es_stanza(b"c", b"0"), es_stanza(b"u"), es_stanza(b"sc"),
+                      es_stanza(b"r"), es_stanza(b"m"), es_stanza(b"keep", b"0"),
+                      es_stanza(b"dn", b"1", b"arm64")])
+    # event -> package -> auto (None: no `auto` key)
+    on = {("dpkg_installed", b"a"): True, ("dpkg_installed", b"b"): False,
+          ("dpkg_installed", b"c"): False, ("dpkg_upgraded", b"u"): True,
+          ("dpkg_downgraded", b"dn"): False, ("dpkg_state_changed", b"sc"): True,
+          ("dpkg_removed", b"r"): None, ("dpkg_installed", b"m"): False}
+    off = {k: None for k in on}
+    other = dict(on)
+    other[("dpkg_installed", b"a")] = False     # the after copy decides, not the before
+    variants = [
+        ("unchanged", "dpkg.auto.present_unchanged", on, ("store",),
+         lambda c: c.both(ES_PATH, reg(marks))),
+        ("changed", "dpkg.auto.changed", on, ("store",),
+         lambda c: (c.put("before", ES_PATH, reg(es_bytes([es_stanza(b"b"), es_stanza(b"c")]))),
+                    c.put("after", ES_PATH, reg(marks, gen=1)))),
+        ("changed-away", "dpkg.auto.changed_after_has_none", other, ("store",),
+         lambda c: (c.put("before", ES_PATH, reg(marks)),
+                    c.put("after", ES_PATH, reg(es_bytes([es_stanza(b"u"), es_stanza(b"sc"),
+                                                          es_stanza(b"r"), es_stanza(b"m"),
+                                                          es_stanza(b"a", b"0")]), gen=1)))),
+        ("absent", "dpkg.auto.absent", off, ("store",), lambda c: None),
+        ("absent-after", "dpkg.auto.removed_in_after", off, ("store",),
+         lambda c: c.put("before", ES_PATH, reg(marks))),
+        ("added-after", "dpkg.auto.added_in_after", on, ("store",),
+         lambda c: c.put("after", ES_PATH, reg(marks, gen=1))),
+        ("unparsable", "dpkg.auto.unparsable", off, ("store",),
+         lambda c: c.both(ES_PATH, reg(b"this is not a stanza\nPackage: a\n"))),
+        ("empty", "dpkg.auto.empty_file", {k: (None if k[0] == "dpkg_removed" else False)
+                                           for k in on}, ("store",),
+         lambda c: c.both(ES_PATH, reg(b""))),
+        ("copy-missing", "dpkg.auto.copy_missing", off, ("store",),
+         lambda c: c.both(ES_PATH, reg(marks, store="absent"))),
+        ("copy-corrupt", "dpkg.auto.copy_corrupt", off, ("store",),
+         lambda c: c.both(ES_PATH, reg(marks, store="corrupt"))),
+        ("not-regular", "dpkg.auto.not_a_regular_file", off, ("store",),
+         lambda c: c.both(ES_PATH, lnk(b"elsewhere"))),
+    ]
+    for name, cell, want, modes, setup in variants:
+        c = Case("dpkg-auto-" + name, modes=modes)
+        c.put("before", sp, reg(status_bytes(before_db)))
+        c.put("after", sp, reg(status_bytes(after_db), gen=1))
+        setup(c)
+        c.tag(cell)
+        c.auto_want = want
+        out.append(c)
+    return out
+
+
 def required_cases():
-    return (cell_dpkg_simple() + cell_pip_simple() + cell_pip_e10() + cell_dpkg_e9_e10()
+    return (cell_dpkg_simple() + cell_dpkg_auto() + cell_pip_simple() + cell_pip_e10() + cell_dpkg_e9_e10()
             + cell_p7() + cell_e11() + cell_order() + cell_content_unavailable() + cell_paths_b64()
             + cell_git_reflog() + cell_git_events() + cell_git_unread() + cell_git_unparsed()
             + cell_git_reflog_gained() + cell_git_last_line() + cell_git_reads() + cell_git_alias()
