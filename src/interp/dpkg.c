@@ -12,11 +12,21 @@
  *  are not UTF-8, fails the end hook, so the events are one
  *  could_not_interpret (diff-events E6). The info/ files are claimed so a
  *  capture keeps them; they add nothing here.
+ *
+ *  `auto` (system-interpreters.md SD-1): every event but a removal says
+ *  whether apt's record beside the status database -- the after-manifest's
+ *  `var/lib/apt/extended_states`, which usually did not change and so is
+ *  looked up (SI-4) -- has a stanza for the package and architecture with
+ *  `Auto-Installed: 1`. No record there, or one that cannot be read or is
+ *  not apt's: the field is absent, never assumed. The record's own change
+ *  (`apt-mark auto`) is its path record and no event.
  */
 #include "builtins.h"
 #include "stanza.h"
 #include "stored.h"
 #include "versions.h"
+
+#include "belay/interp.h"
 
 #include "belay/error.h"
 #include "belay/manifest.h"
@@ -27,6 +37,10 @@
 
 #define DPKG_STATUS_MAX (256u * 1024u * 1024u)  /* bytes of one status read */
 #define DPKG_STATE_MAX  (64u * 1024u * 1024u)   /* bytes of per-diff state (E5) */
+#define DPKG_STATES_MAX (64u * 1024u * 1024u)   /* bytes of one extended_states read */
+#define DPKG_TREES_MAX  64                      /* status databases of one diff whose record is asked */
+#define DPKG_STATUS_TAIL "var/lib/dpkg/status"
+#define DPKG_STATES_TAIL "var/lib/apt/extended_states"
 
 struct str { const char *s; size_t n; };
 
@@ -34,7 +48,13 @@ struct dev {                    /* one pending event */
     int kind;
     struct str package, arch, a, b, path;   /* a, b: version, or from and to */
     bool prov;                              /* from a status whose outcome is unknown (E2) */
+    signed char aut;                        /* auto: -1 absent, 0 false, 1 true */
+    bool aut_set;                           /* a stanza of the record said: the first one counts */
 };
+
+struct dpkg;
+/* One status database's tree: the record beside it, asked of the after-manifest. */
+struct tree { struct dpkg *d; char *states; size_t states_len; const char *status; size_t status_len; };
 
 /* A status that could not be read (why: a stored_why) or interpreted (why
  * SW_ERROR: E10). */
@@ -48,6 +68,10 @@ struct dpkg {
     size_t bytes;
     bool prov;                  /* the status being explained has the outcome unknown */
     bool failed;                /* state over its bound, or memory: E6 */
+    struct belay_lookup *lk;
+    bool asked;                 /* the records were asked for: once */
+    struct tree tree[DPKG_TREES_MAX];
+    size_t ntree;
 };
 
 static void *begin(void) { return calloc(1, sizeof(struct dpkg)); }
@@ -163,6 +187,7 @@ static int pend(struct dpkg *d, int kind, const struct pkg *k, struct str a, str
     memset(e, 0, sizeof *e);
     e->kind = kind;
     e->prov = d->prov;
+    e->aut = -1;
     if (keep(d, &e->package, k->package.s, k->package.n) || keep(d, &e->arch, k->arch.s, k->arch.n) ||
         keep(d, &e->a, a.s, a.n) || keep(d, &e->b, b.s, b.n) ||
         keep(d, &e->path, in->path, in->path_len)) {
@@ -280,7 +305,7 @@ static int emit(struct belay_events *ev, const struct dev *e) {
     const size_t pl = e->path.n;
     const bool two = e->kind == FK_DPKG_INSTALLED || e->kind == FK_DPKG_REMOVED;
     /* `auto`, last (SD-1), on every kind but dpkg_removed. */
-    const struct belay_fv au = { .absent = true };
+    const struct belay_fv au = { .b = e->aut == 1, .absent = e->aut < 0 };
     const struct belay_fv v3[] = { FV(e->package), FV(e->arch), FV(e->a), au };
     const struct belay_fv v4[] = { FV(e->package), FV(e->arch), FV(e->a), FV(e->b), au };
     if (two) return belay_event(ev, e->kind, v3, e->kind == FK_DPKG_REMOVED ? 3 : 4, &path, &pl, 1, flags(e->prov));
@@ -325,6 +350,149 @@ static int unavailable_events(struct dpkg *d, struct belay_events *ev) {
     return 0;
 }
 
+/* ---- auto: apt's record of the after-manifest (SD-1) ---- */
+
+static bool sblank(char c) { return c == ' ' || c == '\t' || c == '\r'; }
+
+static bool field_is(const char *n, size_t l, const char *want) {
+    if (l != strlen(want)) return false;
+    for (size_t i = 0; i < l; i++) {
+        char c = n[i];
+        if (c >= 'A' && c <= 'Z') c = (char)(c - 'A' + 'a');
+        if (c != want[i]) return false;
+    }
+    return true;
+}
+
+/* The events of (package, arch) from the status `t` names, in d->e sorted
+ * by dev_cmp: each not yet told by an earlier stanza takes `value`. */
+static void mark(struct dpkg *d, const struct tree *t, struct str package, struct str arch, int value) {
+    size_t lo = 0, hi = d->n;
+    while (lo < hi) {
+        const size_t mid = lo + (hi - lo) / 2;
+        int c = str_cmp(d->e[mid].package, package);
+        if (c == 0) c = str_cmp(d->e[mid].arch, arch);
+        if (c < 0) lo = mid + 1;
+        else hi = mid;
+    }
+    for (; lo < d->n && str_cmp(d->e[lo].package, package) == 0 && str_cmp(d->e[lo].arch, arch) == 0; lo++) {
+        struct dev *e = &d->e[lo];
+        if (e->kind == FK_DPKG_REMOVED || e->aut_set || e->path.n != t->status_len ||
+            memcmp(e->path.s, t->status, t->status_len) != 0)
+            continue;
+        e->aut = (signed char)value;
+        e->aut_set = true;
+    }
+}
+
+/* apt's extended_states: deb822 stanzas, of each Package, Architecture and
+ * Auto-Installed (0 or 1). One pass, no allocation. `apply` false only
+ * checks that the whole file is such a record: nothing is said from one
+ * that is not. */
+static bool states_read(struct dpkg *d, const struct tree *t, const char *buf, size_t len, bool apply) {
+    struct str package = { NULL, 0 }, arch = { "", 0 };
+    int value = 0;
+    bool open = false, have_arch = false;
+    size_t i = 0;
+    if (memchr(buf, '\0', len) != NULL) return false;
+    for (;;) {
+        const bool at_end = i >= len;
+        const char *nl = at_end ? NULL : memchr(buf + i, '\n', len - i);
+        const size_t end = nl != NULL ? (size_t)(nl - buf) : len;
+        const char *l = buf + (at_end ? len : i);
+        const size_t ll = at_end ? 0 : end - i;
+        i = nl != NULL ? end + 1 : len;
+        size_t k = 0;
+        while (k < ll && sblank(l[k])) k++;
+        if (k == ll) {                                  /* blank, or the end: the stanza ends */
+            if (open) {
+                if (package.s == NULL) return false;
+                if (apply) mark(d, t, package, arch, value);
+            }
+            package = (struct str){ NULL, 0 };
+            arch = (struct str){ "", 0 };
+            value = 0;
+            open = have_arch = false;
+            if (at_end) return true;
+            continue;
+        }
+        if (l[0] == ' ' || l[0] == '\t') {              /* a continuation: of some field of an open stanza */
+            if (!open) return false;
+            continue;
+        }
+        const char *colon = memchr(l, ':', ll);
+        if (colon == NULL || colon == l) return false;
+        open = true;
+        const size_t nlen = (size_t)(colon - l);
+        size_t vs = nlen + 1, ve = ll;
+        while (vs < ve && sblank(l[vs])) vs++;
+        while (ve > vs && sblank(l[ve - 1])) ve--;
+        if (field_is(l, nlen, "package")) {
+            if (package.s == NULL) package = (struct str){ l + vs, ve - vs };
+        } else if (field_is(l, nlen, "architecture")) {
+            if (!have_arch) arch = (struct str){ l + vs, ve - vs };
+            have_arch = true;
+        } else if (field_is(l, nlen, "auto-installed")) {
+            if (ve - vs != 1 || (l[vs] != '0' && l[vs] != '1')) return false;
+            value = l[vs] == '1';
+        }
+    }
+}
+
+/* The record of one tree, found in the after-manifest. */
+static int states_seen(void *ctx, const struct belay_entry *e) {
+    const struct tree *t = ctx;
+    struct dpkg *d = t->d;
+    unsigned char *buf = NULL;
+    size_t len = 0;
+    if (e->type != BELAY_T_REG ||
+        stored_read_entry(belay_lookup_content(d->lk), e, DPKG_STATES_MAX, &buf, &len) != SW_OK)
+        return 0;                                       /* cannot be read: auto stays absent */
+    if (states_read(d, t, (const char *)buf, len, false)) {
+        /* A record: every event of this tree is told -- false, unless a stanza says 1. */
+        for (size_t i = 0; i < d->n; i++)
+            if (d->e[i].kind != FK_DPKG_REMOVED && d->e[i].path.n == t->status_len &&
+                memcmp(d->e[i].path.s, t->status, t->status_len) == 0)
+                d->e[i].aut = 0;
+        states_read(d, t, (const char *)buf, len, true);
+    }
+    free(buf);
+    return 0;
+}
+
+/* Asks, once, for the record beside each status database that gave an
+ * event carrying auto. Past DPKG_TREES_MAX trees, or a path too long: not
+ * asked, and auto is absent there. */
+static enum belay_interp_result prepare(void *state, struct belay_lookup *lk) {
+    struct dpkg *d = state;
+    if (d == NULL) return BELAY_INTERP_ERROR;
+    if (d->failed || d->asked) return BELAY_INTERP_FINDINGS;
+    d->asked = true;
+    d->lk = lk;
+    if (d->n > 1) qsort(d->e, d->n, sizeof *d->e, dev_cmp);       /* the order states_read searches */
+    static const size_t TAIL = sizeof DPKG_STATUS_TAIL - 1, STL = sizeof DPKG_STATES_TAIL - 1;
+    for (size_t i = 0; i < d->n; i++) {
+        const struct dev *e = &d->e[i];
+        if (e->kind == FK_DPKG_REMOVED || e->path.n < TAIL) continue;
+        size_t k = 0;
+        while (k < d->ntree && (d->tree[k].status_len != e->path.n || memcmp(d->tree[k].status, e->path.s, e->path.n) != 0)) k++;
+        if (k < d->ntree || d->ntree == DPKG_TREES_MAX) continue;
+        const size_t prefix = e->path.n - TAIL;
+        if (prefix + STL > 4096) continue;
+        struct tree *t = &d->tree[d->ntree];
+        if ((t->states = malloc(prefix + STL + 1)) == NULL) return BELAY_INTERP_ERROR;
+        memcpy(t->states, e->path.s, prefix);
+        memcpy(t->states + prefix, DPKG_STATES_TAIL, STL + 1);
+        t->states_len = prefix + STL;
+        t->status = e->path.s;
+        t->status_len = e->path.n;
+        t->d = d;
+        d->ntree++;
+        if (belay_lookup_want(lk, t->states, t->states_len, false, states_seen, t) == -1) return BELAY_INTERP_ERROR;
+    }
+    return BELAY_INTERP_FINDINGS;
+}
+
 static enum belay_interp_result end(void *state, struct belay_events *ev) {
     struct dpkg *d = state;
     if (d == NULL) return BELAY_INTERP_ERROR;
@@ -340,10 +508,11 @@ static enum belay_interp_result end(void *state, struct belay_events *ev) {
         free((char *)d->e[i].b.s); free((char *)d->e[i].path.s);
     }
     for (size_t i = 0; i < d->nu; i++) free((char *)d->u[i].path.s);
+    for (size_t i = 0; i < d->ntree; i++) free(d->tree[i].states);
     free(d->e);
     free(d->u);
     free(d);
     return r;
 }
 
-const struct belay_interp INTERP_DPKG = { BELAY_INTERP_DPKG, begin, explain, end, NULL };
+const struct belay_interp INTERP_DPKG = { BELAY_INTERP_DPKG, begin, explain, end, prepare };
