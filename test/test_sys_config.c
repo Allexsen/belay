@@ -320,6 +320,15 @@ TEST(nginx_what_is_not_keyed) {
     REQUIRE(t_snap(2) == 0);
     const char *ev = t_events(1, 2);
     ASSERT_TRUE(strstr(ev, "config_not_keyed") == NULL);
+    /* One why, the first that holds of either side: does not parse before
+     * not unique, whichever side. */
+    t_file(NG, "server { } server { }\n", 0644);
+    REQUIRE(t_snap(3) == 0);
+    t_file(NG, "server {\n", 0644);
+    REQUIRE(t_snap(4) == 0);
+    ASSERT_EQ_STR(NOT_KEYED(NG, "nginx", "does not parse"), t_events(3, 4));
+    ASSERT_EQ_STR(NOT_KEYED(NG, "nginx", "does not parse"), t_events(4, 3));
+    ev = t_events(1, 2);
     ASSERT_TRUE(strstr(ev, ADDED(NG, "nginx", "\"stream\",\"server\"", "stream, server", "listen", "81")) != NULL);
 }
 
@@ -343,7 +352,8 @@ static const char *by_hand(const char *path, const struct belay_entry *b, const 
 TEST(what_cannot_be_read_could_not_be_interpreted) {
     t_reset();
     struct belay_entry b = t_entry(LD, BELAY_T_REG, 0644, t_put("UID_MIN 1000\n")), a = b;
-    a.sealed = true;
+    a.sealed = true;                    /* a copy or not, a sealed side's bytes are given to no interpreter */
+    ASSERT_EQ_STR(CNI(LD), by_hand(LD, &b, &a, "modified"));
     a.has_stored = false;
     ASSERT_EQ_STR(CNI(LD), by_hand(LD, &b, &a, "modified"));
     a = b;
@@ -400,6 +410,17 @@ TEST(hostile_files_are_read_within_bounds_and_never_silently) {
     size_t w = 0;
     for (int i = 0; i < 65537; i++) w += (size_t)snprintf(big + w, sizeof big - w, "k%d v\n", i);
     ASSERT_EQ_STR(NOT_KEYED(LD, "namevalue", "too large"), hostile(LD, big, w));
+    {   /* too large on one side, does not parse on the other: too large */
+        static struct t_run r;
+        tr_begin(&r, BELAY_INTERP_CONFIG);
+        const struct belay_entry b = t_entry(SC, BELAY_T_REG, 0644, t_put("x\n"));
+        for (size_t i = 0; i < w; i++) if (big[i] == ' ') big[i] = '=';
+        const struct belay_entry a2 = t_entry(SC, BELAY_T_REG, 0644, t_put_n(big, w));
+        for (size_t i = 0; i < w; i++) if (big[i] == '=') big[i] = ' ';
+        ASSERT_EQ_STR("", tr_path(&r, SC, &b, &a2, "modified"));
+        ASSERT_EQ_STR(NOT_KEYED(SC, "keyvalue", "too large"), tr_end(&r, NULL, 0));
+        tr_free(&r);
+    }
     w -= strlen("k65536 v\n");
     const char *out = hostile(LD, big, w);
     ASSERT_EQ_INT(65536, (int)lines_of(out));

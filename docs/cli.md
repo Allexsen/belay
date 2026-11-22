@@ -448,7 +448,7 @@ could not be listed: `nothing seen below 37 directories`.
 **Events.** Beside the path records, a diff states what the text of the files it keeps says, as
 event records. Each kind's fields and text are in the table of
 [docs/spec/diff-v1.md](spec/diff-v1.md); their order in a diff is text, pip, dpkg, accounts,
-sudoers, cron, systemd, sshkeys, trust, git. The files are recognised by their paths, in any scope
+sudoers, cron, systemd, sshkeys, trust, config, git. The files are recognised by their paths, in any scope
 (a container's root as well); `--system` is what reads them on a whole machine.
 
 | interpreter | reads | kinds |
@@ -460,6 +460,20 @@ sudoers, cron, systemd, sshkeys, trust, git. The files are recognised by their p
 | dpkg | also `var/lib/apt/extended_states` | `dpkg_installed`, `dpkg_upgraded`, `dpkg_downgraded` and `dpkg_state_changed` carry `auto` |
 | sshkeys | `.ssh/authorized_keys`, `.ssh/authorized_keys2` | `ssh_key_added`, `ssh_key_removed`, `ssh_ca_added`, `ssh_ca_removed` |
 | trust | `etc/ssl/certs/*.pem`, `*.crt` | `trust_anchor_added`, `trust_anchor_removed` |
+| config | `etc/nginx/nginx.conf`, `etc/nginx/conf.d/*.conf`, the files of `etc/nginx/sites-available`, `sites-enabled`, `modules-enabled`, `snippets` (grammar `nginx`); `etc/ssh/sshd_config`, `etc/ssh/sshd_config.d/*.conf` (`sshd`); every unit file and drop-in systemd reads, `etc/systemd/*.conf`, `etc/systemd/*.conf.d/*.conf` (`ini`); `etc/sysctl.conf`, `etc/sysctl.d/*.conf` (`keyvalue`); `etc/login.defs` (`namevalue`) | `config_key_added`, `config_key_removed`, `config_key_changed`, `config_not_keyed` |
+
+config names the key that changed in a file whose grammar is fixed, beside what the file's own
+interpreter says of it (its line diff, or systemd's events): a key with one value on each side that
+differs is `changed`; otherwise a key's values are a set, and each one on one side only is `added` or
+`removed`. Its context is the enclosing blocks' headers (nginx), the `Match` line (sshd) or the
+section (ini), as written. An nginx block that holds another language (`map`, `types`, `geo`,
+`split_clients`, `charset_map`, `*_by_lua_block`) is one key, its value the sha256 of its text. A
+symbolic link in `sites-enabled` is not keyed: its target is, where it is. A file over 1 MiB or of
+more than 65,536 keys, one that does not parse, or one with two blocks or sections of one header is
+`shown as lines` (`config_not_keyed`) and only its line diff stands. config states the text of one
+file, never the setting in force: includes, drop-in order, first-match rules and defaults are the
+tool's. Shell-sourced files (`etc/default/*`, `etc/environment`), Apache, PAM, fstab, YAML and JSON
+are not keyed. What only config reads is kept up to 1 MiB and sealed like any file others cannot read.
 
 An event states the text of a file and never an effect. belay does not say what sudo would answer
 or what anyone may run; a unit is `linked into multi-user.target`, never "enabled at boot"; a key
