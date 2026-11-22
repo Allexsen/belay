@@ -23,8 +23,11 @@
  *  A command known to need more (KNOWN_OVER: per-diff state this step does
  *  not redesign) is run with the limit doubled until it passes, and the
  *  bracket is printed; it does not fail the run unless it passes at 64 MiB,
- *  which means its line here is stale. Takes minutes: `make scale-test`,
- *  not part of `make check`.
+ *  which means its line here is stale. The peak RSS printed beside each
+ *  command is not its heap: it counts the pages of the mapped index too
+ *  (a mark of 2,000,000 entries shows about 300 MiB of them). Takes two to
+ *  three minutes and 1.5 GB of disk: `make scale-test`, not part of
+ *  `make check`.
  */
 #define _GNU_SOURCE
 #include <errno.h>
@@ -45,6 +48,13 @@
 #include "belay/error.h"
 #include "cli/delta.h"
 #include "cli/state.h"
+
+#ifndef __linux__
+int main(void) {
+    puts("scale: skipped: a limit on the data segment bounds the heap on Linux only");
+    return 0;
+}
+#else
 
 #define LIMIT_MIB 64L
 
@@ -271,11 +281,6 @@ static void run(const char *name, bool known_over, int want, int (*fn)(void *), 
     run(name, over, want, exec_belay, argv_, NULL); } while (0)
 
 int main(int argc, char **argv) {
-#ifndef __linux__
-    (void)argc; (void)argv; (void)plant; (void)find_checkpoints; (void)store_delta; (void)run; (void)sh;
-    puts("scale: skipped: a limit on the data segment bounds the heap on Linux only");
-    return 0;
-#else
     if (argc < 3) die("usage: scale <belay binary> <work directory> [entries]");
     if (realpath(argv[1], g_bin) == NULL) die("no binary at %s", argv[1]);
     sh("rm -rf '%s' && mkdir -p '%s'", argv[2], argv[2]);
@@ -292,7 +297,7 @@ int main(int argc, char **argv) {
 
     /* The bundle verify judges against, and the first checkpoint: the scope as it is. */
     {
-        char cmd[4 * PATH_MAX];
+        static char cmd[6 * PATH_MAX + 256];
         /* in a state directory of its own: an export is a checkpoint too */
         snprintf(cmd, sizeof cmd, "mkdir -m 700 '%s/export-state' && BELAY_STATE_DIR='%s/export-state' "
                  "'%s' baseline export --scope '%s' --out '%s' --json", g_work, g_work, g_bin, g_scope, g_bundle);
@@ -323,7 +328,12 @@ int main(int argc, char **argv) {
     BELAY("log", false, 0, "log", "--scope", g_scope);
     BELAY("manifest (a delta)", false, 0, "manifest", "--scope", g_scope, "--id", "2");
     BELAY("diff, two generated manifests", false, 0, "diff", "--scope", g_scope, "--since", "1", "--to", "2");
-    BELAY("diff, every entry removed", false, 0, "diff", "--scope", g_scope, "--since", "2", "--to", "3");
+    BELAY("diff --json, every entry removed", false, 0, "diff", "--scope", g_scope, "--since", "2", "--to", "3", "--json");
+    /* KNOWN_OVER: the receipt keeps every line of a diff to order and fold them (src/cli/receipt.c), so
+     * its memory follows the number of changes -- here every entry of the manifest, 2,000,000 lines;
+     * measured between 64 and 128 MiB. Not the manifests: the same diff as JSON is under the limit. */
+    if (g_entries >= 2000000) BELAY("diff, every entry removed", true, 0, "diff", "--scope", g_scope, "--since", "2", "--to", "3");
+    else printf("%-34s not run: listed as over at 2,000,000 entries, and what it needs follows the count\n", "diff, every entry removed");
     BELAY("verify --to (a delta)", false, 0, "verify", "--scope", g_scope, "--baseline", g_bundle, "--baseline-sha256", g_sha,
           "--to", "2");
     plant(4, 2);
@@ -331,7 +341,7 @@ int main(int argc, char **argv) {
     plant(6, 1);
     CAPTURE("watch step", 7, false, "watch", "step", "--scope", g_scope, "--session", "s", "--first-ok");
     plant(8, 2);
-    CAPTURE("watch step, every entry removed", 9, false, "watch", "step", "--scope", g_scope, "--session", "s");
+    CAPTURE("watch step, again", 9, false, "watch", "step", "--scope", g_scope, "--session", "s");
     BELAY("watch mark", false, 0, "watch", "mark", "--scope", g_scope, "--session", "s", "--name", "m");
     BELAY("watch summary", false, 0, "watch", "summary", "--scope", g_scope, "--session", "s", "--since", "m");
     BELAY("watch receipt", false, 0, "watch", "receipt", "--scope", g_scope);
@@ -344,5 +354,5 @@ int main(int argc, char **argv) {
     if (g_failed != 0) printf("scale: %d command(s) not as listed\n", g_failed);
     else puts("scale: every command as listed");
     return g_failed != 0;
-#endif
 }
+#endif
