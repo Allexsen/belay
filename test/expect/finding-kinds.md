@@ -115,6 +115,8 @@ explicit OK. Removing a kind or changing a field's meaning is a diff.v1 version 
 | ssh_key_removed | sshkeys | event | path: string, type: string, fingerprint: string, comment: string, options: list | `key removed in {path}: {type} {fingerprint} {comment}` | The reverse. |
 | ssh_ca_added | sshkeys | event | path: string, type: string, fingerprint: string, comment: string, options: list | `certificate authority added in {path}: {type} {fingerprint} {comment}` | The same, for a key line whose options include `cert-authority`. |
 | ssh_ca_removed | sshkeys | event | path: string, type: string, fingerprint: string, comment: string, options: list | `certificate authority removed in {path}: {type} {fingerprint} {comment}` | The reverse. |
+| trust_anchor_added | trust | event | path: string, target: string, subject: string?, fingerprint: string?, owner: string/null? | `certificate added to the trust store: {subject} ({path})`; subject absent: `certificate added to the trust store: {path}` | A symbolic link or regular file added directly under `etc/ssl/certs` whose name ends `.pem` or `.crt`, the bundle `ca-certificates.crt` aside (TS-1). target: the path, relative to the scope, where the chain of links ends by the after-manifest (the path itself for a regular file; where the chain leaves what the manifest records, the last path it names). subject, fingerprint: from the PEM when the target's content is kept and holds exactly one certificate; `subject` as `openssl x509 -noout -subject` prints it after `subject=`, `fingerprint` the sha256 of the DER in uppercase hex pairs joined by `:`; else both absent (TS-2). Not validated. owner: the package that owns the target (SI-5); null: in no package; absent: no dpkg database in the after-manifest, or one that could not be read whole. |
+| trust_anchor_removed | trust | event | path: string, target: string, subject: string?, fingerprint: string?, owner: string/null? | `certificate removed from the trust store: {subject} ({path})`; subject absent: `certificate removed from the trust store: {path}` | The same, removed: target, subject and fingerprint by the entries the diff was given and the after-manifest; absent where they cannot be told. |
 
 binary claims nothing it explains: it declines.
 
@@ -129,3 +131,5 @@ Added with the kinds of system-interpreters.md, whose fields need them (its SI-4
   lookup the field rests on answered "none" (in no package) or could not be made (`uid_min`). No
   template names such a field. `string/null?` may also be absent: nothing is known.
 - A kind has at most 8 fields.
+- A kind's second template is used when a field its first template names is absent; an absent field
+  no template names (`owner`, `auto`) changes no text.
