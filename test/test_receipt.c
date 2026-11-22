@@ -794,6 +794,33 @@ TEST(the_summary_counts_the_directories_nothing_was_seen_below) {
     }
 }
 
+/* runtime-v1.md: the plain receipt prints the runtime records' texts in a
+ * section of their own (RT-D1); the UDP listeners opened in the client
+ * port range on one line (RT-6); a kind it does not know, not at all. */
+TEST(the_runtime_section_prints_the_records_texts) {
+    static char diff[4096];
+    snprintf(diff, sizeof diff, "%s%s", HEAD,
+             "{\"runtime\":\"incomplete\",\"why\":[\"holders_unknown_before\"],\"text\":\"runtime incomplete: holders not read before\"}\n"
+             "{\"runtime\":\"listener_opened\",\"listener\":\"tcp\",\"proto\":4,\"addr\":\"0.0.0.0\",\"port\":80,\"holders\":[],"
+             "\"text\":\"opened: tcp 0.0.0.0:80 held by nginx.service\"}\n"
+             "{\"runtime\":\"listener_opened\",\"listener\":\"udp\",\"proto\":4,\"addr\":\"0.0.0.0\",\"port\":40000,\"client_range\":true,"
+             "\"holders\":[],\"text\":\"opened: udp 0.0.0.0:40000 held by socat\"}\n"
+             "{\"runtime\":\"listener_opened\",\"listener\":\"udp\",\"proto\":6,\"addr\":\"::\",\"port\":51820,\"client_range\":true,"
+             "\"holders\":[],\"text\":\"opened: udp [::]:51820 (no process holds it)\"}\n"
+             "{\"runtime\":\"service_restarted\",\"service\":\"/system.slice/nginx.service\",\"processes\":5,\"exe\":\"/usr/sbin/nginx\","
+             "\"text\":\"restarted: nginx.service\"}\n"
+             "{\"runtime\":\"a_kind_not_known\",\"text\":\"NOTSHOWN\"}\n");
+    snprintf(diff + strlen(diff), sizeof diff - strlen(diff), "%s", TRAIL("0", "0", "0", "0", "0", "0", "0"));
+    ASSERT_EQ_INT(0, render(diff, false));
+    ASSERT_TRUE(strstr(g_text, "\nruntime\n"
+                               "  runtime incomplete: holders not read before\n"
+                               "  opened: tcp 0.0.0.0:80 held by nginx.service\n"
+                               "  restarted: nginx.service\n"
+                               "  udp in the client port range: 40000 held by socat, 51820 (no process holds it)\n") != NULL);
+    ASSERT_TRUE(strstr(g_text, "NOTSHOWN") == NULL);
+    ASSERT_TRUE(strstr(g_text, "no changes") == NULL);
+}
+
 /* ---- the system interpreters' words (system-interpreters.md) ---- */
 
 #define EVT(interp, kind, rest) "{\"event\":\"" kind "\",\"interp\":\"" interp "\"," rest ",\"paths\":[\"p\"]}\n"
@@ -1193,6 +1220,7 @@ int main(void) {
     RUN(a_type_change_into_a_sealed_directory_says_so_and_never_folds);
     RUN(the_note_follows_the_path_when_the_line_says_nothing_else);
     RUN(the_summary_counts_the_directories_nothing_was_seen_below);
+    RUN(the_runtime_section_prints_the_records_texts);
     RUN(a_diff_of_another_version_is_rejected_and_b64_scopes_shown);
     RUN(a_line_of_many_strings_is_read_in_linear_memory);
     RUN(invisible_and_invalid_bytes_are_shown_and_a_type_change_is_said);

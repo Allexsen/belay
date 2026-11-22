@@ -227,7 +227,7 @@
           "pattern": "^[0-9a-f]{64}$"
         }
       ],
-      "description": "the sha256 of the checkpoint's runtime record, or null when it has none; always null in this release"
+      "description": "the sha256 of the checkpoint's runtime record, or null when it has none: a system watch's checkpoint has one where /proc was read (runtime-v1.md)"
     },
     "journal_seq": {
       "oneOf": [

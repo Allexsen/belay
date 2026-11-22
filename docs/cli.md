@@ -486,6 +486,26 @@ record stands. Of `shadow` and `gshadow` belay keeps, per line, the first field 
 of the line (in the checkpoint's `shadow.lines`, mode 600) and nothing else: a diff says an entry
 was added, removed or changed for a name, when both checkpoints kept digests under one sealing key.
 
+**What is running.** Each checkpoint of a system watch also keeps `runtime.ndjson` (mode 600):
+what is listening and which services have processes, as `/proc` says when the checkpoint is taken
+(test/expect/runtime-v1.md). belay reads `/proc` itself and runs no program of the machine. One
+line per listening socket -- TCP in state LISTEN, unconnected UDP (`client_range: true` when its
+port is in `ip_local_port_range`), and unix sockets listening on a path -- with its `holders`: each
+process's executable and cgroup, as read. Only root can read other users' descriptors, so without
+root `holders` is `null` and the trailer counts it. One line per cgroup ending `.service` with
+processes, with their number and the oldest process's executable and start time. macOS has no
+`/proc`, and its checkpoints have no runtime record. A diff of two checkpoints that have one gives
+a `runtime` section (docs/spec/diff-v1.md, "Runtime"); the receipt prints its texts under
+`runtime`:
+
+```
+runtime
+  closed: tcp 0.0.0.0:80 held by nginx.service
+  opened: tcp 0.0.0.0:2222 held by systemd
+  restarted: systemd-resolved.service
+  udp in the client port range: 51820 (no process holds it), 40000 held by socat
+```
+
 **Refused.** `baseline export`, `verify` and a protect spec are not designed for a system watch:
 with `--system`, or for a scope whose latest checkpoint was taken with it, they exit 3. A bundle
 whose manifest has roots is rejected by every reader. `--system` with `--docker` is not implemented
@@ -632,9 +652,11 @@ as `\xNN`, a backslash as `\\`. A type change that is also a privilege change sa
 [schema/checkpoint.v3.json](../schema/checkpoint.v3.json). A path that is not UTF-8 is given in
 base64 as `scope_b64` or `manifest_b64` in place of `scope` or `manifest`. checkpoint.v3 adds
 `unreadable` and `sealing` (the two counts of the checkpoint's line, 0 included), `basis` (`walk`),
-`carried` (`0`), `runtime_sha256` and `journal_seq` (each `null`: these four have one value in
-this release), and `shadow_lines_sha256`: the sha256 of the checkpoint's `shadow.lines`, set for a
-system watch's checkpoint that read `etc/shadow` or `etc/gshadow`, `null` otherwise. A checkpoint made before it is printed by `log` as the
+`carried` (`0`) and `journal_seq` (`null`: these three have one value in this release),
+`runtime_sha256`: the sha256 of the checkpoint's `runtime.ndjson`, set for a system watch's
+checkpoint where `/proc` was read, `null` otherwise, and `shadow_lines_sha256`: the sha256 of the
+checkpoint's `shadow.lines`, set for a system watch's checkpoint that read `etc/shadow` or
+`etc/gshadow`, `null` otherwise. A checkpoint made before it is printed by `log` as the
 checkpoint.v2 record it was, without the seven keys.
 
 Mixing versions over one state directory: a belay from before checkpoint.v3 reads state this one
