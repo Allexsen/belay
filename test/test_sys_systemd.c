@@ -399,7 +399,26 @@ TEST(what_cannot_be_read_is_said_and_what_is_not_systemd_s_is_declined) {
     struct belay_entry lnk = t_entry("etc/systemd/system/a.target.wants/x.service", BELAY_T_LNK, 0777, NULL);
     lnk.unreadable = true;
     ASSERT_EQ_STR(CNI, tr_path(&r, "etc/systemd/system/a.target.wants/x.service", NULL, &lnk, "added"));
+    struct belay_entry lnk2 = t_entry("etc/systemd/system/y.service", BELAY_T_LNK, 0777, NULL);
+    lnk2.unreadable = true;
+    ASSERT_EQ_STR(CNI, tr_path(&r, "etc/systemd/system/y.service", &lnk2, NULL, "removed"));
+    /* sealed, though a copy is named: its bytes are given to no interpreter */
+    struct belay_entry sc = t_entry("etc/systemd/system/sealed2.timer", BELAY_T_REG, 0600, t_put("[Timer]\nOnCalendar=daily\n"));
+    sc.sealed = true;
+    sc.size = 25;
+    ASSERT_EQ_STR(CNI, tr_path(&r, "etc/systemd/system/sealed2.timer", NULL, &sc, "added"));
     /* unknown: no finding; the events provisional, the unreadable one too */
+    struct belay_entry mk = t_entry("etc/systemd/system/m.service", BELAY_T_LNK, 0777, NULL);
+    mk.has_link_target = true;
+    mk.link_target_len = 9;
+    memcpy(mk.link_target, "/dev/null", 9);
+    ASSERT_EQ_STR("", tr_path(&r, "etc/systemd/system/m.service", NULL, &mk, "unknown"));
+    struct belay_entry zero = mk;                 /* nine bytes that are not /dev/null: an alias */
+    memcpy(zero.link_target, "/dev/zero", 9);
+    ASSERT_EQ_STR("", tr_path(&r, "etc/systemd/system/z.service", &zero, NULL, "unknown"));
+    ASSERT_EQ_STR("", tr_path(&r, "etc/systemd/system/t.target.wants/m.service", &zero, NULL, "unknown"));
+    struct belay_entry rc = t_entry("etc/rc.local", BELAY_T_REG, 0755, NULL);
+    ASSERT_EQ_STR("", tr_path(&r, "etc/rc.local", NULL, &rc, "unknown"));
     struct belay_entry u1 = t_entry("etc/systemd/system/raced.timer", BELAY_T_REG, 0644, t_put("[Timer]\nOnCalendar=daily\n"));
     u1.size = 25;
     ASSERT_EQ_STR("", tr_path(&r, "etc/systemd/system/raced.timer", NULL, &u1, "unknown"));
@@ -421,13 +440,25 @@ TEST(what_cannot_be_read_is_said_and_what_is_not_systemd_s_is_declined) {
     ASSERT_EQ_STR("", tr_path(&r, "etc/init.d", NULL, &dir, "added"));
     ASSERT_EQ_STR("", tr_path(&r, "etc/systemd/system/same.service", &f, &f, "metadata_only"));
     ASSERT_EQ_STR(
+        EV("init_script_added") "\"path\":\"etc/rc.local\",\"executable\":true,\"text\":\"init script etc/rc.local added\","
+        "\"provisional\":true,\"paths\":[\"etc/rc.local\"]}\n"
         E10("etc/systemd/system/a.target.wants/x.service") E10("etc/systemd/system/gone.timer")
+        EV("unit_masked") "\"unit\":\"m.service\",\"text\":\"m.service masked\",\"provisional\":true,"
+        "\"paths\":[\"etc/systemd/system/m.service\"]}\n"
         EV("unit_file_added") "\"path\":\"etc/systemd/system/raced.timer\",\"text\":\"unit file etc/systemd/system/raced.timer added\","
         "\"provisional\":true,\"paths\":[\"etc/systemd/system/raced.timer\"]}\n"
         EV("timer_file_added") "\"path\":\"etc/systemd/system/raced.timer\",\"on_calendar\":[\"daily\"],"
         "\"in_words\":\"at 00:00 every day (by systemd's)\",\"text\":\"timer etc/systemd/system/raced.timer added: daily\","
         "\"provisional\":true,\"paths\":[\"etc/systemd/system/raced.timer\"]}\n"
-        E10("etc/systemd/system/sealed.timer") E10("usr/lib/systemd/system/nocopy.timer")
+        E10("etc/systemd/system/sealed.timer") E10("etc/systemd/system/sealed2.timer")
+        EV("unit_unlinked") "\"unit\":\"m.service\",\"into\":\"t.target\",\"target\":\"/dev/zero\","
+        "\"text\":\"m.service unlinked from t.target\",\"provisional\":true,"
+        "\"paths\":[\"etc/systemd/system/t.target.wants/m.service\"]}\n"
+        E10("etc/systemd/system/y.service")
+        EV("unit_alias_removed") "\"alias\":\"z.service\",\"target\":\"/dev/zero\","
+        "\"text\":\"z.service is no longer a link to /dev/zero\",\"provisional\":true,"
+        "\"paths\":[\"etc/systemd/system/z.service\"]}\n"
+        E10("usr/lib/systemd/system/nocopy.timer")
         "{\"event\":\"could_not_interpret\",\"interp\":\"systemd\",\"text\":\"could not interpret\",\"provisional\":true,"
         "\"paths\":[\"usr/lib/systemd/system/raced2.timer\"]}\n",
         tr_end(&r, NULL, 0));
@@ -455,7 +486,7 @@ TEST(timer_words_are_given_for_the_forms_of_the_table_only) {
         "", "monthly", "yearly", "minutely", "Daily", "*-*-* 03:17:30", "*-*-* 3:17:00", "*-*-* 24:00:00", "*-*-* 03:60:00",
         "*-*-* *:00:00", "*-*-01 03:17:00", "2026-*-* 03:17:00", "*-*-* 03:17", "*-*-*  03:17:00", " *-*-* 03:17:00",
         "*-*-* 03:17:00 UTC", "Mon..Fri *-*-* 03:17:00", "mon *-*-* 03:17:00", "Monday *-*-* 03:17:00", "Mon, Thu *-*-* 03:17:00",
-        "Mon,*-*-* 03:17:00", "Mon, *-*-* 03:17:00", ",Mon *-*-* 03:17:00", "Mon,Xyz *-*-* 03:17:00", "Mon 03:17:00", "03:17:00",
+        "Mon;Thu *-*-* 03:17:00", "Mon Thu *-*-* 03:17:00", "Mon,*-*-* 03:17:00", "Mon, *-*-* 03:17:00", ",Mon *-*-* 03:17:00", "Mon,Xyz *-*-* 03:17:00", "Mon 03:17:00", "03:17:00",
         "*-*-* 03:17:00\n", "dailyx", "hourl",
     };
     for (size_t i = 0; i < sizeof NONE / sizeof NONE[0]; i++)
