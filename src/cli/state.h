@@ -113,6 +113,8 @@ struct checkpoint {
     bool walk_start_reference;  /* prefiltered against the previous walk's start, not its newest ctime */
     bool kept;                  /* never pruned (state-retention KP-1) */
     bool watch;                 /* written by a step of `belay watch` (state-retention-watch WR-14) */
+    char shadow_lines[65];      /* the sha256 of its `shadow.lines` (system-interpreters.md SA-6,
+                                   checkpoint-v3 C3-6b); "": it has none */
     bool has_since_full;        /* meta.json says since_full (older ones don't) */
     long since_full;            /* marks since the last full one: pruning can't reset it */
 };
@@ -156,6 +158,13 @@ int state_json_member(char *buf, size_t cap, const char *key, const char *s);
 /* `data` as `name` in the directory `dfd`, whole or not at all. 0, or -1 with
  * belay_err; `shown` names it in the error. */
 int state_write_whole(int dfd, const char *name, const char *data, size_t len, const char *shown);
+
+/* Checkpoint `id`'s per-line digest file for shadow and gshadow (SA-6), for
+ * a diff: 1 with its path in buf when the checkpoint has one and the file
+ * hashes to what its meta.json records; 0 when it has none; -1 with
+ * belay_err (CORRUPT: recorded and not there, not a regular file, or other
+ * bytes -- never compared, never skipped in silence). */
+int state_shadow_lines(const struct state *st, long id, char *buf, size_t cap);
 
 /* The path of checkpoint `id`'s manifest into buf. */
 void state_manifest(const struct state *st, long id, char *buf, size_t cap);

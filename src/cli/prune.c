@@ -181,6 +181,7 @@ static bool ours(const char *n) {
     return !strcmp(n, "manifest.ndjson") || !strcmp(n, "manifest.ndjson.tmp") || !strcmp(n, "manifest.delta") ||
            !strcmp(n, "manifest.delta.tmp") ||
            !strcmp(n, "meta.json") || !strcmp(n, "meta.json.tmp") ||
+           !strcmp(n, "shadow.lines") || !strncmp(n, "shadow.lines.tmp.", 17) ||       /* SA-6 */
            !strncmp(n, "diff-from-", 10) || !strncmp(n, "manifest.ndjson.tmp.", 20) || !strncmp(n, "manifest.ndjson.run.", 20);
 }
 

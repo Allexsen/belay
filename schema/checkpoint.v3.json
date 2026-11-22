@@ -251,7 +251,7 @@
           "pattern": "^[0-9a-f]{64}$"
         }
       ],
-      "description": "the sha256 of the checkpoint's per-line digest file for shadow/gshadow, or null when it has none; always null in this release"
+      "description": "the sha256 of the checkpoint's per-line digest file for shadow/gshadow, or null when it has none: a system watch's checkpoint has one when shadow or gshadow was read sealed (system-interpreters.md SA-6)"
     }
   },
   "allOf": [
