@@ -1067,6 +1067,35 @@ TEST(under_no_delete_a_directory_sealed_only_after_is_unverifiable) {
     HAS("protected_path_unverifiable", "grader/sub", ",\"rule\":\"grader/**\",\"reasons\":[\"mount\"],");
 }
 
+/* PV2-12: a directory whose listing was incomplete on a side (`unstable`)
+ * is judged as one nothing was seen below: a child the listing missed has no
+ * entry, and deleting it later leaves no record. */
+TEST(under_no_delete_a_directory_listed_incompletely_is_unverifiable) {
+    static const char LISTED[] = HB_TOP HB_DIR("grader/sub", "16877", "1", "") HB_REG("grader/sub/x");
+    static const char PART[] = HB_TOP HB_DIR("grader/sub", "16877", "1", HB_UNSTABLE) HB_REG("grader/sub/x");
+    static const char GONE[] = HB_TOP;
+    static const struct { const char *name, *before, *after; int violations; bool deleted; } S[] = {
+        { "on both sides", PART, PART, 1, false },
+        { "at reset only", PART, LISTED, 1, false },
+        { "after only", LISTED, PART, 1, false },
+        { "at reset, then removed", PART, GONE, 3, true },      /* the directory twice, its file deleted */
+    };
+    for (size_t i = 0; i < sizeof S / sizeof S[0]; i++) {
+        const int rc = hb_verify(ND_ONLY, S[i].before, S[i].after);
+        if (rc != S[i].violations) BELAY_FAIL("%s: %d violations in:\n%s", S[i].name, rc, g_out);
+        const char *w = why_not("protected_path_unverifiable", "grader/sub", ",\"rule\":\"grader/**\",\"reasons\":[\"unstable\"],");
+        if (w != NULL) BELAY_FAIL("%s: %s", S[i].name, w);
+        if (S[i].deleted && record("protected_path_deleted", "grader/sub") == NULL)
+            BELAY_FAIL("%s: no protected_path_deleted in:\n%s", S[i].name, g_out);
+    }
+    /* PV2-11 stands: one that was not there at reset is no finding */
+    ASSERT_EQ_INT(0, hb_verify(ND_ONLY, GONE, PART));
+    /* and a file is there, whatever it carries (PV2-8): `unstable` seals a directory only */
+    static const char FILE_U[] = HB_TOP "{\"path\":\"grader/k\",\"type\":\"reg\",\"mode\":33188,\"uid\":0,\"gid\":0,\"size\":3,"
+        "\"mtime_ns\":5,\"ctime_ns\":5,\"ino\":9,\"dev\":1,\"nlink\":1,\"unverified\":true,\"unstable\":true}\n";
+    ASSERT_EQ_INT(0, hb_verify(ND_ONLY, FILE_U, FILE_U));
+}
+
 /* PV2-8 for a flag other than unreadable: a writer holds the protected file
  * at verify, so its outcome is unknown (writer_open). It is there. */
 TEST(under_no_delete_a_file_a_writer_holds_is_there) {
@@ -1351,6 +1380,7 @@ int main(void) {
     RUN(under_no_delete_what_was_created_is_no_finding_and_a_sealed_directory_removed_is_both);
     RUN(under_no_delete_a_mount_root_is_unverifiable);
     RUN(under_no_delete_a_directory_sealed_only_after_is_unverifiable);
+    RUN(under_no_delete_a_directory_listed_incompletely_is_unverifiable);
     RUN(under_no_delete_a_file_a_writer_holds_is_there);
     RUN(a_protected_file_modified_and_not_read_is_written_and_unverifiable);
     RUN(a_side_never_looked_at_is_not_counted);
