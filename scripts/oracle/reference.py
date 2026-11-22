@@ -168,6 +168,27 @@ the two sets of them".
      must be `type_changed`: a raced type change is `unknown` and carries
      none ("no record has both").
 
+  M13 V5-A6: "A regular file `sealed` on one side only, with a plain hash
+     on the other ... is `unknown` with reason `class_changed`, not
+     `sealed_key` ... `sealed_key` stays for `sealed` on both sides under
+     different keys." Read: `sealed` on one side only is `class_changed`
+     whatever the other side carries -- a plain hash (the row's case),
+     `meta` (the row: "`not_read` and `class_changed`"), or no hash at all
+     (`unverified`: the row does not name it, and gives `sealed_key` to two
+     sealed entries alone). `meta` against a plain hash is `not_read` alone,
+     as V5-D2. The order: `not_read`, `sealed_key`, `class_changed`;
+  M14 V5-A4 and V5-D4b. A link "standing where a directory on the way to a
+     root, or a root itself, is looked for is recorded as a link", under any
+     `partial` directory. V5-D4b, written before it, takes a non-directory
+     under a deeper `partial` directory for "a file", known absent only
+     when the other side's `roots` list it. Read with V5-D4b's own reason
+     ("every such child of a `partial` directory is recorded, so its absence
+     is known"): a link P on one side only is `added` or `removed` when the
+     other side's roots have a root at or below P -- that side looked for a
+     directory there and would have recorded a link -- and `not_captured`
+     when they have none. V5-A5 (which mounts a capture enters) and
+     watch-system WS-5a (a command line refused) show in no diff.
+
 Ambiguities in O9 and G3-2 (N1-N6), where they are decided:
   N1 `content_not_read`'s order is "the order of the `unknown` array",
      which no pin gives in words (the reasons table is generated): it is
@@ -443,7 +464,9 @@ TRAILER_KEYS = TRAILER_KEYS_SHAPE + SEALING_TRAILER_KEYS
 # reasons V5-D1 to V5-D5 name.
 NOT_READ, PARTIAL, META, SEALED = 'not_read', 'partial', 'meta', 'sealed'
 SEALED_KEY = 'sealed_key'
-V5_REASONS = [NOT_READ, SEALED_KEY]         # V5-D5: in this order, after `writer_open`
+CLASS_CHANGED = 'class_changed'             # V5-A6
+# V5-D5, V5-A6: in this order, after `writer_open`.
+V5_REASONS = [NOT_READ, SEALED_KEY, CLASS_CHANGED]
 MANIFEST_V5_PIN = os.path.join(REPO, 'test', 'expect', 'manifest-v5.md')
 V5_WORDS = {
     'V5-D1': ['`meta` on both sides: `sha256` is not compared; every other field is. All equal: '
@@ -483,6 +506,17 @@ C3_3_WORDS = ('Entries nothing below which was looked at: directories carrying `
 
 V5_ADDENDUM_PIN = os.path.join(REPO, 'test', 'expect', 'manifest-v5-addendum.md')
 V5A_WORDS = {
+    'V5-A4': ['A symbolic link standing where a directory on the way to a root, or a root itself, '
+              'is looked for is recorded as a link, with its target as for any link, and is '
+              'never followed; every root at or below it is `found: false`.'],
+    'V5-A6': ['A regular file `sealed` on one side only, with a plain hash on the other (its '
+              'content kept, or not), is `unknown` with reason `class_changed`, not `sealed_key`, '
+              'whether or not the two manifests carry the same `sealed_key`',
+              '`sealed_key` stays for `sealed` on both sides under different keys. As before, a '
+              'different `size` is `modified` and a different type `type_changed`, and no record '
+              'carries the sealed side\'s hash. `meta` against a plain hash stays V5-D2\'s '
+              '`not_read`; `meta` on one side and `sealed` on the other gives `not_read` and '
+              '`class_changed`. `class_changed` comes after `sealed_key` in the reasons\' order'],
     'V5-A1': ['The header\'s `roots` is an int: the number of root lines. Each root is a line of '
               'its own, directly after the header and before the first entry: `{"root": <path '
               'relative to the scope>, "class": "content" \\| "metadata", "found": true \\| '
@@ -1108,6 +1142,10 @@ def one_sided(p, present, lacking_entries, added, lacking_excluded, present_entr
             trace.append('partial:directory')
         elif c['type'] == 'lnk' and ap == b'.':
             trace.append('partial:link-under-the-scope-root')
+        elif c['type'] == 'lnk' and any(r['path'] == cp or r['path'].startswith(cp + b'/')
+                                        for r in lacking_roots):
+            # V5-A4 (M14): where the other side looked for a directory, or a root
+            trace.append('partial:link-where-a-directory-was-looked-for')
         else:
             assert cp == p, (cp, p)             # "Otherwise C is P, a file"
             listed = [r for r in lacking_roots if r['path'] == p]
@@ -1419,7 +1457,8 @@ def both_sides(b, a, ctx):
         trace.append('v5:meta-difference')
     v5_why = ([NOT_READ] if any(meta_sides) and (not all(meta_sides) or changed or unk_fields
                                                  or ctime_differs) else []) + \
-        ([SEALED_KEY] if unsealed else [])
+        ([] if not unsealed else                 # V5-A6 (M13): one side only, or two keys
+         [SEALED_KEY] if b.get(SEALED) and a.get(SEALED) else [CLASS_CHANGED])
     reasons += v5_why
     content_unknown = 'content' in scopes or CONTENT in unk_scopes or bool(v5_why)
     meta_unknown = 'metadata' in scopes or (unk_scopes - {CONTENT})

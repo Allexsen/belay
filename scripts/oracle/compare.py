@@ -2398,7 +2398,12 @@ V5_SCENARIOS = list(
        'partial on one side only, a directory on both: not compared',
        'partial: raced on the one-sided entry']
     + ['reasons: not_read beside another reason', 'reasons: sealed_key beside another reason',
-       'reasons: not_read and sealed_key', 'reasons: writer_open and not_read'])
+       'reasons: class_changed beside another reason',
+       'reasons: not_read and class_changed', 'reasons: writer_open and not_read',
+       # V5-A4: a link where a directory on the way to a root, or a root, is looked for
+       'link on the way: a partial directory becomes a link, what was below it removed',
+       'link on the way: a link on one side only where the other side has a root below it',
+       'link on the way: a link on one side only that is itself a root of the other side'])
 
 
 def v5_coverage(stem, tags):
@@ -2449,8 +2454,15 @@ def v5_coverage(stem, tags):
         b, a = eb[p], ea[p]
         rec = recs.get(p, {})
         un = rec.get('unknown', [])
-        if ref.NOT_READ in un and ref.SEALED_KEY in un:
-            tags.add('reasons: not_read and sealed_key')
+        if ref.NOT_READ in un and ref.CLASS_CHANGED in un:
+            tags.add('reasons: not_read and class_changed')
+        if ref.CLASS_CHANGED in un and set(un) - {ref.NOT_READ, ref.CLASS_CHANGED}:
+            tags.add('reasons: class_changed beside another reason')
+        if b['type'] != a['type'] and 'lnk' in (b['type'], a['type']) and \
+                (b.get(ref.PARTIAL) or a.get(ref.PARTIAL)) and \
+                any(q.startswith(p + b'/') for q in set(eb) ^ set(ea)):
+            tags.add('link on the way: a partial directory becomes a link, what was below it '
+                     'removed')
         if ref.NOT_READ in un and ref.WRITER_OPEN in un:
             tags.add('reasons: writer_open and not_read')
         if ref.NOT_READ in un and set(un) - {ref.NOT_READ, ref.SEALED_KEY, ref.WRITER_OPEN}:
@@ -2579,6 +2591,13 @@ def v5_coverage(stem, tags):
                          'below it')
         elif e['type'] == 'lnk' and ap == b'.':
             tags.add('partial: a link directly under the scope root, on one side only')
+        elif e['type'] == 'lnk' and any(r['path'].startswith(p + b'/') for r in lroots):
+            tags.add('link on the way: a link on one side only where the other side has a root '
+                     'below it')
+        elif e['type'] == 'lnk' and listed and any(r['path'] == p for r in
+                                                   (ra if p in ea else rb)):
+            tags.add('link on the way: a link on one side only that is itself a root of the '
+                     'other side')
         elif listed:
             tags.add('partial: a file on one side only, a root not found on the other')
         else:
