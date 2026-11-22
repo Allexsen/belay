@@ -31,8 +31,22 @@ enum belay_interp_id {
     BELAY_INTERP_PIP,
     BELAY_INTERP_DPKG,
     BELAY_INTERP_GIT,
+    /* The system interpreters (test/expect/system-interpreters.md). Their
+     * place among the events is not this order: diff-events E13. */
+    BELAY_INTERP_ACCOUNTS,
+    BELAY_INTERP_SUDOERS,
+    BELAY_INTERP_CRON,
+    BELAY_INTERP_SYSTEMD,
+    BELAY_INTERP_SSHKEYS,
+    BELAY_INTERP_TRUST,
     BELAY_INTERP_COUNT
 };
+
+/* diff-events E13: the order of the interpreters' events in a diff, one
+ * after another. `config` has no interpreter yet; its place is after trust.
+ * BELAY_INTERP_ORDER_COUNT of them. */
+#define BELAY_INTERP_ORDER_COUNT 10
+extern const enum belay_interp_id BELAY_INTERP_ORDER[BELAY_INTERP_ORDER_COUNT];
 
 /* The keep bound of BELAY_KEEP_STORE_BOUNDED: a reflog is kept, and read in
  * full, up to this, whatever store_max_bytes says (decision 2026-11-01, 6:
@@ -82,9 +96,14 @@ enum belay_interp_id belay_interp_dispatch(const struct belay_claim *claim,
  */
 
 /* One field value, in the kind's field order: `s`/`len` for a string or
- * bytes, `i` for an int, `b` for a bool; `absent` for an optional field
- * the kind's meaning leaves out. */
-struct belay_fv { const char *s; size_t len; uint64_t i; bool b; bool absent; };
+ * bytes, `i` for an int, `b` for a bool, `list`/`nlist` for a list (each
+ * element's `s`/`len`); `absent` for an optional field the kind's meaning
+ * leaves out; `null` for a field whose type allows null (`string/null`). */
+struct belay_fv {
+    const char *s; size_t len; uint64_t i; bool b; bool absent;
+    bool null;
+    const struct belay_fv *list; size_t nlist;
+};
 
 struct belay_findings;          /* one path's findings, kept by the core */
 struct belay_events;            /* one interpreter's events over one diff */
@@ -151,19 +170,65 @@ struct belay_interp_input {
 
 enum belay_interp_result { BELAY_INTERP_FINDINGS, BELAY_INTERP_DECLINE, BELAY_INTERP_ERROR };
 
+/*
+ *  Lookup (system-interpreters.md SI-4, SI-5): once every path has been
+ *  seen and before the end hooks, an interpreter may ask for entries of the
+ *  after-manifest it was not given -- a path it does not claim, or one that
+ *  did not change -- and for the package that owns a path. Asked in a
+ *  prepare hook; the core then reads the after-manifest once for everything
+ *  asked in that round and calls each `fn` with the entries found, in the
+ *  manifest's order, and runs the prepare hooks again, until a round asks
+ *  for no entry (at most BELAY_LOOKUP_ROUNDS: a chain of links is followed
+ *  one round a link). An entry that is not there is not delivered: what a
+ *  lookup did not find is said in the event, never assumed. The memory this
+ *  takes is bounded by what is asked, never by the manifest.
+ */
+struct belay_lookup;
+#define BELAY_LOOKUP_ROUNDS 12
+#define BELAY_LOOKUP_WANTS  65536u      /* paths asked for in one round */
+#define BELAY_OWNER_ASKS    262144u     /* paths whose owner is asked in one diff */
+typedef int (*belay_lookup_fn)(void *ctx, const struct belay_entry *e);
+
+/* Asks for the after-manifest's entry of `path` (relative to the scope),
+ * or with `below` for every entry under the directory `path`. 0; -1: out
+ * of memory or past BELAY_LOOKUP_WANTS (the hook fails: E6). `fn` returns
+ * 0, or -1 to fail the same way. */
+int belay_lookup_want(struct belay_lookup *lk, const char *path, size_t len, bool below,
+                      belay_lookup_fn fn, void *ctx);
+
+/* The stored copies, for a looked-up entry (NULL: the diff has no store). */
+const struct belay_content *belay_lookup_content(const struct belay_lookup *lk);
+
+/* Asks which package owns `path` (SI-5). 0; -1: out of memory. Past
+ * BELAY_OWNER_ASKS the path is not asked, and its answer is "absent". */
+int belay_owner_ask(struct belay_lookup *lk, const char *path, size_t len);
+
+/* The answer, in an end hook. ABSENT: no dpkg database in the after-manifest,
+ * or one that could not be read whole and did not name the path -- nothing
+ * is known; NONE: the database lists it in no package; PACKAGE: *pkg (the
+ * name of its list file without `.list`, as dpkg wrote it: `libc6:amd64`),
+ * the first in byte order when several list it. */
+enum belay_owned { BELAY_OWNER_ABSENT, BELAY_OWNER_NONE, BELAY_OWNER_PACKAGE };
+enum belay_owned belay_owner_of(const struct belay_lookup *lk, const char *path, size_t len,
+                                const char **pkg, size_t *pkg_len);
+
 /* One interpreter. Over one diff: begin once before the first path (its
  * state, or NULL), explain for each path it claims (`out` empty at first),
  * end once after the last -- with `ev` to add its events to after a diff
  * that read every path, NULL when the diff failed and only the state is to
  * be freed. An end that returns BELAY_INTERP_ERROR has its events replaced
  * by one could_not_interpret event naming the paths it was given (diff-
- * events E6). Any may be NULL. */
+ * events E6). prepare: before the end hooks of a diff that read every
+ * path, once a round (see Lookup above); `lk` stays valid until the end
+ * hook returns; one that returns BELAY_INTERP_ERROR fails as an end hook
+ * does. Any may be NULL. */
 struct belay_interp {
     enum belay_interp_id id;
     void *(*begin)(void);
     enum belay_interp_result (*explain)(void *state, const struct belay_interp_input *in,
                                         struct belay_findings *out);
     enum belay_interp_result (*end)(void *state, struct belay_events *ev);
+    enum belay_interp_result (*prepare)(void *state, struct belay_lookup *lk);
 };
 
 /* The built-in interpreter for `id`. */

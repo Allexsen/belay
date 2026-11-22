@@ -62,4 +62,4 @@ static enum belay_interp_result explain(void *state, const struct belay_interp_i
     return r;
 }
 
-const struct belay_interp INTERP_TEXT = { BELAY_INTERP_TEXT, NULL, explain, NULL };
+const struct belay_interp INTERP_TEXT = { BELAY_INTERP_TEXT, NULL, explain, NULL, NULL };

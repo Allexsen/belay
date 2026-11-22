@@ -46,6 +46,12 @@ static const struct rule rules[] = {
     { "*/.git/logs/refs/*",               BELAY_INTERP_GIT,  BELAY_KEEP_STORE_BOUNDED },
 };
 
+/* diff-events E13. `config` will stand between trust and git. */
+const enum belay_interp_id BELAY_INTERP_ORDER[BELAY_INTERP_ORDER_COUNT] = {
+    BELAY_INTERP_TEXT, BELAY_INTERP_PIP, BELAY_INTERP_DPKG, BELAY_INTERP_ACCOUNTS, BELAY_INTERP_SUDOERS,
+    BELAY_INTERP_CRON, BELAY_INTERP_SYSTEMD, BELAY_INTERP_SSHKEYS, BELAY_INTERP_TRUST, BELAY_INTERP_GIT,
+};
+
 void belay_interp_classify(const char *abs_path, size_t len, struct belay_claim *out) {
     out->interp = BELAY_INTERP_BINARY;
     out->keep = BELAY_KEEP_DEFAULT;
@@ -83,6 +89,12 @@ const char *belay_interp_name(enum belay_interp_id id) {
     case BELAY_INTERP_PIP:    return "pip";
     case BELAY_INTERP_DPKG:   return "dpkg";
     case BELAY_INTERP_GIT:    return "git";
+    case BELAY_INTERP_ACCOUNTS: return "accounts";
+    case BELAY_INTERP_SUDOERS:  return "sudoers";
+    case BELAY_INTERP_CRON:     return "cron";
+    case BELAY_INTERP_SYSTEMD:  return "systemd";
+    case BELAY_INTERP_SSHKEYS:  return "sshkeys";
+    case BELAY_INTERP_TRUST:    return "trust";
     case BELAY_INTERP_COUNT:  break;
     }
     return "unknown";

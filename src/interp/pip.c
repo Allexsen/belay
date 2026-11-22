@@ -506,4 +506,4 @@ static enum belay_interp_result end(void *state, struct belay_events *ev) {
     return r;
 }
 
-const struct belay_interp INTERP_PIP = { BELAY_INTERP_PIP, begin, explain, end };
+const struct belay_interp INTERP_PIP = { BELAY_INTERP_PIP, begin, explain, end, NULL };

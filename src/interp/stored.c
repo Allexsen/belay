@@ -13,12 +13,16 @@ const struct belay_entry *side_entry(const struct belay_interp_input *in, enum s
 
 enum stored_why stored_read(const struct belay_interp_input *in, enum side s, size_t max,
                             unsigned char **buf, size_t *len) {
-    const struct belay_entry *e = side_entry(in, s);
+    return stored_read_entry(in->content, side_entry(in, s), max, buf, len);
+}
+
+enum stored_why stored_read_entry(const struct belay_content *c, const struct belay_entry *e, size_t max,
+                                  unsigned char **buf, size_t *len) {
     *buf = NULL;
     *len = 0;
     if (e == NULL || !e->has_stored) return SW_MISSING;
-    if (in->content == NULL) return SW_NO_STORE;
-    if (belay_content_get(in->content, e->stored_hex, max, buf, len) == 0) return SW_OK;
+    if (c == NULL) return SW_NO_STORE;
+    if (belay_content_get(c, e->stored_hex, max, buf, len) == 0) return SW_OK;
     const int code = belay_err_code(), err = belay_err_errno();
     belay_err_clear();
     if (code == BELAY_ERR_RANGE) return SW_TOO_LARGE;

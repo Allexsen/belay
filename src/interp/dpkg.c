@@ -342,4 +342,4 @@ static enum belay_interp_result end(void *state, struct belay_events *ev) {
     return r;
 }
 
-const struct belay_interp INTERP_DPKG = { BELAY_INTERP_DPKG, begin, explain, end };
+const struct belay_interp INTERP_DPKG = { BELAY_INTERP_DPKG, begin, explain, end, NULL };

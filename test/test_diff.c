@@ -583,7 +583,7 @@ static enum belay_interp_result t_stale(void *state, const struct belay_interp_i
 TEST(one_paths_findings_never_reach_the_next) {
     two_records();
     g_calls = 0;
-    const struct belay_interp t = { BELAY_INTERP_PIP, NULL, t_stale, NULL };
+    const struct belay_interp t = { BELAY_INTERP_PIP, NULL, t_stale, NULL, NULL };
     REQUIRE(run_in(BELAY_INTERP_PIP, &t) == 0);
     ASSERT_TRUE(has(PIP_A, "\"findings\":[{\"kind\":\"content_unavailable\",\"reason\":\"missing\","
                            "\"side\":\"after\",\"text\":\"content unavailable (after): missing\"}]"));
@@ -600,7 +600,7 @@ static enum belay_interp_result t_adds_then_declines(void *state, const struct b
 
 TEST(a_declining_interpreter_adds_nothing) {
     two_records();
-    const struct belay_interp t = { BELAY_INTERP_PIP, NULL, t_adds_then_declines, NULL };
+    const struct belay_interp t = { BELAY_INTERP_PIP, NULL, t_adds_then_declines, NULL, NULL };
     REQUIRE(run_in(BELAY_INTERP_PIP, &t) == 0);
     ASSERT_TRUE(record(PIP_A) != NULL);
     ASSERT_FALSE(has(PIP_A, "findings"));
@@ -627,7 +627,7 @@ static enum belay_interp_result t_end_event(void *state, struct belay_events *ev
 
 TEST(events_come_after_the_path_records_and_the_trailer_counts_them) {
     two_records();
-    const struct belay_interp t = { BELAY_INTERP_PIP, NULL, t_claims, t_end_event };
+    const struct belay_interp t = { BELAY_INTERP_PIP, NULL, t_claims, t_end_event, NULL };
     const int rc = run_in(BELAY_INTERP_PIP, &t);
     if (rc != 0) BELAY_FAIL("%s", belay_err_msg());
     REQUIRE(rc == 0);
@@ -663,7 +663,7 @@ static enum belay_interp_result t_end_fails(void *state, struct belay_events *ev
 
 TEST(a_failed_end_hook_is_one_event_naming_its_paths) {
     two_records();
-    const struct belay_interp t = { BELAY_INTERP_PIP, NULL, t_claims, t_end_fails };
+    const struct belay_interp t = { BELAY_INTERP_PIP, NULL, t_claims, t_end_fails, NULL };
     REQUIRE(run_in(BELAY_INTERP_PIP, &t) == 0);
     ASSERT_TRUE(strstr(g_text, "{\"event\":\"could_not_interpret\",\"interp\":\"pip\",\"text\":"
                                "\"could not interpret\",\"paths\":[\"" PIP_A "\",\"" PIP_B "\"]}\n") != NULL);
@@ -682,7 +682,7 @@ TEST(a_failed_end_hook_never_names_a_path_not_captured) {
         if (k == 0) E(.path = "c-1.dist-info/RECORD", .type = "reg", .size = 3, .sha = HA);
         m_end();
     }
-    const struct belay_interp t = { BELAY_INTERP_PIP, NULL, t_claims, t_end_fails };
+    const struct belay_interp t = { BELAY_INTERP_PIP, NULL, t_claims, t_end_fails, NULL };
     REQUIRE(run_in(BELAY_INTERP_PIP, &t) == 0);
     ASSERT_TRUE(strstr(g_text, "{\"path\":\"c-1.dist-info/RECORD\",\"outcome\":\"unknown\"") != NULL);
     ASSERT_TRUE(strstr(g_text, "{\"event\":\"could_not_interpret\",\"interp\":\"pip\",\"text\":"
@@ -703,7 +703,7 @@ TEST(a_failed_diff_ends_its_interpreters_without_a_sink) {
     m_begin("after", "/s", 1000); ROOT(.mode = 0755);
     E(.path = "o/y", .type = "reg", .size = 1, .sha = HA); m_end();       /* an orphan: refused */
     g_null_ends = 0;
-    const struct belay_interp t = { BELAY_INTERP_PIP, NULL, t_claims, t_end_null };
+    const struct belay_interp t = { BELAY_INTERP_PIP, NULL, t_claims, t_end_null, NULL };
     ASSERT_EQ_INT(-1, run_in(BELAY_INTERP_PIP, &t));
     ASSERT_EQ_INT(1, g_null_ends);
     belay_err_clear();
@@ -794,7 +794,7 @@ TEST(a_published_output_is_success_even_where_its_directory_cannot_be_synced) {
 TEST(an_interpreter_error_is_a_finding_never_a_failed_diff) {
     m_begin("before", "/s", 1000); ROOT(); E(.path = "f", .type = "reg", .size = 3, .sha = HA); m_end();
     m_begin("after", "/s", 1000); ROOT(); E(.path = "f", .type = "reg", .size = 3, .sha = HB); m_end();
-    const struct belay_interp t = { BELAY_INTERP_BINARY, NULL, t_error, NULL };
+    const struct belay_interp t = { BELAY_INTERP_BINARY, NULL, t_error, NULL, NULL };
     REQUIRE(run_with(&t) == 0);
     ASSERT_TRUE(has("f", "\"outcome\":\"modified\""));
     ASSERT_TRUE(has("f", "\"findings\":[{\"kind\":\"could_not_interpret\",\"text\":\"could not interpret\"}]}"));
@@ -802,7 +802,7 @@ TEST(an_interpreter_error_is_a_finding_never_a_failed_diff) {
 
 TEST(a_finding_that_is_not_utf8_is_replaced) {
     two_records();
-    const struct belay_interp t = { BELAY_INTERP_PIP, NULL, t_invalid, NULL };
+    const struct belay_interp t = { BELAY_INTERP_PIP, NULL, t_invalid, NULL, NULL };
     REQUIRE(run_in(BELAY_INTERP_PIP, &t) == 0);
     ASSERT_TRUE(has(PIP_A, "\"findings\":[{\"kind\":\"invalid_finding\",\"text\":\"invalid finding\"},"
                            "{\"kind\":\"content_unavailable\",\"reason\":\"missing\",\"side\":\"after\","
@@ -816,7 +816,7 @@ TEST(an_interpreter_sees_the_verdict_and_keeps_its_state_over_one_diff) {
     m_begin("after", "/s", 1000); ROOT(); E(.path = "f", .type = "reg", .size = 3, .sha = HB);
     E(.path = "g", .type = "reg", .size = 4, .sha = HB); m_end();
     g_begun = g_ended = g_saw_modified = 0;
-    const struct belay_interp t = { BELAY_INTERP_BINARY, t_begin, t_verdict, t_end };
+    const struct belay_interp t = { BELAY_INTERP_BINARY, t_begin, t_verdict, t_end, NULL };
     REQUIRE(run_with(&t) == 0);
     ASSERT_EQ_INT(1, g_begun);
     ASSERT_EQ_INT(1, g_ended);
@@ -866,7 +866,7 @@ TEST(the_store_reaches_an_interpreter_through_the_options) {
     }
     m_begin("before", "/s", 1000); ROOT(); E(.path = "f", .type = "reg", .size = 6, .sha = HA); m_end();
     m_begin("after", "/s", 1000); ROOT(); E(.path = "f", .type = "reg", .size = 6, .sha = HB); m_end();
-    const struct belay_interp t = { BELAY_INTERP_BINARY, NULL, t_content, NULL };
+    const struct belay_interp t = { BELAY_INTERP_BINARY, NULL, t_content, NULL, NULL };
     const struct belay_diff_opts o = { .store_dir = store };
     g_content_ok = g_content_none = 0;
     g_opts = &o;

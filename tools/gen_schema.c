@@ -252,11 +252,11 @@ static void diff_fields_block(void) {
 
 static void diff_findings_block(void) {
     static const char *const T[] = { [FT_UNSET] = NULL, [FT_INT] = "int", [FT_STRING] = "string",
-                                     [FT_BOOL] = "bool", [FT_BYTES] = "bytes" };
+                                     [FT_BOOL] = "bool", [FT_BYTES] = "bytes", [FT_LIST] = "list" };
     printf("| kind | interpreter | level | fields | text | meaning |\n|---|---|---|---|---|---|\n");
     for (int k = FK_UNSET + 1; k < FK_COUNT; k++) {
         const struct finding_kind_def *d = &FINDING_KINDS[k];
-        char in[128] = "", fl[256] = "";
+        char in[128] = "", fl[512] = "";
         size_t w = 0;
         if (d->interps == IN_CORE) snprintf(in, sizeof in, "core");
         else
@@ -267,8 +267,9 @@ static void diff_findings_block(void) {
         w = 0;
         for (int f = 0; f < FINDING_FIELDS_MAX && d->field[f].name; f++) {
             if (T[d->field[f].type] == NULL) abort();
-            w += (size_t)snprintf(fl + w, sizeof fl - w, "%s%s: %s%s", w ? ", " : "", d->field[f].name,
-                                  T[d->field[f].type], d->field[f].optional ? "?" : "");
+            w += (size_t)snprintf(fl + w, sizeof fl - w, "%s%s: %s%s%s", w ? ", " : "", d->field[f].name,
+                                  T[d->field[f].type], d->field[f].nullable ? "/null" : "",
+                                  d->field[f].optional ? "?" : "");
         }
         if (strchr(d->meaning, '|') != NULL || strchr(d->text, '|') != NULL) abort();
         char tx[512];

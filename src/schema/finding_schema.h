@@ -31,11 +31,15 @@ enum finding_kind {
 
 /* FT_BYTES: up to FINDING_BYTES_MAX bytes, written "<name>" when UTF-8 and
  * "<name>_b64" otherwise, as the manifest writes bytes (decision 2026-10-31, b). */
-enum field_type { FT_UNSET, FT_INT, FT_STRING, FT_BOOL, FT_BYTES };
+enum field_type { FT_UNSET, FT_INT, FT_STRING, FT_BOOL, FT_BYTES, FT_LIST };
+/* FT_LIST: a JSON array of at most FINDING_LIST_MAX strings, each as a
+ * string field is; joined by ", " in the text (finding-kinds.md, "Types of
+ * the system interpreters' fields"). */
+#define FINDING_LIST_MAX 256u
 
 #define LV_PATH  1u
 #define LV_EVENT 2u
-#define FINDING_FIELDS_MAX 5
+#define FINDING_FIELDS_MAX 8
 #define FINDING_STRING_MAX 1024u        /* bytes of a string field, and of the text */
 #define FINDING_BYTES_MAX 4095u         /* bytes of a bytes field: addendum A4's link target */
 #define FINDINGS_PER_RECORD 4096u       /* then one and_more (decision Q4) */
@@ -45,8 +49,10 @@ enum field_type { FT_UNSET, FT_INT, FT_STRING, FT_BOOL, FT_BYTES };
  * IN_CORE is none: the core's own kinds (decision P5). */
 #define IN_CORE 0u
 
-/* optional: absent exactly when the kind's meaning says (`?` in the pin). */
-struct finding_field { const char *name; enum field_type type; bool optional; };
+/* optional: absent exactly when the kind's meaning says (`?` in the pin).
+ * nullable: the value may be JSON null (`/null` in the pin); no template
+ * names such a field. */
+struct finding_field { const char *name; enum field_type type; bool optional; bool nullable; };
 
 struct finding_kind_def {
     const char *name;
@@ -61,7 +67,7 @@ struct finding_kind_def {
 extern const struct finding_kind_def FINDING_KINDS[FK_COUNT];
 
 /* The rules of event records (diff-events.md), by id ("E1 placement"). */
-#define EVENT_RULE_COUNT 12
+#define EVENT_RULE_COUNT 13
 struct event_rule { const char *id, *statement; };
 extern const struct event_rule EVENT_RULES[EVENT_RULE_COUNT];
 
