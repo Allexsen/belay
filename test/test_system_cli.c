@@ -175,6 +175,96 @@ TEST(mark_diff_and_log_take_it) {
     ASSERT_TRUE(strstr(g_out, ", nothing seen below 3 directories") != NULL);
 }
 
+/* The first line of a command's output, into a static buffer. */
+static const char *sh_line(const char *fmt, ...) {
+    static char line[600];
+    char cmd[4096];
+    va_list ap;
+    va_start(ap, fmt);
+    vsnprintf(cmd, sizeof cmd, fmt, ap);
+    va_end(ap);
+    line[0] = '\0';
+    FILE *f = popen(cmd, "r");
+    if (f == NULL) return line;
+    if (fgets(line, sizeof line, f) == NULL) line[0] = '\0';
+    pclose(f);
+    line[strcspn(line, "\n")] = '\0';
+    return line;
+}
+
+/* system-interpreters.md SA-6, checkpoint-v3 C3-6b: a checkpoint of a
+ * system watch keeps the per-line digests of shadow and gshadow as
+ * `shadow.lines`, mode 600, and records its sha256; a diff of two names the
+ * entries that changed; no part of a line but its first field is anywhere
+ * in belay's state or output; and the file goes with its checkpoint. */
+TEST(a_checkpoint_keeps_the_digests_of_shadow_lines) {
+    fresh();
+    sh("cd '%s' && printf 'root:SHADOWSECRET:1::::::\\ndaemon:*:1::::::\\n' > etc/shadow && "
+       "printf 'root:GSHADOWSECRET::\\n' > etc/gshadow && chmod 640 etc/gshadow", g_tree);
+    REQUIRE_MSG(belay("check", "--system-root", g_tree, "--json", NULL) == 0, "%s", g_err);
+    char lines[600], sha[80];
+    snprintf(lines, sizeof lines, "%s", sh_line("find '%s' -name shadow.lines", g_state));
+    REQUIRE(strstr(lines, "/checkpoints/1/shadow.lines") != NULL);
+    struct stat ls;
+    REQUIRE(stat(lines, &ls) == 0);
+    ASSERT_EQ_INT(0600, (int)(ls.st_mode & 07777));
+    /* the record's last key is the sha256 of that file (sha256sum is coreutils'; shasum is everywhere else) */
+    snprintf(sha, sizeof sha, "%.64s", sh_line("(sha256sum '%s' 2>/dev/null || shasum -a 256 '%s') | cut -c1-64", lines, lines));
+    char want[200];
+    snprintf(want, sizeof want, ",\"journal_seq\":null,\"shadow_lines_sha256\":\"%s\"}\n", sha);
+    ASSERT_EQ_INT(64, (int)strlen(sha));
+    ASSERT_TRUE(strstr(g_out, want) != NULL);
+    ASSERT_EQ_STR("4", sh_line("wc -l < '%s' | tr -d ' '", lines));         /* a header, gshadow's line, shadow's two */
+    ASSERT_EQ_STR("1", sh_line("grep -c '^{\"file\":\"etc/shadow\",\"name\":\"daemon\",\"hmac\":\"[0-9a-f]*\"}$' '%s'", lines));
+    ASSERT_EQ_STR("1", sh_line("grep -c '^{\"file\":\"etc/gshadow\",\"name\":\"root\",\"hmac\":\"[0-9a-f]*\"}$' '%s'", lines));
+    ASSERT_EQ_STR("", sh_line("grep -r -l 'SHADOWSECRET' '%s'", g_state));
+    /* useradd's rewrite, in small: an entry changed, one added, one removed */
+    sh("cd '%s' && printf 'root:SHADOWSECRET2:2::::::\\nsiteuser:!:3::::::\\n' > etc/shadow", g_tree);
+    REQUIRE_MSG(belay("diff", "--system-root", g_tree, "--since", "1", "--json", NULL) == 0, "%s", g_err);
+    ASSERT_TRUE(strstr(g_out, "{\"event\":\"password_entry_changed\",\"interp\":\"accounts\",\"file\":\"etc/shadow\",\"name\":\"root\","
+                              "\"text\":\"password database: entry changed for root\",\"paths\":[\"etc/shadow\"]}\n"
+                              "{\"event\":\"password_entry_removed\",\"interp\":\"accounts\",\"file\":\"etc/shadow\",\"name\":\"daemon\","
+                              "\"text\":\"password database: entry removed for daemon\",\"paths\":[\"etc/shadow\"]}\n"
+                              "{\"event\":\"password_entry_added\",\"interp\":\"accounts\",\"file\":\"etc/shadow\",\"name\":\"siteuser\","
+                              "\"text\":\"password database: entry added for siteuser\",\"paths\":[\"etc/shadow\"]}\n") != NULL);
+    ASSERT_TRUE(strstr(g_out, "etc/gshadow\",\"name") == NULL);            /* gshadow did not change */
+    ASSERT_TRUE(strstr(g_out, "SHADOWSECRET") == NULL);
+    ASSERT_EQ_STR("", sh_line("grep -r -l 'SHADOWSECRET' '%s'", g_state));
+    /* the receipt says them too, among the events */
+    REQUIRE(belay("diff", "--system-root", g_tree, "--since", "1", "--to", "2", NULL) == 0);
+    ASSERT_TRUE(strstr(g_out, "password database: entry added for siteuser") != NULL);
+    ASSERT_TRUE(strstr(g_out, "SHADOWSECRET") == NULL);
+    /* log prints each checkpoint's */
+    REQUIRE(belay("log", "--system-root", g_tree, "--json", NULL) == 0);
+    ASSERT_TRUE(strstr(g_out, want) != NULL);
+    ASSERT_TRUE(strstr(g_out, "\"shadow_lines_sha256\":null") == NULL);
+    /* a digest file that is not the one recorded is corrupt state, said: never compared, never skipped */
+    sh("printf 'x' >> '%s'", lines);
+    ASSERT_TRUE(belay("diff", "--system-root", g_tree, "--since", "1", "--to", "2", "--json", NULL) != 0);
+    ASSERT_TRUE(strstr(g_err, "shadow.lines") != NULL);
+    /* and it goes with its checkpoint */
+    REQUIRE_MSG(belay("prune", "--scope", g_tree, "--keep-last", "1", NULL) == 0, "%s", g_err);
+    ASSERT_EQ_INT(-1, access(lines, F_OK));
+    lines[strlen(lines) - strlen("/shadow.lines")] = '\0';
+    ASSERT_EQ_INT(-1, access(lines, F_OK));                                 /* the directory too */
+    ASSERT_EQ_STR("", sh_line("grep -r -l 'SHADOWSECRET' '%s'", g_state));
+}
+
+/* A system watch of a machine whose shadow cannot be read (belay not root)
+ * or that has none keeps no digest file, and says null. */
+TEST(no_digest_file_where_shadow_is_not_read) {
+    fresh();
+    sh("rm -f '%s/etc/shadow'", g_tree);
+    REQUIRE_MSG(belay("check", "--system-root", g_tree, "--json", NULL) == 0, "%s", g_err);
+    ASSERT_TRUE(strstr(g_out, ",\"shadow_lines_sha256\":null}\n") != NULL);
+    ASSERT_EQ_STR("", sh_line("find '%s' -name shadow.lines", g_state));
+    /* against a checkpoint that has one: no entry is named, the record of shadow stands */
+    sh("cd '%s' && printf 'root:SHADOWSECRET:1::::::\\n' > etc/shadow && chmod 640 etc/shadow", g_tree);
+    REQUIRE_MSG(belay("diff", "--system-root", g_tree, "--since", "1", "--json", NULL) == 0, "%s", g_err);
+    ASSERT_TRUE(strstr(g_out, "password_entry") == NULL);
+    ASSERT_TRUE(strstr(g_out, "{\"path\":\"etc/shadow\",\"outcome\":\"added\",") != NULL);
+}
+
 /* WS-1's forms, and what this version does not take it on. */
 TEST(usage) {
     fresh();
@@ -357,6 +447,8 @@ int main(void) {
     setenv("BELAY_STATE_DIR", g_state, 1);
     RUN(check_captures_the_roots);
     RUN(mark_diff_and_log_take_it);
+    RUN(a_checkpoint_keeps_the_digests_of_shadow_lines);
+    RUN(no_digest_file_where_shadow_is_not_read);
     RUN(usage);
     RUN(a_system_scope_is_captured_only_with_the_flag);
     RUN(the_root_directory_is_refused_without_the_flag);

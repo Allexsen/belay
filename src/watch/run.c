@@ -553,7 +553,12 @@ static int do_step(struct wctx *x, const struct wop *op) {
         char d[PATH_MAX + 200];
         snprintf(d, sizeof d, "%s/checkpoints/%ld/diff-from-%ld.ndjson", x->st.dir, c.id, cursor);
         if (manifest_acquire(&x->st, cursor, &mf_a) == -1 || manifest_acquire(&x->st, c.id, &mf_b) == -1) goto out;
-        const struct belay_diff_opts dopts = { .store_dir = x->st.store };
+        static char lines_a[PATH_MAX + 200], lines_b[PATH_MAX + 200];      /* SA-6 */
+        const int la = state_shadow_lines(&x->st, cursor, lines_a, sizeof lines_a);
+        const int lb = la == -1 ? -1 : state_shadow_lines(&x->st, c.id, lines_b, sizeof lines_b);
+        if (la == -1 || lb == -1) goto out;
+        const struct belay_diff_opts dopts = { .store_dir = x->st.store, .shadow_lines_before = la == 1 ? lines_a : NULL,
+                                               .shadow_lines_after = lb == 1 ? lines_b : NULL };
         struct belay_diff_stats ds;
         if (belay_diff(mf_a.path, mf_b.path, d, &dopts, &ds) == -1) goto out;
         stage(x, "matching");

@@ -330,21 +330,23 @@ static void json_checkpoint(FILE *out, const struct state *st, const struct chec
      * did, without the seven keys (C3-8). No capture is from events yet, and
      * none has a runtime record, a kernel record or a per-line digest file:
      * `walk`, 0 and three nulls. */
-    char unread[96] = "";
+    char unread[96] = "", lines[80] = "null";
+    if (c->shadow_lines[0] != '\0') snprintf(lines, sizeof lines, "\"%s\"", c->shadow_lines);
     if (c->counts_unread)
         snprintf(unread, sizeof unread, "\"unreadable\":%llu,\"sealing\":%llu,",
                  (unsigned long long)c->unreadable, (unsigned long long)c->sealing);
     fprintf(out, "{\"id\":%ld,\"kind\":\"%s\",\"created_ns\":%lld,%s,%s,"
                  "\"entries\":%llu,\"raced\":%llu,\"unstable\":%llu,\"vanished\":%llu,%s\"provisional\":%s,"
                  "\"excluded\":%llu,\"excluded_paths\":%s,\"prefilter\":{\"used\":%s,\"reference\":\"%s\",\"trusted\":%llu,"
-                 "\"racy\":%llu,\"full_reason\":\"%s\"},%s\"source\":%s,\"stored\":\"%s\",\"kept\":%s%s}\n",
+                 "\"racy\":%llu,\"full_reason\":\"%s\"},%s\"source\":%s,\"stored\":\"%s\",\"kept\":%s%s%s}\n",
             c->id, c->kind, (long long)c->created_ns, esc, mesc, (unsigned long long)c->entries,
             (unsigned long long)c->raced, (unsigned long long)c->unstable, (unsigned long long)c->vanished,
             unread, c->provisional ? "true" : "false", (unsigned long long)c->excluded, xs, c->full ? "false" : "true",
             state_reference(c), (unsigned long long)c->trusted, (unsigned long long)c->racy, why,
             c->counts_unread ? "\"basis\":\"walk\",\"carried\":0," : "", src,
             delta ? "delta" : "whole", c->kept ? "true" : "false",
-            c->counts_unread ? ",\"runtime_sha256\":null,\"journal_seq\":null,\"shadow_lines_sha256\":null" : "");
+            c->counts_unread ? ",\"runtime_sha256\":null,\"journal_seq\":null,\"shadow_lines_sha256\":" : "",
+            c->counts_unread ? lines : "");
 }
 
 /* What a manifest's header says was not walked, one line each (Q6;
@@ -687,7 +689,14 @@ static int cmd_diff(const struct opts *o, FILE *out, FILE *err) {
     } else {
         snprintf(d, sizeof d, "%s/checkpoints/%ld/diff-from-%ld.ndjson", st.dir, to, from);
     }
-    const struct belay_diff_opts dopts = { .store_dir = st.store };
+    /* SA-6: both checkpoints' per-line digests of shadow and gshadow, where
+     * each kept one. */
+    static char lines_a[PATH_MAX + 200], lines_b[PATH_MAX + 200];
+    const int la = state_shadow_lines(&st, from, lines_a, sizeof lines_a);
+    const int lb = la == -1 ? -1 : state_shadow_lines(&st, to, lines_b, sizeof lines_b);
+    if (la == -1 || lb == -1) { rc = failed(err); goto done; }
+    const struct belay_diff_opts dopts = { .store_dir = st.store, .shadow_lines_before = la == 1 ? lines_a : NULL,
+                                           .shadow_lines_after = lb == 1 ? lines_b : NULL };
     struct belay_diff_stats ds;
     if (belay_diff(a, b, d, &dopts, &ds) == -1) { rc = failed(err); goto done; }
     in = fopen(d, "r");
