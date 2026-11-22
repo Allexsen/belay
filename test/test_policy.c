@@ -964,6 +964,109 @@ TEST(under_no_delete_what_was_created_is_no_finding_and_a_sealed_directory_remov
     HAS("protected_path_unverifiable", "grader/sub", ",\"rule\":\"grader/**\",\"reasons\":[\"unreadable\"");
 }
 
+/* ---- hand-built manifests: what a real capture as this user cannot make ---- */
+
+static size_t hb_count(const char *body, const char *key) {
+    size_t n = 0;
+    for (const char *p = body; (p = strstr(p, key)) != NULL; p++) n++;
+    return n;
+}
+
+/* A version 5 manifest of a whole scope at g_dir/<name>: `body` is its entry
+ * lines, in path order, each from HB_DIR or HB_REG; the trailer counts them. */
+static void hb_manifest(const char *name, const char *body) {
+    char p[600];
+    snprintf(p, sizeof p, "%s/%s", g_dir, name);
+    FILE *f = fopen(p, "wb");
+    if (f == NULL) return;
+    fprintf(f, "{\"belay_manifest\":5,\"created_ns\":0,\"scopes\":[\"/s\"],\"hash\":\"sha256\",\"hash_max_bytes\":67108864,"
+               "\"store_max_bytes\":65536,\"excluded\":[],\"walk_start_ns\":0,\"source\":null,\"roots\":0,"
+               "\"basis\":\"walk\"}\n%s", body);
+    fprintf(f, "{\"belay_manifest_end\":%zu,\"vanished\":0,\"unreadable\":%zu,\"unstable\":%zu,\"mounts\":%zu,\"raced\":0,"
+               "\"trusted\":0,\"reference\":\"none\",\"read_all\":\"check\",\"writer_open\":0,\"unguarded\":0,"
+               "\"not_read\":0,\"meta\":0,\"sealed\":0,\"carried\":0,\"racy\":0}\n",
+            hb_count(body, "{\"path\":"), hb_count(body, "\"unreadable\":true"), hb_count(body, "\"unstable\":true"),
+            hb_count(body, "\"mount\":true"));
+    fclose(f);
+}
+/* `flags` in canonical order, each with its leading comma. */
+#define HB_DIR(path, mode, dev, flags) "{\"path\":\"" path "\",\"type\":\"dir\",\"mode\":" mode ",\"uid\":0,\"gid\":0," \
+    "\"size\":4096,\"mtime_ns\":5,\"ctime_ns\":5,\"ino\":7,\"dev\":" dev ",\"nlink\":2" flags "}\n"
+#define HB_REG(path) "{\"path\":\"" path "\",\"type\":\"reg\",\"mode\":33188,\"uid\":0,\"gid\":0,\"size\":3,\"mtime_ns\":5," \
+    "\"ctime_ns\":5,\"ino\":9,\"dev\":1,\"nlink\":1,\"sha256\":\"" \
+    "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\"}\n"
+#define HB_UNREADABLE ",\"unreadable\":true"
+#define HB_MOUNT      ",\"mount\":true"
+#define HB_UNSTABLE   ",\"unstable\":true"
+
+/* The diff of two such manifests judged against `spec`: policy.v1 in g_out.
+ * The violations counted, or -1 (g_out is then why). */
+static int hb_verify(const char *spec_json, const char *before, const char *after) {
+    fresh(spec_json);
+    char m1[600], m2[600], d[600], st[600];
+    snprintf(m1, sizeof m1, "%s/before", g_dir);
+    snprintf(m2, sizeof m2, "%s/after", g_dir);
+    snprintf(d, sizeof d, "%s/d", g_dir);
+    snprintf(st, sizeof st, "%s/st", g_dir);
+    mkdir(st, 0700);
+    hb_manifest("before", before);
+    hb_manifest("after", after);
+    free(g_out);
+    g_out = NULL;
+    struct protect_spec spec;
+    if (belay_diff(m1, m2, d, NULL, NULL) != 0 || protect_load(g_spec, &spec) != 0) {
+        g_out = strdup(belay_err_msg());
+        return -1;
+    }
+    struct bundle b = { 0 };
+    const struct policy_in in = { m1, m2, d, st, g_scope, false, &b,
+                                  "0000000000000000000000000000000000000000000000000000000000000000", &spec };
+    struct policy_stats ps = { 0, 0 };
+    size_t on;
+    FILE *out = open_memstream(&g_out, &on);
+    const int rc = policy_run(&in, out, &ps);
+    fclose(out);
+    protect_free(&spec);
+    if (rc != 0) { free(g_out); g_out = strdup(belay_err_msg()); return -1; }
+    return (int)ps.violations;
+}
+
+#define ND_ONLY "{\"belay_protect\":2,\"protect\":[{\"path\":\"grader/**\",\"mode\":[\"no_delete\"]}]}"
+#define HB_TOP HB_DIR(".", "16877", "1", "") HB_DIR("grader", "16877", "1", "")
+
+/* PV2-9, the `mount` half: under no_delete alone a matched directory that is
+ * a mount root has nothing recorded below it either. Only a manifest written
+ * by hand has one without privilege. */
+TEST(under_no_delete_a_mount_root_is_unverifiable) {
+    static const char M[] = HB_TOP HB_DIR("grader/sub", "16877", "2", HB_MOUNT);
+    const int rc = hb_verify(ND_ONLY, M, M);
+    if (rc != 1) BELAY_FAIL("%d violations in:\n%s", rc, g_out);
+    HAS("protected_path_unverifiable", "grader/sub", ",\"rule\":\"grader/**\",\"reasons\":[\"mount\"],");
+    /* one that is listed is no finding */
+    static const char L[] = HB_TOP HB_DIR("grader/sub", "16877", "1", "") HB_REG("grader/sub/x");
+    ASSERT_EQ_INT(0, hb_verify(ND_ONLY, L, L));
+}
+
+/* PV2-9, the after side alone: a file replaced by a directory nobody may
+ * list, and a directory that was listed at reset and is sealed after. What
+ * the rule protects below it after has no entry. */
+TEST(under_no_delete_a_directory_sealed_only_after_is_unverifiable) {
+    static const char FILE_B[] = HB_TOP HB_REG("grader/sub");
+    static const char DIR_B[] = HB_TOP HB_DIR("grader/sub", "16877", "1", "") HB_REG("grader/sub/x");
+    static const char SEALED_A[] = HB_TOP HB_DIR("grader/sub", "16384", "1", HB_UNREADABLE);
+    static const char MOUNT_A[] = HB_TOP HB_DIR("grader/sub", "16877", "2", HB_MOUNT);
+    int rc = hb_verify(ND_ONLY, FILE_B, SEALED_A);
+    if (rc != 1) BELAY_FAIL("a file replaced by a sealed directory: %d violations in:\n%s", rc, g_out);
+    HAS("protected_path_unverifiable", "grader/sub", ",\"rule\":\"grader/**\",\"reasons\":[\"unreadable\"],");
+    rc = hb_verify(ND_ONLY, DIR_B, SEALED_A);
+    if (rc != 2) BELAY_FAIL("a directory sealed during the episode: %d violations in:\n%s", rc, g_out);
+    HAS("protected_path_unverifiable", "grader/sub", ",\"rule\":\"grader/**\",\"reasons\":[\"unreadable\"],");
+    HAS("protected_path_unverifiable", "grader/sub/x", ",\"rule\":\"grader/**\",\"reasons\":[\"not_captured\"],");
+    rc = hb_verify(ND_ONLY, DIR_B, MOUNT_A);
+    if (rc != 2) BELAY_FAIL("a directory mounted over during the episode: %d violations in:\n%s", rc, g_out);
+    HAS("protected_path_unverifiable", "grader/sub", ",\"rule\":\"grader/**\",\"reasons\":[\"mount\"],");
+}
+
 /* PV2-8 for a flag other than unreadable: a writer holds the protected file
  * at verify, so its outcome is unknown (writer_open). It is there. */
 TEST(under_no_delete_a_file_a_writer_holds_is_there) {
@@ -1246,6 +1349,8 @@ int main(void) {
     RUN(no_delete_beside_anything_else_reads_what_it_read);
     RUN(under_no_delete_a_directory_nothing_was_seen_below_is_unverifiable);
     RUN(under_no_delete_what_was_created_is_no_finding_and_a_sealed_directory_removed_is_both);
+    RUN(under_no_delete_a_mount_root_is_unverifiable);
+    RUN(under_no_delete_a_directory_sealed_only_after_is_unverifiable);
     RUN(under_no_delete_a_file_a_writer_holds_is_there);
     RUN(a_protected_file_modified_and_not_read_is_written_and_unverifiable);
     RUN(a_side_never_looked_at_is_not_counted);
