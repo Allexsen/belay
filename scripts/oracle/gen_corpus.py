@@ -1093,9 +1093,14 @@ def v5_violations(t):
             v.append('%r: V5-6' % p)
     if not t.roots:
         return v
+    # V5-A4: a link where a directory on the way to a root, or a root itself,
+    # is looked for; "every root at or below it is `found: false`".
+    links = {p for p, e in t.e.items() if e['type'] == 'lnk'
+             and any(q == p or q.startswith(p + b'/') for q in t.roots)}
+    behind = lambda q: any(q == p or q.startswith(p + b'/') for p in links)
     for q, (cls, found) in t.roots.items():
         if cls not in ('content', 'metadata') or found not in (True, False) or \
-                found != (q in t.e) or q == b'.' or \
+                found != (q in t.e and not behind(q)) or q == b'.' or \
                 any(o != q and (q.startswith(o + b'/')) for o in t.roots):
             v.append('root %r' % q)
     # V5-E3: `.` and every directory on the way to a root, as far as it exists.
@@ -1105,6 +1110,10 @@ def v5_violations(t):
             q = parent_of(q)
             way.add(q)
     for p, e in t.e.items():
+        if p in links:                          # V5-A4: recorded as a link, never followed
+            if 'partial' in e or not t.e[parent_of(p)].get('partial'):
+                v.append('%r: V5-A4' % p)
+            continue
         on_way = p in way and root_of(t, p) is None
         if has_partial(e) != on_way or (on_way and e['type'] != 'dir'):
             v.append('%r: V5-E3, partial' % p)
@@ -5632,7 +5641,7 @@ def manifest_v5(w, rng):
     def unread(a, rng):
         a.e[TOOL]['mode'] &= ~0o004
     T('meta, then sealed', both(cls, unread),
-      ['meta on one side, sealed on the other', 'reasons: not_read and sealed_key'])
+      ['meta on one side, sealed on the other', 'reasons: not_read and class_changed'])
     T('meta, then a writer at it', both(cls, on(TOOL, 'writer_open')),
       ['meta on one side, writer_open on the other', 'reasons: writer_open and not_read'])
     def to(p, typ):
@@ -5671,6 +5680,8 @@ def manifest_v5(w, rng):
            for s in ('before', 'after')])
     T('sealed under two keys, xattrs_unknown on a side', both(rekey, on(SHADOW, 'xattrs_unknown')),
       ['reasons: sealed_key beside another reason'])
+    T('sealed, then plain, xattrs_unknown on a side', both(opened, on(KEY, 'xattrs_unknown')),
+      ['reasons: class_changed beside another reason'])
     T('a sealed file becomes a symlink', to(SHADOW, 'lnk'), ['sealed on a side, the type differs'])
     def too_big(a, rng):
         a.e[SHADOW]['size'] = a.limit + 2
@@ -5727,6 +5738,27 @@ def manifest_v5(w, rng):
         v5_reg(rng, a, U + b'.config/systemd/user/x.service')
     T('a first .config/systemd/user/x.service where .config was', first_unit,
       ['partial: a directory two levels below a partial one, its parent new too'])
+    # V5-A4: a link where a directory on the way to a root, or a root, is looked for.
+    def unit_there(b, rng):                     # `.config/systemd/user/x.service` at reset
+        first_unit(b, rng)
+    def config_link(a, rng):
+        for p in [p for p in a.e if p.startswith(U + b'.config/')]:
+            del a.e[p]
+        old = a.e[U + b'.config']
+        v5_lnk(rng, a, U + b'.config', b'work').update({k: old[k] for k in ('uid', 'gid', 'dev')})
+        a.roots[U + b'.config/systemd/user'] = ('content', False)
+    T('a .config on the way to a root is replaced by a link (V5-A4)', config_link,
+      ['link on the way: a partial directory becomes a link, what was below it removed'],
+      before=unit_there)
+    def no_config(b, rng):
+        del b.e[U + b'.config']
+    T('a link appears where a directory on the way to a root is looked for (V5-A4)',
+      lambda a, rng: v5_lnk(rng, a, U + b'.config', b'work'),
+      ['link on the way: a link on one side only where the other side has a root below it'],
+      before=no_config)
+    T('a link appears where a root is looked for (V5-A4)',
+      lambda a, rng: v5_lnk(rng, a, U + b'.ssh', b'work'),
+      ['link on the way: a link on one side only that is itself a root of the other side'])
     def file_root(found):
         return lambda t, rng: t.roots.__setitem__(U + b'.bashrc', ('content', found))
     T('a file that is a root, not found and then there',
@@ -5741,7 +5773,7 @@ def manifest_v5(w, rng):
     T('a root whose path is not UTF-8, on one side', odd_root,       # V5-A1: `root_b64`
       ['roots: a root line spelled root_b64'])
     def link_root(a, rng):
-        a.roots[U + b'.link'] = ('content', True)
+        a.roots[U + b'.link'] = ('content', False)   # V5-A4: a link is not a root found
         v5_lnk(rng, a, U + b'.link', b'.profile')
     T('a link that is a root of one side only', link_root,
       ['partial: a link under a deeper partial directory, no root of the other'])
