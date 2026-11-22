@@ -156,7 +156,7 @@ here the gate runs again over the whole corpus.
 Exit 0 only when every pair agrees, in every combination of versions, every
 refusal holds, the reasons have one order, and the gate passes.
 """
-import base64, collections, concurrent.futures, glob, json, os, subprocess, sys
+import base64, collections, concurrent.futures, glob, json, os, re, subprocess, sys
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import reference as ref
@@ -198,6 +198,37 @@ def is_utf8(b):
         return True
     except UnicodeDecodeError:
         return False
+
+
+# The system interpreters (system-interpreters.md: accounts, sudoers, cron,
+# systemd, sshkeys, trust, config) are NOT MODELLED here: no model of them
+# exists in this script (step 4a). A path one of them claims (the pin's
+# "Claims" lines, scope-relative, `**` spanning `/`) and an event of one are
+# left out of the comparison: the belay side's `findings` on such a path and
+# its events of these interpreters are dropped before comparing. Nothing else.
+NOT_MODELLED = {'accounts', 'sudoers', 'cron', 'systemd', 'sshkeys', 'trust', 'config'}
+NM_CLAIMS = re.compile(
+    r'etc/(passwd|group|sudoers|crontab)|etc/(sudoers|cron)\.d/.*|var/spool/cron/crontabs/.*'
+    r'|etc/cron\.(hourly|daily|weekly|monthly)/.*'
+    r'|(usr/)?(etc|lib)/systemd/(system|user)/.*|etc/systemd/(system|user)/.*'
+    r'|(.*/)?\.config/systemd/user/.*|etc/rc\.local|etc/init\.d/[^/]*'
+    r'|etc/ssl/certs/.*|usr/local/share/ca-certificates/.*|(.*/)?\.ssh/authorized_keys2?')
+
+
+def drop_not_modelled(lines, objs):
+    keep = [i for i, o in enumerate(objs)
+            if not (o and o[0][0] == 'event' and dict(o).get('interp') in NOT_MODELLED)]
+    out = []
+    for i in keep:
+        o = objs[i]
+        d = dict(o)
+        if 0 < i < len(objs) - 1 and ('path' in d or 'path_b64' in d) and 'findings' in d and \
+                NM_CLAIMS.fullmatch(rec_path(d)[0].decode('utf-8', 'replace')):
+            o = [(k, v) for k, v in o if k != 'findings']
+        out.append(o)
+    dropped = len(objs) - len(keep)
+    out[-1] = [(k, v - dropped if k == 'events' else v) for k, v in out[-1]]
+    return [lines[i] for i in keep], out
 
 
 def rec_path(d):
@@ -651,6 +682,7 @@ def run_pair(ran, stem, orders):
         return {'status': 'malformed', 'why': 'no final newline'}
     lines = lines[:-1]
     objs = [json.loads(l.decode('utf-8'), object_pairs_hook=list) for l in lines]
+    lines, objs = drop_not_modelled(lines, objs)
     got_header, body, got_trailer = objs[0], objs[1:-1], objs[-1]
     # E1: the path records, then the event records (a line whose first key is
     # `event`), then the trailer.

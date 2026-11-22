@@ -1729,6 +1729,25 @@ def record_values(rb, ra, changed, trace):
 KINDS_PIN = os.path.join(REPO, 'test', 'expect', 'finding-kinds.md')
 EVENTS_PIN = os.path.join(REPO, 'test', 'expect', 'diff-events.md')
 
+# diff-events E13: "By interpreter, in the order text, pip, dpkg, accounts,
+# sudoers, cron, systemd, sshkeys, trust, config, git: this list supersedes
+# E4's" (checked against the pin in load_event_rules()). `core` owns the three
+# kinds of "The object".
+INTERP_ORDER = ['text', 'pip', 'dpkg', 'accounts', 'sudoers', 'cron', 'systemd', 'sshkeys',
+                'trust', 'config', 'git']
+INTERPRETERS = ['core'] + INTERP_ORDER
+FIELD_TYPES = ('int', 'string', 'bool', 'bytes', 'list', 'string/null', 'int/null')
+LIST_MAX = 256
+
+
+class Null:
+    """JSON `null` in a `/null` field; None stays "absent" (an optional field)."""
+    def __repr__(self):
+        return 'NULL'
+
+
+NULL = Null()
+
 
 class Kind:
     def __init__(self, row):
@@ -1740,11 +1759,20 @@ class Kind:
             [tuple(x.strip() for x in part.split(':')) for part in f.split(',')]
         # "A type ending in `?` is optional"; a `bytes` field is a byte
         # string written `<name>` or `<name>_b64` (the pin's "The object").
+        # "Types of the system interpreters' fields": a `list`; "A type ending
+        # in `/null` (`string/null`, `int/null`) is that type or JSON `null`";
+        # "`string/null?` may also be absent"; "A kind has at most 8 fields."
         for _, typ in self.fields:
-            if typ.rstrip('?') not in ('int', 'string', 'bool', 'bytes') or \
-                    typ.count('?') > 1:
+            if typ.rstrip('?') not in FIELD_TYPES or typ.count('?') > 1:
                 raise SystemExit('pin: kind %s: unknown field type %r' % (self.name, typ))
+        if len(self.fields) > 8 or len({n for n, _ in self.fields}) != len(self.fields):
+            raise SystemExit('pin: kind %s: over 8 fields, or one named twice' % self.name)
+        if not set(self.interps) <= set(INTERPRETERS) or \
+                not set(self.levels) <= {'path', 'event'}:
+            raise SystemExit('pin: kind %s: interpreter %r, level %r'
+                             % (self.name, self.interps, self.levels))
         self.optional = {n for n, typ in self.fields if typ.endswith('?')}
+        self.nullable = {n for n, typ in self.fields if typ.rstrip('?').endswith('/null')}
         # The text cell: one code span, or -- "A kind whose optional fields may
         # be absent gives a second template, used when any of them is" -- the
         # template, `; `, a few words, `: ` and the second template.
@@ -1754,10 +1782,13 @@ class Kind:
             raise SystemExit('pin: kind %s: text %r is not one code span, or two' % (self.name, t))
         self.template, self.template_absent = m.group(1), m.group(2)
         named = re.findall(r'\{([a-z_]+)\}', self.template)
-        # The hooks' `executable?` is in no template, and their rows give no
-        # second one: read as "a second template exactly when the first
-        # names an optional field" (ambiguity I10); else the one template
-        # serves whether the field is present or not.
+        self.named = named
+        # "A kind's second template is used when a field its first template
+        # names is absent; an absent field no template names (`owner`,
+        # `auto`) changes no text" -- so a second template exactly when the
+        # first names an optional field (what ambiguity I10 read, now the
+        # pin's own words); else the one template serves whether the field
+        # is present or not. "No template names such a field" (`/null`).
         if (self.template_absent is None) == bool(set(named) & self.optional):
             raise SystemExit('pin: kind %s: a second template exactly when the first names an '
                              'optional field' % self.name)
@@ -1770,6 +1801,8 @@ class Kind:
             raise SystemExit('pin: kind %s: second template names %r' % (self.name, named2))
         if any(dict(self.fields)[n] == 'bytes' for n in named + named2):
             raise SystemExit('pin: kind %s: a template names a bytes field' % self.name)
+        if set(named + named2) & self.nullable:
+            raise SystemExit('pin: kind %s: a template names a /null field' % self.name)
 
 
 def load_kinds():
@@ -1812,7 +1845,17 @@ def load_kinds():
               'count: one per `commit`, `commit (merge)`, `cherry-pick`, `revert` or `am` entry, '
               'present only when every entry is one of those.',
               'how: those entries\' operations, each once, in order, joined by `, `.',
-              'from absent when its value before cannot be told (E12).']:
+              'from absent when its value before cannot be told (E12).',
+              # "Types of the system interpreters' fields": Kind, fill(), render().
+              'A `list` field is a JSON array of strings, at most 256 of them, each as a '
+              '`string` field is. In `text` its elements are joined by `, `.',
+              'A type ending in `/null` (`string/null`, `int/null`) is that type or JSON '
+              '`null`',
+              'No template names such a field. `string/null?` may also be absent: nothing is '
+              'known.',
+              'A kind has at most 8 fields.',
+              'A kind\'s second template is used when a field its first template names is '
+              'absent; an absent field no template names (`owner`, `auto`) changes no text.']:
         if w not in text:
             raise SystemExit('pin: finding-kinds.md no longer says what reference.py assumes: '
                              '%r' % w)
@@ -1887,9 +1930,20 @@ def load_event_rules():
                'derived from has the outcome `unknown`'],
         'E3': ['sorted bytewise, each once', '`paths_b64` instead -- every element base64 -- '
                'when any is not valid UTF-8'],
-        'E4': ['By interpreter, in the order text, pip, dpkg, git',
+        'E4': ['pip by normalized name, then kind; dpkg by Package, then Architecture, then kind',
                'git by repository, then `HEAD` before every branch, then branch, then kind '
                '(decision 126)'],
+        # E13 supersedes E4's list of interpreters; within pip, dpkg and git
+        # E4 stands. The order within the system interpreters is
+        # system_event_key()'s.
+        'E13': ['By interpreter, in the order %s: this list supersedes E4\'s'
+                % ', '.join(INTERP_ORDER),
+                'Within pip, dpkg and git, as E4 says.',
+                'Within each of accounts, sudoers, cron, systemd, sshkeys, trust and config: by '
+                'path (the first of the event\'s `paths`), then by the line\'s place in the '
+                'file (a removed line\'s place before, an added line\'s after; an event of the '
+                'file as a whole before every line\'s), removed before added, then by kind in '
+                'finding-kinds.md\'s order.'],
         # E12 (decisions 126, 132, 137, 141, 144), each sentence git_explain() and
         # git_end() rely on.
         'E12': ['git\'s end hook derives repository-level events from the paths of this diff '
@@ -2016,7 +2070,6 @@ def load_event_rules():
 
 KINDS = load_kinds()
 EVENT_RULES = load_event_rules()
-INTERP_ORDER = ['text', 'pip', 'dpkg', 'git']           # E4
 TEXT, BINARY = 'text', 'binary'
 
 # "Which interpreter": "A path is claimed by its absolute path (scope + path):
@@ -2230,9 +2283,13 @@ def fill(kind, values):
     `false`"."""
     k = KINDS[kind]
     tpl = k.template
-    if any(values[n] is None for n in k.optional) and k.template_absent is not None:
+    # "A kind's second template is used when a field its first template names
+    # is absent; an absent field no template names (`owner`, `auto`) changes
+    # no text." A `list`: "In `text` its elements are joined by `, `."
+    if any(values[n] is None for n in k.named):
         tpl = k.template_absent
-    show = lambda v: ('true' if v else 'false') if type(v) is bool else str(v)
+    show = lambda v: ('true' if v else 'false') if type(v) is bool else \
+        ', '.join(v) if type(v) is list else str(v)
     return re.sub(r'\{([a-z_]+)\}', lambda m: show(values[m.group(1)]), tpl)
 
 
@@ -2251,10 +2308,15 @@ def render(kind, values):
         v = values[n]
         if v is None and n in k.optional:
             continue
+        if v is NULL and n in k.nullable:       # "that type or JSON `null`"
+            out.append((n, None))
+            continue
         ok = {'int': lambda v: type(v) is int and v >= 0, 'bool': lambda v: type(v) is bool,
               'string': lambda v: isinstance(v, str) and string_ok(v),
-              'bytes': lambda v: isinstance(v, bytes) and len(v) <= BYTES_MAX
-              }[typ.rstrip('?')](v)
+              'bytes': lambda v: isinstance(v, bytes) and len(v) <= BYTES_MAX,
+              'list': lambda v: type(v) is list and len(v) <= LIST_MAX and
+              all(isinstance(x, str) and string_ok(x) for x in v)
+              }[typ.rstrip('?').split('/')[0]](v)
         if not ok:
             raise AssertionError('reference bug: %s.%s = %r' % (kind, n, v))
         if typ.rstrip('?') == 'bytes':
