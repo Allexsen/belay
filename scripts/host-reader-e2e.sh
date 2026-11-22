@@ -160,6 +160,58 @@ sys.exit(0 if e.get("iflags", 0) & 0x10 else 1)
 EOF
 docker exec "$I" chattr -i /workspace/src/a.py
 
+# ---- --system --docker: the container's / by its roots (watch-system WS-1, runtime-v1 RT-12) ----
+# Its homes are its own passwd's; its runtime record is its first process's net/ and the
+# processes of its cgroup; on the host's network, no listener and netns "host".
+cp_id() { python3 -c 'import json,sys;print(json.load(open(sys.argv[1]))["id"])' "$1"; }
+runtime_of() { find "$T/state" -path "*/checkpoints/$1/runtime.ndjson" -newer "$2" | head -1; }
+H=$(docker run -d belay-hr-e2e sh -c 'while true; do nc -l -p 8080 >/dev/null 2>&1; done & exec sleep 600'); CS="$CS $H"
+sleep 1
+docker exec "$H" netstat -ltn | grep -q ':8080 ' || fail "the container does not listen on 8080 (busybox nc -l): the case cannot be made"
+docker exec "$H" adduser -D -h /srv/app app >/dev/null
+touch "$T/before-s1"
+B check --system --docker "$H" --json > "$T/s1.json" || fail "check --system --docker"
+B manifest --system --docker "$H" --id "$(cp_id "$T/s1.json")" > "$T/s1.ndjson" || fail "manifest --system --docker"
+CG=$(sed -n 's/^0:://p' "/proc/$(docker inspect -f '{{.State.Pid}}' "$H")/cgroup")
+python3 - "$T/s1.ndjson" "$(runtime_of "$(cp_id "$T/s1.json")" "$T/before-s1")" "$H" "$CG" <<'PY' || fail "the container's roots or its runtime record are not the container's"
+import json, sys
+lines = [json.loads(l) for l in open(sys.argv[1])]
+h = lines[0]
+roots = {l["root"] for l in lines if "root" in l and "path" not in l}
+assert h["source"]["docker"].startswith(sys.argv[3][:12]), h["source"]
+assert "srv/app/.ssh" in roots and "root/.ssh" in roots, sorted(roots)
+rt = [json.loads(l) for l in open(sys.argv[2])]
+assert isinstance(rt[0]["netns"], int) and rt[0]["root"] is True and rt[0]["source"] == h["source"], rt[0]
+l = [x for x in rt if x.get("listener") == "tcp" and x.get("port") == 8080]
+cg = sys.argv[4]
+assert l and l[0]["holders"] and all(x["cgroup"] == cg or x["cgroup"].startswith(cg + "/") for x in l[0]["holders"]), l
+PY
+docker exec "$H" adduser -D v >/dev/null
+B mark --system --docker "$H" > /dev/null || fail "mark --system --docker"
+B diff --system --docker "$H" --since "$(cp_id "$T/s1.json")" > "$T/sdiff" 2>&1 || true
+grep -q "user v added" "$T/sdiff" || fail "the container's new user is not said: $(cat "$T/sdiff")"
+B check --docker "$H" --scope / > /dev/null 2>"$T/err" && fail "the container's / by --scope after --system (WS-5a)"
+grep -q -- "--system" "$T/err" || fail "WS-5a's refusal does not name --system: $(cat "$T/err")"
+W=$(run)
+B watch start --system --docker "$W" > "$T/wstart" || fail "watch start --system --docker"
+grep -q "^kernel record: off: no recorder for a container in this version: a change put back is not seen$" "$T/wstart" \
+    || fail "the container's kernel record line: $(cat "$T/wstart")"
+docker exec "$W" sh -c 'mkdir -p /etc/sudoers.d && echo "%wheel ALL=(ALL) NOPASSWD: ALL" > /etc/sudoers.d/w'
+B watch step --system --docker "$W" --session e2e > "$T/wstep" || fail "watch step --system --docker"
+B watch stop --system --docker "$W" > "$T/wstop" || fail "watch stop --system --docker"
+head -1 "$T/wstop" | grep -q "^belay receipt  / in the container $W (${W%"${W#????????????}"})$" \
+    || fail "the receipt does not name the container: $(head -1 "$T/wstop")"
+grep -q "etc/sudoers.d/w" "$T/wstop" || fail "the container's sudo rule is not in its receipt"
+N=$(docker run -d --network host belay-hr-e2e sleep 600); CS="$CS $N"
+touch "$T/before-n"
+B check --system --docker "$N" --json > "$T/n.json" || fail "check --system --docker of a container on the host's network"
+RTN=$(runtime_of "$(cp_id "$T/n.json")" "$T/before-n")
+head -1 "$RTN" | grep -q '"netns":"host"' || fail "the host-network container's netns: $(head -1 "$RTN")"
+if grep -q '"listener"' "$RTN"; then fail "listener lines in a host-network container's record"; fi
+if su nobody -s /bin/sh -c "BELAY_STATE_DIR=$T/nobody '$BELAY' check --system --docker '$H'" >/dev/null 2>&1; then
+    fail "--system --docker read without root"
+fi
+
 # ---- refused: a stopped container, a scope in a volume, not root ----
 docker stop -t 0 "$O" >/dev/null
 B check --docker "$O" --scope /workspace > /dev/null 2>&1 && fail "a stopped container read"

@@ -138,7 +138,9 @@ static const struct { const char *cmd, *text; } HELP[] = {
                "  --system  the machine's / by its roots (watch-system.md): start takes the first walk and\n"
                "            prints the receipt's opening lines; a step's walk past 45 s goes on in its own\n"
                "            process and is reported by the next step; receipt and stop take a walk with no\n"
-               "            time limit and print the receipt in sections; stop ends the watch\n" },
+               "            time limit and print the receipt in sections; stop ends the watch\n"
+               "  --docker C  with --system: the container's / instead, read from its layers on the host\n"
+               "            (root; docs/cli.md)\n" },
     { "hook",  "usage: belay hook claude-code start|pre|post|batch|prompt|stop|subagent-stop|end|receipt [--scope DIR]\n"
                "  The Claude Code plugin's hook: reads the hook's JSON on standard input, runs the\n"
                "  matching belay watch commands, and prints the hook's reply. Exits 0 always.\n" },
