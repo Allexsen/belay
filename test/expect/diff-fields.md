@@ -84,3 +84,4 @@ added after those, each with its rule.
 | id | key | type | rule | source |
 |---|---|---|---|---|
 | G3-2 | `before_sealing`, `after_sealing` | int | Each manifest's entries nothing below which was looked at: its directories carrying `unreadable` or `mount` (checkpoint-v3 C3-3), counted from its entries. In that order, after every key the trailer has. | checkpoint-v3, "The lines", G3-2; measured as an unprivileged user on a mode-700 directory, 2026-11-18: a file added in it changes nothing in the diff but the directory's own line |
+| RT-T1 | `runtime` | int | The count of the diff's `runtime` records (runtime-v1 RT-D1). Always present; 0 when the diff has no `runtime` section. After every key the trailer has, `after_sealing` included. |
