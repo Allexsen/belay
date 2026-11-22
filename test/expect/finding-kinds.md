@@ -76,3 +76,15 @@ explicit OK. Removing a kind or changing a field's meaning is a diff.v1 version 
 | git_branch_moved | git | event | repo: string, branch: string, from: string?, to: string | `{branch} {from} -> {to}`; from absent: `{branch} now at {to}` | The branch names another commit and its reflog of this diff does not say how (none, another operation, or entries that do not lead from its value before to its value after); from absent when its value before cannot be told (E12). |
 
 binary claims nothing it explains: it declines.
+
+## Types of the system interpreters' fields
+
+Added with the kinds of system-interpreters.md, whose fields need them (its SI-4, SI-5: `uid_min: null`,
+`owner` a package name or `null`; its lists: `tags`, `env`, `options`). The rules of "The object" hold, and:
+
+- A `list` field is a JSON array of strings, at most 256 of them, each as a `string` field is. In `text`
+  its elements are joined by `, `.
+- A type ending in `/null` (`string/null`, `int/null`) is that type or JSON `null`: `null` says the
+  lookup the field rests on answered "none" (in no package) or could not be made (`uid_min`). No
+  template names such a field. `string/null?` may also be absent: nothing is known.
+- A kind has at most 8 fields.
