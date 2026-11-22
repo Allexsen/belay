@@ -200,7 +200,10 @@ int sysroots_resolve(const struct fsops *ops, const char *scope, struct belay_sy
      *  times as many to sort away.
      */
     FILE *pw = open_passwd(root_fd);
-    char line[2 * PATH_MAX], rel[PATH_MAX];
+    /* Sized by the manifest's path limit (4096 with the NUL), the same on
+     * every platform; not by PATH_MAX, which is 1024 on macOS and would make
+     * which homes are read depend on where belay was built. */
+    char line[2 * 4096], rel[4096];
     struct build homes = { 0 };         /* candidate homes, relative; `roots` unused but for the paths */
     size_t ll = 0;
     bool bad = false;

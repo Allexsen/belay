@@ -1473,12 +1473,32 @@ TEST(system_roots_homes_by_mount_and_without_statx) {
  * the homes WS-8a leaves out); the capture does not fail. */
 TEST(a_home_too_deep_for_its_roots_is_left_out) {
     tree();
-    char comp[204], home[4200] = "home", cmd[9000];
+    /* The limit is the manifest's, 4096 bytes a path with its NUL, on every
+     * platform -- not the platform's PATH_MAX (1024 on macOS), which no path
+     * here is held to: the home is made one component at a time from a
+     * directory descriptor, never named whole to the system. 20 components
+     * of 203 bytes under home: 4084 bytes, which exists, and whose longest
+     * root (25 bytes more) would not fit. */
+    char comp[204], home[4200] = "home";
     memset(comp, 'd', 203);
     comp[203] = '\0';
-    for (int i = 0; i < 20; i++) { strcat(home, "/"); strcat(home, comp); }      /* 4084 bytes */
-    snprintf(cmd, sizeof cmd, "cd '%s' && mkdir -p '%s'", g_tree, home);
-    REQUIRE(system(cmd) == 0);
+    char top[1200];
+    snprintf(top, sizeof top, "%s/home", g_tree);
+    int dfd = open(top, O_RDONLY | O_DIRECTORY);
+    REQUIRE(dfd != -1);
+    bool made = true;
+    for (int i = 0; i < 20 && made; i++) {
+        strcat(home, "/");
+        strcat(home, comp);
+        made = mkdirat(dfd, comp, 0755) == 0;
+        const int next = made ? openat(dfd, comp, O_RDONLY | O_DIRECTORY | O_NOFOLLOW) : -1;
+        close(dfd);
+        dfd = next;
+        made = made && next != -1;
+    }
+    if (dfd != -1) close(dfd);
+    REQUIRE_MSG(made, "the deep home could not be made: %s", strerror(errno));
+    REQUIRE(strlen(home) == 4084);
     char p[1200];
     snprintf(p, sizeof p, "%s/etc/passwd", g_tree);
     FILE *f = fopen(p, "wb");
