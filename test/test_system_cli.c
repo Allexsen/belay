@@ -265,6 +265,60 @@ TEST(no_digest_file_where_shadow_is_not_read) {
     ASSERT_TRUE(strstr(g_out, "{\"path\":\"etc/shadow\",\"outcome\":\"added\",") != NULL);
 }
 
+/* runtime-v1.md: a system watch's checkpoint keeps the runtime record its
+ * proc gave -- under --system-root, that root's proc, a tree shaped like
+ * /proc -- and records its sha256 (C3-6); a diff of two has the runtime
+ * section; a record that is not the one recorded is corrupt state; it goes
+ * with its checkpoint. A checkpoint with no proc to read has none. */
+TEST(a_checkpoint_keeps_the_runtime_record_of_its_proc) {
+    fresh();
+    REQUIRE_MSG(belay("check", "--system-root", g_tree, "--json", NULL) == 0, "%s", g_err);
+    ASSERT_TRUE(strstr(g_out, ",\"runtime_sha256\":null,") != NULL);          /* proc has no net/ */
+    sh("cd '%s/proc' && mkdir -p net sys/net/ipv4 self/ns 1/fd && printf '32768 60999\\n' > sys/net/ipv4/ip_local_port_range && "
+       "ln -s 'net:[4026531840]' self/ns/net && "
+       "printf '  sl  local_address rem_address   st\\n   0: 00000000:0016 00000000:0000 0A 0:0 0:0 0 0 0 8760 1\\n' > net/tcp && "
+       "printf '0::/init.scope\\n' > 1/cgroup && ln -s 'socket:[8760]' 1/fd/3", g_tree);
+    REQUIRE_MSG(belay("check", "--system-root", g_tree, "--json", NULL) == 0, "%s", g_err);
+    char rt[600], sha[80], want[200];
+    snprintf(rt, sizeof rt, "%s", sh_line("find '%s' -name runtime.ndjson", g_state));
+    REQUIRE(strstr(rt, "/checkpoints/2/runtime.ndjson") != NULL);
+    struct stat rs;
+    REQUIRE(stat(rt, &rs) == 0);
+    ASSERT_EQ_INT(0600, (int)(rs.st_mode & 07777));
+    snprintf(sha, sizeof sha, "%.64s", sh_line("(sha256sum '%s' 2>/dev/null || shasum -a 256 '%s') | cut -c1-64", rt, rt));
+    snprintf(want, sizeof want, ",\"runtime_sha256\":\"%s\",\"journal_seq\":null,", sha);
+    ASSERT_TRUE(strstr(g_out, want) != NULL);
+    const bool root = geteuid() == 0;
+    ASSERT_EQ_STR(root ? "{\"listener\":\"tcp\",\"proto\":4,\"addr\":\"0.0.0.0\",\"port\":22,\"holders\":[{\"exe\":null,\"cgroup\":\"/init.scope\"}]}"
+                       : "{\"listener\":\"tcp\",\"proto\":4,\"addr\":\"0.0.0.0\",\"port\":22,\"holders\":null}",
+                  sh_line("sed -n 2p '%s'", rt));
+    /* the proc tree is not a root: nothing of it is in the manifest */
+    REQUIRE(belay("manifest", "--system-root", g_tree, "--id", "2", NULL) == 0);
+    ASSERT_TRUE(strstr(g_out, "\"path\":\"proc/") == NULL);
+    /* against the checkpoint without one: the section says so, and nothing else */
+    REQUIRE_MSG(belay("diff", "--system-root", g_tree, "--since", "1", "--to", "2", "--json", NULL) == 0, "%s", g_err);
+    ASSERT_TRUE(strstr(g_out, root ? "{\"runtime\":\"incomplete\",\"why\":[\"no_record_before\"],"
+                                     "\"text\":\"runtime incomplete: no runtime record before\"}\n"
+                                   : "{\"runtime\":\"incomplete\",\"why\":[\"no_record_before\",\"holders_unknown_after\"],"
+                                     "\"text\":\"runtime incomplete: no runtime record before; holders not read after\"}\n") != NULL);
+    ASSERT_TRUE(strstr(g_out, ",\"runtime\":1}\n") != NULL);
+    /* port 22 closed, 80 opened: the receipt prints the records' texts */
+    sh("cd '%s/proc' && printf '  sl  local_address rem_address   st\\n   0: 00000000:0050 00000000:0000 0A 0:0 0:0 0 0 0 9000 1\\n' > net/tcp",
+       g_tree);
+    REQUIRE_MSG(belay("diff", "--system-root", g_tree, "--since", "2", NULL) == 0, "%s", g_err);
+    ASSERT_TRUE(strstr(g_out, "\nruntime\n") != NULL);
+    ASSERT_TRUE(strstr(g_out, root ? "  closed: tcp 0.0.0.0:22 held by systemd\n" : "  closed: tcp 0.0.0.0:22\n") != NULL);
+    ASSERT_TRUE(strstr(g_out, root ? "  opened: tcp 0.0.0.0:80 (no process holds it)\n" : "  opened: tcp 0.0.0.0:80\n") != NULL);
+    if (!root) ASSERT_TRUE(strstr(g_out, "  runtime incomplete: holders not read before; holders not read after\n") != NULL);
+    /* a record that is not the one recorded is corrupt state, said */
+    sh("printf 'x' >> '%s'", rt);
+    ASSERT_TRUE(belay("diff", "--system-root", g_tree, "--since", "1", "--to", "2", "--json", NULL) != 0);
+    ASSERT_TRUE(strstr(g_err, "runtime.ndjson") != NULL);
+    /* and it goes with its checkpoint */
+    REQUIRE_MSG(belay("prune", "--scope", g_tree, "--keep-last", "1", NULL) == 0, "%s", g_err);
+    ASSERT_EQ_INT(-1, access(rt, F_OK));
+}
+
 /* WS-1's forms, and what this version does not take it on. */
 TEST(usage) {
     fresh();
@@ -449,6 +503,7 @@ int main(void) {
     RUN(mark_diff_and_log_take_it);
     RUN(a_checkpoint_keeps_the_digests_of_shadow_lines);
     RUN(no_digest_file_where_shadow_is_not_read);
+    RUN(a_checkpoint_keeps_the_runtime_record_of_its_proc);
     RUN(usage);
     RUN(a_system_scope_is_captured_only_with_the_flag);
     RUN(the_root_directory_is_refused_without_the_flag);

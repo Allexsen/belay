@@ -11,6 +11,7 @@
 #include "belay/hash.h"
 #include "belay/json.h"
 #include "belay/manifest.h"
+#include "belay/runtime.h"
 
 #include <dirent.h>
 #include <errno.h>
@@ -481,7 +482,13 @@ void state_close(struct state *st) {
 
 static int read_meta(const struct state *st, const char *name, long id, struct checkpoint *c);
 
-int state_shadow_lines(const struct state *st, long id, char *buf, size_t cap) {
+/* A file beside checkpoint `id`'s manifest whose sha256 its meta.json
+ * records (`digest` of that record, "" when it has none): 1 with its path
+ * in buf when it hashes to what is recorded; 0 when none is recorded; -1
+ * with belay_err (CORRUPT: recorded and not there, not a regular file, or
+ * other bytes -- never compared, never skipped in silence). */
+static int side_file(const struct state *st, long id, const char *file, bool runtime, const char *what, char *buf,
+                     size_t cap) {
     char name[16], shown[PATH_MAX + 200];
     struct checkpoint c;
     snprintf(name, sizeof name, "%ld", id);
@@ -490,12 +497,13 @@ int state_shadow_lines(const struct state *st, long id, char *buf, size_t cap) {
         if (got == 0) belay_err_set(BELAY_ERR_CORRUPT, 0, "%s/checkpoints/%ld has no meta.json", st->dir, id);
         return -1;
     }
-    if (c.shadow_lines[0] == '\0') return 0;
-    snprintf(shown, sizeof shown, "%s/checkpoints/%ld/shadow.lines", st->dir, id);
+    const char *want = runtime ? c.runtime : c.shadow_lines;
+    if (want[0] == '\0') return 0;
+    snprintf(shown, sizeof shown, "%s/checkpoints/%ld/%s", st->dir, id, file);
     const int dfd = dir_at(st->cp_fd, name, false, shown);
     if (dfd == -1) return -1;
     /* Opened from the fds, never followed or waited on; hashed as it is read. */
-    const int fd = openat(dfd, "shadow.lines", O_RDONLY | O_NONBLOCK | O_NOFOLLOW | O_CLOEXEC);
+    const int fd = openat(dfd, file, O_RDONLY | O_NONBLOCK | O_NOFOLLOW | O_CLOEXEC);
     close(dfd);
     struct stat sb;
     struct belay_sha256 h;
@@ -513,8 +521,8 @@ int state_shadow_lines(const struct state *st, long id, char *buf, size_t cap) {
         belay_hex_encode(hex, d, sizeof d);
     }
     if (fd != -1) close(fd);
-    if (!ok || strcmp(hex, c.shadow_lines) != 0) {
-        belay_err_set(BELAY_ERR_CORRUPT, 0, "%s is not the per-line digest file checkpoint %ld recorded", shown, id);
+    if (!ok || strcmp(hex, want) != 0) {
+        belay_err_set(BELAY_ERR_CORRUPT, 0, "%s is not the %s checkpoint %ld recorded", shown, what, id);
         return -1;
     }
     if ((size_t)snprintf(buf, cap, "%s", shown) >= cap) {
@@ -522,6 +530,14 @@ int state_shadow_lines(const struct state *st, long id, char *buf, size_t cap) {
         return -1;
     }
     return 1;
+}
+
+int state_shadow_lines(const struct state *st, long id, char *buf, size_t cap) {
+    return side_file(st, id, "shadow.lines", false, "per-line digest file", buf, cap);
+}
+
+int state_runtime(const struct state *st, long id, char *buf, size_t cap) {
+    return side_file(st, id, "runtime.ndjson", true, "runtime record", buf, cap);
 }
 
 void state_manifest(const struct state *st, long id, char *buf, size_t cap) {
@@ -611,17 +627,20 @@ static int read_meta(const struct state *st, const char *name, long id, struct c
     c->kept = kept != NULL && kept->t == J_BOOL && kept->b;
     const struct jval *watch = jget(&v, "watch");
     c->watch = watch != NULL && watch->t == J_BOOL && watch->b;
-    const struct jval *sl256 = jget(&v, "shadow_lines_sha256");
-    if (sl256 != NULL) {                    /* written only when there is one: 64 hex digits */
-        bool ok = sl256->t == J_STR && strlen(sl256->s) == 64;
+    /* Each written only when there is one: 64 hex digits. */
+    static const char *const SIDE[2] = { "shadow_lines_sha256", "runtime_sha256" };
+    for (int k = 0; k < 2; k++) {
+        const struct jval *d256 = jget(&v, SIDE[k]);
+        if (d256 == NULL) continue;
+        bool ok = d256->t == J_STR && strlen(d256->s) == 64;
         for (size_t i = 0; ok && i < 64; i++)
-            ok = (sl256->s[i] >= '0' && sl256->s[i] <= '9') || (sl256->s[i] >= 'a' && sl256->s[i] <= 'f');
+            ok = (d256->s[i] >= '0' && d256->s[i] <= '9') || (d256->s[i] >= 'a' && d256->s[i] <= 'f');
         if (!ok) {
             jsonr_free(&v);
             belay_err_set(BELAY_ERR_CORRUPT, 0, "%s is not a checkpoint's meta.json", shown);
             return -1;
         }
-        memcpy(c->shadow_lines, sl256->s, 65);
+        memcpy(k ? c->runtime : c->shadow_lines, d256->s, 65);
     }
     const struct jval *sf = jget(&v, "since_full");
     c->has_since_full = sf != NULL && sf->t == J_NUM;
@@ -782,22 +801,23 @@ static int write_meta(const struct state *st, int dfd, const struct checkpoint *
     if (state_json_member(scope, sizeof scope, "scope", st->scope.path) == -1 ||
         belay_json_escape(why, sizeof why, c->full_reason, strlen(c->full_reason)) == -1)
         return -1;
-    char since[40] = "", unread[96] = "", lines[100] = "";
+    char since[40] = "", unread[96] = "", lines[100] = "", rt[100] = "";
     if (c->has_since_full) snprintf(since, sizeof since, ",\"since_full\":%ld", c->since_full);
     if (c->shadow_lines[0] != '\0') snprintf(lines, sizeof lines, ",\"shadow_lines_sha256\":\"%s\"", c->shadow_lines);
+    if (c->runtime[0] != '\0') snprintf(rt, sizeof rt, ",\"runtime_sha256\":\"%s\"", c->runtime);
     if (c->counts_unread)
         snprintf(unread, sizeof unread, ",\"unreadable\":%llu,\"sealing\":%llu",
                  (unsigned long long)c->unreadable, (unsigned long long)c->sealing);
     const int n = snprintf(buf, sizeof buf,
             "{\"id\":%ld,\"kind\":\"%s\",\"created_ns\":%lld,%s,\"entries\":%llu,"
             "\"raced\":%llu,\"unstable\":%llu,\"vanished\":%llu,\"provisional\":%s,\"excluded\":%llu,"
-            "\"prefilter\":{\"used\":%s,\"reference\":\"%s\",\"trusted\":%llu,\"racy\":%llu,\"full_reason\":\"%s\"}%s%s%s%s%s}\n",
+            "\"prefilter\":{\"used\":%s,\"reference\":\"%s\",\"trusted\":%llu,\"racy\":%llu,\"full_reason\":\"%s\"}%s%s%s%s%s%s}\n",
             c->id, c->kind, (long long)c->created_ns, scope, (unsigned long long)c->entries,
             (unsigned long long)c->raced, (unsigned long long)c->unstable, (unsigned long long)c->vanished,
             c->provisional ? "true" : "false", (unsigned long long)c->excluded,
             c->full ? "false" : "true", state_reference(c), (unsigned long long)c->trusted,
             (unsigned long long)c->racy, why, since, c->kept ? ",\"kept\":true" : "",
-            c->watch ? ",\"watch\":true" : "", unread, lines);
+            c->watch ? ",\"watch\":true" : "", unread, lines, rt);
     if (n < 0 || (size_t)n >= sizeof buf) {
         belay_err_set(BELAY_ERR_RANGE, 0, "%s: too large", shown);
         return -1;
@@ -1070,6 +1090,20 @@ int state_capture(struct state *st, const struct capture_req *req, struct checkp
     c.sealing = s.sealing;
     memcpy(c.shadow_lines, s.shadow_lines_sha256, sizeof c.shadow_lines);
     c.provisional = s.raced || s.unstable || s.vanished;
+    if (req->system) {
+        /* runtime-v1.md: what is listening and which services have
+         * processes, from the scope's proc (`/proc`; the system root's,
+         * a tree shaped like it, under --system-root), beside the manifest.
+         * None where there is no proc file system (macOS). */
+        char proc[PATH_MAX + 8], rt[PATH_MAX + 160];
+        struct belay_runtime_stats rs;
+        snprintf(proc, sizeof proc, "%s/proc", strcmp(st->scope.path, "/") == 0 ? "" : st->scope.path);
+        snprintf(rt, sizeof rt, "%s/runtime.ndjson", dir);
+        const struct belay_runtime_opts ro = { .proc_root = proc, .root = -1 };
+        const int got = belay_runtime_capture(&ro, rt, &rs);
+        if (got == -1) goto out;
+        if (got == 1) memcpy(c.runtime, rs.sha256, sizeof c.runtime);
+    }
     c.has_since_full = true;
     c.since_full = c.full ? 0 : since_full + 1;
     if (write_meta(st, dfd, &c) == -1) goto out;

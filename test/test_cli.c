@@ -1284,7 +1284,7 @@ TEST(a_capture_says_what_it_could_not_read) {
         BELAY_FAIL("no line for secret that is unknown: unreadable and ends \"%s\" in:\n%s", suffix, g_out);
     if (strstr(g_out, "\n  nothing seen below 1 directory\n") == NULL) BELAY_FAIL("no summary line in:\n%s", g_out);
     ASSERT_EQ_INT(0, belay("diff", "--scope", g_scope, "--since", "2", "--to", "3", "--json", NULL));
-    ASSERT_TRUE(strstr(g_out, ",\"before_sealing\":1,\"after_sealing\":1}\n") != NULL);
+    ASSERT_TRUE(strstr(g_out, ",\"before_sealing\":1,\"after_sealing\":1,\"runtime\":0}\n") != NULL);
     sh("mkdir '%s/vault' && chmod 000 '%s/vault'", g_scope, g_scope);
     ASSERT_EQ_INT(0, belay("mark", "--scope", g_scope, NULL));
     ASSERT_TRUE(strstr(g_out, "mark 5  ") == g_out);

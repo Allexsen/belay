@@ -312,17 +312,17 @@ TEST(the_trailer_counts_each_sides_sealed_directories) {
     REQUIRE(run() == 0);
     const char *end = strstr(g_text, "{\"belay_diff_end\"");
     REQUIRE(end != NULL);
-    ASSERT_TRUE(strstr(end, ",\"before_unguarded\":0,\"after_unguarded\":0,\"before_sealing\":2,\"after_sealing\":1}\n") != NULL);
+    ASSERT_TRUE(strstr(end, ",\"before_unguarded\":0,\"after_unguarded\":0,\"before_sealing\":2,\"after_sealing\":1,\"runtime\":0}\n") != NULL);
     /* none on either side: said as 0 */
     m_begin("before", "/s", 1000); ROOT(); E(.path = "d", .type = "dir"); m_end();
     m_begin("after", "/s", 1000); ROOT(); E(.path = "d", .type = "dir"); m_end();
     REQUIRE(run() == 0);
-    ASSERT_TRUE(strstr(g_text, ",\"before_sealing\":0,\"after_sealing\":0}\n") != NULL);
+    ASSERT_TRUE(strstr(g_text, ",\"before_sealing\":0,\"after_sealing\":0,\"runtime\":0}\n") != NULL);
     /* a scope root that could not be listed is one */
     m_begin("before", "/s", 1000); ROOT(); m_end();
     m_begin("after", "/s", 1000); ROOT(.unreadable = true); m_end();
     REQUIRE(run() == 0);
-    ASSERT_TRUE(strstr(g_text, ",\"before_sealing\":0,\"after_sealing\":1}\n") != NULL);
+    ASSERT_TRUE(strstr(g_text, ",\"before_sealing\":0,\"after_sealing\":1,\"runtime\":0}\n") != NULL);
 }
 
 /* O9 (checkpoint-v3 G2-1): a regular file whose size proves it modified, but
@@ -1476,7 +1476,7 @@ TEST(a_marked_hash_is_in_no_value_and_each_side_has_its_counts) {
     ASSERT_TRUE(has("f", "\"unknown\":[\"writer_open\"]"));
     ASSERT_TRUE(has("f", "\"size\":3"));              /* the rest of V6 stands */
     ASSERT_TRUE(!has("f", "sha256"));
-    ASSERT_TRUE(strstr(g_text, "\"before_writer_open\":1,\"after_writer_open\":0,\"before_unguarded\":1,\"after_unguarded\":2,\"before_sealing\":0,\"after_sealing\":0}") != NULL);
+    ASSERT_TRUE(strstr(g_text, "\"before_writer_open\":1,\"after_writer_open\":0,\"before_unguarded\":1,\"after_unguarded\":2,\"before_sealing\":0,\"after_sealing\":0,\"runtime\":0}") != NULL);
     ASSERT_TRUE(strstr(g_text, "\"provisional\":false") != NULL);
 }
 

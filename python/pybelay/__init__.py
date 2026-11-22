@@ -16,7 +16,7 @@ from ._binary import binary_path, checked_binary
 from ._errors import BelayError, BinaryMismatch, Failed, FormatError, Refused, UsageError
 
 __all__ = ["check", "mark", "log", "diff", "baseline_export", "verify", "binary_path",
-           "Checkpoint", "Prefilter", "Diff", "DiffRecord", "DiffEvent", "Baseline", "Policy", "Flag",
+           "Checkpoint", "Prefilter", "Diff", "DiffRecord", "DiffEvent", "DiffRuntime", "Baseline", "Policy", "Flag",
            "BelayError", "UsageError", "Refused", "Failed", "FormatError", "BinaryMismatch"]
 
 _KEYS_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "_keys.json")
@@ -175,11 +175,20 @@ class DiffEvent:
 
 
 @dataclasses.dataclass(frozen=True)
+class DiffRuntime:
+    """A record of the diff's runtime section (runtime-v1 RT-D1): its kind, its text, its fields as a dict."""
+    runtime: str
+    text: str
+    fields: Dict[str, Any] = dataclasses.field(default_factory=dict)
+
+
+@dataclasses.dataclass(frozen=True)
 class Diff:
     header: Dict[str, Any]
     records: Tuple[DiffRecord, ...]
     events: Tuple[DiffEvent, ...]
     trailer: Dict[str, Any]
+    runtime: Tuple[DiffRuntime, ...] = ()
 
 
 _RECORD = {f.name for f in dataclasses.fields(DiffRecord)}
@@ -200,9 +209,14 @@ def _diff(lines: List[dict]) -> Diff:
         raise FormatError("a diff without its header and trailer")
     _exact(lines[0], k["diff_header"], "diff header")
     _exact(lines[-1], k["diff_trailer"], "diff trailer")
-    recs, evs = [], []
+    recs, evs, rts = [], [], []
     for raw in lines[1:-1]:
         o = _decode_b64(raw)
+        if "runtime" in o:
+            if not isinstance(o["runtime"], str) or not isinstance(o.get("text"), str):
+                raise FormatError("a runtime record without its kind or text")
+            rts.append(DiffRuntime(o["runtime"], o["text"], {k: v for k, v in o.items() if k not in ("runtime", "text")}))
+            continue
         if "event" in o:
             evs.append(_event(o))
             continue
@@ -213,7 +227,7 @@ def _diff(lines: List[dict]) -> Diff:
             if t in o:
                 o[t] = tuple(o[t])
         recs.append(DiffRecord(**o))
-    return Diff(_decode_b64(lines[0]), tuple(recs), tuple(evs), lines[-1])
+    return Diff(_decode_b64(lines[0]), tuple(recs), tuple(evs), lines[-1], tuple(rts))
 
 
 @dataclasses.dataclass(frozen=True)

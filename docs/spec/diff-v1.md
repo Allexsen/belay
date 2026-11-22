@@ -118,6 +118,7 @@ looked at, so a change there is that directory's one `unknown` record at most. N
 | `after_unguarded` | int | The second manifest's `unguarded`. |
 | `before_sealing` | int | The first manifest's directories carrying `unreadable`, `mount` or (manifest v5) `not_read`, counted from its entries: nothing below them was looked at (test/expect/diff-fields.md, "The trailer"). |
 | `after_sealing` | int | The second manifest's, likewise. |
+| `runtime` | int | The number of `runtime` records, after the events (test/expect/runtime-v1.md, RT-D1); `0` when neither capture has a runtime record. Last. |
 <!-- END GENERATED: diff-trailer -->
 
 ## Outcomes

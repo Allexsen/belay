@@ -21,6 +21,7 @@
 #include "diff_run.h"
 #include "emit.h"
 #include "pair.h"
+#include "runtime_diff.h"
 
 #include "belay/error.h"
 #include "belay/interp.h"
@@ -106,6 +107,8 @@ struct run {
     struct belay_lookup lookup;             /* what the prepare hooks ask of the after-manifest */
     bool prepare_failed[BELAY_INTERP_COUNT];
     struct belay_entry *scratch;            /* one entry of a lookup pass */
+    struct rtdiff *rt;                      /* the runtime section; NULL: none (runtime-v1 RT-D1) */
+    size_t rt_records;
 };
 
 /* config's second claim (system-config.md CF-6): it keys the file beside
@@ -264,6 +267,40 @@ static bool excluded_covers(const struct belay_manifest_header *h, const char *p
     return false;
 }
 
+/* runtime-v1 RT-D4: the after-manifest's `.socket` unit files, read from
+ * the store, when a listener of the section is held by systemd alone. A
+ * unit whose copy cannot be read names no port. Through the same open file,
+ * which must still be the manifest the diff read. */
+static int runtime_units(struct run *x, const char *digest) {
+    if (!rtdiff_wants_units(x->rt) || x->content == NULL) return 0;
+    if (x->scratch == NULL && (x->scratch = malloc(sizeof *x->scratch)) == NULL) {
+        belay_err_set(BELAY_ERR_NOMEM, 0, "diff: out of memory");
+        return -1;
+    }
+    if (belay_manifest_rewind(x->ra) == -1) return -1;
+    int got;
+    while ((got = belay_manifest_next(x->ra, x->scratch)) == 1) {
+        const struct belay_entry *e = x->scratch;
+        if (e->type != BELAY_T_REG || !e->has_stored || e->sealed || !rtdiff_unit_path(e->path, e->path_len)) continue;
+        unsigned char *text;
+        size_t len;
+        if (belay_content_get(x->content, e->sha256_hex, 65536, &text, &len) == -1) {
+            belay_err_clear();
+            continue;
+        }
+        const int r = rtdiff_unit(x->rt, e->path, e->path_len, (const char *)text, len);
+        free(text);
+        if (r == -1) return -1;
+    }
+    char again[65];
+    if (got == -1 || belay_manifest_digest(x->ra, again) == -1) return -1;
+    if (strcmp(again, digest) != 0) {
+        belay_err_set(BELAY_ERR_CORRUPT, 0, "diff: the after manifest changed while it was read");
+        return -1;
+    }
+    return 0;
+}
+
 static int run_pipeline(struct run *x) {
     const struct belay_manifest_header *hb = belay_manifest_header(x->rb);
     const struct belay_manifest_header *ha = belay_manifest_header(x->ra);
@@ -320,7 +357,9 @@ static int run_pipeline(struct run *x) {
     if (belay_manifest_digest(x->rb, sb) == -1 || belay_manifest_digest(x->ra, sa) == -1) return -1;
     const struct belay_manifest_stats tb = *belay_manifest_trailer(x->rb), ta = *belay_manifest_trailer(x->ra);
     if (lookups(x, sa) == -1 || end_all(x) == -1 || emit_events(&x->em, &x->events) == -1) return -1;
-    const struct diff_inputs in = { &tb, &ta, sb, sa };
+    /* runtime-v1 RT-D1: the runtime section, after the events. */
+    if (runtime_units(x, sa) == -1 || rtdiff_write(x->rt, x->em.f, &x->rt_records) == -1) return -1;
+    const struct diff_inputs in = { &tb, &ta, sb, sa, x->rt_records };
     return emit_trailer(&x->em, &in);
 }
 
@@ -352,6 +391,7 @@ int diff_run(const char *before, const char *after, const char *out_path,
     if (opts != NULL && opts->store_dir != NULL &&
         belay_content_open(opts->store_dir, &x->content) == -1)
         goto done;
+    if (opts != NULL && rtdiff_open(opts->runtime_before, opts->runtime_after, &x->rt) == -1) goto done;
     if (belay_manifest_open(before, &x->rb) == -1 || belay_manifest_open(after, &x->ra) == -1 ||
         same_scope(x) == -1 || find_root(x->rb, &x->root[0]) == -1 ||
         find_root(x->ra, &x->root[1]) == -1)
@@ -414,6 +454,7 @@ int diff_run(const char *before, const char *after, const char *out_path,
             .removed = c[D_REMOVED], .modified = c[D_MODIFIED], .type_changed = c[D_TYPE_CHANGED],
             .metadata_only = c[D_METADATA_ONLY], .unknown = c[D_UNKNOWN],
             .dir_timestamps_only = x->em.dir_timestamps, .provisional = x->em.provisional,
+            .runtime = x->rt_records,
         };
     }
     rc = 0;
@@ -424,6 +465,7 @@ done:
     events_free(&x->events);
     lookup_free(&x->lookup);
     free(x->scratch);
+    rtdiff_free(x->rt);
     if (x->out != NULL) fclose(x->out);
     if (tmp_live) unlink(x->tmp);
     emit_close(&x->em);

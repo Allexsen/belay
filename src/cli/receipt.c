@@ -902,8 +902,42 @@ nomem:
     return -1;
 }
 
+/* ---- the runtime section (runtime-v1.md) ---- */
+
+/* A runtime record: its text, a line of the section. A UDP listener opened
+ * in the client port range is not a line of its own: it goes on the one
+ * line RT-6 gives them (`udp in the client port range: 51820 (no process
+ * holds it), 40000 held by socat`), its text after the address. A kind not
+ * known is not shown (RT-D1). */
+static int runtime_line(const struct jval *r, struct lines *rt, struct sb *crange) {
+    static const char *const KNOWN[] = { "incomplete", "listener_opened", "listener_closed", "service_started",
+                                         "service_stopped", "service_restarted" };
+    const char *k = jstr(r, "runtime");
+    bool known = false;
+    for (size_t i = 0; i < sizeof KNOWN / sizeof KNOWN[0]; i++) known |= strcmp(k, KNOWN[i]) == 0;
+    if (!known) return 0;
+    const struct jval *cr = jget(r, "client_range");
+    struct sb b = { 0 };
+    escs(&b, jget(r, "text"));
+    if (b.bad) { free(b.p); belay_err_set(BELAY_ERR_NOMEM, 0, "receipt: out of memory"); return -1; }
+    if (strcmp(k, "listener_opened") == 0 && cr != NULL && cr->t == J_BOOL && cr->b && b.p != NULL &&
+        strncmp(b.p, "opened: udp ", 12) == 0) {
+        const char *a = b.p + 12, *sp = strchr(a, ' '), *end = sp != NULL ? sp : a + strlen(a), *c = end;
+        while (c > a && c[-1] != ':') c--;
+        sbf(crange, "%s%s", crange->n ? ", " : "", c > a ? c : a);
+        free(b.p);
+        return 0;
+    }
+    struct sb l = { 0 };
+    sbf(&l, "  %s", b.p != NULL ? b.p : "");
+    free(b.p);
+    if (l.bad) { free(l.p); belay_err_set(BELAY_ERR_NOMEM, 0, "receipt: out of memory"); return -1; }
+    return keep(rt, l.p, false, true);
+}
+
 int receipt_render(FILE *diff, FILE *out, const struct receipt_opts *o) {
-    struct lines ev = { 0 };
+    struct lines ev = { 0 }, rt = { 0 };
+    struct sb crange = { 0 };
     struct ctx x = { 0 };
     struct coll col = { 0 };
     unsigned char *cls = NULL;
@@ -963,6 +997,8 @@ int receipt_render(FILE *diff, FILE *out, const struct receipt_opts *o) {
             trailer = v;
             have_trailer = true;
             continue;
+        } else if (jget(&v, "runtime") != NULL) {
+            r = runtime_line(&v, &rt, &crange);
         } else if (jget(&v, "event") != NULL) {
             r = event(&v, &x, &ev, o);
         } else {
@@ -988,7 +1024,7 @@ int receipt_render(FILE *diff, FILE *out, const struct receipt_opts *o) {
         if (k) sbf(&c, "%s%lld %s", c.n ? " · " : "", (long long)k, OUT[i]);
     }
     const int64_t nev = jint(&trailer, "events", 0);
-    if (c.n == 0 && nev == 0) fprintf(out, "  no changes\n");
+    if (c.n == 0 && nev == 0 && rt.n == 0 && crange.n == 0) fprintf(out, "  no changes\n");
     else fprintf(out, "  %s%sevents: %lld\n", c.n ? c.p : "", c.n ? "    " : "", (long long)nev);
     free(c.p);
     if (x.cls != NULL && o->class_note != NULL) fprintf(out, "  %s\n", o->class_note);
@@ -1032,8 +1068,14 @@ int receipt_render(FILE *diff, FILE *out, const struct receipt_opts *o) {
     if (x.keys != NULL && x.nown < col.n)
         fprintf(out, "  dpkg's file lists were asked about the first %zu changes only; the others are listed whatever owns them\n",
                 x.nown);
-    const struct { const char *title; struct lines *l; } SEC[] = { { "events", &ev }, { "privilege", &x.priv } };
-    for (size_t s = 0; s < 2; s++) {
+    if (crange.n) {                 /* RT-6: one line, last in its section */
+        struct sb l = { 0 };
+        sbf(&l, "  udp in the client port range: %s", crange.p);
+        if (l.bad || keep(&rt, l.p, false, true) == -1) { if (l.bad) free(l.p); goto out; }
+    }
+    const struct { const char *title; struct lines *l; } SEC[] = { { "events", &ev }, { "privilege", &x.priv },
+                                                                   { "runtime", &rt } };
+    for (size_t s = 0; s < 3; s++) {
         if (SEC[s].l->n == 0) continue;
         fprintf(out, "\n%s\n", SEC[s].title);
         for (size_t i = 0; i < SEC[s].l->n; i++) fprintf(out, "%s\n", SEC[s].l->v[i]);
@@ -1100,6 +1142,8 @@ out:
     free(line);
     free(scope.p);
     drop(&ev);
+    drop(&rt);
+    free(crange.p);
     drop(&x.priv);
     drop(&x.tracked);
     drop(&x.other);

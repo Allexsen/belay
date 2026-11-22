@@ -115,6 +115,8 @@ struct checkpoint {
     bool watch;                 /* written by a step of `belay watch` (state-retention-watch WR-14) */
     char shadow_lines[65];      /* the sha256 of its `shadow.lines` (system-interpreters.md SA-6,
                                    checkpoint-v3 C3-6b); "": it has none */
+    char runtime[65];           /* the sha256 of its `runtime.ndjson` (runtime-v1.md,
+                                   checkpoint-v3 C3-6); "": it has none */
     bool has_since_full;        /* meta.json says since_full (older ones don't) */
     long since_full;            /* marks since the last full one: pruning can't reset it */
 };
@@ -165,6 +167,8 @@ int state_write_whole(int dfd, const char *name, const char *data, size_t len, c
  * belay_err (CORRUPT: recorded and not there, not a regular file, or other
  * bytes -- never compared, never skipped in silence). */
 int state_shadow_lines(const struct state *st, long id, char *buf, size_t cap);
+/* Its runtime record (runtime-v1.md), likewise. */
+int state_runtime(const struct state *st, long id, char *buf, size_t cap);
 
 /* The path of checkpoint `id`'s manifest into buf. */
 void state_manifest(const struct state *st, long id, char *buf, size_t cap);

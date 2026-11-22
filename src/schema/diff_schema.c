@@ -270,4 +270,7 @@ const struct line_field_def DIFF_TRAILER_FIELDS[DT_COUNT] = {
         "The first manifest's directories carrying `unreadable`, `mount` or (manifest v5) `not_read`, counted from its "
         "entries: nothing below them was looked at (test/expect/diff-fields.md, \"The trailer\")." },
     [DT_AFTER_SEALING]      = { "after_sealing", NULL, "int", "The second manifest's, likewise." },
+    [DT_RUNTIME]            = { "runtime", NULL, "int",
+        "The number of `runtime` records, after the events (test/expect/runtime-v1.md, RT-D1); `0` "
+        "when neither capture has a runtime record. Last." },
 };

@@ -321,8 +321,10 @@ int emit_trailer(struct emitter *em, const struct diff_inputs *in) {
         return -1;
     /* Last (diff-fields.md, "The trailer", G3-2): each side's directories
      * nothing below which was looked at. */
-    if (ap(&b, ",\"%s\":%zu,\"%s\":%zu}", DIFF_TRAILER_FIELDS[DT_BEFORE_SEALING].name, in->before->sealing,
+    if (ap(&b, ",\"%s\":%zu,\"%s\":%zu", DIFF_TRAILER_FIELDS[DT_BEFORE_SEALING].name, in->before->sealing,
            DIFF_TRAILER_FIELDS[DT_AFTER_SEALING].name, in->after->sealing) == -1)
         return -1;
+    /* runtime-v1 RT-D1: the runtime section's records, after those. */
+    if (ap(&b, ",\"%s\":%zu}", DIFF_TRAILER_FIELDS[DT_RUNTIME].name, in->runtime) == -1) return -1;
     return put_line(em, &b);
 }

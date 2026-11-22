@@ -20,6 +20,7 @@ struct belay_diff_stats {
     size_t unchanged, added, removed, modified, type_changed, metadata_only, unknown;
     size_t dir_timestamps_only; /* of unchanged: directories whose own timestamps alone differ */
     bool provisional;           /* either tree changed while it was walked (trailer) */
+    size_t runtime;             /* runtime records, after the events (runtime-v1 RT-D1) */
 };
 
 /* How a diff is run. All optional: NULL options mean the defaults. */
@@ -32,6 +33,11 @@ struct belay_diff_opts {
      * password_entry_* events; NULL where a capture kept none: then no such
      * event is given. Read, never written. */
     const char *shadow_lines_before, *shadow_lines_after;
+    /* The runtime records of the two captures (runtime-v1.md; a
+     * checkpoint's `runtime.ndjson`), each checked against the sha256 its
+     * checkpoint recorded; NULL where a capture has none. Either given:
+     * the diff has a `runtime` section (RT-D1, RT-D5). Read, never written. */
+    const char *runtime_before, *runtime_after;
 };
 
 /*
