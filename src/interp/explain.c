@@ -7,7 +7,7 @@
 #include <string.h>
 
 /* The binary fallback declines: size and hash are already in the record. */
-static const struct belay_interp BINARY = { BELAY_INTERP_BINARY, NULL, NULL, NULL };
+static const struct belay_interp BINARY = { BELAY_INTERP_BINARY, NULL, NULL, NULL, NULL };
 
 static const struct belay_interp *const BUILTIN[BELAY_INTERP_COUNT] = {
     [BELAY_INTERP_BINARY] = &BINARY,
@@ -17,6 +17,7 @@ static const struct belay_interp *const BUILTIN[BELAY_INTERP_COUNT] = {
     [BELAY_INTERP_GIT]    = &INTERP_GIT,
 };
 
+/* An id whose interpreter is not built declines, as binary does. */
 const struct belay_interp *belay_interp_builtin(enum belay_interp_id id) {
-    return (unsigned)id < BELAY_INTERP_COUNT ? BUILTIN[id] : BUILTIN[BELAY_INTERP_BINARY];
+    return (unsigned)id < BELAY_INTERP_COUNT && BUILTIN[id] != NULL ? BUILTIN[id] : BUILTIN[BELAY_INTERP_BINARY];
 }

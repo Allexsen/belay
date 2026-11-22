@@ -14,7 +14,6 @@
 #include <stdlib.h>
 #include <string.h>
 
-static const char *const INTERP_NAMES[BELAY_INTERP_COUNT] = { "binary", "text", "pip", "dpkg", "git" };
 
 static int sb_put(struct sbuf *b, const void *p, size_t n) {
     if (b->len + n + 1 > b->cap) {
@@ -62,7 +61,16 @@ static bool valid(int kind, int interp, unsigned level, const struct belay_fv *v
             partial = true;
             continue;
         }
+        if (v[k].null) {                         /* only where the kind allows it */
+            if (!d->field[k].nullable) return false;
+            continue;
+        }
         if (d->field[k].type == FT_STRING && !belay_finding_string_ok(v[k].s, v[k].len)) return false;
+        if (d->field[k].type == FT_LIST) {
+            if (v[k].nlist > FINDING_LIST_MAX || (v[k].list == NULL && v[k].nlist)) return false;
+            for (size_t e = 0; e < v[k].nlist; e++)
+                if (!belay_finding_string_ok(v[k].list[e].s, v[k].list[e].len)) return false;
+        }
         if (d->field[k].type == FT_BYTES &&
             (v[k].len > FINDING_BYTES_MAX || (v[k].s == NULL && v[k].len) ||
              (v[k].len && memchr(v[k].s, '\0', v[k].len) != NULL)))
@@ -83,8 +91,19 @@ static bool valid(int kind, int interp, unsigned level, const struct belay_fv *v
         while (k < n && (strlen(d->field[k].name) != (size_t)(close - open - 1) ||
                          memcmp(d->field[k].name, open + 1, (size_t)(close - open - 1)) != 0))
             k++;
-        if (k == n || v[k].absent || d->field[k].type == FT_BYTES)
+        if (k == n || v[k].absent || v[k].null || d->field[k].type == FT_BYTES)
             return false;                                /* naming no field, or one not there: a bug */
+        if (d->field[k].type == FT_LIST) {           /* its elements, joined by ", " */
+            for (size_t e = 0; e < v[k].nlist; e++) {
+                const size_t el = v[k].list[e].len, sep = e ? 2 : 0;
+                if (w + sep + el > FINDING_STRING_MAX) return false;
+                if (sep) memcpy(text + w, ", ", 2);
+                if (el) memcpy(text + w + sep, v[k].list[e].s, el);
+                w += sep + el;
+            }
+            t = close + 1;
+            continue;
+        }
         char num[32];
         const char *val = num;
         size_t vl;
@@ -120,7 +139,15 @@ static int put_fields(struct sbuf *b, int kind, const struct belay_fv *v, size_t
             continue;
         }
         if (sb_str(b, ",\"") || sb_str(b, d->field[k].name) || sb_str(b, "\":")) return -1;
-        if (d->field[k].type == FT_STRING) {
+        if (v[k].null) {
+            if (sb_str(b, "null")) return -1;
+        } else if (d->field[k].type == FT_LIST) {
+            if (sb_str(b, "[")) return -1;
+            for (size_t e = 0; e < v[k].nlist; e++)
+                if ((e && sb_str(b, ",")) || sb_json(b, v[k].list[e].s ? v[k].list[e].s : "", v[k].list[e].len))
+                    return -1;
+            if (sb_str(b, "]")) return -1;
+        } else if (d->field[k].type == FT_STRING) {
             if (sb_json(b, v[k].s ? v[k].s : "", v[k].len)) return -1;
         } else {
             if (d->field[k].type == FT_INT) snprintf(num, sizeof num, "%" PRIu64, v[k].i);
@@ -264,7 +291,7 @@ static int add_event(struct ev_per *p, int interp, int kind, const struct belay_
     char num[48];
     snprintf(num, sizeof num, ",\"paths_truncated\":%zu", truncated);
     if (sb_str(b, "{\"event\":\"") || sb_str(b, FINDING_KINDS[kind].name) ||
-        sb_str(b, "\",\"interp\":\"") || sb_str(b, INTERP_NAMES[interp]) || sb_str(b, "\"") ||
+        sb_str(b, "\",\"interp\":\"") || sb_str(b, belay_interp_name((enum belay_interp_id)interp)) || sb_str(b, "\"") ||
         put_fields(b, kind, v, n, text, tl) || (provisional && sb_str(b, ",\"provisional\":true")) ||
         put_paths(b, ps, np) || (truncated && sb_str(b, num)) || sb_str(b, "}\n"))
         return -1;
@@ -363,15 +390,14 @@ size_t events_count(const struct belay_events *ev) {
 }
 
 int events_write(const struct belay_events *ev, FILE *out) {
-    static const int ORDER[] = { BELAY_INTERP_TEXT, BELAY_INTERP_PIP, BELAY_INTERP_DPKG,
-                                 BELAY_INTERP_GIT };                      /* E4 */
-    for (size_t k = 0; k < sizeof ORDER / sizeof ORDER[0]; k++) {
+    const enum belay_interp_id *const ORDER = BELAY_INTERP_ORDER;       /* E13 */
+    for (size_t k = 0; k < BELAY_INTERP_ORDER_COUNT; k++) {
         const struct ev_per *p = &ev->per[ORDER[k]];
         const size_t keep = p->extra ? p->last : p->recs.len;     /* E5, as findings */
         if (keep && fwrite(p->recs.p, 1, keep, out) != keep) return -1;
         if (p->extra && fprintf(out, "{\"event\":\"and_more\",\"interp\":\"%s\",\"n\":%zu,"
                                      "\"text\":\"and %zu more\",\"paths\":[]}\n",
-                                INTERP_NAMES[ORDER[k]], p->extra + 1, p->extra + 1) < 0)
+                                belay_interp_name(ORDER[k]), p->extra + 1, p->extra + 1) < 0)
             return -1;
     }
     return 0;

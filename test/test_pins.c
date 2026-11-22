@@ -42,7 +42,7 @@
 
 /* ---- reading the pins: markdown tables ----------------------------------- */
 
-#define MAX_ROWS 96
+#define MAX_ROWS 192
 #define MAX_COLS 8
 #define CELL_MAX 8192
 struct table { int n; char cell[MAX_ROWS][MAX_COLS][CELL_MAX]; int cols[MAX_ROWS]; };   /* a cell: E12 is 4,190 bytes */
@@ -531,14 +531,14 @@ static unsigned interps_of(const char *s) {
  * same way, so the two compare as strings. */
 static void fields_of(const struct finding_kind_def *d, char *out, size_t cap) {
     static const char *const T[] = { [FT_INT] = "int", [FT_STRING] = "string", [FT_BOOL] = "bool",
-                                     [FT_BYTES] = "bytes" };
+                                     [FT_BYTES] = "bytes", [FT_LIST] = "list" };
     size_t w = 0;
     out[0] = '\0';
     for (int k = 0; k < FINDING_FIELDS_MAX && d->field[k].name; k++)
-        w += (size_t)snprintf(out + w, cap - w, "%s%s: %s%s", k ? ", " : "", d->field[k].name,
-                              d->field[k].type <= FT_UNSET || d->field[k].type > FT_BYTES
+        w += (size_t)snprintf(out + w, cap - w, "%s%s: %s%s%s", k ? ", " : "", d->field[k].name,
+                              d->field[k].type <= FT_UNSET || d->field[k].type > FT_LIST
                                   ? "??" : T[d->field[k].type],
-                              d->field[k].optional ? "?" : "");
+                              d->field[k].nullable ? "/null" : "", d->field[k].optional ? "?" : "");
     if (w == 0) snprintf(out, cap, "--");
 }
 
@@ -562,7 +562,7 @@ TEST(finding_kinds_pin_and_schema_agree_both_ways) {
                           : strcmp(t.cell[i][2], "event") == 0 ? LV_EVENT
                           : strcmp(t.cell[i][2], "path, event") == 0 ? (LV_PATH | LV_EVENT) : 0;
         if (lv != d->levels) BELAY_FAIL("%s: level %s, schema %u", d->name, t.cell[i][2], d->levels);
-        char f[256];
+        char f[512];
         fields_of(d, f, sizeof f);
         if (strcmp(f, t.cell[i][3]) != 0) BELAY_FAIL("%s: fields \"%s\", schema \"%s\"", d->name, t.cell[i][3], f);
         /* "`template`" or "`template`; <when>: `second template`" */

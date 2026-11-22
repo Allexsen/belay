@@ -13,6 +13,7 @@
 #include "belay/diff.h"
 
 #include "interp/findings_internal.h"
+#include "interp/lookup_internal.h"
 #include "schema/finding_schema.h"
 
 #include "ancestry.h"
@@ -102,6 +103,9 @@ struct run {
     struct belay_content *content;      /* NULL: no store */
     void *state[BELAY_INTERP_COUNT];
     bool begun, ended[BELAY_INTERP_COUNT];  /* ended: each end hook is called once */
+    struct belay_lookup lookup;             /* what the prepare hooks ask of the after-manifest */
+    bool prepare_failed[BELAY_INTERP_COUNT];
+    struct belay_entry *scratch;            /* one entry of a lookup pass */
 };
 
 /* The interpreter that claims this path explains the change, if it can. What
@@ -149,9 +153,63 @@ static int end_all(struct run *x) {
         x->ended[i] = true;
         const enum belay_interp_result r = x->interp[i]->end(x->state[i], &x->events);
         if (events_oom(&x->events, i)) return -1;
-        if ((r == BELAY_INTERP_ERROR || events_broken(&x->events, i)) &&
+        if ((r == BELAY_INTERP_ERROR || events_broken(&x->events, i) || x->prepare_failed[i] ||
+             x->lookup.hook_failed[i]) &&
             events_failed(&x->events, i) == -1)
             return -1;
+    }
+    return 0;
+}
+
+/* The after-manifest once more, through the same open file (decided F8),
+ * for what the prepare hooks asked (system-interpreters.md SI-4) or, with
+ * `owners`, for the ownership of the paths they asked about (SI-5). It must
+ * be the manifest the diff read: its bytes hash to `digest`. */
+static int after_pass(struct run *x, const char *digest, bool owners) {
+    if (x->scratch == NULL && (x->scratch = malloc(sizeof *x->scratch)) == NULL) {
+        belay_err_set(BELAY_ERR_NOMEM, 0, "diff: out of memory");
+        return -1;
+    }
+    if (belay_manifest_rewind(x->ra) == -1) return -1;
+    int got;
+    while ((got = belay_manifest_next(x->ra, x->scratch)) == 1) {
+        if (!owners) lookup_feed(&x->lookup, x->scratch);
+        else if (lookup_owner_feed(&x->lookup, x->scratch) == -1) {
+            belay_err_set(BELAY_ERR_NOMEM, 0, "diff: out of memory");
+            return -1;
+        }
+    }
+    char again[65];
+    if (got == -1 || belay_manifest_digest(x->ra, again) == -1) return -1;
+    if (strcmp(again, digest) != 0) {
+        belay_err_set(BELAY_ERR_CORRUPT, 0, "diff: the after manifest changed while it was read");
+        return -1;
+    }
+    return 0;
+}
+
+/* The prepare hooks, round by round, each round's asks answered by one pass
+ * over the after-manifest; then one pass for ownership when a path's owner
+ * was asked. A diff whose interpreters ask nothing reads nothing again. */
+static int lookups(struct run *x, const char *digest) {
+    for (int round = 0; round < BELAY_LOOKUP_ROUNDS; round++) {
+        for (int i = 0; i < BELAY_INTERP_COUNT; i++) {
+            if (x->interp[i]->prepare == NULL || x->prepare_failed[i] || x->lookup.hook_failed[i]) continue;
+            x->lookup.current = i;
+            if (x->interp[i]->prepare(x->state[i], &x->lookup) == BELAY_INTERP_ERROR) x->prepare_failed[i] = true;
+        }
+        if (x->lookup.failed) {
+            belay_err_set(BELAY_ERR_NOMEM, 0, "diff: out of memory");
+            return -1;
+        }
+        if (lookup_wanted(&x->lookup) == 0) break;
+        if (after_pass(x, digest, false) == -1) return -1;
+        lookup_round_end(&x->lookup);
+    }
+    lookup_round_end(&x->lookup);
+    if (lookup_owner_pending(&x->lookup)) {
+        if (after_pass(x, digest, true) == -1) return -1;
+        lookup_owner_done(&x->lookup);
     }
     return 0;
 }
@@ -241,11 +299,14 @@ static int run_pipeline(struct run *x) {
         if (emit_path(&x->em, b, a, &v, v.outcome != D_UNCHANGED ? &x->findings : NULL) == -1)
             return -1;
     }
-    if (got == -1 || end_all(x) == -1 || emit_events(&x->em, &x->events) == -1) return -1;
+    if (got == -1) return -1;
+    /* What the trailer says of the two manifests is taken now: the lookups
+     * read the after-manifest again. */
     char sb[65], sa[65];
     if (belay_manifest_digest(x->rb, sb) == -1 || belay_manifest_digest(x->ra, sa) == -1) return -1;
-    const struct diff_inputs in = { belay_manifest_trailer(x->rb), belay_manifest_trailer(x->ra),
-                                    sb, sa };
+    const struct belay_manifest_stats tb = *belay_manifest_trailer(x->rb), ta = *belay_manifest_trailer(x->ra);
+    if (lookups(x, sa) == -1 || end_all(x) == -1 || emit_events(&x->em, &x->events) == -1) return -1;
+    const struct diff_inputs in = { &tb, &ta, sb, sa };
     return emit_trailer(&x->em, &in);
 }
 
@@ -311,6 +372,7 @@ int diff_run(const char *before, const char *after, const char *out_path,
     }
     x->interp = interp;
     events_init(&x->events);
+    lookup_init(&x->lookup, x->content);
     for (int i = 0; i < BELAY_INTERP_COUNT; i++)
         x->state[i] = interp[i]->begin != NULL ? interp[i]->begin() : NULL;
     x->begun = true;
@@ -342,6 +404,8 @@ done:
         if (!x->ended[i] && interp[i]->end != NULL) interp[i]->end(x->state[i], NULL);
     findings_free(&x->findings);
     events_free(&x->events);
+    lookup_free(&x->lookup);
+    free(x->scratch);
     if (x->out != NULL) fclose(x->out);
     if (tmp_live) unlink(x->tmp);
     emit_close(&x->em);

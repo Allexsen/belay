@@ -30,6 +30,11 @@ const struct belay_entry *side_entry(const struct belay_interp_input *in, enum s
 enum stored_why stored_read(const struct belay_interp_input *in, enum side s, size_t max,
                             unsigned char **buf, size_t *len);
 
+/* The same, of an entry that is not the path being explained (a lookup,
+ * SI-4): `c` NULL is SW_NO_STORE. */
+enum stored_why stored_read_entry(const struct belay_content *c, const struct belay_entry *e, size_t max,
+                                  unsigned char **buf, size_t *len);
+
 /* The finding-kinds.md word for a reason ("no_store", ...) and a side
  * ("before", "after"). */
 const char *stored_why_name(enum stored_why w);

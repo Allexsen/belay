@@ -14,6 +14,9 @@
 #define NO(n) { n, FT_INT, true }
 #define SO(n) { n, FT_STRING, true }
 #define BY(n) { n, FT_BYTES }
+#define L(n) { n, FT_LIST }
+#define NN(n) { n, FT_INT, false, true }            /* int/null */
+#define SNO(n) { n, FT_STRING, true, true }         /* string/null? */
 
 const struct finding_kind_def FINDING_KINDS[FK_COUNT] = {
     [FK_COULD_NOT_INTERPRET] = { "could_not_interpret", IN_CORE, LV_PATH | LV_EVENT, { { 0 } },
@@ -268,4 +271,12 @@ const struct event_rule EVENT_RULES[EVENT_RULE_COUNT] = {
         "unterminated last line no entry; 183: a ref's and HEAD's read, an unterminated packed-refs "
         "refused -- as git does; 202: the reflog lines git skips skipped and counted, refs read as "
         "git reads them; 213: ids lowercased, a symbolic loose branch an alias.)" },
+    { "E13 order, amended",
+        "By interpreter, in the order text, pip, dpkg, accounts, sudoers, cron, systemd, sshkeys, "
+        "trust, config, git: this list supersedes E4's (system-interpreters.md SI-1). Within pip, "
+        "dpkg and git, as E4 says. Within each of accounts, sudoers, cron, systemd, sshkeys, trust "
+        "and config: by path (the first of the event's `paths`), then by the line's place in the "
+        "file (a removed line's place before, an added line's after; an event of the file as a "
+        "whole before every line's), removed before added, then by kind in finding-kinds.md's "
+        "order. The same inputs give the same bytes." },
 };

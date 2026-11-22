@@ -1045,4 +1045,4 @@ static enum belay_interp_result explain(void *state, const struct belay_interp_i
     return BELAY_INTERP_ERROR;                  /* dispatch claimed what this cannot place */
 }
 
-const struct belay_interp INTERP_GIT = { BELAY_INTERP_GIT, begin, explain, end };
+const struct belay_interp INTERP_GIT = { BELAY_INTERP_GIT, begin, explain, end, NULL };
