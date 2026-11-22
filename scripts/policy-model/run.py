@@ -486,10 +486,12 @@ def check_diff(rep, sc, env, scope, since, to, recs, B, A, unguarded):
             ("after_writer_open", sum(1 for e in A.values() if e["writer_open"])),
             ("before_unguarded", unguarded[0]), ("after_unguarded", unguarded[1]),
             # G3-2: "In that order, after every key the trailer has."
-            ("before_sealing", model.sealing(B)), ("after_sealing", model.sealing(A))]
+            ("before_sealing", model.sealing(B)), ("after_sealing", model.sealing(A)),
+            # RT-T1: always present, 0 without a runtime section (these pairs have no runtime record), last.
+            ("runtime", 0)]
     keys = list(tr)
-    if keys[-7:-6] != ["after_sha256"] or [(k, tr[k]) for k in keys[-6:]] != want:
-        rep.disagree(sc, "diff: V4-D5 and G3-2, the trailer ends", canon(want), canon(list(tr.items())[-7:]))
+    if keys[-8:-7] != ["after_sha256"] or [(k, tr[k]) for k in keys[-7:]] != want:
+        rep.disagree(sc, "diff: V4-D5 and G3-2, the trailer ends", canon(want), canon(list(tr.items())[-8:]))
     if tr.get("provisional") is not False:
         rep.disagree(sc, "diff: V4-D6, provisional", "false", canon(tr.get("provisional")))
     for side in ("before", "after"):
