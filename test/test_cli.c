@@ -263,6 +263,34 @@ TEST(diff_keeps_its_capture_and_exit_code_is_opt_in) {
     ASSERT_EQ_INT(2, belay("diff", "--scope", g_scope, "--since", "99", NULL));          /* no such */
 }
 
+/* system-interpreters.md SD-1 to SD-3, through the binary's own diff: the
+ * packages installed are one line -- the one apt does not mark automatic by
+ * name, the other counted -- and the files their lists own are counted
+ * there, listed only by --all; a file in no list stays. */
+TEST(diff_folds_a_packages_files_into_its_line) {
+    fresh();
+    sh("mkdir -p '%s/var/lib/dpkg/info' '%s/var/lib/apt' '%s/usr/share/nginx' '%s/etc/nginx'", g_scope, g_scope, g_scope, g_scope);
+    sh(": > '%s/var/lib/dpkg/status'; : > '%s/var/lib/dpkg/diversions'; : > '%s/var/lib/apt/extended_states'",
+       g_scope, g_scope, g_scope);
+    ASSERT_EQ_INT(0, belay("check", "--scope", g_scope, NULL));
+    sh("printf 'Package: nginx\nStatus: install ok installed\nArchitecture: amd64\nVersion: 1.24.0-2ubuntu7\n\n"
+       "Package: nginx-common\nStatus: install ok installed\nArchitecture: all\nVersion: 1.24.0-2ubuntu7\n\n' > '%s/var/lib/dpkg/status'",
+       g_scope);
+    sh("printf 'Package: nginx-common\nArchitecture: all\nAuto-Installed: 1\n\n' > '%s/var/lib/apt/extended_states'", g_scope);
+    sh("printf '/usr/share/nginx\n/usr/share/nginx/index.html\n' > '%s/var/lib/dpkg/info/nginx.list'", g_scope);
+    sh("printf '/etc/nginx\n/etc/nginx/nginx.conf\n/etc/nginx/mime.types\n' > '%s/var/lib/dpkg/info/nginx-common.list'", g_scope);
+    sh("echo x > '%s/usr/share/nginx/index.html'; echo x > '%s/etc/nginx/nginx.conf'; echo x > '%s/etc/nginx/mime.types';"
+       " echo x > '%s/etc/nginx/site-made-by-hand'", g_scope, g_scope, g_scope, g_scope);
+    ASSERT_EQ_INT(0, belay("diff", "--scope", g_scope, "--since", "1", NULL));
+    ASSERT_TRUE(strstr(g_out, "  dpkg  installed nginx:amd64 1.24.0-2ubuntu7 (not marked automatic by apt); 1 marked automatic; "
+                              "3 changes in their files (most: nginx-common 2, nginx 1)\n") != NULL);
+    ASSERT_TRUE(strstr(g_out, "etc/nginx/site-made-by-hand") != NULL);
+    ASSERT_TRUE(strstr(g_out, "nginx.conf") == NULL && strstr(g_out, "index.html") == NULL);
+    ASSERT_EQ_INT(0, belay("diff", "--scope", g_scope, "--since", "1", "--all", NULL));
+    ASSERT_TRUE(strstr(g_out, "  dpkg  installed nginx-common:all 1.24.0-2ubuntu7 (marked automatic)\n") != NULL);
+    ASSERT_TRUE(strstr(g_out, "etc/nginx/nginx.conf") != NULL && strstr(g_out, "usr/share/nginx/index.html") != NULL);
+}
+
 /* Q8, and mark's other full-walk triggers, each said. */
 TEST(mark_says_when_it_reads_every_file) {
     fresh();
@@ -2310,6 +2338,7 @@ int main(void) {
     RUN(a_scope_swapped_before_the_walk_is_refused);
     RUN(the_state_directory_inside_the_scope_is_excluded_and_said);
     RUN(diff_keeps_its_capture_and_exit_code_is_opt_in);
+    RUN(diff_folds_a_packages_files_into_its_line);
     RUN(mark_says_when_it_reads_every_file);
     RUN(log_lists_checkpoints_or_says_there_are_none);
     RUN(a_usage_error_is_one_line_and_ids_are_strict);

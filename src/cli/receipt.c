@@ -8,6 +8,8 @@
 #include "belay/error.h"
 #include "belay/json.h"
 
+size_t receipt_owner_asks = 262144;
+
 #include <errno.h>
 #include <stdarg.h>
 #include <stdlib.h>
@@ -324,6 +326,28 @@ static bool any_git(const struct jval *f) {
     return false;
 }
 
+/* A package of this diff's dpkg events (system-interpreters.md SD-3): the
+ * records its file list owns are counted in its line. */
+enum { PK_INSTALLED, PK_UPGRADED, PK_DOWNGRADED, PK_REMOVED };
+struct pk {
+    char *package, *arch, *version;     /* version: an installed one's, for the installed line */
+    int kind;
+    int aut;                            /* -1: the event has no `auto` */
+    bool prov;
+    size_t count;                       /* records folded into it */
+};
+/* A name dpkg's lists may give a package's owner: `package`, `package:arch`. */
+struct pkkey { char *key; size_t pk; };
+
+static int pkkey_cmp(const void *a, const void *b) {
+    return strcmp(((const struct pkkey *)a)->key, ((const struct pkkey *)b)->key);
+}
+
+static int pk_kind(const char *event) {
+    return strcmp(event, "dpkg_installed") == 0 ? PK_INSTALLED : strcmp(event, "dpkg_upgraded") == 0 ? PK_UPGRADED
+         : strcmp(event, "dpkg_downgraded") == 0 ? PK_DOWNGRADED : strcmp(event, "dpkg_removed") == 0 ? PK_REMOVED : -1;
+}
+
 /* What the changes section is built from. */
 struct ctx {
     struct lines priv, tracked, other, ignedit, ignored, gitvis;
@@ -331,7 +355,38 @@ struct ctx {
     const unsigned char *cls;   /* each classified path's class, in order; NULL: path order */
     size_t ci;
     bool git_events;            /* git's events say what its findings did (decision 126) */
+    /* SD-3: the packages of the diff's dpkg events, in the events' order;
+     * each asked path's owner by the after manifest (and by the before one,
+     * when a package was removed), in the records' order; NULL: nothing folds. */
+    struct pk *pk;
+    size_t npk, pki, n_installed;
+    bool collected;             /* pass 1 ran: pk is whole before the first event is rendered */
+    bool installed_said;
+    char **own[2];
+    size_t nown, ri;
+    struct pkkey *keys;
+    size_t nkeys;
 };
+
+/* The package of the diff that owns record `ri`, or NULL. An installed
+ * package's files are the after manifest's, a removed one's the before's,
+ * an upgraded or downgraded one's either: a file the new version dropped is
+ * in the old list alone. */
+static struct pk *owner_pk(struct ctx *x, size_t ri) {
+    if (x->keys == NULL || ri >= x->nown) return NULL;
+    for (int side = 1; side >= 0; side--) {
+        if (x->own[side] == NULL || x->own[side][ri] == NULL) continue;
+        const struct pkkey probe = { x->own[side][ri], 0 };
+        const struct pkkey *k = bsearch(&probe, x->keys, x->nkeys, sizeof *x->keys, pkkey_cmp);
+        if (k == NULL) continue;
+        /* several packages may share a key (libc6 of two architectures by a
+         * list named without one): the first whose side this is */
+        while (k > x->keys && strcmp(k[-1].key, probe.key) == 0) k--;
+        for (; k < x->keys + x->nkeys && strcmp(k->key, probe.key) == 0; k++)
+            if (x->pk[k->pk].kind != (side == 0 ? PK_INSTALLED : PK_REMOVED)) return &x->pk[k->pk];
+    }
+    return NULL;
+}
 
 static int record(const struct jval *r, struct ctx *x, const struct receipt_opts *o) {
     static char path[4096];
@@ -346,6 +401,7 @@ static int record(const struct jval *r, struct ctx *x, const struct receipt_opts
     const long gp = have_path ? gitpos(path, plen, type) : -1;
     unsigned char c = GC_UNTRACKED;
     if (have_path && gp < 0 && x->cls != NULL) c = x->cls[x->ci++];
+    const size_t ri = have_path && gp < 0 ? x->ri++ : (size_t)-1;      /* its place among the paths asked */
     /* An edit to a git-ignored file -- its text, or its type, not a
      * directory's -- is named, never folded: it is often .env or local
      * configuration (2026-11-04). A binary rewritten (build output) folds,
@@ -430,6 +486,16 @@ static int record(const struct jval *r, struct ctx *x, const struct receipt_opts
      * reliably: each is named on its own line (S7 2026-10-31, row 73). */
     const bool is_priv = why.n != 0, unknown = strcmp(outcome, "unknown") == 0;
     if (is_priv) return keep(&x->priv, b.p, false, o->all);
+    /* SD-3: counted in the line of the package that owns it, and listed
+     * only by --all. Never what is named on a line of its own. */
+    if (!o->all && !unknown && !named && ri != (size_t)-1) {
+        struct pk *owner = owner_pk(x, ri);
+        if (owner != NULL) {
+            free(b.p);
+            owner->count++;
+            return 0;
+        }
+    }
     if (gp >= 0) {      /* a repository's bookkeeping: one line, but what git says stays (decision 105) */
         const char *rest = path + gp + 4;
         const size_t rl = plen - (size_t)gp - 4;
@@ -482,16 +548,101 @@ static int record(const struct jval *r, struct ctx *x, const struct receipt_opts
     return keep(&x->other, b.p, !unknown && !named, o->all);
 }
 
-static int event(const struct jval *e, struct lines *ev, const struct receipt_opts *o) {
+static void changes_in(struct sb *b, size_t n, const char *whose) {
+    if (n) sbf(b, "; %zu change%s in %s files", n, n == 1 ? "" : "s", whose);
+}
+
+static int most_cmp(const void *a, const void *b) {
+    const struct pk *x = *(struct pk *const *)a, *y = *(struct pk *const *)b;
+    if (x->count != y->count) return x->count > y->count ? -1 : 1;
+    return strcmp(x->package, y->package);
+}
+
+#define INSTALLED_NAMES 10      /* packages the installed line names, then "and N more" */
+
+/* SD-3's installed line: the packages apt does not mark automatic (or of
+ * which it says nothing) by name, the rest counted, and the three with the
+ * most records. */
+static int installed_line(struct ctx *x, struct lines *ev, const struct receipt_opts *o) {
+    struct sb b = { 0 };
+    size_t named = 0, more = 0, autos = 0, total = 0, nm = 0;
+    bool prov = false;
+    struct pk **most = malloc((x->npk + 1) * sizeof *most);
+    if (most == NULL) { belay_err_set(BELAY_ERR_NOMEM, 0, "receipt: out of memory"); return -1; }
+    sbf(&b, "  dpkg  installed");
+    for (size_t i = 0; i < x->npk; i++) {
+        const struct pk *p = &x->pk[i];
+        if (p->kind != PK_INSTALLED) continue;
+        prov |= p->prov;
+        total += p->count;
+        if (p->count) most[nm++] = &x->pk[i];
+        if (p->aut == 1) { autos++; continue; }
+        if (named == INSTALLED_NAMES) { more++; continue; }
+        sbf(&b, "%s", named++ ? ", " : " ");
+        esc(&b, p->package, strlen(p->package));
+        sbf(&b, ":");
+        esc(&b, p->arch, strlen(p->arch));
+        sbf(&b, " ");
+        esc(&b, p->version, strlen(p->version));
+        if (p->aut == 0) sbf(&b, " (not marked automatic by apt)");
+    }
+    if (more) sbf(&b, " and %zu more not marked automatic", more);
+    if (named == 0) sbf(&b, " %zu packages, marked automatic", autos);
+    else if (autos) sbf(&b, "; %zu marked automatic", autos);
+    changes_in(&b, total, "their");
+    if (nm > 0) {
+        qsort(most, nm, sizeof *most, most_cmp);
+        for (size_t i = 0; i < nm && i < 3; i++) {
+            sbf(&b, "%s", i ? ", " : " (most: ");
+            esc(&b, most[i]->package, strlen(most[i]->package));
+            sbf(&b, " %zu", most[i]->count);
+        }
+        sbf(&b, ")");
+    }
+    free(most);
+    if (prov) sbf(&b, " (provisional: a path it came from is unknown)");
+    if (b.bad) { free(b.p); belay_err_set(BELAY_ERR_NOMEM, 0, "receipt: out of memory"); return -1; }
+    return keep(ev, b.p, true, o->all);
+}
+
+static int event(const struct jval *e, struct ctx *x, struct lines *ev, const struct receipt_opts *o) {
+    const char *k = jstr(e, "event");
+    /* The package this event is of, as pass 1 listed it. */
+    struct pk *pk = NULL;
+    if (x->collected && strcmp(jstr(e, "interp"), "dpkg") == 0 && pk_kind(k) >= 0 && x->pki < x->npk)
+        pk = &x->pk[x->pki++];
+    if (pk != NULL && !o->all && pk->kind == PK_INSTALLED && x->n_installed > 1) {
+        if (x->installed_said) return 0;
+        x->installed_said = true;
+        return installed_line(x, ev, o);
+    }
     struct sb b = { 0 };
     struct sb in = { 0 };
     escs(&in, jget(e, "interp"));
     sbf(&b, "  %-5s ", in.p != NULL ? in.p : "");
     free(in.p);
     escs(&b, jget(e, "text"));
+    /* What a field says, in the pins' words (system-interpreters.md):
+     * apt's mark (SD-2), a uid below UID_MIN (SA-2), a schedule in words
+     * (SI-6), an owner that is no package (SI-5). */
+    const struct jval *au = jget(e, "auto");
+    if (strncmp(k, "dpkg_", 5) == 0 && au != NULL && au->t == J_BOOL)
+        sbf(&b, au->b ? " (marked automatic)" : " (not marked automatic by apt)");
+    if (strcmp(k, "user_added") == 0) {
+        const struct jval *um = jget(e, "uid_min"), *uid = jget(e, "uid");
+        if (um != NULL && um->t == J_NUM && uid != NULL && uid->t == J_NUM && jint(e, "uid", 0) < jint(e, "uid_min", 0))
+            sbf(&b, " (below UID_MIN %lld)", (long long)jint(e, "uid_min", 0));
+    }
+    if (strncmp(k, "cron_job_", 9) == 0 || strncmp(k, "timer_file_", 11) == 0) {
+        const struct jval *w = jget(e, "in_words");
+        if (w != NULL && w->t == J_STR) { sbf(&b, " -- "); escs(&b, w); }
+    }
+    const struct jval *ow = jget(e, "owner");
+    const bool no_package = ow != NULL && ow->t == J_NULL;
+    if (no_package) sbf(&b, " (in no package)");
+    if (pk != NULL && !o->all) changes_in(&b, pk->count, "its");
     const struct jval *pv = jget(e, "provisional");
     if (pv != NULL && pv->t == J_BOOL && pv->b) sbf(&b, " (provisional: a path it came from is unknown)");
-    const char *k = jstr(e, "event");
     if (strcmp(k, "could_not_interpret") == 0 || strcmp(k, "invalid_finding") == 0 ||
         strcmp(k, "content_unavailable") == 0) {
         const struct jval *ps = jget(e, "paths");
@@ -508,14 +659,16 @@ static int event(const struct jval *e, struct lines *ev, const struct receipt_op
         }
     }
     if (b.bad) { free(b.p); belay_err_set(BELAY_ERR_NOMEM, 0, "receipt: out of memory"); return -1; }
-    return keep(ev, b.p, true, o->all);
+    /* An init script in no package has a line of its own, past the cut too
+     * (system-interpreters.md, the `init script` row). */
+    return keep(ev, b.p, !(no_package && strncmp(k, "init_script_", 12) == 0), o->all);
 }
 
 /* Pass 1 (when the diff can be read twice): each record's path outside a
  * .git, in order, for git to classify; and whether git's events are there
  * (they follow the records, E1). Lines that are not diff.v1 are left for
  * pass 2 to refuse. */
-struct coll { char **p; size_t *len; bool *dir; size_t n, cap; bool git_events; };
+struct coll { char **p; size_t *len; bool *dir; size_t n, cap; bool git_events; struct pk *pk; size_t npk, pkcap; };
 
 static int collect(FILE *diff, struct coll *c) {
     char *line = NULL;
@@ -530,6 +683,25 @@ static int collect(FILE *diff, struct coll *c) {
             size_t len;
             if (jget(&v, "event") != NULL) {
                 c->git_events |= strcmp(jstr(&v, "interp"), "git") == 0;
+                const int kind = strcmp(jstr(&v, "interp"), "dpkg") == 0 ? pk_kind(jstr(&v, "event")) : -1;
+                if (kind >= 0) {                /* a package records may fold into (SD-3) */
+                    if (c->npk == c->pkcap) {
+                        const size_t k = c->pkcap ? c->pkcap * 2 : 32;
+                        struct pk *q = realloc(c->pk, k * sizeof *q);
+                        if (q == NULL) rc = -1;
+                        else { c->pk = q; c->pkcap = k; }
+                    }
+                    if (rc == 0) {
+                        const struct jval *au = jget(&v, "auto"), *pv = jget(&v, "provisional");
+                        struct pk *p = &c->pk[c->npk];
+                        *p = (struct pk){ strdup(jstr(&v, "package")), strdup(jstr(&v, "arch")),
+                                          strdup(jstr(&v, "version")), kind,
+                                          au != NULL && au->t == J_BOOL ? (au->b ? 1 : 0) : -1,
+                                          pv != NULL && pv->t == J_BOOL && pv->b, 0 };
+                        c->npk++;
+                        if (p->package == NULL || p->arch == NULL || p->version == NULL) rc = -1;
+                    }
+                }
             } else if (rpath(&v, path, sizeof path, &len) == 0 && gitpos(path, len, jstr(&v, "type")) < 0) {
                 if (c->n == c->cap) {
                     const size_t k = c->cap ? c->cap * 2 : 256;
@@ -561,6 +733,46 @@ static int collect(FILE *diff, struct coll *c) {
     return rc;
 }
 
+/* SD-3: asks whose each record's path is -- the first receipt_owner_asks of
+ * them, by the after manifest, and by the before one too when the diff
+ * removed, upgraded or downgraded a package -- and lists the names a package of the diff may be
+ * owner under. Without an answer nothing folds. 0, or -1 (memory). */
+static int fold_owners(struct ctx *x, const struct coll *col, const struct receipt_opts *o) {
+    if (o->owner == NULL || o->all || col->npk == 0 || col->n == 0) return 0;
+    const size_t n = col->n < receipt_owner_asks ? col->n : receipt_owner_asks;
+    bool removed = false;               /* a package whose files the before manifest lists */
+    for (size_t i = 0; i < col->npk; i++) removed |= col->pk[i].kind != PK_INSTALLED;
+    for (int side = 1; side >= 0; side--) {
+        if (side == 0 && !removed) continue;
+        if ((x->own[side] = calloc(n ? n : 1, sizeof *x->own[side])) == NULL) goto nomem;
+        if (o->owner(o->owner_ctx, side, (const char *const *)col->p, col->len, n, x->own[side]) == -1) {
+            belay_err_clear();              /* it cannot say: every record is listed */
+            for (size_t i = 0; i < n; i++) free(x->own[side][i]);
+            free(x->own[side]);
+            x->own[side] = NULL;
+            if (side == 1) return 0;
+        }
+    }
+    x->nown = n;
+    if ((x->keys = calloc(2 * col->npk, sizeof *x->keys)) == NULL) goto nomem;
+    for (size_t i = 0; i < col->npk; i++) {
+        const struct pk *p = &col->pk[i];
+        const size_t pl = strlen(p->package), al = strlen(p->arch);
+        char *plain = strdup(p->package), *arch = malloc(pl + al + 2);
+        if (plain == NULL || arch == NULL) { free(plain); free(arch); goto nomem; }
+        memcpy(arch, p->package, pl);
+        arch[pl] = ':';
+        memcpy(arch + pl + 1, p->arch, al + 1);
+        x->keys[x->nkeys++] = (struct pkkey){ plain, i };
+        x->keys[x->nkeys++] = (struct pkkey){ arch, i };
+    }
+    qsort(x->keys, x->nkeys, sizeof *x->keys, pkkey_cmp);
+    return 0;
+nomem:
+    belay_err_set(BELAY_ERR_NOMEM, 0, "receipt: out of memory");
+    return -1;
+}
+
 int receipt_render(FILE *diff, FILE *out, const struct receipt_opts *o) {
     struct lines ev = { 0 };
     struct ctx x = { 0 };
@@ -581,6 +793,11 @@ int receipt_render(FILE *diff, FILE *out, const struct receipt_opts *o) {
             goto out;
         }
         x.git_events = col.git_events;
+        x.collected = true;
+        x.pk = col.pk;
+        x.npk = col.npk;
+        for (size_t i = 0; i < col.npk; i++) x.n_installed += col.pk[i].kind == PK_INSTALLED;
+        if (fold_owners(&x, &col, o) == -1) goto out;
         if (o->classify != NULL && col.n > 0 && (cls = malloc(col.n)) != NULL &&
             o->classify(o->class_ctx, (const char *const *)col.p, col.len, col.dir, col.n, cls) == 0)
             x.cls = cls;
@@ -618,7 +835,7 @@ int receipt_render(FILE *diff, FILE *out, const struct receipt_opts *o) {
             have_trailer = true;
             continue;
         } else if (jget(&v, "event") != NULL) {
-            r = event(&v, &ev, o);
+            r = event(&v, &x, &ev, o);
         } else {
             r = record(&v, &x, o);
         }
@@ -682,6 +899,10 @@ int receipt_render(FILE *diff, FILE *out, const struct receipt_opts *o) {
     const int64_t sealing = jint(&trailer, "after_sealing", 0);
     if (sealing > 0)
         fprintf(out, "  nothing seen below %lld director%s\n", (long long)sealing, sealing == 1 ? "y" : "ies");
+    /* One line when dpkg's lists were asked about only some of the changes (SD-3). */
+    if (x.keys != NULL && x.nown < col.n)
+        fprintf(out, "  dpkg's file lists were asked about the first %zu changes only; the others are listed whatever owns them\n",
+                x.nown);
     const struct { const char *title; struct lines *l; } SEC[] = { { "events", &ev }, { "privilege", &x.priv } };
     for (size_t s = 0; s < 2; s++) {
         if (SEC[s].l->n == 0) continue;
@@ -752,6 +973,14 @@ out:
     tallies_free(&x.ign);
     tallies_free(&x.ignu);
     tallies_free(&x.git);
+    for (int side = 0; side < 2; side++) {
+        for (size_t i = 0; x.own[side] != NULL && i < x.nown; i++) free(x.own[side][i]);
+        free(x.own[side]);
+    }
+    for (size_t i = 0; i < x.nkeys; i++) free(x.keys[i].key);
+    free(x.keys);
+    for (size_t i = 0; i < col.npk; i++) { free(col.pk[i].package); free(col.pk[i].arch); free(col.pk[i].version); }
+    free(col.pk);
     for (size_t i = 0; i < col.n; i++) free(col.p[i]);
     free(col.p);
     free(col.len);

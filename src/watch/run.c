@@ -470,7 +470,7 @@ static int render_section(struct wctx *x, const struct wstep *s, const char *a, 
     snprintf(la, sizeof la, "checkpoint %ld", s->from);
     snprintf(lb, sizeof lb, "checkpoint %ld", s->to);
     const struct receipt_opts ro = { la, lb, true, cli_mode_of, &m, x->st.scope.docker[0] ? NULL : cli_classify,
-                                     x->st.scope.path, NULL };
+                                     x->st.scope.path, NULL, NULL, NULL };  /* --all: nothing folds, no owner asked */
     if (receipt_render(in, mem, &ro) == -1) goto out;
     cli_not_compared(mem, belay_manifest_header(m.side[0].r), belay_manifest_header(m.side[1].r), NULL);
     fputs("\n", mem);
