@@ -1241,6 +1241,81 @@ TEST(a_link_on_the_way_to_a_root_is_recorded) {
     ASSERT_TRUE(ent("home/u/link") == NULL);
 }
 
+/* V5-A4, the root itself: a link standing where a root is looked for -- a
+ * directory root (~/.ssh, usr) or a single file's (~/.bashrc) -- is recorded
+ * as a link, never followed, and that root is `found: false`: what was
+ * looked for is not there, a link is. The capture is read back by the
+ * reader, which takes it. */
+TEST(a_link_where_a_root_is_looked_for_is_recorded_and_the_root_not_found) {
+    static const struct { const char *root, *make, *below; } C[] = {
+        { "home/u/.ssh", "cd '%s/home/u' && rm -rf .ssh && mkdir -p elsewhere && printf 'k\n' > elsewhere/authorized_keys && "
+                         "ln -s elsewhere .ssh", "home/u/.ssh/authorized_keys" },
+        { "home/u/.bashrc", "cd '%s/home/u' && rm -f .bashrc && printf 'rc\n' > rc && ln -s rc .bashrc", NULL },
+        { "usr", "cd '%s' && mv usr elsewhere && ln -s elsewhere usr", "usr/bin/tool" },
+        { "root", "cd '%s' && rm -rf root && ln -s nowhere root", NULL },                /* dangling: a link all the same */
+    };
+    for (size_t i = 0; i < sizeof C / sizeof C[0]; i++) {
+        tree();
+        mk("home/u/.ssh", 0700);
+        wr("home/u/.bashrc", "rc\n", 0644);
+        char cmd[3000], line[300];
+        struct belay_manifest_stats st;
+        snprintf(line, sizeof line, "\n{\"root\":\"%s\",\"class\":\"", C[i].root);
+        REQUIRE(capture_roots(g_m2, NULL, &st) == 0);
+        char *all = slurp(g_m2);
+        REQUIRE(all != NULL && strstr(all, line) != NULL);
+        if (strstr(strstr(all, line), "\"found\":true}") != strchr(strstr(all, line) + 1, '\n') - 13)
+            BELAY_FAIL("%s: not found before any link was made", C[i].root);
+        free(all);
+        snprintf(cmd, sizeof cmd, C[i].make, g_tree);
+        REQUIRE(system(cmd) == 0);
+        if (capture_roots(g_m2, NULL, &st) != 0) { BELAY_FAIL("%s a link: %s", C[i].root, belay_err_msg()); continue; }
+        if (ent(C[i].root) == NULL || ent(C[i].root)->type != BELAY_T_LNK || !ent(C[i].root)->has_link_target) {
+            BELAY_FAIL("%s: the link is not recorded as one", C[i].root);
+            continue;
+        }
+        if (ent(C[i].root)->meta || ent(C[i].root)->sealed || ent(C[i].root)->partial) BELAY_FAIL("%s: a link with a file's flag", C[i].root);
+        if (C[i].below != NULL && ent(C[i].below) != NULL) BELAY_FAIL("%s: followed, %s is recorded", C[i].root, C[i].below);
+        all = slurp(g_m2);
+        REQUIRE(all != NULL);
+        char want[400];
+        snprintf(want, sizeof want, "\n{\"root\":\"%s\",\"class\":\"%s\",\"found\":false}\n", C[i].root,
+                 strcmp(C[i].root, "usr") == 0 ? "metadata" : "content");
+        if (strstr(all, want) == NULL) BELAY_FAIL("%s: a link there, and the root says found", C[i].root);
+        free(all);
+        ASSERT_EQ_INT(0, (int)(st.unstable + st.raced));
+    }
+}
+
+/* The reader's side of it: a link exactly at a root that was not found is
+ * the one entry such a root may have; a link at a root that says found, any
+ * other entry at a root not found, and anything below, are refused. */
+TEST(the_reader_takes_a_link_at_a_root_not_found_and_nothing_else_there) {
+#define LNK_(p) "{\"path\":\"" p "\",\"type\":\"lnk\",\"mode\":41471,\"uid\":0,\"gid\":0,\"size\":1,\"mtime_ns\":1," \
+                "\"ctime_ns\":1,\"ino\":4,\"dev\":1,\"nlink\":1,\"link_target\":\"t\"}\n"
+    /* (a link below a root that was found is any entry: etc/alternative) */
+    REQUIRE_MSG(read_text(SR PD(".") DIR_("etc", "") LNK_("etc/alternative") SEAL_ PD("home") PD("home/u") LNK_("home/u/.ssh")
+                          LNK_("opt") DIR_("usr", "") T5(9, 0, 0, 1)) == 0, "%s", belay_err_msg());
+    ASSERT_TRUE(g_n == 9);
+    static const struct { const char *what, *text, *msg; } C[] = {
+        { "a link at a root that says found", SR PD(".") DIR_("etc", "") SEAL_ LNK_("usr") T5(4, 0, 0, 1),
+          "a link at a root that was found" },
+        { "a file at a root not found", SR PD(".") DIR_("etc", "") SEAL_ REG_("opt", ",\"meta\":true") T5(4, 0, 1, 1),
+          "a root that was not found" },
+        { "a directory at a root not found", SR PD(".") DIR_("etc", "") SEAL_ PD("home") PD("home/u") DIR_("home/u/.ssh", "") T5(6, 0, 0, 1),
+          "a root that was not found" },
+        { "an entry below a link at a root", SR PD(".") DIR_("etc", "") SEAL_ LNK_("opt") REG_("opt/x", ",\"meta\":true") T5(5, 0, 1, 1),
+          "the parent directory is not recorded" },
+        { "a link below a root not found", SR PD(".") DIR_("etc", "") SEAL_ PD("home") PD("home/u") LNK_("home/u/.ssh/x") T5(6, 0, 0, 1),
+          "the parent directory is not recorded" },
+    };
+    for (size_t i = 0; i < sizeof C / sizeof C[0]; i++) {
+        const int r = read_text(C[i].text);
+        if (r != -1) BELAY_FAIL("%s: read", C[i].what);
+        else if (strstr(belay_err_msg(), C[i].msg) == NULL) BELAY_FAIL("%s: %s", C[i].what, belay_err_msg());
+    }
+}
+
 /* ---------- the roots of a system (watch-system.md WS-6 to WS-9) ---------- */
 
 static struct belay_system_roots g_sr;
@@ -1635,6 +1710,8 @@ int main(void) {
     RUN(a_scope_root_others_cannot_search_seals_everything_read);
     RUN(a_not_read_directory_s_ctime_is_not_the_newest);
     RUN(a_link_on_the_way_to_a_root_is_recorded);
+    RUN(a_link_where_a_root_is_looked_for_is_recorded_and_the_root_not_found);
+    RUN(the_reader_takes_a_link_at_a_root_not_found_and_nothing_else_there);
     RUN(system_roots_from_a_hostile_passwd);
     RUN(system_roots_homes_by_mount_and_without_statx);
     RUN(a_home_too_deep_for_its_roots_is_left_out);
