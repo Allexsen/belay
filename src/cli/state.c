@@ -864,7 +864,7 @@ int state_capture(struct state *st, const struct capture_req *req, struct checkp
         struct manifest_file mf;
         struct belay_manifest_reader *lr = NULL;
         if (manifest_acquire_header(st, list[n - 1].id, &mf) == -1) { free(list); return -1; }
-        const int opened = belay_manifest_open_header(mf.path, &lr);
+        const int opened = belay_manifest_open_header_at(mf.path, mf.skip, &lr);
         const bool has_roots = opened == 0 && belay_manifest_header(lr)->n_roots > 0;
         belay_manifest_close(lr);
         manifest_release(&mf);

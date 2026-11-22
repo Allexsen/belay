@@ -885,6 +885,128 @@ static bool same_as_written(int id) {
     return same;
 }
 
+/* capture-scale SC-M3: a rebuilt manifest is a file of the scope's state
+ * directory, never of TMPDIR or /tmp; none is left when the command ends. */
+TEST(a_rebuilt_manifest_is_a_file_of_the_state_directory) {
+    history_copied(4);
+    char *old = getenv("TMPDIR") != NULL ? strdup(getenv("TMPDIR")) : NULL;
+    char gone[600];
+    snprintf(gone, sizeof gone, "%s/no-such-directory", g_dir);
+    setenv("TMPDIR", gone, 1);                  /* nothing can be made there */
+    const bool rebuilt = same_as_written(2) && same_as_written(3);
+    const int log = belay("log", "--scope", g_scope, "--json", NULL);      /* a delta's header alone */
+    if (old != NULL) setenv("TMPDIR", old, 1); else unsetenv("TMPDIR");
+    free(old);
+    ASSERT_TRUE(rebuilt);
+    ASSERT_EQ_INT(0, log);
+    ASSERT_TRUE(holds("[ -d \"$d/tmp\" ] && [ -z \"$(ls -A \"$d/tmp\")\" ]"));
+    /* the state directory is still one every command takes: a capture, a prune */
+    ASSERT_EQ_INT(0, belay("mark", "--scope", g_scope, NULL));
+    ASSERT_EQ_INT(0, belay("prune", "--scope", g_scope, "--keep-last", "2", NULL));
+    ASSERT_TRUE(same_as_written(4));
+}
+
+/* SC-M3: what a killed run left there is removed by the next rebuild; a
+ * file a running command still holds is not. */
+TEST(a_killed_runs_temporary_is_removed_by_the_next) {
+    history_copied(4);
+    ASSERT_TRUE(same_as_written(2));
+    ASSERT_TRUE(holds("printf 'half a manifest' > \"$d/tmp/999999999.0.0badc0de\" && printf 'held' > \"$d/tmp/999999998.0.0badc0de\""));
+    char held[900];
+    glob_t gl;
+    snprintf(held, sizeof held, "%s/scopes/*/tmp/999999998.0.0badc0de", g_state);
+    REQUIRE(glob(held, 0, NULL, &gl) == 0 && gl.gl_pathc == 1);
+    const int fd = open(gl.gl_pathv[0], O_RDONLY);
+    globfree(&gl);
+    REQUIRE(fd != -1 && flock(fd, LOCK_EX) == 0);       /* as the command that made it holds it */
+    ASSERT_TRUE(same_as_written(3));
+    ASSERT_TRUE(holds("[ ! -e \"$d/tmp/999999999.0.0badc0de\" ] && [ -f \"$d/tmp/999999998.0.0badc0de\" ]"));
+    close(fd);
+    ASSERT_TRUE(same_as_written(3));
+    ASSERT_TRUE(holds("[ -z \"$(ls -A \"$d/tmp\")\" ]"));
+}
+
+/* How many lines of its own checkpoint `id`'s delta holds (-1: none to read),
+ * with a copy of the manifest it stands for kept as kept-<id>. */
+static int delta_own_lines(int id) {
+    char cmd[1600];
+    snprintf(cmd, sizeof cmd, "d=$(ls -d '%s'/scopes/*) && cp \"$d/checkpoints/%d/manifest.ndjson\" '%s/kept-%d' && "
+             "grep -q '^=[1-9]' \"$d/checkpoints/%d/manifest.delta\" && grep -c '^+' \"$d/checkpoints/%d/manifest.delta\"",
+             g_state, id, g_dir, id, id, id);
+    FILE *p = popen(cmd, "r");
+    int n = -1;
+    if (p == NULL || fscanf(p, "%d", &n) != 1) n = -1;
+    if (p != NULL) pclose(p);
+    return n;
+}
+
+/* Whether `belay manifest` gives checkpoint `id` as kept-<id> has it. */
+static bool rebuilds_as_kept(int id) {
+    char n[16], cmd[1400];
+    snprintf(n, sizeof n, "%d", id);
+    if (belay("manifest", "--scope", g_scope, "--id", n, NULL) != 0) return false;
+    snprintf(cmd, sizeof cmd, "%s/rebuilt", g_dir);
+    FILE *f = fopen(cmd, "w");
+    if (f == NULL) return false;
+    fputs(g_out, f);
+    fclose(f);
+    snprintf(cmd, sizeof cmd, "cmp -s '%s/rebuilt' '%s/kept-%d'", g_dir, g_dir, id);
+    return system(cmd) == 0;
+}
+
+/* The delta writer reads both manifests side by side in path order (SC-M2):
+ * a delta's own lines are the header, each entry that changed (the directory
+ * a name was made or removed in is one) and the trailer when its counts
+ * moved -- wherever the change is: first, last, a file gone, a file new
+ * between two that stay, and a name whose escaped spelling sorts on the
+ * other side of its neighbour (a tab is below `A`, `\t` above it). */
+TEST(a_delta_holds_only_what_changed) {
+    fresh();
+    sh("cd '%s' && for i in 0 1 2 3 4 5 6 7 8 9; do for j in 0 1 2 3 4 5 6 7 8 9; do printf 'x\n' > \"f$i$j\"; done; done && "
+       "printf 'q\n' > 'a\"quote' && printf 'b\n' > 'back\\slash' && printf 't\n' > \"$(printf 'tab\\there')\" && "
+       "printf 'A\n' > tabA && printf 'z\n' > zz-last && mkdir dir && printf 'd\n' > dir/inside", g_scope);
+    ASSERT_EQ_INT(0, belay("check", "--scope", g_scope, NULL));
+    static const struct { const char *change; int own; } C[] = {
+        { "printf 'changed\n' > f55", 3 },                              /* the trailer too: a mark --full after a check */
+        { "printf 'changed\n' > 'a\"quote'", 2 },
+        { "rm f00 'back\\slash' && printf 'new\n' > f555", 4 },
+        { "printf 'changed\n' > \"$(printf 'tab\\there')\"", 2 },
+        { "printf 'changed\n' > tabA && printf 'changed\n' > zz-last", 3 },
+        { "rm \"$(printf 'tab\\there')\" && printf 'new\n' > '!first' && printf 'new\n' > dir/more", 6 },
+    };
+    const int n = (int)(sizeof C / sizeof C[0]);
+    for (int i = 0; i < n; i++) {
+        sh("cd '%s' && %s", g_scope, C[i].change);
+        ASSERT_EQ_INT(0, belay("mark", "--scope", g_scope, "--full", NULL));
+        const int own = delta_own_lines(i + 2);
+        if (own != C[i].own) BELAY_FAIL("checkpoint %d (%s): %d lines of its own, not %d", i + 2, C[i].change, own, C[i].own);
+    }
+    for (int i = 2; i <= n + 1; i++)
+        if (!rebuilds_as_kept(i)) BELAY_FAIL("checkpoint %d does not rebuild", i);
+}
+
+/* The same for names that are not UTF-8, which a manifest writes in base64:
+ * they sort by their bytes, and base64 does not keep that order (0x80 is
+ * below 0xe0; `g...` is above `4...`). */
+TEST(a_delta_orders_names_that_are_not_utf8_by_their_bytes) {
+    fresh();
+    char bad[600];
+    snprintf(bad, sizeof bad, "%s/\200x", g_scope);
+    const int fd = open(bad, O_WRONLY | O_CREAT, 0644);
+    if (fd == -1) SKIP("this filesystem refuses a name that is not UTF-8");
+    close(fd);
+    sh("cd '%s' && printf 'y\n' > \"$(printf '\\340y')\" && printf 'z\n' > zz-last", g_scope);
+    ASSERT_EQ_INT(0, belay("check", "--scope", g_scope, NULL));
+    ASSERT_EQ_INT(0, belay("mark", "--scope", g_scope, "--full", NULL));
+    sh("cd '%s' && printf 'changed\n' > \"$(printf '\\200x')\"", g_scope);
+    ASSERT_EQ_INT(0, belay("mark", "--scope", g_scope, "--full", NULL));
+    ASSERT_EQ_INT(2, delta_own_lines(3));                   /* the header and the one entry */
+    sh("cd '%s' && rm \"$(printf '\\200x')\" && printf 'changed\n' > \"$(printf '\\340y')\"", g_scope);
+    ASSERT_EQ_INT(0, belay("mark", "--scope", g_scope, "--full", NULL));
+    ASSERT_EQ_INT(4, delta_own_lines(4));                   /* the header, the root, the entry, the trailer */
+    ASSERT_TRUE(rebuilds_as_kept(3) && rebuilds_as_kept(4));
+}
+
 /* ST-1, ST-2, ST-3, ST-4: only the newest is whole, and every other rebuilds
  * byte for byte. */
 TEST(delta_rebuilds_every_checkpoint_byte_for_byte) {
@@ -1837,7 +1959,10 @@ static char *snapshot(void) {
  * list, verify, and a diff between two kept checkpoints whose diff is
  * stored -- run against a read-only state directory, each succeeds and the
  * directory is as it was. A diff whose pair was never diffed stores it,
- * once. */
+ * once. A checkpoint stored as a delta is rebuilt into the state directory
+ * and nowhere else (capture-scale SC-M3): where that cannot be written, a
+ * diff of it fails and says so, and log, which reads a delta's header in
+ * place, still answers. */
 TEST(reads_leave_the_state_directory_as_it_was) {
     fresh();
     char bundle[600];
@@ -1850,8 +1975,6 @@ TEST(reads_leave_the_state_directory_as_it_was) {
     memcpy(sha, k + 10, 64);
     sh("printf 'c\\n' >> '%s/src/x.txt'", g_scope);
     ASSERT_EQ_INT(0, belay("diff", "--scope", g_scope, "--since", "1", NULL));     /* checkpoint 3, diff-from-1 */
-    sh("printf 'd\\n' > '%s/src/y.txt'", g_scope);
-    ASSERT_EQ_INT(0, belay("mark", "--scope", g_scope, NULL));                     /* checkpoint 4, no diff stored */
 
     sh("chmod -R a-w '%s'", g_state);
     char *before = snapshot();
@@ -1867,6 +1990,26 @@ TEST(reads_leave_the_state_directory_as_it_was) {
     const int vrc = belay("verify", "--scope", g_scope, "--baseline", bundle, "--baseline-sha256", sha, NULL);
     ASSERT_TRUE(vrc == 0);
     char *after = snapshot();
+    ASSERT_EQ_STR(before, after);
+    free(before);
+    free(after);
+
+    /* with a checkpoint after it, 3 is a delta: log reads its header where it is,
+     * and a diff of it, which needs it rebuilt, is refused where nothing can be written */
+    sh("chmod -R u+w '%s'", g_state);
+    sh("printf 'd\\n' > '%s/src/y.txt'", g_scope);
+    ASSERT_EQ_INT(0, belay("mark", "--scope", g_scope, NULL));                     /* checkpoint 4, no diff stored */
+    ASSERT_TRUE(holds("[ ! -f \"$d/checkpoints/3/manifest.ndjson\" ] && [ -f \"$d/checkpoints/3/manifest.delta\" ]"));
+    sh("chmod -R a-w '%s'", g_state);
+    before = snapshot();
+    ASSERT_EQ_INT(0, belay("log", "--scope", g_scope, "--json", NULL));
+    ASSERT_TRUE(strstr(g_out, "\"id\":3,") != NULL);
+    const int in_place = belay("diff", "--scope", g_scope, "--since", "1", "--to", "3", NULL);
+    if (geteuid() != 0) {                       /* root writes anywhere: there it is rebuilt */
+        ASSERT_EQ_INT(4, in_place);
+        ASSERT_TRUE(strstr(g_err, "cannot create a temporary manifest in ") != NULL && strstr(g_err, "/tmp") != NULL);
+    }
+    after = snapshot();
     ASSERT_EQ_STR(before, after);
     free(before);
     free(after);
@@ -2152,6 +2295,10 @@ int main(void) {
     RUN(prune_keep_id_lasts_and_is_checked);
     RUN(prune_dry_run_changes_nothing_and_tells_the_truth);
     RUN(prune_sweeps_the_store_and_what_stays_still_works);
+    RUN(a_rebuilt_manifest_is_a_file_of_the_state_directory);
+    RUN(a_killed_runs_temporary_is_removed_by_the_next);
+    RUN(a_delta_holds_only_what_changed);
+    RUN(a_delta_orders_names_that_are_not_utf8_by_their_bytes);
     RUN(delta_rebuilds_every_checkpoint_byte_for_byte);
     RUN(delta_keeps_a_full_copy_every_256);
     RUN(delta_that_does_not_rebuild_is_corrupt);

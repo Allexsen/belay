@@ -190,15 +190,19 @@ static int read_roots(struct belay_manifest_reader *r, const struct belay_manife
     return 0;
 }
 
-static int open_file(const char *path, bool header_only, struct belay_manifest_reader **out);
+static int open_file(const char *path, bool header_only, long skip, struct belay_manifest_reader **out);
 
-int belay_manifest_open(const char *path, struct belay_manifest_reader **out) { return open_file(path, false, out); }
+int belay_manifest_open(const char *path, struct belay_manifest_reader **out) { return open_file(path, false, 0, out); }
 
 int belay_manifest_open_header(const char *path, struct belay_manifest_reader **out) {
-    return open_file(path, true, out);
+    return open_file(path, true, 0, out);
 }
 
-static int open_file(const char *path, bool header_only, struct belay_manifest_reader **out) {
+int belay_manifest_open_header_at(const char *path, long skip, struct belay_manifest_reader **out) {
+    return open_file(path, true, skip, out);
+}
+
+static int open_file(const char *path, bool header_only, long skip, struct belay_manifest_reader **out) {
     if (path == NULL || out == NULL) {
         belay_err_set(BELAY_ERR_INVALID, 0, "manifest_open: null argument");
         return -1;
@@ -225,6 +229,11 @@ static int open_file(const char *path, bool header_only, struct belay_manifest_r
         return -1;
     }
 
+    if (skip != 0 && (skip < 0 || fseek(r->f, skip, SEEK_SET) != 0)) {
+        belay_err_set(BELAY_ERR_IO, errno, "manifest: cannot read %s", path);
+        belay_manifest_close(r);
+        return -1;
+    }
     if (read_header(r, &r->header) == -1 || (!header_only && read_roots(r, &r->header, false) == -1)) {
         belay_manifest_close(r);
         return -1;

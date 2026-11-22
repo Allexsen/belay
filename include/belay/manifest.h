@@ -457,6 +457,9 @@ int  belay_manifest_open(const char *path, struct belay_manifest_reader **out);
  * manifest's header as it is): header->n_roots is its count and
  * header->roots NULL; belay_manifest_next fails. 0, or -1. */
 int  belay_manifest_open_header(const char *path, struct belay_manifest_reader **out);
+/* The same, of a header line that starts `skip` bytes into the file: belay's
+ * state keeps a manifest's header inside another file of its own. */
+int  belay_manifest_open_header_at(const char *path, long skip, struct belay_manifest_reader **out);
 int  belay_manifest_next(struct belay_manifest_reader *r, struct belay_entry *e);
 /* The `i`th racy path (V5-A2), in byte order, once belay_manifest_next has
  * returned 0: its length with *path set (NUL-terminated, the reader's), or
