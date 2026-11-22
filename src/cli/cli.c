@@ -588,6 +588,122 @@ static int pathcmp(const char *a, size_t al, const char *b, size_t bl) {
     return c ? c : (al > bl) - (al < bl);
 }
 
+/* What the receipt asks of the after manifest for systemd's events
+ * (system-interpreters.md SY-3a, SY-4), in one read of it: the links named
+ * like a timer in a `.wants` or `.requires` directory; and, for whether a
+ * home's user lingers, the kept copy of `etc/passwd` and the names recorded
+ * directly under `var/lib/systemd/linger` (a metadata root's entries: the
+ * names are enough). Memory: what was asked, one copy of passwd (at most
+ * 4 MiB), and at most CLI_LINGER_MAX names. */
+#define CLI_LINGER_MAX 4096
+#define CLI_PASSWD_MAX (4u * 1024u * 1024u)
+struct cli_system { const char *manifest; const char *store; };
+
+static bool ends_in(const char *s, size_t n, const char *tail) {
+    const size_t tl = strlen(tail);
+    return n > tl && memcmp(s + n - tl, tail, tl) == 0;
+}
+
+/* The one name of `passwd` whose home (its sixth field) is "/" and `home`:
+ * its length with *name set, or 0 when there is none or more than one. */
+static size_t passwd_name_of(const char *buf, size_t len, const char *home, const char **name) {
+    const size_t hl = strlen(home);
+    size_t found = 0;
+    for (const char *p = buf, *end = buf + len; p < end; ) {
+        const char *nl = memchr(p, '\n', (size_t)(end - p)), *e = nl != NULL ? nl : end;
+        const char *f = p, *first_end = NULL;
+        int field = 0;
+        for (const char *q = p; q <= e; q++) {
+            if (q != e && *q != ':') continue;
+            if (field == 0) first_end = q;
+            if (field == 5 && (size_t)(q - f) == hl + 1 && f[0] == '/' && memcmp(f + 1, home, hl) == 0) {
+                if (found) return 0;            /* two users of one home: not told */
+                found = (size_t)(first_end - p);
+                *name = p;
+            }
+            field++;
+            f = q + 1;
+        }
+        p = nl != NULL ? nl + 1 : end;
+    }
+    return found;
+}
+
+static int cli_system_of(void *ctx, struct receipt_system *q) {
+    static const char LINGER[] = "var/lib/systemd/linger";
+    const struct cli_system *c = ctx;
+    struct belay_manifest_reader *r = NULL;
+    struct belay_entry *e = malloc(sizeof *e);
+    char **names = calloc(CLI_LINGER_MAX, sizeof *names);
+    size_t n_names = 0;
+    bool linger_dir = false, names_over = false, have_passwd = false;
+    char passwd_hex[65] = "";
+    unsigned char *passwd = NULL;
+    size_t passwd_len = 0;
+    int rc = -1, got = 0;
+    if (e == NULL || names == NULL) {
+        belay_err_set(BELAY_ERR_NOMEM, 0, "receipt: out of memory");
+        goto done;
+    }
+    if (belay_manifest_open(c->manifest, &r) == -1) goto done;
+    while ((got = belay_manifest_next(r, e)) == 1) {
+        const char *base = e->path + e->path_len;
+        while (base > e->path && base[-1] != '/') base--;
+        const size_t bl = (size_t)(e->path + e->path_len - base), dl = (size_t)(base - e->path);
+        if (e->type == BELAY_T_LNK && dl > 1 && q->n_timers > 0) {
+            /* its directory's own name: <x>.wants or <x>.requires */
+            const char *dir = base - 1;
+            while (dir > e->path && dir[-1] != '/') dir--;
+            const size_t dn = (size_t)(base - 1 - dir);
+            if (ends_in(dir, dn, ".wants") || ends_in(dir, dn, ".requires"))
+                for (size_t i = 0; i < q->n_timers; i++)
+                    if (strlen(q->timers[i]) == bl && memcmp(q->timers[i], base, bl) == 0) q->linked[i] = true;
+        }
+        if (q->n_homes == 0) continue;
+        if (e->path_len == 10 && memcmp(e->path, "etc/passwd", 10) == 0 && e->type == BELAY_T_REG && e->has_stored) {
+            memcpy(passwd_hex, e->stored_hex, sizeof passwd_hex);
+            have_passwd = true;
+        } else if (e->path_len == sizeof LINGER - 1 && memcmp(e->path, LINGER, e->path_len) == 0) {
+            linger_dir = e->type == BELAY_T_DIR && !e->unreadable && !e->not_read && !e->is_mount && !e->unstable;
+        } else if (dl == sizeof LINGER && memcmp(e->path, LINGER, sizeof LINGER - 1) == 0 && memchr(base, '\0', bl) == NULL) {
+            if (n_names == CLI_LINGER_MAX) { names_over = true; continue; }
+            if ((names[n_names] = malloc(bl + 1)) == NULL) {
+                belay_err_set(BELAY_ERR_NOMEM, 0, "receipt: out of memory");
+                goto done;
+            }
+            memcpy(names[n_names], base, bl);
+            names[n_names++][bl] = '\0';
+        }
+    }
+    if (got == -1) goto done;
+    rc = 0;
+    for (size_t i = 0; i < q->n_homes; i++) q->linger[i] = -1;
+    if (q->n_homes > 0 && have_passwd && linger_dir && !names_over && c->store != NULL) {
+        struct belay_content *content = NULL;
+        if (belay_content_open(c->store, &content) == 0 &&
+            belay_content_get(content, passwd_hex, CLI_PASSWD_MAX, &passwd, &passwd_len) == 0) {
+            for (size_t i = 0; i < q->n_homes; i++) {
+                const char *name = NULL;
+                const size_t nl = passwd_name_of((const char *)passwd, passwd_len, q->homes[i], &name);
+                if (nl == 0) continue;
+                q->linger[i] = 0;
+                for (size_t k = 0; k < n_names; k++)
+                    if (strlen(names[k]) == nl && memcmp(names[k], name, nl) == 0) q->linger[i] = 1;
+            }
+        } else {
+            belay_err_clear();          /* no copy to read: not told */
+        }
+        belay_content_close(content);
+    }
+done:
+    free(passwd);
+    for (size_t i = 0; i < n_names; i++) free(names[i]);
+    free(names);
+    free(e);
+    belay_manifest_close(r);
+    return rc;
+}
+
 /* The receipt's owners (system-interpreters.md SD-3, SI-5): which package's
  * file list names each path, by the dpkg database of one side's manifest
  * and the copies in the store. One read of that manifest. */
@@ -767,8 +883,10 @@ static int cmd_diff(const struct opts *o, FILE *out, FILE *err) {
             snprintf(note, sizeof note, "tracked, untracked and ignored: as the repository is now, not at checkpoint %ld",
                      to);
         struct cli_owners own = { { a, b }, st.store };
+        struct cli_system sys = { b, st.store };
         const struct receipt_opts ro = { label_a, label_b, o->all, cli_mode_of, &m, o->docker != NULL ? NULL : cli_classify,
-                                         st.scope.path, note[0] ? note : NULL, cli_owner_of, &own };
+                                         st.scope.path, note[0] ? note : NULL, cli_owner_of, &own,
+                                         cli_system_of, &sys };
         if (receipt_render(in, out, &ro) == -1) { rc = failed(err); goto done; }
         if (now.id != 0 && (now.raced || now.unstable || now.vanished)) {
             fprintf(out, "\ncheckpoint %ld, captured now\n", now.id);

@@ -291,6 +291,43 @@ TEST(diff_folds_a_packages_files_into_its_line) {
     ASSERT_TRUE(strstr(g_out, "etc/nginx/nginx.conf") != NULL && strstr(g_out, "usr/share/nginx/index.html") != NULL);
 }
 
+/* system-interpreters.md SY-3a, SY-3b, SY-4, through the binary: the after
+ * manifest is asked once for the timers the diff does not link and for
+ * whether each home's user lingers; the links of etc/rc?.d are one line. */
+TEST(diff_says_of_systemd_what_the_after_manifest_shows) {
+    fresh();
+    sh("mkdir -p '%s/etc/systemd/system/timers.target.wants' '%s/var/lib/systemd/linger' '%s/etc/rc2.d' '%s/etc/init.d'",
+       g_scope, g_scope, g_scope, g_scope);
+    sh("mkdir -p '%s/home/u/.config/systemd/user' '%s/home/v/.config/systemd/user' '%s/home/w/.config/systemd/user'",
+       g_scope, g_scope, g_scope);
+    sh("printf 'root:x:0:0:root:/root:/bin/bash\nu:x:1000:1000::/home/u:/bin/sh\nv:x:1001:1001::/home/v:/bin/sh\n"
+       "x1:x:1002:1002::/home/x:/bin/sh\nx2:x:1003:1003::/home/x:/bin/sh\n' > '%s/etc/passwd'", g_scope);
+    sh(": > '%s/var/lib/systemd/linger/u'; : > '%s/var/lib/systemd/linger/x1'", g_scope, g_scope);
+    /* a link of a timer's name that is in no .wants or .requires directory */
+    sh("mkdir -p '%s/etc/other' '%s/home/x/.config/systemd/user'; ln -s /nowhere '%s/etc/other/lone.timer'", g_scope, g_scope, g_scope);
+    /* linked before the diff begins: only the after manifest shows it */
+    sh("ln -s /etc/systemd/system/old.timer '%s/etc/systemd/system/timers.target.wants/old.timer'", g_scope);
+    ASSERT_EQ_INT(0, belay("check", "--scope", g_scope, NULL));
+    sh("for t in old lone; do printf '[Timer]\nOnCalendar=*:0/15\n' > '%s/etc/systemd/system/'$t.timer; done", g_scope);
+    sh("for h in u v w x; do printf '[Service]\nExecStart=/bin/true\n' > '%s/home/'$h/.config/systemd/user/job.service; done", g_scope);
+    sh("ln -s ../init.d/x '%s/etc/rc2.d/S01x'; ln -s ../init.d/y '%s/etc/rc2.d/S01y'", g_scope, g_scope);
+    ASSERT_EQ_INT(0, belay("diff", "--scope", g_scope, "--since", "1", NULL));
+    ASSERT_TRUE(strstr(g_out, "timer etc/systemd/system/lone.timer added: *:0/15 (not linked into any target)\n") != NULL);
+    ASSERT_TRUE(strstr(g_out, "timer etc/systemd/system/old.timer added: *:0/15\n") != NULL);
+    ASSERT_TRUE(strstr(g_out, "unit file home/u/.config/systemd/user/job.service added (lingering: yes)\n") != NULL);
+    ASSERT_TRUE(strstr(g_out, "unit file home/v/.config/systemd/user/job.service added (lingering: no)\n") != NULL);
+    ASSERT_TRUE(strstr(g_out, "unit file home/w/.config/systemd/user/job.service added\n") != NULL);    /* nobody's home */
+    ASSERT_TRUE(strstr(g_out, "  etc/rc?.d: 2 links added (--all lists them)\n") != NULL);
+    ASSERT_TRUE(strstr(g_out, "S01x") == NULL);
+    /* two users of one home: whose lingering it would be cannot be told */
+    ASSERT_TRUE(strstr(g_out, "unit file home/x/.config/systemd/user/job.service added\n") != NULL);
+    /* the linger directory not recorded: "no" would be a guess */
+    sh("rm -r '%s/var/lib/systemd/linger'; echo x > '%s/home/v/.config/systemd/user/k.service'", g_scope, g_scope);
+    ASSERT_EQ_INT(0, belay("diff", "--scope", g_scope, "--since", "2", NULL));
+    ASSERT_TRUE(strstr(g_out, "unit file home/v/.config/systemd/user/k.service added\n") != NULL);
+    ASSERT_TRUE(strstr(g_out, "lingering") == NULL);
+}
+
 /* Q8, and mark's other full-walk triggers, each said. */
 TEST(mark_says_when_it_reads_every_file) {
     fresh();
@@ -2339,6 +2376,7 @@ int main(void) {
     RUN(the_state_directory_inside_the_scope_is_excluded_and_said);
     RUN(diff_keeps_its_capture_and_exit_code_is_opt_in);
     RUN(diff_folds_a_packages_files_into_its_line);
+    RUN(diff_says_of_systemd_what_the_after_manifest_shows);
     RUN(mark_says_when_it_reads_every_file);
     RUN(log_lists_checkpoints_or_says_there_are_none);
     RUN(a_usage_error_is_one_line_and_ids_are_strict);

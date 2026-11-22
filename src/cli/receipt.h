@@ -60,6 +60,27 @@ typedef int (*receipt_owner_fn)(void *ctx, int side, const char *const *paths, c
  * the tests. */
 extern size_t receipt_owner_asks;
 
+/* What the receipt asks of the after manifest for systemd's events
+ * (system-interpreters.md SY-3a, SY-4), in one read of it. `timers`: file
+ * names of timers (`probe.timer`); linked[i]: whether a symbolic link of
+ * that name stands in some directory named `<x>.wants` or `<x>.requires`.
+ * `homes`: home directories relative to the scope (`home/u`); linger[i]: 1
+ * when `var/lib/systemd/linger/<name>` is recorded for the one user whose
+ * home that is by the kept `etc/passwd`, 0 when it is not, -1 when it
+ * cannot be told (no copy of passwd, no user or several with that home,
+ * the linger directory not recorded). */
+#define RECEIPT_SYSTEM_ASKS 4096        /* timers, and homes, asked about; past it nothing is said of the rest */
+struct receipt_system {
+    const char *const *timers;
+    size_t n_timers;
+    bool *linked;
+    const char *const *homes;
+    size_t n_homes;
+    int *linger;
+};
+/* 0, or -1 when it cannot say. */
+typedef int (*receipt_system_fn)(void *ctx, struct receipt_system *q);
+
 struct receipt_opts {
     const char *from, *to;      /* how the two sides are named in the heading */
     bool all;                   /* nothing folded */
@@ -70,6 +91,8 @@ struct receipt_opts {
     const char *class_note;     /* said once when paths were classified: they were, as the repository is now */
     receipt_owner_fn owner;     /* NULL, or -1 from it: no record folds into a package's line (SD-3) */
     void *owner_ctx;
+    receipt_system_fn system;   /* NULL, or -1 from it: `not linked into any target` and `lingering` are not said */
+    void *system_ctx;
 };
 
 /* Reads diff.v1 from `diff`, writes the receipt to `out`. 0; -1 with

@@ -94,13 +94,31 @@ static int fake_owner(void *ctx, int side, const char *const *paths, const size_
 }
 static receipt_owner_fn g_owner;
 
+/* The after manifest, faked (system-interpreters.md SY-3a, SY-4): a link
+ * named linked.timer stands in a .wants directory; home/u is user u's and u
+ * lingers, home/v is v's and v does not, of home/w nothing can be told. */
+static bool g_system_fails;
+static size_t g_system_timers, g_system_homes;
+static int fake_system(void *ctx, struct receipt_system *q) {
+    (void)ctx;
+    if (g_system_fails) return -1;
+    g_system_timers = q->n_timers;
+    g_system_homes = q->n_homes;
+    for (size_t i = 0; i < q->n_timers; i++) q->linked[i] = strcmp(q->timers[i], "linked.timer") == 0;
+    for (size_t i = 0; i < q->n_homes; i++)
+        q->linger[i] = strcmp(q->homes[i], "home/u") == 0 ? 1 : strcmp(q->homes[i], "home/v") == 0 ? 0 : -1;
+    return 0;
+}
+static receipt_system_fn g_system;
+
 static int render(const char *diff, bool all) {
     FILE *in = fmemopen((void *)diff, strlen(diff), "r");
     size_t n;
     free(g_text);
     g_text = NULL;
     FILE *out = open_memstream(&g_text, &n);
-    const struct receipt_opts o = { "checkpoint 3", "checkpoint 4", all, g_fn, NULL, g_class, NULL, g_note, g_owner, NULL };
+    const struct receipt_opts o = { "checkpoint 3", "checkpoint 4", all, g_fn, NULL, g_class, NULL, g_note, g_owner, NULL,
+                                    g_system, NULL };
     const int r = receipt_render(in, out, &o);
     fclose(in);
     fclose(out);
@@ -1027,6 +1045,139 @@ TEST(past_the_bound_of_paths_asked_the_rest_are_listed_and_it_is_said) {
 }
 
 
+/* ---- systemd in the receipt (system-interpreters.md SY-3a, SY-3b, SY-4) ---- */
+
+#define REC_L(path, outcome) "{\"path\":\"" path "\",\"outcome\":\"" outcome "\",\"type\":\"lnk\"}\n"
+#define TIMER(path) EVT("systemd", "timer_file_added", "\"path\":\"" path "\",\"on_calendar\":[\"daily\"],\"text\":\"timer " path " added: daily\"")
+#define LINKED(unit) EVT("systemd", "unit_linked", "\"unit\":\"" unit "\",\"into\":\"timers.target\",\"target\":\"/x\",\"text\":\"" unit " linked into timers.target\"")
+
+/* SY-3b: the links of etc/rc?.d are not events and not lines: one line
+ * counts those added and removed. Only links, only directly there, only
+ * `rc` and one character; --all lists every one and counts nothing. */
+TEST(rc_d_links_are_counted_in_one_line) {
+    const char *diff = HEAD
+        "{\"path\":\"etc/rc10.d/S01two\",\"outcome\":\"added\",\"type\":\"lnk\"}\n"
+        REC_L("etc/rc.local", "added")
+        REC_L("etc/rc/.d/S01slash", "added")
+        REC_L("etc/rc2.d/S01nginx", "added")
+        "{\"path\":\"etc/rc2.d/README\",\"outcome\":\"added\",\"type\":\"reg\"}\n"
+        "{\"path\":\"etc/rc2.d/S02raced\",\"outcome\":\"unknown\",\"type\":\"lnk\",\"unknown\":[\"raced\"]}\n"
+        REC_L("etc/rc2.d/sub/S01deep", "added")
+        REC_L("etc/rc3.d/S01nginx", "added")
+        REC_L("etc/rc6.d/K01nginx", "removed")
+        REC_L("etc/rcS.d/S01early", "added")
+        "{\"path\":\"etc/rcS.d/S09retarget\",\"outcome\":\"modified\",\"type\":\"lnk\",\"changed\":[\"link_target\"]}\n"
+        REC_L("srv/etc/rc2.d/S01other-tree", "added")
+        TRAIL("1", "10", "0", "1", "0", "0", "0");
+    ASSERT_EQ_INT(0, render(diff, false));
+    ASSERT_TRUE(strstr(g_text, "\n  etc/rc?.d: 3 links added, 1 removed (--all lists them)\n") != NULL);
+    ASSERT_TRUE(strstr(g_text, "  A etc/rc.local\n") != NULL);      /* rc, one character, and no .d */
+    ASSERT_TRUE(strstr(g_text, "  A etc/rc/.d/S01slash\n") != NULL);    /* the character is of the name */
+    ASSERT_TRUE(strstr(g_text, "etc/rc2.d/S01nginx") == NULL && strstr(g_text, "etc/rc3.d/S01nginx") == NULL &&
+                strstr(g_text, "K01nginx") == NULL && strstr(g_text, "S01early") == NULL);
+    ASSERT_TRUE(strstr(g_text, "  A etc/rc10.d/S01two\n") != NULL && strstr(g_text, "  A etc/rc2.d/README\n") != NULL);
+    ASSERT_TRUE(strstr(g_text, "etc/rc2.d/S02raced") != NULL && strstr(g_text, "  A etc/rc2.d/sub/S01deep\n") != NULL);
+    ASSERT_TRUE(strstr(g_text, "etc/rcS.d/S09retarget") != NULL && strstr(g_text, "  A srv/etc/rc2.d/S01other-tree\n") != NULL);
+    ASSERT_EQ_INT(0, render(diff, true));
+    ASSERT_TRUE(strstr(g_text, "etc/rc?.d:") == NULL);
+    ASSERT_TRUE(strstr(g_text, "  A etc/rc2.d/S01nginx\n") != NULL && strstr(g_text, "  D etc/rc6.d/K01nginx\n") != NULL);
+    /* One of each, and one side alone. */
+    ASSERT_EQ_INT(0, render(HEAD REC_L("etc/rc2.d/S01a", "added") TRAIL("0", "1", "0", "0", "0", "0", "0"), false));
+    ASSERT_TRUE(strstr(g_text, "\nchanges\n  etc/rc?.d: 1 link added (--all lists them)\n") != NULL);
+    ASSERT_EQ_INT(0, render(HEAD REC_L("etc/rc2.d/K01a", "removed") REC_L("etc/rc2.d/K01b", "removed")
+                            TRAIL("0", "0", "0", "0", "0", "0", "0"), false));
+    ASSERT_TRUE(strstr(g_text, "\nchanges\n  etc/rc?.d: 2 links removed (--all lists them)\n") != NULL);
+    /* A diff without any says nothing of them. */
+    ASSERT_EQ_INT(0, render(HEAD REC_A("etc/motd") TRAIL("0", "1", "0", "0", "0", "0", "0"), false));
+    ASSERT_TRUE(strstr(g_text, "rc?.d") == NULL);
+}
+
+/* SY-3b: whether rc.local runs is rc-local.service's condition; the receipt
+ * says the bit and nothing more, of rc.local alone, as it is after. */
+TEST(rc_local_without_an_execute_bit_says_so) {
+    const char *diff = HEAD
+        EVT("systemd", "init_script_added", "\"path\":\"etc/init.d/x\",\"owner\":\"pk\",\"executable\":false,\"text\":\"init script etc/init.d/x added\"")
+        EVT("systemd", "init_script_changed", "\"path\":\"etc/rc.local\",\"owner\":null,\"executable\":false,\"text\":\"init script etc/rc.local changed\"")
+        EVT("systemd", "init_script_removed", "\"path\":\"etc/rc.local\",\"executable\":false,\"text\":\"init script etc/rc.local removed\"")
+        TRAIL("0", "0", "0", "0", "3", "0", "0");
+    ASSERT_EQ_INT(0, render(diff, false));
+    ASSERT_TRUE(strstr(g_text, "  systemd init script etc/init.d/x added\n"
+                               "  systemd init script etc/rc.local changed (in no package) (not executable)\n"
+                               "  systemd init script etc/rc.local removed\n") != NULL);
+    ASSERT_EQ_INT(0, render(HEAD EVT("systemd", "init_script_added", "\"path\":\"etc/rc.local\",\"executable\":true,\"text\":\"init script etc/rc.local added\"")
+                            TRAIL("0", "0", "0", "0", "1", "0", "0"), false));
+    ASSERT_TRUE(strstr(g_text, "  systemd init script etc/rc.local added\n") != NULL);
+}
+
+/* SY-4: a timer file with no unit_linked for it in the same diff and no
+ * link of its name in the after manifest is shown as not linked into any
+ * target. The event that links it may come after the timer's (E13: by
+ * path). Without the after manifest nothing is said. */
+TEST(a_timer_nothing_links_says_so) {
+    const char *diff = HEAD
+        LINKED("probe.timer")
+        TIMER("etc/systemd/system/lone.timer")
+        TIMER("etc/systemd/system/probe.timer")
+        TIMER("usr/lib/systemd/system/linked.timer")
+        TIMER("usr/lib/systemd/system/zlate.timer")
+        EVT("systemd", "timer_file_removed", "\"path\":\"etc/systemd/system/gone.timer\",\"on_calendar\":[],\"text\":\"timer etc/systemd/system/gone.timer removed: \"")
+        LINKED("home/u/.config/systemd/user/zlate.timer")
+        TRAIL("0", "0", "0", "0", "7", "0", "0");
+    g_system = fake_system;
+    g_system_timers = 99;
+    ASSERT_EQ_INT(0, render(diff, false));
+    ASSERT_TRUE(strstr(g_text, "  systemd timer etc/systemd/system/lone.timer added: daily (not linked into any target)\n"
+                               "  systemd timer etc/systemd/system/probe.timer added: daily\n"
+                               "  systemd timer usr/lib/systemd/system/linked.timer added: daily\n"
+                               "  systemd timer usr/lib/systemd/system/zlate.timer added: daily\n"
+                               "  systemd timer etc/systemd/system/gone.timer removed: \n") != NULL);
+    ASSERT_EQ_INT(2, (int)g_system_timers);     /* asked only of those the diff does not link: lone, linked */
+    /* It cannot say, or there is no after manifest to ask: not said. */
+    g_system_fails = true;
+    ASSERT_EQ_INT(0, render(diff, false));
+    ASSERT_TRUE(strstr(g_text, "not linked") == NULL);
+    g_system_fails = false;
+    g_system = NULL;
+    ASSERT_EQ_INT(0, render(diff, false));
+    ASSERT_TRUE(strstr(g_text, "not linked") == NULL && strstr(g_text, "lone.timer added: daily\n") != NULL);
+}
+
+/* SY-3a: a unit under a home's .config/systemd/user says whether that user
+ * lingers, by the after manifest, and nothing more; nothing where it cannot
+ * be told, and nothing of a unit that is not under a home. */
+TEST(a_home_s_unit_says_whether_its_user_lingers) {
+    const char *diff = HEAD
+        EVT("systemd", "unit_file_added", "\"path\":\"etc/systemd/user/all.service\",\"text\":\"unit file etc/systemd/user/all.service added\"")
+        LINKED("home/u/.config/systemd/user/job.timer")
+        EVT("systemd", "unit_file_added", "\"path\":\"home/u/.config/systemd/user/job.service\",\"owner\":null,\"text\":\"unit file home/u/.config/systemd/user/job.service added\"")
+        TIMER("home/u/.config/systemd/user/job.timer")
+        EVT("systemd", "unit_file_added", "\"path\":\"home/v/.config/systemd/user/x.service\",\"text\":\"unit file home/v/.config/systemd/user/x.service added\"")
+        EVT("systemd", "unit_file_added", "\"path\":\"home/w/.config/systemd/user/x.service\",\"text\":\"unit file home/w/.config/systemd/user/x.service added\"")
+        EVT("systemd", "unit_file_removed", "\"path\":\"home/u/.config/systemd/user/old.service\",\"text\":\"unit file home/u/.config/systemd/user/old.service removed\"")
+        EVT("systemd", "unit_file_removed", "\"path\":\"home/z/.config/systemd/user/old.service\",\"text\":\"unit file home/z/.config/systemd/user/old.service removed\"")
+        TRAIL("0", "0", "0", "0", "8", "0", "0");
+    g_system = fake_system;
+    g_system_homes = 99;
+    ASSERT_EQ_INT(0, render(diff, false));
+    ASSERT_TRUE(strstr(g_text,
+        "  systemd unit file etc/systemd/user/all.service added\n"
+        "  systemd home/u/.config/systemd/user/job.timer linked into timers.target (lingering: yes)\n"
+        "  systemd unit file home/u/.config/systemd/user/job.service added (in no package) (lingering: yes)\n"
+        "  systemd timer home/u/.config/systemd/user/job.timer added: daily (lingering: yes)\n"
+        "  systemd unit file home/v/.config/systemd/user/x.service added (lingering: no)\n"
+        "  systemd unit file home/w/.config/systemd/user/x.service added\n"
+        "  systemd unit file home/u/.config/systemd/user/old.service removed\n") != NULL);
+    ASSERT_EQ_INT(3, (int)g_system_homes);      /* each home once; not home/z, where a unit was only removed */
+    g_system_fails = true;
+    ASSERT_EQ_INT(0, render(diff, false));
+    ASSERT_TRUE(strstr(g_text, "lingering") == NULL);
+    g_system_fails = false;
+    g_system = NULL;
+    ASSERT_EQ_INT(0, render(diff, false));
+    ASSERT_TRUE(strstr(g_text, "lingering") == NULL);
+}
+
+
 int main(void) {
     RUN(a_receipt_puts_events_then_privilege_then_changes);
     RUN(long_sections_fold_but_privilege_never_does);
@@ -1063,6 +1214,10 @@ int main(void) {
     RUN(the_installed_line_by_what_apt_marks);
     RUN(what_never_folds_stays_named_though_a_package_owns_it);
     RUN(past_the_bound_of_paths_asked_the_rest_are_listed_and_it_is_said);
+    RUN(rc_d_links_are_counted_in_one_line);
+    RUN(rc_local_without_an_execute_bit_says_so);
+    RUN(a_timer_nothing_links_says_so);
+    RUN(a_home_s_unit_says_whether_its_user_lingers);
     free(g_text);
     return belay_test_report();
 }
