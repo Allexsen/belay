@@ -548,6 +548,27 @@ from it. Past 50 events, or 50 untracked changes (or changes by path, without gi
 to "and N more" (`--all` shows everything and folds nothing); tracked changes, privilege changes
 and unknown entries never fold. `--json` is the diff itself, unaffected.
 
+What an event's fields say is said after its text, in fixed words. A dpkg event whose package apt's
+record (`var/lib/apt/extended_states` of the newer side) marks automatic ends `(marked automatic)`,
+one it does not, `(not marked automatic by apt)`; without that record, nothing is said. A user
+added with a uid lower than `UID_MIN` of `etc/login.defs` ends `(below UID_MIN 1000)`. A cron job or
+a timer whose schedule is one of the forms belay puts in words ends `-- every 5 minutes (by cron's
+clock)`. An event about a file that dpkg's file lists name in no package ends `(in no package)`;
+an init script in no package has a line of its own, past the cut too.
+
+When the diff has dpkg events, a change to a file that one of their packages owns -- by dpkg's file
+lists (`var/lib/dpkg/info/*.list`, with `diversions`): those of the newer side for a package
+installed, of the older side for one removed, of either for one upgraded or downgraded -- is not
+listed: it is counted in that package's line (`upgraded bash:amd64 1 -> 2 (marked automatic); 3
+changes in its files`). Several packages installed are one line, which names those apt does not mark
+automatic (ten of them, then `and N more not marked automatic`), counts the others, and names the
+three packages with the most changes: `installed nginx:amd64 1.24.0 (not marked automatic by apt);
+14 marked automatic; 4874 changes in their files (most: nginx-common 2301, libgd3 900, nginx 12)`.
+A privilege change, an entry of unknown outcome and a file whose content was not read are listed
+all the same. belay asks about at most 262,144 changed paths; past that a line says so (`dpkg's
+file lists were asked about the first 262144 changes only; the others are listed whatever owns
+them`). `--all` lists every event and every change.
+
 Every path and text is printed escaped -- in the receipt, in error lines, and whatever belay
 reads back from its state: control characters, C1 controls, DEL, invisible format and bidi
 characters (U+200B-U+200F, U+2028-U+202E, U+2060-U+206F, U+FEFF, ...) and bytes that are not UTF-8

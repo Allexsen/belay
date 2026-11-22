@@ -1,4 +1,5 @@
 #define _GNU_SOURCE
+#include "interp/lookup_internal.h"
 #include "cli.h"
 #include "cli_internal.h"
 
@@ -587,6 +588,32 @@ static int pathcmp(const char *a, size_t al, const char *b, size_t bl) {
     return c ? c : (al > bl) - (al < bl);
 }
 
+/* The receipt's owners (system-interpreters.md SD-3, SI-5): which package's
+ * file list names each path, by the dpkg database of one side's manifest
+ * and the copies in the store. One read of that manifest. */
+struct cli_owners { const char *manifest[2]; const char *store; };
+static int cli_owner_of(void *ctx, int side, const char *const *paths, const size_t *lens, size_t n, char **owner) {
+    const struct cli_owners *c = ctx;
+    struct owners *o = NULL;
+    if (owners_of_manifest(c->manifest[side], c->store, paths, lens, n, &o) == -1) return -1;
+    int rc = 0;
+    for (size_t i = 0; i < n; i++) {
+        const char *pkg = NULL;
+        size_t pl = 0;
+        owner[i] = NULL;
+        if (owners_get(o, paths[i], lens[i], &pkg, &pl) != BELAY_OWNER_PACKAGE || memchr(pkg, '\0', pl) != NULL) continue;
+        if ((owner[i] = malloc(pl + 1)) == NULL) { rc = -1; break; }
+        memcpy(owner[i], pkg, pl);
+        owner[i][pl] = '\0';
+    }
+    if (rc == -1) {
+        for (size_t i = 0; i < n; i++) { free(owner[i]); owner[i] = NULL; }
+        belay_err_set(BELAY_ERR_NOMEM, 0, "receipt: out of memory");
+    }
+    owners_free(o);
+    return rc;
+}
+
 int cli_mode_of(void *ctx, int side, const char *path, size_t len, struct receipt_meta *m) {
     struct cli_cursor *c = &((struct cli_modes *)ctx)->side[side];
     while (c->got == 1 && pathcmp(c->e.path, c->e.path_len, path, len) < 0)
@@ -739,8 +766,9 @@ static int cmd_diff(const struct opts *o, FILE *out, FILE *err) {
         if (to < latest)
             snprintf(note, sizeof note, "tracked, untracked and ignored: as the repository is now, not at checkpoint %ld",
                      to);
+        struct cli_owners own = { { a, b }, st.store };
         const struct receipt_opts ro = { label_a, label_b, o->all, cli_mode_of, &m, o->docker != NULL ? NULL : cli_classify,
-                                         st.scope.path, note[0] ? note : NULL };
+                                         st.scope.path, note[0] ? note : NULL, cli_owner_of, &own };
         if (receipt_render(in, out, &ro) == -1) { rc = failed(err); goto done; }
         if (now.id != 0 && (now.raced || now.unstable || now.vanished)) {
             fprintf(out, "\ncheckpoint %ld, captured now\n", now.id);

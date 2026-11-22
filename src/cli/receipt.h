@@ -48,6 +48,18 @@ typedef int (*receipt_mode_fn)(void *ctx, int side, const char *path, size_t len
 typedef int (*receipt_class_fn)(void *ctx, const char *const *paths, const size_t *lens, const bool *dir, size_t n,
                                 unsigned char *out);
 
+/* Which package's file list names each of n paths, by the dpkg database of a
+ * side's manifest (0 before, 1 after; system-interpreters.md SI-5): owner[i]
+ * a malloc'd name the receipt frees (`nginx-common`, `libc6:amd64`), or NULL
+ * for none or not known. 0, or -1 when it cannot say. */
+typedef int (*receipt_owner_fn)(void *ctx, int side, const char *const *paths, const size_t *lens, size_t n,
+                                char **owner);
+
+/* How many of a diff's paths the receipt asks owners of (BELAY_OWNER_ASKS);
+ * the rest are listed as they are, and one line says so. A variable for
+ * the tests. */
+extern size_t receipt_owner_asks;
+
 struct receipt_opts {
     const char *from, *to;      /* how the two sides are named in the heading */
     bool all;                   /* nothing folded */
@@ -56,6 +68,8 @@ struct receipt_opts {
     receipt_class_fn classify;  /* NULL, or -1 from it: changes in path order, as before (2026-11-04) */
     void *class_ctx;
     const char *class_note;     /* said once when paths were classified: they were, as the repository is now */
+    receipt_owner_fn owner;     /* NULL, or -1 from it: no record folds into a package's line (SD-3) */
+    void *owner_ctx;
 };
 
 /* Reads diff.v1 from `diff`, writes the receipt to `out`. 0; -1 with

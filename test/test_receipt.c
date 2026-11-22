@@ -66,13 +66,41 @@ static int fake_class(void *ctx, const char *const *paths, const size_t *lens, c
 static receipt_class_fn g_class;
 static const char *g_note;
 
+/* dpkg's lists, faked (system-interpreters.md SI-5, SD-3): by the after
+ * manifest, what is under usr/share/nginx is nginx's, under usr/lib/x
+ * libx:amd64's, under etc/nginx nginx-common's, usr/bin/bash bash's; by the
+ * before manifest, what is under usr/old is gone's. */
+static bool g_owner_fails;
+static size_t g_owner_asked[2];
+static int fake_owner(void *ctx, int side, const char *const *paths, const size_t *lens, size_t n, char **owner) {
+    (void)ctx; (void)lens;
+    if (g_owner_fails) return -1;
+    g_owner_asked[side] = n;
+    for (size_t i = 0; i < n; i++) {
+        const char *o = NULL;
+        if (side == 1 && !strncmp(paths[i], "usr/share/nginx/", 16)) o = "nginx";
+        if (side == 1 && !strncmp(paths[i], "usr/lib/x/", 10)) o = "libx:amd64";
+        if (side == 1 && !strncmp(paths[i], "etc/nginx/", 10)) o = "nginx-common";
+        if (side == 1 && !strcmp(paths[i], "usr/bin/bash")) o = "bash";
+        if (side == 1 && !strncmp(paths[i], "opt/", 4)) o = "unrelated";
+        if (side == 0 && !strncmp(paths[i], "usr/old/", 8)) o = "gone";
+        if (side == 0 && !strncmp(paths[i], "usr/share/bash-old/", 19)) o = "bash";
+        if (side == 0 && !strncmp(paths[i], "var/was-nginx/", 14)) o = "nginx";
+        if (side == 1 && !strncmp(paths[i], "var/now-gone/", 13)) o = "gone";
+        if (side == 1 && !strncmp(paths[i], "usr/share/fonts/", 16)) o = "fonts";
+        owner[i] = o != NULL ? strdup(o) : NULL;
+    }
+    return 0;
+}
+static receipt_owner_fn g_owner;
+
 static int render(const char *diff, bool all) {
     FILE *in = fmemopen((void *)diff, strlen(diff), "r");
     size_t n;
     free(g_text);
     g_text = NULL;
     FILE *out = open_memstream(&g_text, &n);
-    const struct receipt_opts o = { "checkpoint 3", "checkpoint 4", all, g_fn, NULL, g_class, NULL, g_note };
+    const struct receipt_opts o = { "checkpoint 3", "checkpoint 4", all, g_fn, NULL, g_class, NULL, g_note, g_owner, NULL };
     const int r = receipt_render(in, out, &o);
     fclose(in);
     fclose(out);
@@ -748,6 +776,257 @@ TEST(the_summary_counts_the_directories_nothing_was_seen_below) {
     }
 }
 
+/* ---- the system interpreters' words (system-interpreters.md) ---- */
+
+#define EVT(interp, kind, rest) "{\"event\":\"" kind "\",\"interp\":\"" interp "\"," rest ",\"paths\":[\"p\"]}\n"
+#define DPKG_I(pkg, arch, ver, autov) EVT("dpkg", "dpkg_installed", "\"package\":\"" pkg "\",\"arch\":\"" arch "\",\"version\":\"" ver "\"" autov ",\"text\":\"installed " pkg ":" arch " " ver "\"")
+#define REC_A(path) "{\"path\":\"" path "\",\"outcome\":\"added\",\"type\":\"reg\"}\n"
+
+/* SD-2: apt's words, never "asked for"; SA-2: below UID_MIN, never "system
+ * account"; SI-5: `in no package`; SI-6: the schedule in words. Each from a
+ * field of the event, and nothing where the field is absent. */
+TEST(events_say_what_their_fields_say_in_the_pins_words) {
+    const char *diff = HEAD
+        EVT("dpkg", "dpkg_upgraded", "\"package\":\"bash\",\"arch\":\"amd64\",\"from\":\"1\",\"to\":\"2\",\"auto\":true,\"text\":\"upgraded bash:amd64 1 -> 2\"")
+        EVT("dpkg", "dpkg_state_changed", "\"package\":\"held\",\"arch\":\"amd64\",\"from\":\"a\",\"to\":\"b\",\"auto\":false,\"text\":\"held:amd64 a -> b\"")
+        EVT("dpkg", "dpkg_downgraded", "\"package\":\"zl\",\"arch\":\"amd64\",\"from\":\"2\",\"to\":\"1\",\"text\":\"downgraded zl:amd64 2 -> 1\"")
+        EVT("accounts", "user_added", "\"name\":\"svc\",\"uid\":999,\"gid\":999,\"home\":\"/home/svc\",\"shell\":\"/bin/sh\",\"uid_min\":1000,\"text\":\"user svc added: uid 999, home /home/svc, shell /bin/sh\"")
+        EVT("accounts", "user_added", "\"name\":\"site\",\"uid\":1000,\"gid\":1000,\"home\":\"/home/site\",\"shell\":\"/bin/sh\",\"uid_min\":1000,\"text\":\"user site added: uid 1000, home /home/site, shell /bin/sh\"")
+        EVT("accounts", "user_added", "\"name\":\"low\",\"uid\":5,\"gid\":5,\"home\":\"/\",\"shell\":\"/bin/sh\",\"uid_min\":null,\"text\":\"user low added: uid 5, home /, shell /bin/sh\"")
+        EVT("cron", "cron_job_added", "\"path\":\"etc/cron.d/site\",\"schedule\":\"*/5 * * * *\",\"user\":\"root\",\"command\":\"/bin/true\",\"env\":[],\"owner\":null,\"in_words\":\"every 5 minutes (by cron's clock)\",\"text\":\"cron job added in etc/cron.d/site: */5 * * * * root /bin/true\"")
+        EVT("cron", "cron_job_removed", "\"path\":\"etc/cron.d/pk\",\"schedule\":\"1 2 3 4 5\",\"user\":\"root\",\"command\":\"x\",\"env\":[],\"owner\":\"pk\",\"text\":\"cron job removed in etc/cron.d/pk: 1 2 3 4 5 root x\"")
+        EVT("cron", "cron_script_added", "\"path\":\"etc/cron.daily/x\",\"text\":\"etc/cron.daily/x added\"")
+        EVT("systemd", "timer_file_added", "\"path\":\"etc/systemd/system/probe.timer\",\"on_calendar\":[\"*-*-* 03:17:00\"],\"owner\":null,\"in_words\":\"at 03:17 every day (by systemd's)\",\"text\":\"timer etc/systemd/system/probe.timer added: *-*-* 03:17:00\"")
+        TRAIL("0", "0", "0", "0", "10", "0", "0");
+    ASSERT_EQ_INT(0, render(diff, false));
+    ASSERT_EQ_STR(
+        "belay diff  /w  checkpoint 3 -> checkpoint 4\n"
+        "  events: 10\n"
+        "\n"
+        "events\n"
+        "  dpkg  upgraded bash:amd64 1 -> 2 (marked automatic)\n"
+        "  dpkg  held:amd64 a -> b (not marked automatic by apt)\n"
+        "  dpkg  downgraded zl:amd64 2 -> 1\n"
+        "  accounts user svc added: uid 999, home /home/svc, shell /bin/sh (below UID_MIN 1000)\n"
+        "  accounts user site added: uid 1000, home /home/site, shell /bin/sh\n"
+        "  accounts user low added: uid 5, home /, shell /bin/sh\n"
+        "  cron  cron job added in etc/cron.d/site: */5 * * * * root /bin/true -- every 5 minutes (by cron's clock) (in no package)\n"
+        "  cron  cron job removed in etc/cron.d/pk: 1 2 3 4 5 root x\n"
+        "  cron  etc/cron.daily/x added\n"
+        "  systemd timer etc/systemd/system/probe.timer added: *-*-* 03:17:00 -- at 03:17 every day (by systemd's) (in no package)\n",
+        g_text);
+    /* The words are the receipt's, escaped like every string of the diff. */
+    const char *bad = HEAD
+        EVT("cron", "cron_job_added", "\"path\":\"p\",\"schedule\":\"s\",\"user\":\"u\",\"command\":\"c\",\"env\":[],\"in_words\":\"x\\u001b[31m\",\"text\":\"t\"")
+        TRAIL("0", "0", "0", "0", "1", "0", "0");
+    ASSERT_EQ_INT(0, render(bad, false));
+    ASSERT_TRUE(strstr(g_text, "  cron  t -- x\\x1b[31m\n") != NULL);
+}
+
+/* The `init script` row: with `owner: null` it has a line of its own, past
+ * the cut of 50 events too. One a package owns folds like any event. */
+TEST(an_init_script_in_no_package_is_never_folded) {
+    static char diff[40000];
+    size_t w = (size_t)snprintf(diff, sizeof diff, HEAD);
+    for (int i = 0; i < 55; i++)
+        w += (size_t)snprintf(diff + w, sizeof diff - w,
+                              EVT("pip", "pip_installed", "\"name\":\"p%d\",\"version\":\"1\",\"text\":\"installed p%d 1\""), i, i);
+    snprintf(diff + w, sizeof diff - w,
+        EVT("systemd", "init_script_added", "\"path\":\"etc/init.d/pk\",\"owner\":\"pk\",\"executable\":true,\"text\":\"init script etc/init.d/pk added\"")
+        EVT("systemd", "init_script_added", "\"path\":\"etc/init.d/x\",\"owner\":null,\"executable\":true,\"text\":\"init script etc/init.d/x added\"")
+        EVT("systemd", "init_script_changed", "\"path\":\"etc/rc.local\",\"executable\":false,\"text\":\"init script etc/rc.local changed\"")
+        TRAIL("0", "0", "0", "0", "58", "0", "0"));
+    ASSERT_EQ_INT(0, render(diff, false));
+    ASSERT_TRUE(strstr(g_text, "  pip   installed p49 1\n  systemd init script etc/init.d/x added (in no package)\n"
+                               "  and 7 more (--all shows them)\n") != NULL);
+    ASSERT_TRUE(strstr(g_text, "etc/init.d/pk") == NULL && strstr(g_text, "rc.local") == NULL);
+}
+
+#define FOLD_DIFF HEAD \
+        REC_A("etc/nginx/a") REC_A("etc/nginx/b") REC_A("etc/nginx/c") \
+        REC_A("home/u/notes") REC_A("opt/tool") \
+        "{\"path\":\"usr/bin/bash\",\"outcome\":\"modified\",\"type\":\"reg\",\"changed\":[\"size\"]}\n" \
+        REC_A("usr/lib/x/1") REC_A("usr/lib/x/2") \
+        "{\"path\":\"usr/old/a\",\"outcome\":\"removed\",\"type\":\"reg\"}\n" \
+        "{\"path\":\"usr/old/b\",\"outcome\":\"removed\",\"type\":\"reg\"}\n" \
+        REC_A("usr/share/nginx/index.html") \
+        EVT("dpkg", "dpkg_upgraded", "\"package\":\"bash\",\"arch\":\"amd64\",\"from\":\"1\",\"to\":\"2\",\"auto\":true,\"text\":\"upgraded bash:amd64 1 -> 2\"") \
+        DPKG_I("fonts", "all", "7", ",\"auto\":true") \
+        EVT("dpkg", "dpkg_removed", "\"package\":\"gone\",\"arch\":\"amd64\",\"version\":\"3\",\"text\":\"removed gone:amd64 3\"") \
+        DPKG_I("libx", "amd64", "0.9", ",\"auto\":true") \
+        DPKG_I("nginx", "amd64", "1.24", ",\"auto\":false") \
+        DPKG_I("nginx-common", "all", "1.24", ",\"auto\":true") \
+        TRAIL("1", "8", "0", "0", "6", "0", "0")
+
+/* SD-3: a record whose path a package of this diff's dpkg events owns is
+ * counted in that package's line and listed only by --all; the installed
+ * line names the packages apt does not mark automatic, counts the rest, and
+ * names the three with the most records. A package no event names
+ * (`unrelated`, of opt/tool) folds nothing. */
+TEST(records_a_package_of_the_diff_owns_fold_into_its_line) {
+    g_owner = fake_owner;
+    ASSERT_EQ_INT(0, render(FOLD_DIFF, false));
+    ASSERT_EQ_STR(
+        "belay diff  /w  checkpoint 3 -> checkpoint 4\n"
+        "  1 modified · 8 added    events: 6\n"
+        "\n"
+        "events\n"
+        "  dpkg  upgraded bash:amd64 1 -> 2 (marked automatic); 1 change in its files\n"
+        "  dpkg  installed nginx:amd64 1.24 (not marked automatic by apt); 3 marked automatic; "
+        "6 changes in their files (most: nginx-common 3, libx 2, nginx 1)\n"
+        "  dpkg  removed gone:amd64 3; 2 changes in its files\n"
+        "\n"
+        "changes\n"
+        "  A home/u/notes\n"
+        "  A opt/tool\n",
+        g_text);
+    ASSERT_EQ_INT(11, (int)g_owner_asked[1]);
+    ASSERT_EQ_INT(11, (int)g_owner_asked[0]);     /* a removal: the before manifest's lists too */
+    /* --all folds nothing: every event its own line, every record listed. */
+    ASSERT_EQ_INT(0, render(FOLD_DIFF, true));
+    ASSERT_TRUE(strstr(g_text, "  dpkg  installed fonts:all 7 (marked automatic)\n"
+                               "  dpkg  removed gone:amd64 3\n"
+                               "  dpkg  installed libx:amd64 0.9 (marked automatic)\n"
+                               "  dpkg  installed nginx:amd64 1.24 (not marked automatic by apt)\n"
+                               "  dpkg  installed nginx-common:all 1.24 (marked automatic)\n") != NULL);
+    ASSERT_TRUE(strstr(g_text, "  A etc/nginx/a\n") != NULL && strstr(g_text, "  D usr/old/b\n") != NULL &&
+                strstr(g_text, "  M usr/bin/bash   size\n") != NULL && strstr(g_text, "in its files") == NULL);
+    /* Without dpkg's lists (no callback, or one that cannot say) every record
+     * is listed; the installed line still names and counts. */
+    g_owner_fails = true;
+    ASSERT_EQ_INT(0, render(FOLD_DIFF, false));
+    ASSERT_TRUE(strstr(g_text, "  dpkg  upgraded bash:amd64 1 -> 2 (marked automatic)\n"
+                               "  dpkg  installed nginx:amd64 1.24 (not marked automatic by apt); 3 marked automatic\n"
+                               "  dpkg  removed gone:amd64 3\n") != NULL);
+    ASSERT_TRUE(strstr(g_text, "  A etc/nginx/a\n") != NULL && strstr(g_text, "  A usr/share/nginx/index.html\n") != NULL);
+    g_owner_fails = false;
+    g_owner = NULL;
+    ASSERT_EQ_INT(0, render(FOLD_DIFF, false));
+    ASSERT_TRUE(strstr(g_text, "; 3 marked automatic\n") != NULL && strstr(g_text, "  A etc/nginx/a\n") != NULL);
+}
+
+/* Whose lists: an installed package's files are the after manifest's, a
+ * removed one's the before's, an upgraded or downgraded one's either (a
+ * file the new version dropped is in the old list alone). */
+TEST(a_packages_files_are_those_of_the_side_it_is_on) {
+    g_owner = fake_owner;
+    const char *diff = HEAD
+        "{\"path\":\"usr/share/bash-old/doc\",\"outcome\":\"removed\",\"type\":\"reg\"}\n"
+        REC_A("usr/share/nginx/index.html")
+        REC_A("var/now-gone/x")
+        "{\"path\":\"var/was-nginx/x\",\"outcome\":\"removed\",\"type\":\"reg\"}\n"
+        EVT("dpkg", "dpkg_upgraded", "\"package\":\"bash\",\"arch\":\"amd64\",\"from\":\"1\",\"to\":\"2\",\"text\":\"upgraded bash:amd64 1 -> 2\"")
+        EVT("dpkg", "dpkg_removed", "\"package\":\"gone\",\"arch\":\"amd64\",\"version\":\"3\",\"text\":\"removed gone:amd64 3\"")
+        DPKG_I("nginx", "amd64", "1.24", "")
+        TRAIL("0", "2", "0", "0", "3", "0", "0");
+    ASSERT_EQ_INT(0, render(diff, false));
+    ASSERT_TRUE(strstr(g_text, "\nevents\n"
+                               "  dpkg  upgraded bash:amd64 1 -> 2; 1 change in its files\n"
+                               "  dpkg  removed gone:amd64 3\n"
+                               "  dpkg  installed nginx:amd64 1.24; 1 change in its files\n"
+                               "\nchanges\n"
+                               "  A var/now-gone/x\n"
+                               "  D var/was-nginx/x\n") != NULL);
+    /* An upgrade alone has the before manifest read. */
+    const char *up = HEAD "{\"path\":\"usr/share/bash-old/doc\",\"outcome\":\"removed\",\"type\":\"reg\"}\n"
+        EVT("dpkg", "dpkg_downgraded", "\"package\":\"bash\",\"arch\":\"amd64\",\"from\":\"2\",\"to\":\"1\",\"text\":\"downgraded bash:amd64 2 -> 1\"")
+        TRAIL("0", "0", "0", "0", "1", "0", "0");
+    ASSERT_EQ_INT(0, render(up, false));
+    ASSERT_TRUE(strstr(g_text, "  dpkg  downgraded bash:amd64 2 -> 1; 1 change in its files\n") != NULL);
+    /* No removal, upgrade or downgrade: the before manifest is not read. */
+    g_owner_asked[0] = 0;
+    const char *only = HEAD REC_A("usr/share/nginx/index.html") DPKG_I("nginx", "amd64", "1.24", "")
+        TRAIL("0", "1", "0", "0", "1", "0", "0");
+    ASSERT_EQ_INT(0, render(only, false));
+    ASSERT_EQ_INT(0, (int)g_owner_asked[0]);
+    g_owner = NULL;
+}
+
+/* Of four packages with records, the three with the most are named. */
+TEST(the_installed_line_names_three_packages_with_the_most_records) {
+    g_owner = fake_owner;
+    const char *diff = HEAD
+        REC_A("etc/nginx/a") REC_A("etc/nginx/b") REC_A("etc/nginx/c") REC_A("etc/nginx/d")
+        REC_A("usr/lib/x/1") REC_A("usr/lib/x/2") REC_A("usr/lib/x/3")
+        REC_A("usr/share/fonts/a")
+        REC_A("usr/share/nginx/1") REC_A("usr/share/nginx/2")
+        DPKG_I("fonts", "all", "7", ",\"auto\":true") DPKG_I("libx", "amd64", "0.9", ",\"auto\":true")
+        DPKG_I("nginx", "amd64", "1.24", ",\"auto\":true") DPKG_I("nginx-common", "all", "1.24", ",\"auto\":true")
+        TRAIL("0", "10", "0", "0", "4", "0", "0");
+    ASSERT_EQ_INT(0, render(diff, false));
+    ASSERT_TRUE(strstr(g_text, "\nevents\n  dpkg  installed 4 packages, marked automatic; 10 changes in their files "
+                               "(most: nginx-common 4, libx 3, nginx 2)\n") != NULL);
+    g_owner = NULL;
+}
+
+/* One installed package is its own line; all automatic ones are counted;
+ * a package whose auto is not known is named without apt's words. */
+TEST(the_installed_line_by_what_apt_marks) {
+    g_owner = fake_owner;
+    const char *one = HEAD REC_A("usr/share/nginx/index.html") REC_A("usr/share/nginx/x")
+        DPKG_I("nginx", "amd64", "1.24", ",\"auto\":false") TRAIL("0", "2", "0", "0", "1", "0", "0");
+    ASSERT_EQ_INT(0, render(one, false));
+    ASSERT_TRUE(strstr(g_text, "\nevents\n  dpkg  installed nginx:amd64 1.24 (not marked automatic by apt); 2 changes in its files\n") != NULL);
+    ASSERT_TRUE(strstr(g_text, "\nchanges\n") == NULL);
+    const char *autos = HEAD DPKG_I("a", "all", "1", ",\"auto\":true") DPKG_I("b", "all", "1", ",\"auto\":true")
+        TRAIL("0", "0", "0", "0", "2", "0", "0");
+    ASSERT_EQ_INT(0, render(autos, false));
+    ASSERT_TRUE(strstr(g_text, "\nevents\n  dpkg  installed 2 packages, marked automatic\n") != NULL);
+    const char *mixed = HEAD DPKG_I("a", "all", "1", "") DPKG_I("b", "all", "2", ",\"auto\":false")
+        "{\"event\":\"dpkg_installed\",\"interp\":\"dpkg\",\"package\":\"c\",\"arch\":\"all\",\"version\":\"3\",\"text\":\"installed c:all 3\",\"provisional\":true,\"paths\":[\"p\"]}\n"
+        TRAIL("0", "0", "0", "0", "3", "0", "0");
+    ASSERT_EQ_INT(0, render(mixed, false));
+    ASSERT_TRUE(strstr(g_text, "\nevents\n  dpkg  installed a:all 1, b:all 2 (not marked automatic by apt), c:all 3"
+                               " (provisional: a path it came from is unknown)\n") != NULL);
+    /* Past ten names the rest are counted. */
+    static char many[8192];
+    size_t w = (size_t)snprintf(many, sizeof many, HEAD);
+    for (int i = 0; i < 13; i++)
+        w += (size_t)snprintf(many + w, sizeof many - w, DPKG_I("p%02d", "all", "1", ",\"auto\":false"), i, i);
+    snprintf(many + w, sizeof many - w, TRAIL("0", "0", "0", "0", "13", "0", "0"));
+    ASSERT_EQ_INT(0, render(many, false));
+    ASSERT_TRUE(strstr(g_text, ", p09:all 1 (not marked automatic by apt) and 3 more not marked automatic\n") != NULL);
+    g_owner = NULL;
+}
+
+/* What never folds does not fold into a package's line either: a privilege
+ * change, an entry of unknown outcome, a file whose content was not read. */
+TEST(what_never_folds_stays_named_though_a_package_owns_it) {
+    g_owner = fake_owner;
+    const char *diff = HEAD
+        "{\"path\":\"usr/share/nginx/a\",\"outcome\":\"unknown\",\"type\":\"reg\",\"unknown\":[\"raced\"]}\n"
+        "{\"path\":\"usr/share/nginx/b\",\"outcome\":\"metadata_only\",\"type\":\"reg\",\"changed\":[\"ctime_ns\",\"caps\"]}\n"
+        "{\"path\":\"usr/share/nginx/c\",\"outcome\":\"added\",\"type\":\"reg\",\"content_not_read\":[\"unreadable\"]}\n"
+        REC_A("usr/share/nginx/d")
+        DPKG_I("nginx", "amd64", "1.24", ",\"auto\":false") TRAIL("0", "2", "1", "1", "1", "0", "0");
+    ASSERT_EQ_INT(0, render(diff, false));
+    ASSERT_TRUE(strstr(g_text, "installed nginx:amd64 1.24 (not marked automatic by apt); 1 change in its files\n") != NULL);
+    ASSERT_TRUE(strstr(g_text, "\nprivilege\n  ~ usr/share/nginx/b   capabilities changed\n") != NULL);
+    ASSERT_TRUE(strstr(g_text, "\nchanges\n  ? usr/share/nginx/a   unknown: raced\n"
+                               "  A usr/share/nginx/c   content not read (unreadable)\n") != NULL);
+    ASSERT_TRUE(strstr(g_text, "usr/share/nginx/d") == NULL);
+    g_owner = NULL;
+}
+
+/* Bounded by what is asked: past receipt_owner_asks paths the rest are not
+ * asked, are listed as they are, and one line says so. */
+TEST(past_the_bound_of_paths_asked_the_rest_are_listed_and_it_is_said) {
+    g_owner = fake_owner;
+    const size_t was = receipt_owner_asks;
+    receipt_owner_asks = 2;
+    const char *diff = HEAD REC_A("usr/share/nginx/a") REC_A("usr/share/nginx/b") REC_A("usr/share/nginx/c")
+        DPKG_I("nginx", "amd64", "1.24", ",\"auto\":false") TRAIL("0", "3", "0", "0", "1", "0", "0");
+    ASSERT_EQ_INT(0, render(diff, false));
+    ASSERT_EQ_INT(2, (int)g_owner_asked[1]);
+    ASSERT_TRUE(strstr(g_text, "  3 added    events: 1\n"
+                               "  dpkg's file lists were asked about the first 2 changes only; the others are listed whatever owns them\n") != NULL);
+    ASSERT_TRUE(strstr(g_text, "; 2 changes in its files\n") != NULL);
+    ASSERT_TRUE(strstr(g_text, "\nchanges\n  A usr/share/nginx/c\n") != NULL);
+    receipt_owner_asks = was;
+    g_owner = NULL;
+}
+
+
 int main(void) {
     RUN(a_receipt_puts_events_then_privilege_then_changes);
     RUN(long_sections_fold_but_privilege_never_does);
@@ -776,6 +1055,14 @@ int main(void) {
     RUN(inode_flags_are_privilege_only_where_the_pin_counts_them);
     RUN(files_hashed_unguarded_are_said_on_one_line);
     RUN(ignored_unknown_rows_fold_by_directory_and_reason);
+    RUN(events_say_what_their_fields_say_in_the_pins_words);
+    RUN(an_init_script_in_no_package_is_never_folded);
+    RUN(records_a_package_of_the_diff_owns_fold_into_its_line);
+    RUN(a_packages_files_are_those_of_the_side_it_is_on);
+    RUN(the_installed_line_names_three_packages_with_the_most_records);
+    RUN(the_installed_line_by_what_apt_marks);
+    RUN(what_never_folds_stays_named_though_a_package_owns_it);
+    RUN(past_the_bound_of_paths_asked_the_rest_are_listed_and_it_is_said);
     free(g_text);
     return belay_test_report();
 }
