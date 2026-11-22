@@ -115,3 +115,4 @@ protected path, a `--to` checkpoint that trusted files (3); a corrupt bundle, an
 | P-G3 | `protected_path_unverifiable` under a rule whose only mode is `no_delete`: as protect-spec-v2 PV2-8 says. The flag's row and PS-M5 stand for every other mode; no kind, field or key changes. |
 | P-G4 | A directory nothing was seen below, matched only by rules whose only mode is `no_delete`: `protected_path_unverifiable`, as protect-spec-v2 PV2-9 says. No kind, field or key changes. |
 | P-G5 | Which paths PV2-8 and PV2-9 reach (every matching rule `no_delete` alone), and that an added path under such rules is no finding: protect-spec-v2 PV2-10, PV2-11. No kind, field or key changes; `belay_policy` stays 1. |
+| P-G6 | A directory whose listing was incomplete (`unstable`), matched only by rules whose only mode is `no_delete`: `protected_path_unverifiable`, as protect-spec-v2 PV2-12 says. No kind, field or key changes. |
