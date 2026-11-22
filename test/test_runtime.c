@@ -262,19 +262,14 @@ TEST(no_proc_writes_nothing_and_a_broken_line_is_an_error) {
     ASSERT_EQ_INT(-1, capture(1, &st));
 }
 
-/* RT-11: what readlink gives, as read -- one that is not UTF-8 in base64,
- * as a manifest's path_b64. RT-12's parameter: another process's net/. */
-TEST(an_exe_as_read_and_another_process_net) {
+/* What is read and is not UTF-8 is in base64, as a manifest's path_b64.
+ * RT-12's parameter: another process's net/. */
+TEST(bytes_not_utf8_are_base64_and_another_process_net_is_read) {
     machine();
-    process(8000, "x", "/opt/\xff", "/system.slice/bin.service", 5, "");
-    char e[600];
-    snprintf(e, sizeof e, "%s/8000/exe", g_proc);
-    char got[64];
-    const ssize_t n = readlink(e, got, sizeof got);
-    if (n != 6) SKIP("this file system keeps no link target that is not UTF-8");
+    process(8000, "x", "/opt/x", "/system.slice/\xff" "bin.service", 5, "");
     struct belay_runtime_stats st;
     REQUIRE(capture(1, &st) == 1);
-    ASSERT_TRUE(strstr(slurp(g_out), "{\"service\":\"/system.slice/bin.service\",\"processes\":1,\"exe_b64\":\"L29wdC//\","
+    ASSERT_TRUE(strstr(slurp(g_out), "{\"service_b64\":\"L3N5c3RlbS5zbGljZS//YmluLnNlcnZpY2U=\",\"processes\":1,\"exe\":\"/opt/x\","
                                      "\"started_ns\":50000000}\n") != NULL);
     /* the net/ of pid 4148, in its own namespace */
     put("4148/net/tcp", TCP_HEAD "   0: 00000000:1F90 00000000:0000 0A" TAIL4 "26691 1\n");
@@ -440,6 +435,13 @@ TEST(the_section_names_what_opened_closed_started_stopped_and_restarted) {
     REQUIRE(diff_of(a, b) == 9);
     ASSERT_TRUE(strstr(section(), "\"port\":2222,\"holders\":[" SYSTEMD ",{\"exe\":\"/usr/sbin/sshd\",\"cgroup\":"
                                   "\"/system.slice/ssh.service\"}],\"text\":\"opened: tcp 0.0.0.0:2222 held by ssh.service, systemd\"}\n") != NULL);
+    /* pid 1's cgroup is systemd's, whatever its exe reads (after an upgrade, `(deleted)`) */
+    sh("rm -rf '%s/1' '%s/9000'", g_proc, g_proc);
+    process(1, "systemd", "/usr/lib/systemd/systemd-old (deleted)", "/init.scope", 2, "8760 8762 21567 8800 21990");
+    process(9000, "sshd", "/usr/sbin/sshd", "/system.slice/ssh.service", 120200, "");
+    REQUIRE(belay_runtime_capture(&o, b, &st) == 1);
+    REQUIRE(diff_of(a, b) == 9);        /* 22 and /run/systemd/private: a holder changed, not a key */
+    ASSERT_TRUE(strstr(section(), "\"matches\":[\"foo.socket\"],\"text\":\"opened: tcp 0.0.0.0:2222 held by systemd\"}\n") != NULL);
     /* the same record twice: no section records */
     ASSERT_EQ_INT(0, diff_of(a, a));
     ASSERT_EQ_STR("", section());
@@ -503,7 +505,7 @@ int main(void) {
     RUN(as_root_the_record_lists_listeners_their_holders_and_services);
     RUN(not_root_the_holders_are_null_and_counted);
     RUN(no_proc_writes_nothing_and_a_broken_line_is_an_error);
-    RUN(an_exe_as_read_and_another_process_net);
+    RUN(bytes_not_utf8_are_base64_and_another_process_net_is_read);
     RUN(the_section_names_what_opened_closed_started_stopped_and_restarted);
     RUN(a_side_without_a_record_or_its_holders_is_incomplete);
     sh("chmod -R u+rwx '%s' 2>/dev/null; rm -rf '%s'", g_dir, g_dir);
