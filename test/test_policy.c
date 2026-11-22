@@ -1265,7 +1265,7 @@ TEST(unverifiable_reasons_come_in_the_pinned_order) {
     REQUIRE(belay_manifest_write(m1, dir, &o, NULL) == 0);
     REQUIRE(belay_diff(m1, m1, d, NULL, NULL) == 0);
     snprintf(cmd, sizeof cmd, "head -n 1 '%s' > '%s' && printf '%%s\\n' '{\"path\":\"x\",\"outcome\":\"unknown\",\"type\":\"reg\","
-             "\"unknown\":[\"raced\",\"unverified\"]}' >> '%s' && tail -n 1 '%s' >> '%s'", d, dd, dd, d, dd);
+             "\"unknown\":[\"a_later_word\",\"class_changed\",\"raced\",\"sealed_key\",\"unverified\"]}' >> '%s' && tail -n 1 '%s' >> '%s'", d, dd, dd, d, dd);
     REQUIRE(system(cmd) == 0);
     struct protect_spec spec;
     REQUIRE(protect_load(g_spec, &spec) == 0);
@@ -1278,7 +1278,10 @@ TEST(unverifiable_reasons_come_in_the_pinned_order) {
     REQUIRE_MSG(policy_run(&in, out, NULL) == 0, "%s", belay_err_msg());
     fclose(out);
     protect_free(&spec);
-    HAS("protected_path_unverifiable", "x", ",\"reasons\":[\"unverified\",\"raced\"],");
+    /* v5's reasons after v4's, `class_changed` last of them (manifest-v5 V5-D5,
+     * addendum V5-A6); a word the order does not list after them all */
+    HAS("protected_path_unverifiable", "x",
+        ",\"reasons\":[\"unverified\",\"raced\",\"sealed_key\",\"class_changed\",\"a_later_word\"],");
 }
 
 /* ---- refusals ---- */

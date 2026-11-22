@@ -241,11 +241,6 @@ TEST(sealed_entries_compare_under_one_key) {
        pair(3, 5, 5, SEALED(HA), K1, 3, 5, 5, SEALED(HA), K2));
     IS("{\"path\":\"f\",\"outcome\":\"unknown\",\"type\":\"reg\",\"unknown\":[\"sealed_key\"]}",
        pair(3, 5, 5, SEALED(HA), K1, 3, 5, 5, SEALED(HB), K2));
-    /* on one side only */
-    IS("{\"path\":\"f\",\"outcome\":\"unknown\",\"type\":\"reg\",\"unknown\":[\"sealed_key\"]}",
-       pair(3, 5, 5, SEALED(HA), K1, 3, 5, 5, SHA(HA), NULL));
-    IS("{\"path\":\"f\",\"outcome\":\"unknown\",\"type\":\"reg\",\"unknown\":[\"sealed_key\"]}",
-       pair(3, 5, 5, SHA(HB), NULL, 3, 5, 5, SEALED(HA), K1));
     /* a metadata difference beside it is listed, the outcome still unknown */
     IS("{\"path\":\"f\",\"outcome\":\"unknown\",\"type\":\"reg\",\"changed\":[\"mtime_ns\"],"
        "\"before\":{\"mtime_ns\":5},\"after\":{\"mtime_ns\":6},\"unknown\":[\"sealed_key\"]}",
@@ -412,13 +407,43 @@ TEST(a_link_on_the_way_to_a_root) {
     IS("{\"path\":\"home/u/.config\",\"outcome\":\"added\",\"type\":\"lnk\"}", rec("home/u/.config"));
 }
 
-/* V5-D5: `not_read` after `writer_open`, `sealed_key` after it. */
+/* V5-A6: sealed on one side only is the file's class changing, not a key's:
+ * `class_changed`, whether the other manifest carries the same key (another
+ * file there is sealed), another, or none. */
+TEST(a_file_sealed_on_one_side_only_changed_class) {
+    static const char CC[] = "{\"path\":\"f\",\"outcome\":\"unknown\",\"type\":\"reg\",\"unknown\":[\"class_changed\"]}";
+    IS(CC, pair(3, 5, 5, SEALED(HA), K1, 3, 5, 5, SHA(HA), NULL));
+    IS(CC, pair(3, 5, 5, SHA(HB), NULL, 3, 5, 5, SEALED(HA), K1));
+    for (int same_key = 0; same_key < 2; same_key++)
+        for (int sealed_after = 0; sealed_after < 2; sealed_after++) {
+            m_new(NULL, K1); dir(".", ""); reg("f", sealed_after ? SHA(HA) : SEALED(HA)); reg("g", SEALED(HB)); m_write("before");
+            m_new(NULL, same_key ? K1 : K2); dir(".", ""); reg("f", sealed_after ? SEALED(HA) : SHA(HA)); reg("g", SEALED(HB));
+            m_write("after");
+            REQUIRE(run() == 0);
+            IS(CC, rec("f"));
+            /* the file sealed on both sides is the key's to say */
+            IS(same_key ? "" : "{\"path\":\"g\",\"outcome\":\"unknown\",\"type\":\"reg\",\"unknown\":[\"sealed_key\"]}", rec("g"));
+        }
+    /* a different size proves it, as before; nothing of the sealed side's hash is carried */
+    IS("{\"path\":\"f\",\"outcome\":\"modified\",\"type\":\"reg\",\"changed\":[\"size\"],"
+       "\"before\":{\"size\":3},\"after\":{\"size\":4}}",
+       pair(3, 5, 5, SHA(HA), NULL, 4, 5, 5, SEALED(HA), K1));
+    /* a metadata difference beside it is listed, the outcome still unknown */
+    IS("{\"path\":\"f\",\"outcome\":\"unknown\",\"type\":\"reg\",\"changed\":[\"mtime_ns\"],"
+       "\"before\":{\"mtime_ns\":5},\"after\":{\"mtime_ns\":6},\"unknown\":[\"class_changed\"]}",
+       pair(3, 5, 5, SHA(HA), NULL, 3, 6, 6, SEALED(HA), K1));
+}
+
+/* V5-D5: `not_read` after `writer_open`, `sealed_key` after it; V5-A6:
+ * `class_changed` after that. */
 TEST(the_new_reasons_come_last) {
     IS("{\"path\":\"f\",\"outcome\":\"unknown\",\"type\":\"reg\",\"unknown\":[\"writer_open\",\"not_read\"]}",
        pair(3, 5, 5, SHA(HA) ",\"writer_open\":true", NULL, 3, 5, 5, META, NULL));
     IS("{\"path\":\"f\",\"outcome\":\"unknown\",\"type\":\"reg\",\"unknown\":[\"writer_open\",\"sealed_key\"]}",
+       pair(3, 5, 5, SHA(HA) ",\"writer_open\":true,\"sealed\":true", K1, 3, 5, 5, SEALED(HA), K2));
+    IS("{\"path\":\"f\",\"outcome\":\"unknown\",\"type\":\"reg\",\"unknown\":[\"writer_open\",\"class_changed\"]}",
        pair(3, 5, 5, SHA(HA) ",\"writer_open\":true", NULL, 3, 5, 5, SEALED(HA), K1));
-    IS("{\"path\":\"f\",\"outcome\":\"unknown\",\"type\":\"reg\",\"unknown\":[\"not_read\",\"sealed_key\"]}",
+    IS("{\"path\":\"f\",\"outcome\":\"unknown\",\"type\":\"reg\",\"unknown\":[\"not_read\",\"class_changed\"]}",
        pair(3, 5, 5, META, NULL, 3, 5, 5, SEALED(HA), K1));
 }
 
@@ -466,6 +491,7 @@ int main(void) {
     RUN(meta_on_both_sides);
     RUN(meta_on_one_side);
     RUN(sealed_entries_compare_under_one_key);
+    RUN(a_file_sealed_on_one_side_only_changed_class);
     RUN(not_read_directories);
     RUN(a_first_ssh_directory_in_a_home_is_added);
     RUN(a_first_user_unit_in_a_home_is_added);

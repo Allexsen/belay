@@ -254,7 +254,8 @@ one side only.
 | `not_captured` | Absent on a side whose nearest recorded ancestor directory is `unreadable`, a `mount` or (manifest v5) `not_read`, or that excluded the path or a directory above it (manifest v2's `excluded`), or whose nearest recorded ancestor is `partial` and records neither such a name nor, in its `roots`, this path: nothing there was captured. |
 | `writer_open` | A concurrent writer: some process had the file open for writing, or mapped shared-writable, when it was read, so its hash may be of bytes it never held. Never compared. |
 | `not_read` | Manifest v5. A regular file whose content was not read, by its root's class (`meta`), with something else differing or a hash on the other side; or a directory not entered (`not_read`) on one side only, or whose type, mode or owner differs. |
-| `sealed_key` | Manifest v5. A `sealed` hash on one side only, or on both under different sealing keys (the manifests' `sealed_key`): the hashes do not compare. |
+| `sealed_key` | Manifest v5. A `sealed` hash on both sides under different sealing keys (the manifests' `sealed_key`): the hashes do not compare. |
+| `class_changed` | Manifest v5. A `sealed` hash on one side only: the file moved between the class whose content is kept and the class that is sealed, and a keyed hash does not compare with a plain one, whatever the keys. |
 <!-- END GENERATED: diff-reasons -->
 
 ## How each manifest field is compared
@@ -294,7 +295,7 @@ one side only.
 | `not_read` | flag: by its rule (manifest v5) | dir | compared | flag |  | A directory not entered. On both sides, with equal type, mode and owner: no record, and nothing else of it is compared. On one side only, or those differ: `unknown` (reason `not_read`). A path below it on the other side is `not_captured`. |
 | `partial` | not compared |  | compared | flag |  | Not compared. For a path the other side lacks directly under it: a directory, or a link under the scope root, is `added` or `removed` as anywhere; anything else only when that side's `roots` list it, and is `not_captured` otherwise. |
 | `meta` | flag: by its rule (manifest v5) | reg | compared | flag |  | Content not read. On both sides: unchanged when every other field is equal, `modified` when `size` differs, `unknown` (reason `not_read`) for any other difference, never `metadata_only`. Against a hash on the other side: `unknown` unless `size` differs. |
-| `sealed` | flag: by its rule (manifest v5) | reg | compared | flag |  | A keyed hash. On both sides under one `sealed_key`, `sha256` compares as any; on one side only, or under different keys, it does not: `unknown` (reason `sealed_key`) unless `size` differs. No record carries a sealed entry's hash. |
+| `sealed` | flag: by its rule (manifest v5) | reg | compared | flag |  | A keyed hash. On both sides under one `sealed_key`, `sha256` compares as any; under different keys it does not: `unknown` (reason `sealed_key`) unless `size` differs. On one side only: `unknown` (reason `class_changed`) unless `size` differs. No record carries a sealed entry's hash. |
 <!-- END GENERATED: diff-fields -->
 
 ## Interpreters

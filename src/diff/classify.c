@@ -104,6 +104,8 @@ int classify_both(const struct diff_ctx *ctx, const struct belay_entry *b,
      *    meta      on one side, the content (V5-D2, as O1 for unverified); on
      *              both, nothing by itself -- see below (V5-D1);
      *    sealed    the content, unless both are sealed under one key (V5-D3);
+     *              on one side only the reason is the file's class, not a
+     *              key (addendum V5-A6);
      *    not_read  a directory: decided here, after the type (V5-D4).
      */
     const bool meta_both = b->meta && a->meta;
@@ -112,7 +114,7 @@ int classify_both(const struct diff_ctx *ctx, const struct belay_entry *b,
         content_unknown |= !meta_both;
     }
     if ((b->sealed || a->sealed) && !(b->sealed && a->sealed && ctx->sealed_comparable)) {
-        reasons |= DRBIT(DR_SEALED_KEY);
+        reasons |= DRBIT(b->sealed && a->sealed ? DR_SEALED_KEY : DR_CLASS_CHANGED);
         content_unknown = true;
     }
     if (b->not_read || a->not_read) reasons |= DRBIT(DR_NOT_READ);

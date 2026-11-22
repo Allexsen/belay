@@ -30,6 +30,7 @@ enum diff_reason {
     DR_RACED, DR_UNSTABLE, DR_UNVERIFIED, DR_UNREADABLE, DR_MOUNT, DR_XATTRS_UNKNOWN,
     DR_IFLAGS_UNKNOWN, DR_LISTING_INCOMPLETE, DR_NOT_CAPTURED, DR_WRITER_OPEN,
     DR_NOT_READ, DR_SEALED_KEY,         /* manifest-v5 V5-D5: after writer_open, in this order */
+    DR_CLASS_CHANGED,                   /* manifest-v5-addendum V5-A6: after sealed_key */
     DR_COUNT
 };
 #define DR_FIRST DR_RACED

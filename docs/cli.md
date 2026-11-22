@@ -398,7 +398,9 @@ they are sealed like any other file others cannot read.) The key is `sealing.key
 made by the first capture that seals a file and never rewritten; each manifest's header carries the
 first 16 hex digits of its sha256 as `sealed_key`. Two sealed hashes compare only under one key:
 if the key file is lost a new one is made, and every sealed entry of the older checkpoints is
-`unknown` (reason `sealed_key`) against the newer ones. A file that is not such a key at that path
+`unknown` (reason `sealed_key`) against the newer ones. A file sealed in one checkpoint and not
+in the other -- its mode or owner changed who may read it -- is `unknown` with reason
+`class_changed`: a keyed hash does not compare with a plain one. A file that is not such a key at that path
 fails the capture (exit 4); belay does not replace it.
 
 **Mount points.** Under a root, a mount point is entered only when its filesystem is ext2, ext3,

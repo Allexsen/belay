@@ -1445,7 +1445,9 @@ TEST(a_marked_entry_is_unknown_and_its_hash_never_compared) {
     /* last among the reasons of v4 (V4-D4); v5's two come after it, in this order (V5-D5) */
     ASSERT_EQ_INT(DR_WRITER_OPEN + 1, DR_NOT_READ);
     ASSERT_EQ_INT(DR_NOT_READ + 1, DR_SEALED_KEY);
-    ASSERT_EQ_INT(DR_COUNT - 1, DR_SEALED_KEY);
+    ASSERT_EQ_INT(DR_SEALED_KEY + 1, DR_CLASS_CHANGED);     /* manifest-v5-addendum V5-A6 */
+    ASSERT_EQ_INT(DR_COUNT - 1, DR_CLASS_CHANGED);
+    ASSERT_EQ_STR("class_changed", DIFF_REASONS[DR_CLASS_CHANGED].name);
 }
 
 /* V4-D2 where the values are not `changed`'s: across a type change a side's
