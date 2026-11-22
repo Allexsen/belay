@@ -285,7 +285,13 @@ TEST(diff_folds_a_packages_files_into_its_line) {
     ASSERT_TRUE(strstr(g_out, "  dpkg  installed nginx:amd64 1.24.0-2ubuntu7 (not marked automatic by apt); 1 marked automatic; "
                               "3 changes in their files (most: nginx-common 2, nginx 1)\n") != NULL);
     ASSERT_TRUE(strstr(g_out, "etc/nginx/site-made-by-hand") != NULL);
-    ASSERT_TRUE(strstr(g_out, "nginx.conf") == NULL && strstr(g_out, "index.html") == NULL);
+    ASSERT_TRUE(strstr(g_out, "index.html") == NULL);
+    /* SD-3 folds records: nginx.conf's is counted in nginx-common's line.
+     * config's event of the same file is an event, listed as systemd's are
+     * (system-config.md CF-6): `x` is no nginx directive. */
+    const char *conf = strstr(g_out, "nginx.conf");
+    ASSERT_TRUE(conf != NULL && strstr(conf + 1, "nginx.conf") == NULL);
+    ASSERT_TRUE(strstr(g_out, "  config etc/nginx/nginx.conf: shown as lines (does not parse)\n") != NULL);
     ASSERT_EQ_INT(0, belay("diff", "--scope", g_scope, "--since", "1", "--all", NULL));
     ASSERT_TRUE(strstr(g_out, "  dpkg  installed nginx-common:all 1.24.0-2ubuntu7 (marked automatic)\n") != NULL);
     ASSERT_TRUE(strstr(g_out, "etc/nginx/nginx.conf") != NULL && strstr(g_out, "usr/share/nginx/index.html") != NULL);
