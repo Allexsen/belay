@@ -278,7 +278,8 @@ static size_t packaged_of(const char *path, size_t len, char out[4][600]) {
         size_t n = 0;
         snprintf(out[n++], 600, "usr/lib/systemd/%s/%.*s", kind, (int)ul, u);
         snprintf(out[n++], 600, "lib/systemd/%s/%.*s", kind, (int)ul, u);
-        const char *at = memchr(u, '@', ul), *dot = memrchr(u, '.', ul);
+        const char *at = memchr(u, '@', ul), *dot = NULL;   /* the last `.`: memrchr is not on macOS */
+        for (size_t k = ul; k > 0; k--) if (u[k - 1] == '.') { dot = u + k - 1; break; }
         if (at != NULL && dot != NULL && dot > at + 1) {      /* a template's instance: its template */
             snprintf(out[n++], 600, "usr/lib/systemd/%s/%.*s%.*s", kind, (int)(at - u + 1), u, (int)(ul - (size_t)(dot - u)), dot);
             snprintf(out[n++], 600, "lib/systemd/%s/%.*s%.*s", kind, (int)(at - u + 1), u, (int)(ul - (size_t)(dot - u)), dot);
