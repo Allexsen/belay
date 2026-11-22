@@ -537,8 +537,9 @@ needs a marker.
   the shell startup files (the system's and each home's), kernel modules and settings, the trust
   store, firewall rule files, a unit override that sets what runs, a privilege change, a file
   others cannot read outside `root` and the homes (named, never its content), a listener below
-  port 1024 whose program no package owns, and a unit added under a home's own unit directory are
-  flagged 🔴. New users and groups, cron jobs, timers, units, init scripts, packages, services and
+  port 1024 whose program no package owns, a unit added under a home's own unit directory, and
+  any of the accounts, sudoers, key, sshd or home unit files that can no longer be interpreted
+  (`could not interpret: etc/sudoers (sudo)`) are flagged 🔴. New users and groups, cron jobs, timers, units, init scripts, packages, services and
   listeners are named without a circle; one whose file no package owns has a line of its own
   ending `, in no package`, and those of a package installed in the same step are counted (`and 6
   others by packages installed here`). The files of the step's packages under `usr`, `var`, `opt`,
