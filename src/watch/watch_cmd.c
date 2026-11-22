@@ -16,6 +16,7 @@
 #include "belay/manifest.h"
 #include "cli/cli.h"
 #include "cli/cli_internal.h"
+#include "cli/docker.h"
 #include "cli/delta.h"
 #include "util/pattern.h"
 #include "watch/ledger.h"
@@ -95,14 +96,14 @@ out:
     return rc;
 }
 
-int watch_receipt_file(const char *scope, const struct wsb *text, char *path, size_t cap) {
+int watch_receipt_file(const char *scope, const char *docker, const struct wsb *text, char *path, size_t cap) {
     struct scope sc;
     struct state st;
     struct ledger l;
     st.dir_fd = st.cp_fd = st.lock_fd = -1;
     l.dfd = -1;
     int rc = -1;
-    if (scope_resolve(scope, &sc) == 0 && state_open(&sc, false, &st, NULL) == 0 && ledger_open(&st, false, &l) == 0) {
+    if (scope_resolve_in(docker, scope, &sc) == 0 && state_open(&sc, false, &st, NULL) == 0 && ledger_open(&st, false, &l) == 0) {
         if (l.dfd == -1) {
             belay_err_set(BELAY_ERR_INVALID, 0, "nothing recorded for %s yet", sc.path);
         } else {
@@ -236,7 +237,7 @@ out:
  * with their classes and how many entries of the newest checkpoint each
  * holds (a longer root wins), the directories not read, the homes left out
  * and why, then the flag list with the entries each path row matches. */
-static int cmd_patterns_system(const char *scope, FILE *out, FILE *err) {
+static int cmd_patterns_system(const char *scope, const char *docker, FILE *out, FILE *err) {
     struct scope sc;
     struct state st;
     st.dir_fd = st.cp_fd = st.lock_fd = -1;
@@ -246,8 +247,9 @@ static int cmd_patterns_system(const char *scope, FILE *out, FILE *err) {
     struct checkpoint *cps = NULL;
     size_t n_cps = 0, *per = NULL, *rows = NULL;
     int rc = 0;
-    if (scope_resolve(scope, &sc) == -1) { cli_err_line(err); belay_err_clear(); return EXIT_REFUSED; }
-    if (belay_system_roots(sc.path, &sr) == -1 || state_open(&sc, false, &st, NULL) == -1 ||
+    if (scope_resolve_in(docker, scope, &sc) == -1) { cli_err_line(err); belay_err_clear(); return EXIT_REFUSED; }
+    if ((docker != NULL ? docker_system_roots(docker, &sr) : belay_system_roots(sc.path, &sr)) == -1 ||
+        state_open(&sc, false, &st, NULL) == -1 ||
         (per = calloc(sr.n_roots + 1, sizeof *per)) == NULL || (rows = calloc(sysflag_n_rows, sizeof *rows)) == NULL) {
         if (belay_err_code() == BELAY_OK) belay_err_set(BELAY_ERR_NOMEM, 0, "out of memory");
         rc = cli_failed(err);
@@ -331,7 +333,7 @@ int cmd_watch(int argc, char **argv, FILE *out, FILE *err) {
     if (argc < 3) return cli_usage(err, "watch needs a command: start, step, close, mark, summary, receipt, stop or patterns");
     const char *sub = argv[2];
     const char *scope = NULL, *session = NULL, *begin = NULL, *finish = NULL, *agent = NULL, *name = NULL, *since = NULL;
-    const char *system_root = NULL;
+    const char *system_root = NULL, *docker = NULL;
     bool first_ok = false, all = false, path = false, entries = false, system = false;
     long deadline = WATCH_DEADLINE_S, max_lines = 0;
     struct wsb ids = { 0 };
@@ -357,6 +359,7 @@ int cmd_watch(int argc, char **argv, FILE *out, FILE *err) {
         else if (!strcmp(a, "--name")) val = &name;
         else if (!strcmp(a, "--since")) val = &since;
         else if (!strcmp(a, "--system-root")) val = &system_root;      /* cli_system_scope */
+        else if (!strcmp(a, "--docker")) val = &docker;                 /* WS-1: with --system */
         else if (strcmp(a, "--id") && strcmp(a, "--deadline") && strcmp(a, "--max-lines")) {
             snprintf(why, sizeof why, "unknown option %.200s", a);
             rc = cli_usage(err, why);
@@ -384,20 +387,22 @@ int cmd_watch(int argc, char **argv, FILE *out, FILE *err) {
             goto done;
         }
     }
+    if (docker != NULL && !system) { rc = cli_usage(err, "--docker on watch is a system watch's: give --system"); goto done; }
     if (system || system_root != NULL) {
-        if ((rc = cli_system_scope(system, system_root, &scope, NULL, err)) != 0) goto done;
+        if ((rc = cli_system_scope(system, system_root, &scope, docker, err)) != 0) goto done;
         system = true;
     }
     if (scope == NULL) { rc = cli_usage(err, "--scope DIR is required"); goto done; }
     const bool is_step = !strcmp(sub, "step"), is_close = !strcmp(sub, "close"), is_mark = !strcmp(sub, "mark"),
                is_summary = !strcmp(sub, "summary"), is_start = !strcmp(sub, "start"), is_stop = !strcmp(sub, "stop");
     if ((is_start || is_stop) && !system) { rc = cli_usage(err, "start and stop are a system watch's: give --system"); goto done; }
-    if (!strcmp(sub, "patterns")) { rc = system ? cmd_patterns_system(scope, out, err) : cmd_patterns(scope, entries, out, err); goto done; }
+    if (!strcmp(sub, "patterns")) { rc = system ? cmd_patterns_system(scope, docker, out, err) : cmd_patterns(scope, entries, out, err); goto done; }
     if (system && (is_start || is_stop || !strcmp(sub, "receipt"))) {
         /* WS-2, WS-3, K12: a walk under the lock, no time limit, a line on standard error every 10 s */
         if (session != NULL && !ledger_id_valid(session)) { rc = cli_usage(err, "--session needs an id: printable, no spaces, at most 96 bytes"); goto done; }
         struct wreq q = { .scope = scope, .session = session != NULL ? session : "system", .agent = "", .first_ok = true,
-                          .deadline_s = 0, .words = { "call", "", "" }, .system = true, .progress = err };
+                          .deadline_s = 0, .words = { "call", "", "" }, .system = true, .progress = err,
+                          .docker = docker };
         if (is_start) q.ops[q.n_ops++] = (struct wop){ WOP_START, NULL, 0 };
         q.ops[q.n_ops++] = (struct wop){ WOP_STEP, NULL, WSTEP_PLAIN };
         if (!is_start) q.ops[q.n_ops++] = (struct wop){ WOP_RECEIPT, NULL, is_stop ? 1 : 0 };
@@ -408,7 +413,7 @@ int cmd_watch(int argc, char **argv, FILE *out, FILE *err) {
             fputs("belay: out of memory\n", err);
             rc = EXIT_FAILED;
         } else if (wr == 0 && path && !is_start) {
-            if (watch_receipt_file(scope, &text, file, sizeof file) == -1) rc = cli_failed(err);
+            if (watch_receipt_file(scope, docker, &text, file, sizeof file) == -1) rc = cli_failed(err);
             else fprintf(out, "%s\n", file);
         } else {
             long lines = 0;
@@ -434,7 +439,7 @@ int cmd_watch(int argc, char **argv, FILE *out, FILE *err) {
             if (text.bad) belay_err_set(BELAY_ERR_NOMEM, 0, "out of memory");
             rc = cli_failed(err);
         } else if (path) {
-            if (watch_receipt_file(scope, &text, file, sizeof file) == -1) rc = cli_failed(err);
+            if (watch_receipt_file(scope, docker, &text, file, sizeof file) == -1) rc = cli_failed(err);
             else fprintf(out, "%s\n", file);
         } else {
             long lines = 0;
@@ -464,7 +469,7 @@ int cmd_watch(int argc, char **argv, FILE *out, FILE *err) {
         goto done;
     }
     struct wreq q = { .scope = scope, .session = session, .agent = agent != NULL ? agent : "", .first_ok = first_ok,
-                      .deadline_s = deadline, .words = { "call", "", "" }, .system = system };
+                      .deadline_s = deadline, .words = { "call", "", "" }, .system = system, .docker = docker };
     char span[WATCH_ID_MAX + 16];
     if (is_step) {
         if (begin != NULL && finish != NULL) { rc = cli_usage(err, "--begin or --finish, not both"); goto done; }

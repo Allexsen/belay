@@ -44,6 +44,9 @@ struct scope {
 /* --docker: `path` resolved inside the container `name` (H-C3), every check
  * of host-reader.md made on the way; a warning (H-C9) on `warn`. */
 int scope_resolve_docker(const char *name, const char *path, bool need_paused, struct scope *out, FILE *warn);
+/* scope_resolve, or with `docker` not NULL scope_resolve_docker, the
+ * container running or paused (the watch's: watch-system WS-1). */
+int scope_resolve_in(const char *docker, const char *path, struct scope *out);
 
 /* The state root to use instead of the environment's, when not NULL:
  * `belay verify` sets it to a directory it has just created, so no state a

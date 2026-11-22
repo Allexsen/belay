@@ -414,6 +414,15 @@ static int read_proc(const char *proc, long pid, struct proc *pr) {
     return 1;
 }
 
+/* RT-12: a process's cgroup is the container's `cg`, or below it (a
+ * container's own systemd makes such cgroups). The root cgroup "/" holds
+ * only what is in it itself: below it is the whole machine. */
+static bool in_cgroup(const char *pcg, const char *cg) {
+    if (pcg == NULL) return false;
+    const size_t n = strlen(cg);
+    return strncmp(pcg, cg, n) == 0 && (pcg[n] == '\0' || (pcg[n] == '/' && strcmp(cg, "/") != 0));
+}
+
 static int pid_cmp(const void *a, const void *b) {
     const long x = *(const long *)a, y = *(const long *)b;
     return (x > y) - (x < y);
@@ -635,6 +644,27 @@ int belay_runtime_capture(const struct belay_runtime_opts *opts, const char *out
         snprintf(ns, sizeof ns, "%s/self/ns/net", proc);
     }
     if (stat(net, &sb) != 0 || !S_ISDIR(sb.st_mode)) return 0;     /* no proc file system here */
+    /* RT-12: the container's cgroup, and whether its network is the host's */
+    char *cg = NULL;
+    bool host_net = false;
+    if (opts->container) {
+        char p[PATH_MAX], *buf;
+        size_t len;
+        snprintf(p, sizeof p, "%s/%ld/cgroup", proc, opts->net_pid);
+        if (slurp(p, &buf, &len, SMALL_MAX) == 0) {
+            cg = v2_line(buf, len);
+            free(buf);
+        }
+        if (cg == NULL) {
+            belay_err_set(BELAY_ERR_IO, errno, "runtime: no cgroup v2 path for the container's first process (%s)", p);
+            return -1;
+        }
+        snprintf(p, sizeof p, "%s/self/ns/net", proc);
+        char *mine = link_text(p), *its = link_text(ns);
+        host_net = mine != NULL && its != NULL && strcmp(mine, its) == 0;
+        free(mine);
+        free(its);
+    }
 
     const bool root = opts->root < 0 ? geteuid() == 0 : opts->root > 0;
     struct listeners ls = { 0 };
@@ -643,17 +673,23 @@ int belay_runtime_capture(const struct belay_runtime_opts *opts, const char *out
     size_t npids = 0;
     struct sb b = { 0 };
     int rc = -1;
-    if (port_range(proc, range) == -1 || read_inet(net, "tcp", K_TCP, 4, range, &ls) == -1 ||
-        read_inet(net, "tcp6", K_TCP, 6, range, &ls) == -1 || read_inet(net, "udp", K_UDP, 4, range, &ls) == -1 ||
-        read_inet(net, "udp6", K_UDP, 6, range, &ls) == -1 || read_unix(net, &ls) == -1 ||
-        list_pids(proc, &pids, &npids) == -1)
+    if (!host_net && (port_range(proc, range) == -1 || read_inet(net, "tcp", K_TCP, 4, range, &ls) == -1 ||
+                      read_inet(net, "tcp6", K_TCP, 6, range, &ls) == -1 ||
+                      read_inet(net, "udp", K_UDP, 4, range, &ls) == -1 ||
+                      read_inet(net, "udp6", K_UDP, 6, range, &ls) == -1 || read_unix(net, &ls) == -1))
         goto out;
+    if (list_pids(proc, &pids, &npids) == -1) goto out;
     if (npids && (ps.v = calloc(npids, sizeof *ps.v)) == NULL) {
         belay_err_set(BELAY_ERR_NOMEM, 0, "runtime: out of memory");
         goto out;
     }
     for (size_t i = 0; i < npids; i++) {
         const int got = read_proc(proc, pids[i], &ps.v[ps.n]);
+        if (got == 1 && cg != NULL && !in_cgroup(ps.v[ps.n].cgroup, cg)) {     /* RT-12: not the container's */
+            free(ps.v[ps.n].exe);
+            free(ps.v[ps.n].cgroup);
+            continue;
+        }
         if (got == 1) ps.n++;
     }
     /* RT-9: not root, no holders are read: another user's descriptors are
@@ -688,7 +724,8 @@ int belay_runtime_capture(const struct belay_runtime_opts *opts, const char *out
         free((void *)nsl);
     }
     sb_put(&b, "{\"belay_runtime\":1,\"netns\":", 27);
-    if (have_ns) sbf(&b, "%llu", (unsigned long long)nsino);
+    if (host_net) sb_put(&b, "\"host\"", 6);
+    else if (have_ns) sbf(&b, "%llu", (unsigned long long)nsino);
     else sb_put(&b, "null", 4);
     sbf(&b, ",\"root\":%s,\"source\":", root ? "true" : "false");
     const char *src = opts->source_json != NULL ? opts->source_json : "null";
@@ -730,7 +767,7 @@ int belay_runtime_capture(const struct belay_runtime_opts *opts, const char *out
                 (unsigned long long)(old->start / (uint64_t)hz * 1000000000u +
                                      old->start % (uint64_t)hz * 1000000000u / (uint64_t)hz));
         else
-            sb_put(&b, ",\"started_ns\":null}\n", 19);
+            sb_put(&b, ",\"started_ns\":null}\n", 20);
         nsvc++;
         i = j;
     }
@@ -760,5 +797,6 @@ out:
     free(ps.v);
     free(pids);
     free(b.p);
+    free(cg);
     return rc;
 }

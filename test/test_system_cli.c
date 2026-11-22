@@ -332,11 +332,10 @@ TEST(usage) {
     ASSERT_TRUE(strstr(g_err, "--system given twice") != NULL);
     ASSERT_EQ_INT(2, belay("exclude", "--system-root", g_tree, NULL));
     ASSERT_TRUE(strstr(g_err, "--system is check's, mark's, diff's, log's and manifest's") != NULL);
-    /* a container's `/` (WS-1) is not read by roots yet: refused, loudly, before anything is read */
-    ASSERT_EQ_INT(3, belay("log", "--system", "--docker", "no-such-container", NULL));
-    ASSERT_TRUE(strstr(g_err, "--system with --docker") != NULL);
-    ASSERT_EQ_INT(3, belay("manifest", "--system", "--docker", "no-such-container", "--id", "1", NULL));
-    ASSERT_EQ_INT(3, belay("check", "--system-root", g_tree, "--docker", "no-such-container", NULL));
+    /* a container's `/` (WS-1): --system-root is a directory's, not a container's; the rest
+     * is test_docker_system's */
+    ASSERT_EQ_INT(2, belay("check", "--system-root", g_tree, "--docker", "no-such-container", NULL));
+    ASSERT_TRUE(strstr(g_err, "--system-root is a directory's, --docker a container's") != NULL);
     /* nothing was captured or written by any of these */
     char cmd[600];
     snprintf(cmd, sizeof cmd, "[ -z \"$(ls -A '%s')\" ]", g_state);

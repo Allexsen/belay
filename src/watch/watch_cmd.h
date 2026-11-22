@@ -13,6 +13,6 @@ int watch_receipt(const char *scope, struct wsb *out, size_t *n_steps);
 
 /* That text as a file in the record, its own path on its second line; the
  * path into `path`. 0, or -1 with belay_err. */
-int watch_receipt_file(const char *scope, const struct wsb *text, char *path, size_t cap);
+int watch_receipt_file(const char *scope, const char *docker, const struct wsb *text, char *path, size_t cap);
 
 #endif

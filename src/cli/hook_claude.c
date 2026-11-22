@@ -322,7 +322,7 @@ static void receipt_event(const char *scope, FILE *out) {
     } else if (n_steps == 0) {
         wsb_f(&r, "belay has no receipt for this directory yet: nothing has changed in it.");
     } else if (entry != NULL && strcmp(entry, "claude-vscode") == 0 &&
-               watch_receipt_file(scope, &text, file, sizeof file) == 0 && open_in_editor(file)) {
+               watch_receipt_file(scope, NULL, &text, file, sizeof file) == 0 && open_in_editor(file)) {
         wsb_f(&r, "belay's full receipt is open in an editor tab: %s", file);
     } else {
         belay_err_clear();

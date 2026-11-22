@@ -8,6 +8,7 @@
 
 #include "belay/error.h"
 #include "capture/capture.h"
+#include "capture/fsops.h"
 
 #include <errno.h>
 #include <fcntl.h>
@@ -18,6 +19,13 @@
 #include <sys/stat.h>
 #include <sys/wait.h>
 #include <unistd.h>
+
+int (*docker_test_open)(const char *name, struct docker_info *d, struct union_fs **u) = NULL;
+const char *docker_proc = "/proc";
+
+void docker_source_json(const struct docker_info *d, char *out, size_t cap) {
+    snprintf(out, cap, "{\"docker\":\"%s\",\"image\":\"%s\"}", d->id, d->image);
+}
 
 #ifdef __linux__
 
@@ -265,6 +273,15 @@ static int layers_are_the_daemons(const char *name, const struct inspected *x, c
 
 int docker_open(const char *name, bool need_paused, struct docker_info *d, struct union_fs **u, FILE *warn) {
     *u = NULL;
+    if (docker_test_open != NULL) {
+        if (docker_test_open(name, d, u) == -1) return -1;
+        if (need_paused && !d->paused) {
+            union_free(*u);
+            *u = NULL;
+            return refuse("--docker %s: not paused%s", name, "");
+        }
+        return 0;
+    }
     if (geteuid() != 0) return refuse("--docker %s: reading a container's layers needs root on the host (host-reader H-C7)%s", name, "");
     static struct inspected x;
     if (inspect_all(name, &x) == -1) return -1;
@@ -356,7 +373,13 @@ out:
 
 int docker_still(const char *name, const struct docker_info *d, bool need_paused) {
     static struct inspected x;
-    if (inspect_all(name, &x) == -1) return -1;
+    if (docker_test_open != NULL) {
+        struct union_fs *u = NULL;
+        if (docker_test_open(name, &x.d, &u) == -1) return -1;
+        union_free(u);
+    } else if (inspect_all(name, &x) == -1) {
+        return -1;
+    }
     if (strcmp(x.d.id, d->id) != 0 || x.d.pid != d->pid || (need_paused && !x.d.paused)) {
         belay_err_set(BELAY_ERR_IO, 0, "--docker %s: the container changed while it was read (%s); nothing kept "
                       "(host-reader H-C5)", name, need_paused && !x.d.paused ? "no longer paused" : "another process");
@@ -366,7 +389,8 @@ int docker_still(const char *name, const struct docker_info *d, bool need_paused
 }
 
 int docker_capture(const char *name, const char *path, bool need_paused, const char *manifest,
-                   struct belay_manifest_opts *o, struct belay_manifest_stats *s, FILE *warn) {
+                   struct belay_manifest_opts *o, struct belay_manifest_stats *s, FILE *warn,
+                   const struct docker_system *sys) {
     static struct docker_info d;
     struct union_fs *u;
     if (docker_open(name, need_paused, &d, &u, warn) == -1) return -1;
@@ -375,6 +399,17 @@ int docker_capture(const char *name, const char *path, bool need_paused, const c
     if (root == -1) {
         union_free(u);
         return -1;
+    }
+    if (sys != NULL) {                  /* WS-1: the roots of the container's `/`, its homes from its passwd */
+        if (sysroots_resolve_at(union_ops(u), root, "the container's /", sys->roots) == -1) {
+            close(root);
+            union_free(u);
+            return -1;
+        }
+        o->roots = sys->roots->roots;
+        o->n_roots = sys->roots->n_roots;
+        o->not_read = sys->roots->not_read;
+        o->n_not_read = sys->roots->n_not_read;
     }
     o->source_docker = d.id;
     o->source_image = d.image;
@@ -386,16 +421,31 @@ int docker_capture(const char *name, const char *path, bool need_paused, const c
         w = -1;
     }
     union_free(u);
+    if (w == 0 && sys != NULL && sys->runtime != NULL && sys->runtime(sys->ctx, &d) == -1) w = -1;
     if (w == 0 && docker_still(name, &d, need_paused) == -1) w = -1;
     if (w == -1) unlink(manifest);
     return w;
 }
 
+int docker_system_roots(const char *name, struct belay_system_roots *out) {
+    struct docker_info d;
+    struct union_fs *u;
+    memset(out, 0, sizeof *out);
+    if (docker_open(name, false, &d, &u, NULL) == -1) return -1;
+    char canon[PATH_MAX];
+    const int root = union_open_scope(u, "/", canon, sizeof canon);
+    const int rc = root == -1 ? -1 : sysroots_resolve_at(union_ops(u), root, "the container's /", out);
+    if (root != -1) close(root);
+    union_free(u);
+    return rc;
+}
+
 #else
 
 int docker_capture(const char *name, const char *path, bool need_paused, const char *manifest,
-                   struct belay_manifest_opts *o, struct belay_manifest_stats *s, FILE *warn) {
-    (void)path; (void)need_paused; (void)manifest; (void)o; (void)s; (void)warn;
+                   struct belay_manifest_opts *o, struct belay_manifest_stats *s, FILE *warn,
+                   const struct docker_system *sys) {
+    (void)path; (void)need_paused; (void)manifest; (void)o; (void)s; (void)warn; (void)sys;
     belay_err_set(BELAY_ERR_INVALID, 0, "--docker %s: the host reader is Linux only (host-reader H-C1)", name);
     return -1;
 }
@@ -403,6 +453,12 @@ int docker_capture(const char *name, const char *path, bool need_paused, const c
 int docker_open(const char *name, bool need_paused, struct docker_info *d, struct union_fs **u, FILE *warn) {
     (void)need_paused; (void)d; (void)warn;
     *u = NULL;
+    belay_err_set(BELAY_ERR_INVALID, 0, "--docker %s: the host reader is Linux only (host-reader H-C1)", name);
+    return -1;
+}
+
+int docker_system_roots(const char *name, struct belay_system_roots *out) {
+    memset(out, 0, sizeof *out);
     belay_err_set(BELAY_ERR_INVALID, 0, "--docker %s: the host reader is Linux only (host-reader H-C1)", name);
     return -1;
 }

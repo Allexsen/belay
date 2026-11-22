@@ -119,6 +119,10 @@ bool fsops_mount_whole_listed(const char *mountinfo, uint64_t id, uint64_t ino);
 /* belay_system_roots (belay/manifest.h) through a given platform table. */
 struct belay_system_roots;
 int sysroots_resolve(const struct fsops *ops, const char *scope, struct belay_system_roots *out);
+/* The same from the scope's directory `root_fd` (not closed), read wholly
+ * through `ops`: a container's `/` is its union's (watch-system WS-1).
+ * `scope` names it in an error. */
+int sysroots_resolve_at(const struct fsops *ops, int root_fd, const char *scope, struct belay_system_roots *out);
 
 /* The table for this platform. */
 const struct fsops *fsops_default(void);

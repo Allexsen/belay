@@ -7,6 +7,7 @@
 #ifndef BELAY_RUNTIME_H
 #define BELAY_RUNTIME_H
 
+#include <stdbool.h>
 #include <stddef.h>
 
 struct belay_runtime_opts {
@@ -20,6 +21,11 @@ struct belay_runtime_opts {
     /* RT-8, RT-9: whether to read as root -- the holders are read only then.
      * -1: whether geteuid() is 0 (what the CLI passes); 0 or 1: as given. */
     int root;
+    /* RT-12: `net_pid` is a container's first process. Only the processes
+     * whose cgroup v2 path is its, or below it, are read (holders and
+     * services); when its network namespace is the proc root's `self`'s
+     * (the host's), no listener is read and the header's `netns` is "host". */
+    bool container;
 };
 
 struct belay_runtime_stats {

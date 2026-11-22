@@ -56,7 +56,8 @@ static const char USAGE[] =
     "  --version\n"
     "\n"
     "  --system in place of --scope DIR on check, mark, diff, log, manifest, prune and watch: the machine's /,\n"
-    "    read by a fixed list of roots (docs/cli.md); baseline export and verify refuse it\n"
+    "    read by a fixed list of roots (docs/cli.md); baseline export and verify refuse it. With --docker\n"
+    "    CONTAINER: the container's /, read the same way from its layers on the host\n"
     "  --docker CONTAINER on any of these: the scope is a path inside a Docker container, read from its\n"
     "                                        layers on the host (Linux, root; export and verify: paused)\n"
     "exit codes: 0 done, 1 diff --exit-code found a change (verify: a violation), 2 usage, 3 refused, 4 failed\n";
@@ -243,11 +244,8 @@ static int parse(int argc, char **argv, struct opts *o, FILE *err) {
 
 int cli_system_scope(bool system, const char *system_root, const char **scope, const char *docker, FILE *err) {
     if (*scope != NULL || (system && system_root != NULL)) return usage(err, "--system takes the place of --scope");
-    if (docker != NULL) {
-        fputs("belay: refused: --system with --docker is not implemented in this version\n", err);
-        return EXIT_REFUSED;
-    }
-    *scope = system_root != NULL ? system_root : "/";
+    if (docker != NULL && system_root != NULL) return usage(err, "--system-root is a directory's, --docker a container's: one of them");
+    *scope = system_root != NULL ? system_root : "/";      /* with --docker: the container's / (WS-1) */
     return 0;
 }
 
@@ -541,12 +539,12 @@ static int open_scope(const struct opts *o, bool create, struct state *st, FILE 
     return open_scope_paused(o, false, create, st, err);
 }
 
-int cli_open_scope(const char *scope, const char *docker, bool create, struct state *st, FILE *err) {
+int cli_open_scope(const char *scope, const char *docker, bool need_paused, bool create, struct state *st, FILE *err) {
     struct opts o;
     memset(&o, 0, sizeof o);
     o.scope = scope;
     o.docker = docker;
-    return open_scope_paused(&o, docker != NULL, create, st, err);   /* export: paused (H-C4) */
+    return open_scope_paused(&o, docker != NULL && need_paused, create, st, err);   /* export: paused (H-C4) */
 }
 
 static int cmd_capture(const struct opts *o, const char *kind, FILE *out, FILE *err) {
