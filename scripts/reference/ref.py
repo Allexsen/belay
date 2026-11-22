@@ -81,13 +81,13 @@ KIND_ROWS = {
     "pip_reinstalled": (["name", "version", "files_added", "files_removed", "files_changed"],
                         "reinstalled {name} {version}: +{files_added} -{files_removed} "
                         "~{files_changed} files"),
-    "dpkg_installed": (["package", "arch", "version"], "installed {package}:{arch} {version}"),
+    "dpkg_installed": (["package", "arch", "version", "auto"], "installed {package}:{arch} {version}"),
     "dpkg_removed": (["package", "arch", "version"], "removed {package}:{arch} {version}"),
-    "dpkg_upgraded": (["package", "arch", "from", "to"],
+    "dpkg_upgraded": (["package", "arch", "from", "to", "auto"],
                       "upgraded {package}:{arch} {from} -> {to}"),
-    "dpkg_downgraded": (["package", "arch", "from", "to"],
+    "dpkg_downgraded": (["package", "arch", "from", "to", "auto"],
                         "downgraded {package}:{arch} {from} -> {to}"),
-    "dpkg_state_changed": (["package", "arch", "from", "to"], "{package}:{arch} {from} -> {to}"),
+    "dpkg_state_changed": (["package", "arch", "from", "to", "auto"], "{package}:{arch} {from} -> {to}"),
     "git_reflog_appended": (["ref", "entries"], "{ref}: {entries} reflog entries"),
     "git_reflog_move": (["ref", "from", "to", "operation"], "{ref} {from} -> {to} by {operation}"),
     "git_reflog_rewritten": (["ref"], "{ref}: reflog rewritten"),
@@ -183,7 +183,9 @@ def render(kind, values):
     """The template with each {field} replaced by its value, in one pass: a
     value that itself holds "{...}" is not replaced again."""
     fields, template = KIND_ROWS[kind]
-    if any(f not in values for f in fields):
+    # SD-1's `auto` is optional and in no template ("an absent field no template
+    # names changes no text").
+    if any(f not in values for f in fields if f != "auto"):
         optional, template = OPTIONAL[kind]
         assert all(f in values or f in optional for f in fields)
 
@@ -200,6 +202,9 @@ def fields_json(kind, values):
         if f not in values:
             continue                    # an optional field, absent
         v = values[f]
+        if isinstance(v, bool):
+            parts.append(jstr(f) + b":" + (b"true" if v else b"false"))
+            continue
         parts.append(jstr(f) + b":" + (str(v).encode() if isinstance(v, int) else jstr(v)))
     return parts
 
@@ -601,7 +606,28 @@ def deb_installed(st):
     return len(words) >= 3 and words[2] == b"installed"
 
 
-def dpkg_events_for(path, before, after):
+EXTENDED_STATES = b"var/lib/apt/extended_states"
+
+
+def auto_marks(store, aents):
+    """SD-1: the set of (Package, Architecture) the after-manifest's
+    `var/lib/apt/extended_states` marks `Auto-Installed: 1`; None -- `auto`
+    absent -- when the file is not in the scope or cannot be read (no entry,
+    not a regular file, no readable copy, not parsable)."""
+    e = aents.get(EXTENDED_STATES)
+    if not is_reg(e):
+        return None
+    reason, data = fetch(store, e, DPKG_BOUND)
+    if reason:
+        return None
+    try:
+        db = parse_status(data)
+    except InterpFailure:
+        return None
+    return {k for k, st in db.items() if st.get(b"auto-installed") == b"1"}
+
+
+def dpkg_events_for(path, before, after, auto=None):
     """Events of one status path, as (sort key, kind, values)."""
     bdb = parse_status(before) if before is not None else {}
     adb = parse_status(after) if after is not None else {}
@@ -635,6 +661,8 @@ def dpkg_events_for(path, before, after):
         if sb != sa and not covered:
             evs.append(("dpkg_state_changed", {"package": pkg, "arch": arch, "from": sb, "to": sa}))
         for kind, vals in evs:
+            if auto is not None and kind != "dpkg_removed":
+                vals["auto"] = (pkg, arch) in auto
             out.append(((0, pkg, arch, KIND_INDEX[kind], path), kind, vals, [path]))
     return out
 
@@ -1743,9 +1771,10 @@ def interpret(before_fn, after_fn, store):
     # ---- dpkg end hook
     cni_dpkg = set()
     evs = []
+    auto = auto_marks(store, aents) if dpkg_jobs else None
     for path, before, after in dpkg_jobs:
         try:
-            evs += dpkg_events_for(path, before, after)
+            evs += dpkg_events_for(path, before, after, auto)
         except InterpFailure:
             cni_dpkg.add(path)
     dpkg_lines = end_events("dpkg", evs, cni_dpkg, unav["dpkg"], unknown)

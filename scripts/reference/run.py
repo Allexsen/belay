@@ -789,6 +789,20 @@ def e11_silent(mine, n=1):
     return not any(p in nc for e in evs(mine) for p in event_paths(e))
 
 
+AUTO_WANT = {}      # cell -> {(event, package): auto | None}, from gen's cases
+
+
+def check_auto(cell, E):
+    """SD-1: the reference's own output has the `auto` the case was built to
+    show on each of its events."""
+    want = AUTO_WANT[cell]
+    seen = {}
+    for e in E:
+        if e["interp"] == "dpkg" and "package" in e and e["package"] != "keep":
+            seen[(e["event"], e["package"].encode())] = e.get("auto")
+    return seen == want
+
+
 def check_cell(cell, mine, belay=None):
     """Did this pair's reference output show the cell it was built for?
     (belay's parsed diff is used by one probe only: a claim's edge.)"""
@@ -798,6 +812,8 @@ def check_cell(cell, mine, belay=None):
     def has(kind, **kw):
         return any(e["event"] == kind and all(e.get(k) == v for k, v in kw.items()) for e in E)
 
+    if cell.startswith("dpkg.auto."):
+        return check_auto(cell, E)
     if cell.startswith("git.e12."):
         return check_e12(cell, mine)
     if cell.startswith("git.") or cell.startswith("cu.git."):
@@ -1036,6 +1052,9 @@ def main():
     os.makedirs(a.work)
     cache = os.path.join(os.path.dirname(os.path.abspath(a.work)), "zero-digests.json")
     cases = gen.all_cases(a.n, a.seed)
+    for c in cases:
+        if hasattr(c, "auto_want"):
+            AUTO_WANT[next(iter(c.tags[c.modes[0]]))] = c.auto_want
     if a.only:
         cases = [c for c in cases if a.only in c.name]
     hits = collections.Counter()
