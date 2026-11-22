@@ -280,6 +280,29 @@ TEST(a_file_that_no_longer_interprets_is_flagged) {
     REQUIRE(sys("stop") == 0);
 }
 
+/* WS-F17, the branches the test above leaves: a sudoers file, an
+ * authorized_keys file and a home's own user unit that no longer interpret. */
+TEST(a_sudoers_sshkeys_or_user_unit_that_no_longer_interprets_is_flagged) {
+    fresh();
+    sh("cd '%s' && mkdir -p etc/sudoers.d home/u/.ssh home/u/.config/systemd/user && printf 'u ALL=(ALL) ALL\\n' > etc/sudoers.d/u && "
+       "printf 'ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA k\\n' > home/u/.ssh/authorized_keys && "
+       "printf '[Service]\\nExecStart=/bin/x\\n' > home/u/.config/systemd/user/x.service", g_tree);
+    settle();
+    REQUIRE_MSG(step() == 0, "%s", g_out);
+    REQUIRE_MSG(step() == 0, "%s", g_out);
+    sh("cd '%s' && printf 'u ALL=(ALL) ALL\\0x\\n' > etc/sudoers.d/u", g_tree);
+    REQUIRE(step() == 0);
+    ASSERT_TRUE(strstr(g_out, "belay: " RED " outside tool calls: could not interpret: etc/sudoers.d/u (") == g_out);
+    sh("cd '%s' && printf 'ssh-ed25519 \\0x\\n' > home/u/.ssh/authorized_keys", g_tree);
+    REQUIRE(step() == 0);
+    ASSERT_TRUE(strstr(g_out, "belay: " RED " outside tool calls: could not interpret: home/u/.ssh/authorized_keys (") == g_out);
+    sh("cd '%s' && printf '[Service]\\0x\\n' > home/u/.config/systemd/user/x.service", g_tree);
+    REQUIRE(step() == 0);
+    /* the unit's own event is flagged with it, in one line */
+    ASSERT_TRUE(strstr(g_out, "belay: " RED " outside tool calls: unit file home/u/.config/systemd/user/x.service changed (services); "
+                              "could not interpret: home/u/.config/systemd/user/x.service (services)\n") == g_out);
+}
+
 /* WS-F13, WS-N3, WS-N5 over a diff's runtime records: a listener below
  * 1024 whose holder's executable no package owns is flagged; one a package
  * owns is noted; one of a package installed here is counted; a UDP
@@ -514,6 +537,7 @@ int main(void) {
     RUN(start_opens_stop_closes_and_a_second_start_is_refused);
     RUN(a_step_flags_and_notes_by_the_system_list);
     RUN(a_file_that_no_longer_interprets_is_flagged);
+    RUN(a_sudoers_sshkeys_or_user_unit_that_no_longer_interprets_is_flagged);
     RUN(listeners_and_services_by_their_executables_owner);
     RUN(patterns_lists_the_roots_the_homes_left_out_and_the_list);
     RUN(the_receipt_is_in_sections_in_order);
