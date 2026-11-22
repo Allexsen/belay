@@ -119,6 +119,7 @@ int capture_write_root(const struct fsops *ops, const char *out_path, const char
         else snprintf(td.dir, sizeof td.dir, "%.*s", (int)(slash - out_path), out_path);
     }
     FILE *verdicts = NULL;
+    struct ixb *index = NULL;
     struct belay_entry *ebuf = malloc(sizeof *ebuf);
 
     struct walk_ctx *wc = calloc(1, sizeof *wc);
@@ -179,7 +180,8 @@ int capture_write_root(const struct fsops *ops, const char *out_path, const char
     struct prev_info pinfo = { 0 };
     const char *prev_why = NULL;
     if (opts->previous != NULL) {
-        const int pr = prev_load(ops, opts->previous, real, wc->root_dev, opts, &wc->prev, &pinfo, &prev_why);
+        const int pr = prev_load(ops, opts->previous, real, wc->root_dev, opts, cap_tmpfile, &td, &wc->prev, &pinfo,
+                                 &prev_why);
         if (pr == -1) goto cleanup;
         wc->reference_ns = pinfo.reference_ns;
         /* V5-E7: a sealed entry is trusted only when the previous
@@ -290,6 +292,13 @@ int capture_write_root(const struct fsops *ops, const char *out_path, const char
     struct belay_manifest_header hdr = { .hash_max_bytes = opts->hash_max_bytes };
     snprintf(hdr.scope, sizeof hdr.scope, "%s", real);
     if (runs_rewind(wc->runs) == -1) goto cleanup;
+    /* A walk leaves the index of what it wrote (capture-scale SC-M3a), built
+     * from the entries as they go out. It is a cache: when it cannot be
+     * made, the capture is no worse, and the next one builds it. */
+    if (opts->index_dir != NULL) {
+        index = ixb_new(opts->index_dir, cap_tmpfile, &td, opts->run_bytes);
+        if (index == NULL) belay_err_clear();
+    }
     const unsigned char *key, *val;
     uint32_t klen, vlen;
     int got;
@@ -315,6 +324,11 @@ int capture_write_root(const struct fsops *ops, const char *out_path, const char
         if (fwrite(wc->line, 1, llen, out) != llen) {
             belay_err_set(BELAY_ERR_IO, errno, "manifest: write failed");
             goto cleanup;
+        }
+        if (index != NULL && ixb_add(index, ebuf) == -1) {
+            belay_err_clear();
+            ixb_free(index);
+            index = NULL;
         }
     }
     if (got == -1) goto cleanup;
@@ -406,6 +420,10 @@ int capture_write_root(const struct fsops *ops, const char *out_path, const char
     }
     outtmp_live = false;
     sync_dir_of(ops, out_path);
+    if (index != NULL) {                    /* named by the bytes just published */
+        char sha[65];
+        if (prev_file_sha256(out_path, sha) == -1 || ixb_finish(index, sha, NULL, NULL, NULL) == -1) belay_err_clear();
+    }
 
     if (stats != NULL) {
         *stats = tally;
@@ -431,6 +449,7 @@ cleanup:
     if (out != NULL) fclose(out);
     if (outtmp_live) unlink(outtmp);
     if (verdicts != NULL) fclose(verdicts);
+    ixb_free(index);
     free(ebuf);
     if (wc != NULL) {
         runs_free(wc->runs);

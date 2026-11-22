@@ -211,9 +211,9 @@ struct belay_manifest_opts {
      *  Memory budget for the writer's sort buffer. 0 selects the default
      *  (4 MiB). Values below the minimum (one maximal entry, ~70 KB) are
      *  raised to it. Peak writer memory is roughly this plus ~1 MiB of merge
-     *  cursors, independent of how many entries the scope holds -- plus,
-     *  with `previous`, its index: about 76 bytes a regular file, at most
-     *  64 MiB.
+     *  cursors, independent of how many entries the scope holds: the index
+     *  of `previous` is sorted within the same budget and mapped from a
+     *  file, never held (test/expect/capture-scale.md).
      */
     size_t   run_bytes;
 
@@ -222,10 +222,25 @@ struct belay_manifest_opts {
      *  A regular file it shows unchanged -- same (dev, ino, mode, size,
      *  mtime_ns, ctime_ns), ctime_ns before the reference point -- is not
      *  read: its hash and stored copy are the previous entry's. NULL: every
-     *  file is read. Unusable (another scope, other limits, too large to
-     *  index): a full walk, said in stats->prefilter_skipped.
+     *  file is read. Unusable (another scope, other limits): a full walk,
+     *  said in stats->prefilter_skipped. Its size is no reason
+     *  (capture-scale SC-M1).
      */
     const char *previous;
+    /*
+     *  Where a manifest's index is kept (capture-scale SC-M3, SC-M3a): a
+     *  directory of belay's state, made when missing, that this capture and
+     *  no other writes while it runs. The index of `previous` is taken from
+     *  it when the one there names that manifest's sha256, and built there
+     *  otherwise; and a walk leaves the index of the manifest it wrote
+     *  there, in place of whatever was, so the next capture builds none.
+     *  NULL: the index of `previous` is a temporary beside the output, gone
+     *  with the capture, and none is written.
+     *  previous_sha256: the sha256 of `previous`' bytes, 64 hex digits, when
+     *  the caller has it recorded; NULL: the file is read for it.
+     */
+    const char *index_dir;
+    const char *previous_sha256;
     /* Why every file is read, when `previous` is NULL, for the trailer's
      * `read_all` ("asked for (--full)", "every 50 marks", ...); NULL: a full
      * check, "check". The previous walk's start is read from the previous

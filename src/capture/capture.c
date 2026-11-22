@@ -601,19 +601,20 @@ int cap_read_file(int pfd, const char *name, const struct stat *st, const char *
         const struct prev_rec *p = prev_find(wc->prev, (uint64_t)st->st_dev, (uint64_t)st->st_ino);
         /* V5-E9, V5-E7: trusted only in the class it has now, and a sealed
          * hash only under the key that made it. */
-        if (prev_trusted(p, st, wc->reference_ns) && p->sealed == seal && (!seal || wc->prev_key_same)) {
+        const bool p_sealed = p != NULL && (p->flags & PF_SEALED), p_stored = p != NULL && (p->flags & PF_HAS_STORED);
+        if (prev_trusted(p, st, wc->reference_ns) && p_sealed == seal && (!seal || wc->prev_key_same)) {
             char hex[65];
             prev_hex(p, hex);
             /* A copy is recorded only as a full capture would record it: in
              * the store at its size, and no writer holding the file open
              * (second review 2026-10-31, D4). */
-            const bool copy = want && p->has_stored && store_has(wc->store, hex, e->size) &&
+            const bool copy = want && p_stored && store_has(wc->store, hex, e->size) &&
                               wc->ops->writer_present(wc->ops->ctx, fd) != 1;
             /* An unclaimed file without a copy may be binary, which a full
              * capture would not keep either: that is decided by its first
              * SNIFF_BYTES, unchanged with the rest, so only they are read. */
             bool skip = !want || copy;
-            if (!skip && !p->has_stored && claim.keep == BELAY_KEEP_DEFAULT) {
+            if (!skip && !p_stored && claim.keep == BELAY_KEEP_DEFAULT) {
                 skip = sniff_binary(wc->ops, fd, wc->readbuf);
                 if (!skip && lseek(fd, 0, SEEK_SET) == -1) {      /* read whole below, from 0 */
                     close(fd);

@@ -229,7 +229,7 @@ static int verify_steps(int layers) {
     FILE *out = open_memstream(&g_out, &on);
     if (state_open(&sc, true, &st, stderr) == -1) goto done;
     if (bundle_read(g_bundle, g_sha, work, before, st.store, &bd) == -1) goto done;
-    const struct capture_req req = { "check", false, false, 0, bd.meta.hash_max_bytes, false, false, false };
+    const struct capture_req req = { "check", false, false, 0, bd.meta.hash_max_bytes, false, false, false, true };
     struct checkpoint c;
     if (state_capture(&st, &req, &c) == -1) goto done;
     state_manifest(&st, c.id, after, sizeof after);

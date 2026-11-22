@@ -524,6 +524,27 @@ int manifest_delta_base(const struct state *st, long id, long *base, uint64_t *s
     return 0;
 }
 
+bool manifest_recorded_sha256(const struct state *st, long id, char hex[65]) {
+    const int d = open_file(st, id, "manifest.delta", NULL);
+    struct lr r;
+    if (d < 0 || lr_open(&r, d, 0, false) == -1) {
+        if (d >= 0) close(d);
+        belay_err_clear();
+        return false;
+    }
+    struct header h;
+    const char *l;
+    size_t ln;
+    const bool ok = lr_line(&r, &l, &ln) == 1 && parse_header(st, id, l, ln, &h) == 0;
+    lr_close(&r);
+    if (!ok) {
+        belay_err_clear();
+        return false;
+    }
+    memcpy(hex, h.sha, 65);
+    return true;
+}
+
 /* tmp/<name> made checkpoints/<id>/<as>, durable: 0, or -1 with belay_err. */
 static int publish(const struct state *st, int tfd, const char *name, int fd, long id, const char *as) {
     char rel[64], shown[PATH_MAX + 160];
