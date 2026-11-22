@@ -252,6 +252,34 @@ TEST(a_step_flags_and_notes_by_the_system_list) {
     ASSERT_TRUE(strstr(g_out, RED) == NULL);
 }
 
+/* WS-F17: a file whose events a row flags that no longer interprets is
+ * flagged, by the event's text and its first path, not counted; the
+ * receipt puts it in its interpreter's section. */
+TEST(a_file_that_no_longer_interprets_is_flagged) {
+    fresh();
+    sh("cd '%s' && mkdir -p etc/ssh && printf 'Port 22\\n' > etc/ssh/sshd_config", g_tree);
+    settle();
+    REQUIRE_MSG(step() == 0, "%s", g_out);
+    REQUIRE_MSG(step() == 0, "%s", g_out);
+    sh("cd '%s' && printf '+bad\\n' >> etc/passwd", g_tree);
+    REQUIRE(step() == 0);
+    ASSERT_TRUE(strstr(g_out, "belay: " RED " outside tool calls: could not interpret: etc/passwd (accounts)") == g_out);
+    ASSERT_TRUE(strstr(g_out, "etc/passwd modified") == NULL);
+    sh("cd '%s' && printf 'Port 22\\0x\\n' > etc/ssh/sshd_config", g_tree);
+    REQUIRE(step() == 0);
+    ASSERT_TRUE(strstr(g_out, "belay: " RED " outside tool calls: could not interpret: etc/ssh/sshd_config (ssh)") == g_out);
+    /* the receipt */
+    fresh();
+    sh("cd '%s' && mkdir -p etc/ssh && printf 'Port 22\\n' > etc/ssh/sshd_config", g_tree);
+    settle();
+    REQUIRE(sys("start") == 0);
+    sh("cd '%s' && printf '+bad\\n' >> etc/passwd && printf 'Port 22\\0x\\n' > etc/ssh/sshd_config", g_tree);
+    REQUIRE_MSG(sys("receipt") == 0, "%s%s", g_out, g_err);
+    ASSERT_TRUE(strstr(g_out, "\nuser\n  could not interpret: etc/passwd\n") != NULL);
+    ASSERT_TRUE(strstr(g_out, "\nconfig\n  could not interpret: etc/ssh/sshd_config\n") != NULL);
+    REQUIRE(sys("stop") == 0);
+}
+
 /* WS-F13, WS-N3, WS-N5 over a diff's runtime records: a listener below
  * 1024 whose holder's executable no package owns is flagged; one a package
  * owns is noted; one of a package installed here is counted; a UDP
@@ -485,6 +513,7 @@ int main(void) {
     g_root = geteuid() == 0;
     RUN(start_opens_stop_closes_and_a_second_start_is_refused);
     RUN(a_step_flags_and_notes_by_the_system_list);
+    RUN(a_file_that_no_longer_interprets_is_flagged);
     RUN(listeners_and_services_by_their_executables_owner);
     RUN(patterns_lists_the_roots_the_homes_left_out_and_the_list);
     RUN(the_receipt_is_in_sections_in_order);

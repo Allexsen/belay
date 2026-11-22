@@ -9,6 +9,7 @@
 #include "belay/error.h"
 #include "belay/interp.h"
 #include "belay/manifest.h"
+#include "interp/config.h"
 #include "interp/lookup_internal.h"
 #include "util/pattern.h"
 
@@ -70,6 +71,7 @@ const char *const sysflag_event_rows[][2] = {
     { "WS-F13", "listener_opened below port 1024 held by an executable in no package" },
     { "WS-F14", "trust_anchor_added in no package" },
     { "WS-F16", "a unit event under a home's .config/systemd/user" },
+    { "WS-F17", "could_not_interpret of accounts, sudoers, sshkeys, of config on a file of grammar sshd, or on a unit under a home's .config/systemd/user" },
     { "WS-N1", "noted: user_added, group_added, password_entry_added, other group_members_changed" },
     { "WS-N2", "noted: cron_job_added, cron_script_added, timer_file_added, unit_linked, unit_file_added, unit_masked, init_script_added, init_script_changed, trust_anchor_added in a package" },
     { "WS-N3", "noted: service_started, service_stopped, service_restarted, other listener_opened, listener_closed" },
@@ -435,9 +437,45 @@ static bool any_path(const struct jval *e, bool (*fn)(const struct sx *, const c
     return p[0] != '\0' && fn(x, p, strlen(p));
 }
 
+/* A file of sshd's grammar (WS-F6), by its scope-relative path. */
+static bool sshd_file(const struct sx *x, const char *path, size_t len) {
+    (void)x;
+    char abs[4096];
+    if (len + 2 > sizeof abs) return false;
+    abs[0] = '/';
+    memcpy(abs + 1, path, len);
+    abs[len + 1] = '\0';
+    return config_grammar(abs, len + 1) == CONFIG_SSHD;
+}
+
+/* WS-F17: a could_not_interpret on a file whose events WS-F1, F2, F3, F6,
+ * F16 flag. */
+static int not_interpreted(const struct sx *x, const struct jval *e, const char *interp, enum wkind *kind) {
+    if (any_path(e, in_user_units, x)) { *kind = WK_SERVICE; return SF_FLAG; }
+    if (!strcmp(interp, "sudoers")) { *kind = WK_SUDO; return SF_FLAG; }
+    if (!strcmp(interp, "sshkeys")) { *kind = WK_SSH; return SF_FLAG; }
+    if (!strcmp(interp, "accounts")) { *kind = WK_ACCOUNT; return SF_FLAG; }
+    if (!strcmp(interp, "config") && any_path(e, sshd_file, x)) { *kind = WK_SSH; return SF_FLAG; }
+    return SF_NONE;
+}
+
+/* The text of a could_not_interpret as the receipt says it: with its first
+ * path. NULL: no memory. */
+static char *not_interpreted_text(const struct jval *e) {
+    const struct jval *ps = jget(e, "paths");
+    const char *t = jstr(e, "text"), *p = ps != NULL && ps->t == J_ARR && ps->n && ps->kids[0].t == J_STR ? ps->kids[0].s : NULL;
+    const size_t cap = strlen(t) + (p != NULL ? strlen(p) : 0) + 16;
+    char *out = malloc(cap);
+    if (out == NULL) return NULL;
+    if (p != NULL) snprintf(out, cap, "%s: %s%s", t, p, ps->n > 1 ? " and others" : "");
+    else snprintf(out, cap, "%s", t);
+    return out;
+}
+
 static int event_class(const struct sx *x, const struct jval *e, enum wkind *kind, bool *own) {
     const char *k = jstr(e, "event"), *interp = jstr(e, "interp");
     *own = false;
+    if (!strcmp(k, "could_not_interpret")) return not_interpreted(x, e, interp, kind);
     const bool config = strcmp(interp, "config") == 0 && strncmp(k, "config_", 7) == 0;
     /* WS-F16: a unit event under a home's user units */
     static const char *const UNIT_EV[] = { "unit_file_added", "unit_file_changed", "timer_file_added", "unit_linked" };
@@ -557,8 +595,12 @@ static int pass_events(struct sx *x, FILE *in, struct wstep *s) {
             if (c != SF_NONE && taken_add(x, &v) == -1) rc = -1;
             else if (c == SF_BYINST) s->by_installed++;
             else if (c == SF_FLAG || c == SF_NOTE) {
-                if (say(&f, kind, c == SF_NOTE, own, jstr(&v, "text"), own ? NULL : wkind_name(kind)) == -1 ||
-                    add_flag(s, &f) == -1) { free(f.text); rc = -1; }
+                const bool cni = strcmp(jstr(&v, "event"), "could_not_interpret") == 0;     /* F17 */
+                char *t = cni ? not_interpreted_text(&v) : NULL;
+                if (cni && t == NULL) rc = nomem();
+                else if (say(&f, kind, c == SF_NOTE, own, cni ? t : jstr(&v, "text"), own ? NULL : wkind_name(kind)) == -1 ||
+                         add_flag(s, &f) == -1) { free(f.text); rc = -1; }
+                free(t);
             }
         } else if (jget(&v, "runtime") != NULL) {
             const char *word = "added";

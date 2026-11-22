@@ -1,6 +1,6 @@
 /*
  *  What a system watch flags and notes (test/expect/watch-system.md, WS-F1
- *  to WS-F16, WS-N1 to WS-N5, WS-L1), over one diff: its events, its path
+ *  to WS-F17, WS-N1 to WS-N5, WS-L1), over one diff: its events, its path
  *  records -- by the roots of its two manifests -- and its runtime records.
  *  watch-v1's list does not apply to a system scope: this one does.
  *
