@@ -166,8 +166,9 @@ static int parse(const char *buf, size_t len, const struct str *user, struct csi
     sd->lines = sys_lines(buf, len, &nl, &oom);
     if (oom) return -1;
     if (nl == 0) return 0;
-    /* A key is no longer than its line and two separators. */
-    sd->keys = malloc(len + 3 * nl + 1);
+    /* A key is no longer than its line, two separators and, in a spool
+     * file, the user its name gives every job. */
+    sd->keys = malloc(len + (3 + (user != NULL ? user->n : 0)) * nl + 1);
     sd->j = calloc(nl, sizeof *sd->j);
     sd->e = calloc(nl, sizeof *sd->e);
     sd->jk = calloc(nl, sizeof *sd->jk);

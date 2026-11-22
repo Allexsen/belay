@@ -65,8 +65,7 @@ static bool weekdays(struct fld f, char *out, size_t cap) {
         if (!weekday(f.s + at, e - at, &d) || w + 6 > cap) return false;
         w += (size_t)snprintf(out + w, cap - w, "%s%s", w ? ", " : "", DAY[d]);
         if (e == f.n) return true;
-        at = e + 1;
-        if (at == f.n) return false;            /* a list ending in a comma */
+        at = e + 1;                             /* a list ending in a comma: an empty weekday, refused */
     }
 }
 

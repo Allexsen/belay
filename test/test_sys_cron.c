@@ -12,6 +12,8 @@
 
 #include "interp/inwords.h"
 
+#include <sys/time.h>
+
 #define HEAD "# /etc/crontab: system-wide crontab\n" \
              "SHELL=/bin/sh\n" \
              "PATH=/usr/local/sbin:/usr/local/bin:/sbin:/bin:/usr/sbin:/usr/bin\n" \
@@ -143,10 +145,11 @@ TEST(env_lines_are_changed_added_or_removed_and_do_not_move_jobs) {
         "\"from\":\"\",\"to\":\"3\",\"text\":\"etc/cron.d/y: A  -> 3\",\"paths\":[\"etc/cron.d/y\"]}\n",
         t_events(1, 2));
     /* env: the last of each name above the job, in the file's order. */
-    t_file("etc/cron.d/x", "MAILTO=a\nSHELL=/bin/sh\nOTHER=1\nMAILTO=b\nCRON_TZ=UTC\n5 5 * * * root x\nSHELL=/bin/bash\n", 0644);
+    t_file("etc/cron.d/x", "MAILTO=a\nSHELL=/bin/sh\nOTHER=1\nMAILTO=b\nCRON_TZ=UTC\n  PATH = /bin \n5 5 * * * root x\n"
+                           "SHELL=/bin/bash\n", 0644);
     REQUIRE(t_snap(3) == 0);
-    ASSERT_TRUE(strstr(t_events(2, 3), "\"command\":\"x\",\"env\":[\"SHELL=/bin/sh\",\"MAILTO=b\",\"CRON_TZ=UTC\"],"
-                                       "\"text\":") != NULL);
+    ASSERT_TRUE(strstr(t_events(2, 3), "\"command\":\"x\",\"env\":[\"SHELL=/bin/sh\",\"MAILTO=b\",\"CRON_TZ=UTC\","
+                                       "\"PATH = /bin\"],\"text\":") != NULL);
 }
 
 #define JOB "* * * * * root true\n"
@@ -200,13 +203,23 @@ TEST(files_cron_does_not_run_are_said_where_cron_is_installed) {
     REQUIRE(chmod(p, 0664) == 0);
     REQUIRE(t_snap(3) == 0);
     ASSERT_EQ_STR(NOTRUN("etc/cron.d/ok-name", "mode"), t_events(2, 3));
+    /* Only its times changed: the file is not one "added or changed", and
+     * its name is not said again. */
+    snprintf(p, sizeof p, "%s/root/etc/cron.d/has.dot", g_dir);
+    const struct timeval tv[2] = { { 1000000000, 0 }, { 1000000000, 0 } };
+    REQUIRE(utimes(p, tv) == 0);
+    REQUIRE(t_snap(4) == 0);
+    ASSERT_TRUE(strstr(t_record(t_diff(3, 4), "etc/cron.d/has.dot"), "\"outcome\":\"metadata_only\"") != NULL);
+    ASSERT_EQ_STR("", t_only_events(g_text));
 }
 
 /* SC-2, SC-6: without the package (removed, never there, or no database)
  * the jobs and scripts are listed and nothing is said of validity. */
 TEST(nothing_is_said_of_validity_where_cron_is_not_installed) {
     static const char *const STATUS[] = { STATUS_BASE STATUS_GONE, STATUS_BASE, NULL,
-                                          "Package: cron\nStatus: install ok installed\n continuation\n" };
+                                          "Package: cron\nStatus: install ok installed\n continuation\n",
+                                          /* cron's stanza whole, the file not: a status that does not parse says nothing */
+                                          STATUS_CRON "Package: x\nthis is no field\n" };
     for (size_t i = 0; i < sizeof STATUS / sizeof STATUS[0]; i++) {
         t_reset();
         if (STATUS[i] != NULL) t_file("var/lib/dpkg/status", STATUS[i], 0644);
@@ -458,6 +471,16 @@ TEST(hostile_crontabs_are_read_or_refused_never_trusted) {
     tr_free(&r);
     ASSERT_EQ_STR(E10("etc/cron.d/x"), one(&r, "etc/cron.d/x", "=novalue\n", 9));
     tr_free(&r);
+    /* A spool file's name is every job's user: many short jobs under a long name. */
+    {
+        static char name[300], jobs[60000];
+        size_t jw = 0;
+        snprintf(name, sizeof name, "var/spool/cron/crontabs/%0200d", 7);
+        for (int i = 0; i < 5000; i++) jw += (size_t)snprintf(jobs + jw, sizeof jobs - jw, "@reboot x\n");
+        const char *sp = one(&r, name, jobs, jw);
+        ASSERT_EQ_INT(5000, count(sp, "{\"event\":\"cron_job_added\""));
+        tr_free(&r);
+    }
     /* 100,000 jobs: 65,535 events and one and_more counting the rest (E5). */
     static char many[3200000];
     w = 0;
