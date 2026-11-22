@@ -625,7 +625,9 @@ static int record(const struct jval *r, struct ctx *x, const struct receipt_opts
         sbf(&b, ")");
     }
     /* Neither is ever folded: each is named on its own line (G2-4, G3-4). */
-    const bool named = not_read || sealed;
+    /* under a metadata root content is never read (manifest v5): a system
+     * watch's receipt folds those records as any other */
+    const bool named = (not_read && x->sec == NULL) || sealed;
     free(why.p);
     /* A record past the 4,096-finding cap ends in an and_more finding
      * standing for n more: counted, not shown as one (review 2026-11-01,
@@ -649,10 +651,6 @@ static int record(const struct jval *r, struct ctx *x, const struct receipt_opts
      * reliably: each is named on its own line (S7 2026-10-31, row 73). */
     const bool is_priv = why.n != 0, unknown = strcmp(outcome, "unknown") == 0;
     if (is_priv) return keep(&x->priv, b.p, false, o->all);
-    if (x->sec != NULL && have_path && !o->all && plen < sizeof path) {
-        path[plen] = '\0';
-        if (memchr(path, '\0', plen) == NULL && str_in(x->taken, x->n_taken, path)) { free(b.p); return 0; }   /* an event's */
-    }
     const int sec = x->sec != NULL && x->sec->section != NULL && have_path ? x->sec->section(x->sec->section_ctx, path, plen, is_dir) : -1;
     if (sec == RS_SECRET) {             /* WS-F12: said without content */
         free(b.p);
@@ -687,6 +685,10 @@ static int record(const struct jval *r, struct ctx *x, const struct receipt_opts
             }
             return 0;
         }
+    }
+    if (x->sec != NULL && have_path && !o->all && plen < sizeof path) {
+        path[plen] = '\0';
+        if (memchr(path, '\0', plen) == NULL && str_in(x->taken, x->n_taken, path)) { free(b.p); return 0; }   /* an event's */
     }
     /* SY-3b: a link of etc/rc?.d added or removed is counted, not listed. */
     if (!o->all && !unknown && !named && have_path && rc_d_link(path, plen) && type != NULL && strcmp(type, "lnk") == 0 &&

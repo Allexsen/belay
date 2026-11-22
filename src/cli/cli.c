@@ -898,7 +898,7 @@ static int cmd_diff(const struct opts *o, FILE *out, FILE *err) {
         struct cli_system sys = { b, st.store };
         const struct receipt_opts ro = { label_a, label_b, o->all, cli_mode_of, &m, o->docker != NULL ? NULL : cli_classify,
                                          st.scope.path, note[0] ? note : NULL, cli_owner_of, &own,
-                                         cli_system_of, &sys };
+                                         cli_system_of, &sys, NULL };
         if (receipt_render(in, out, &ro) == -1) { rc = failed(err); goto done; }
         if (now.id != 0 && (now.raced || now.unstable || now.vanished)) {
             fprintf(out, "\ncheckpoint %ld, captured now\n", now.id);

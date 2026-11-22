@@ -578,14 +578,14 @@ static int do_step(struct wctx *x, const struct wop *op, bool late) {
         /* WS-3a: a walk, under the lock, said in the record before it begins */
         char words[96];
         snprintf(words, sizeof words, "walking (%s)", watch_walk_reason());
-        x->stage = "walking";
-        msg(x->to_sup, 'S', words, strlen(words));
-        if (watch_stage_hook != NULL) watch_stage_hook("walking");
         x->walked = true;
         x->walk_began = now_ns();
         st->walk_ns = x->walk_began;
         snprintf(st->walk_reason, sizeof st->walk_reason, "%s", watch_walk_reason());
         if (ledger_append(&x->l, "walk", q->session, x->now, "", NULL) == -1) return -1;
+        x->stage = "walking";
+        msg(x->to_sup, 'S', words, strlen(words));
+        if (watch_stage_hook != NULL) watch_stage_hook("walking");
         if (state_capture(&x->st, &req, &c) == -1) return -1;
         st->walk_ns = 0;
         st->walk_reason[0] = '\0';
