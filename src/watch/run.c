@@ -967,7 +967,7 @@ static int work(struct wctx *x) {
                 x->status = 3;
                 return 0;
             }
-            x->starting = true;
+            x->starting = true;     /* step 7: the recorder starts here, when it can (kernel-record K1) */
             break;
         case WOP_RECEIPT: {                     /* WS-R, after the step that is its end state (K12) */
             struct wstate *snap = x->n_pend > 0 ? &x->pend[x->n_pend - 1].snap : st;
@@ -984,7 +984,7 @@ static int work(struct wctx *x) {
                 if (snap->cursor == 0) belay_err_set(BELAY_ERR_IO, 0, "no checkpoint to end the receipt with");
                 return -1;
             }
-            if (op->how == 1) {                 /* stop: the watch ends */
+            if (op->how == 1) {                 /* stop: the watch ends; step 7: and its recorder (K1) */
                 snap->sys_started_ns = 0;
                 snap->sys_start = 0;
                 if (snap != st) { st->sys_started_ns = 0; st->sys_start = 0; }
