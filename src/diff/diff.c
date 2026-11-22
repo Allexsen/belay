@@ -373,6 +373,10 @@ int diff_run(const char *before, const char *after, const char *out_path,
     x->interp = interp;
     events_init(&x->events);
     lookup_init(&x->lookup, x->content);
+    if (opts != NULL) {
+        x->lookup.shadow_lines[0] = opts->shadow_lines_before;
+        x->lookup.shadow_lines[1] = opts->shadow_lines_after;
+    }
     for (int i = 0; i < BELAY_INTERP_COUNT; i++)
         x->state[i] = interp[i]->begin != NULL ? interp[i]->begin() : NULL;
     x->begun = true;

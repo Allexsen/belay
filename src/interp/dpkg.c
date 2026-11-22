@@ -279,8 +279,12 @@ static int emit(struct belay_events *ev, const struct dev *e) {
     const char *path = e->path.s;
     const size_t pl = e->path.n;
     const bool two = e->kind == FK_DPKG_INSTALLED || e->kind == FK_DPKG_REMOVED;
-    const struct belay_fv v[] = { FV(e->package), FV(e->arch), FV(e->a), FV(e->b) };
-    return belay_event(ev, e->kind, v, two ? 3 : 4, &path, &pl, 1, flags(e->prov));
+    /* `auto`, last (SD-1), on every kind but dpkg_removed. */
+    const struct belay_fv au = { .absent = true };
+    const struct belay_fv v3[] = { FV(e->package), FV(e->arch), FV(e->a), au };
+    const struct belay_fv v4[] = { FV(e->package), FV(e->arch), FV(e->a), FV(e->b), au };
+    if (two) return belay_event(ev, e->kind, v3, e->kind == FK_DPKG_REMOVED ? 3 : 4, &path, &pl, 1, flags(e->prov));
+    return belay_event(ev, e->kind, v4, 5, &path, &pl, 1, flags(e->prov));
 }
 
 static int upath_cmp(const void *a, const void *b) {

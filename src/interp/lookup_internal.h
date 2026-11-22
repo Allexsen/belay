@@ -15,6 +15,7 @@ struct lk_want { char *path; size_t len; bool below; belay_lookup_fn fn; void *c
 
 struct belay_lookup {
     const struct belay_content *content;
+    const char *shadow_lines[2];    /* belay_diff_opts': before, after */
     struct lk_want *w;          /* this round's, sorted by path before a pass */
     size_t n, cap;
     bool sorted;

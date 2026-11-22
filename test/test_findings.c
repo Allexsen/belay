@@ -231,10 +231,10 @@ TEST(events_are_written_by_interpreter_in_the_pinned_order) {
     struct belay_events e;
     events_init(&e);
     const char *const p[] = { "x" };
-    const struct belay_fv d[] = { S("bash"), S("amd64"), S("5.2") };
+    const struct belay_fv d[] = { S("bash"), S("amd64"), S("5.2"), { .absent = true } };     /* auto (SD-1) */
     const struct belay_fv q[] = { S("numpy"), S("2.1.0") };
     const struct belay_fv c[] = { S("no_store"), S("both") };
-    ASSERT_EQ_INT(0, ev(&e, BELAY_INTERP_DPKG, FK_DPKG_INSTALLED, d, 3, p, 1));
+    ASSERT_EQ_INT(0, ev(&e, BELAY_INTERP_DPKG, FK_DPKG_INSTALLED, d, 4, p, 1));
     ASSERT_EQ_INT(0, ev(&e, BELAY_INTERP_PIP, FK_PIP_INSTALLED, q, 2, p, 1));
     ASSERT_EQ_INT(0, ev(&e, BELAY_INTERP_DPKG, FK_CONTENT_UNAVAILABLE, c, 2, p, 1));
     const char *w = ev_written(&e);

@@ -11,6 +11,7 @@
 #include "schema/finding_schema.h"
 
 #include <inttypes.h>
+#include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 
@@ -76,8 +77,14 @@ static bool valid(int kind, int interp, unsigned level, const struct belay_fv *v
              (v[k].len && memchr(v[k].s, '\0', v[k].len) != NULL)))
             return false;
     }
-    const char *tmpl = partial ? d->text_partial : d->text;
-    if (tmpl == NULL) tmpl = d->text;            /* no second template: absent fields unnamed */
+    /* The second template, when a field the first names is absent; an absent
+     * field no template names changes no text. */
+    const char *tmpl = d->text;
+    for (size_t k = 0; partial && d->text_partial != NULL && tmpl == d->text && k < n; k++) {
+        char name[64];
+        snprintf(name, sizeof name, "{%s}", d->field[k].name);
+        if (v[k].absent && strstr(d->text, name) != NULL) tmpl = d->text_partial;
+    }
     size_t w = 0;
     for (const char *t = tmpl; *t; ) {
         const char *open = strchr(t, '{');

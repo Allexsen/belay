@@ -127,6 +127,58 @@ TEST(text_is_an_unclaimed_path_stored_on_every_side_it_exists_on) {
     ASSERT_EQ_INT(BELAY_INTERP_PIP, belay_interp_dispatch(&pip, &s, &s));
 }
 
+/* system-interpreters.md: what each of the six claims, and how it is kept.
+ * KEEP_STORE is what keeps a file others cannot read out of the sealing
+ * rule (manifest-v5 V5-E5): sudoers, crontabs, authorized_keys, units. */
+TEST(system_interpreters_claim_their_files) {
+    EXPECT("/etc/passwd", BELAY_INTERP_ACCOUNTS, BELAY_KEEP_STORE);
+    EXPECT("/etc/group", BELAY_INTERP_ACCOUNTS, BELAY_KEEP_STORE);
+    EXPECT("/srv/root/etc/passwd", BELAY_INTERP_ACCOUNTS, BELAY_KEEP_STORE);
+    EXPECT("/etc/sudoers", BELAY_INTERP_SUDOERS, BELAY_KEEP_STORE);
+    EXPECT("/etc/sudoers.d/90-site", BELAY_INTERP_SUDOERS, BELAY_KEEP_STORE);
+    EXPECT("/etc/crontab", BELAY_INTERP_CRON, BELAY_KEEP_STORE);
+    EXPECT("/etc/cron.d/ok-name", BELAY_INTERP_CRON, BELAY_KEEP_STORE);
+    EXPECT("/var/spool/cron/crontabs/siteuser", BELAY_INTERP_CRON, BELAY_KEEP_STORE);
+    EXPECT("/etc/cron.hourly/x", BELAY_INTERP_CRON, BELAY_KEEP_DEFAULT);
+    EXPECT("/etc/cron.daily/logrotate", BELAY_INTERP_CRON, BELAY_KEEP_DEFAULT);
+    EXPECT("/etc/cron.weekly/x", BELAY_INTERP_CRON, BELAY_KEEP_DEFAULT);
+    EXPECT("/etc/cron.monthly/x", BELAY_INTERP_CRON, BELAY_KEEP_DEFAULT);
+    EXPECT("/etc/systemd/system/multi-user.target.wants/nginx.service", BELAY_INTERP_SYSTEMD, BELAY_KEEP_STORE);
+    EXPECT("/etc/systemd/system/nginx.service", BELAY_INTERP_SYSTEMD, BELAY_KEEP_STORE);
+    EXPECT("/etc/systemd/user/x.service", BELAY_INTERP_SYSTEMD, BELAY_KEEP_STORE);
+    EXPECT("/usr/lib/systemd/system/nginx.service", BELAY_INTERP_SYSTEMD, BELAY_KEEP_STORE);
+    EXPECT("/usr/lib/systemd/user/x.timer", BELAY_INTERP_SYSTEMD, BELAY_KEEP_STORE);
+    EXPECT("/lib/systemd/system/nginx.service.d/override.conf", BELAY_INTERP_SYSTEMD, BELAY_KEEP_STORE);
+    EXPECT("/home/u/.config/systemd/user/probe.timer", BELAY_INTERP_SYSTEMD, BELAY_KEEP_STORE);
+    EXPECT("/etc/rc.local", BELAY_INTERP_SYSTEMD, BELAY_KEEP_DEFAULT);
+    EXPECT("/etc/init.d/nginx", BELAY_INTERP_SYSTEMD, BELAY_KEEP_DEFAULT);
+    EXPECT("/var/lib/apt/extended_states", BELAY_INTERP_DPKG, BELAY_KEEP_STORE);
+    EXPECT("/home/u/.ssh/authorized_keys", BELAY_INTERP_SSHKEYS, BELAY_KEEP_STORE);
+    EXPECT("/root/.ssh/authorized_keys2", BELAY_INTERP_SSHKEYS, BELAY_KEEP_STORE);
+    EXPECT("/etc/ssl/certs/probe-ca.pem", BELAY_INTERP_TRUST, BELAY_KEEP_DEFAULT);
+    EXPECT("/usr/local/share/ca-certificates/probe-ca.crt", BELAY_INTERP_TRUST, BELAY_KEEP_DEFAULT);
+    /* Near misses stay unclaimed. `shadow` is nobody's: it is sealed, and
+     * its lines reach the accounts interpreter another way (SA-6). */
+    EXPECT("/etc/passwd-", BELAY_INTERP_BINARY, BELAY_KEEP_DEFAULT);
+    EXPECT("/etc/shadow", BELAY_INTERP_BINARY, BELAY_KEEP_DEFAULT);
+    EXPECT("/etc/gshadow", BELAY_INTERP_BINARY, BELAY_KEEP_DEFAULT);
+    EXPECT("/etc/sudoers.dist", BELAY_INTERP_BINARY, BELAY_KEEP_DEFAULT);
+    EXPECT("/etc/cron.deny", BELAY_INTERP_BINARY, BELAY_KEEP_DEFAULT);
+    EXPECT("/home/u/.ssh/authorized_keys.bak", BELAY_INTERP_BINARY, BELAY_KEEP_DEFAULT);
+    EXPECT("/home/u/.ssh/id_ed25519", BELAY_INTERP_BINARY, BELAY_KEEP_DEFAULT);
+    EXPECT("/etc/rc.local.bak", BELAY_INTERP_BINARY, BELAY_KEEP_DEFAULT);
+    EXPECT("/etc/rc2.d/S01nginx", BELAY_INTERP_BINARY, BELAY_KEEP_DEFAULT);
+    EXPECT("/var/lib/systemd/deb-systemd-helper-enabled/multi-user.target.wants/nginx.service",
+           BELAY_INTERP_BINARY, BELAY_KEEP_DEFAULT);
+    EXPECT("/run/systemd/system/x.service", BELAY_INTERP_BINARY, BELAY_KEEP_DEFAULT);
+    ASSERT_EQ_STR("accounts", belay_interp_name(BELAY_INTERP_ACCOUNTS));
+    ASSERT_EQ_STR("sudoers", belay_interp_name(BELAY_INTERP_SUDOERS));
+    ASSERT_EQ_STR("cron", belay_interp_name(BELAY_INTERP_CRON));
+    ASSERT_EQ_STR("systemd", belay_interp_name(BELAY_INTERP_SYSTEMD));
+    ASSERT_EQ_STR("sshkeys", belay_interp_name(BELAY_INTERP_SSHKEYS));
+    ASSERT_EQ_STR("trust", belay_interp_name(BELAY_INTERP_TRUST));
+}
+
 int main(void) {
     RUN(dpkg_claims_status_and_baseline_databases);
     RUN(dpkg_near_misses_are_not_claimed);
@@ -137,5 +189,6 @@ int main(void) {
     RUN(unclaimed_and_hostile_inputs_fall_back_to_binary);
     RUN(names_are_stable);
     RUN(text_is_an_unclaimed_path_stored_on_every_side_it_exists_on);
+    RUN(system_interpreters_claim_their_files);
     return belay_test_report();
 }
