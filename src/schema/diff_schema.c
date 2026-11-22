@@ -52,8 +52,12 @@ const struct diff_name_def DIFF_REASONS[DR_COUNT] = {
         "with something else differing or a hash on the other side; or a directory not entered "
         "(`not_read`) on one side only, or whose type, mode or owner differs." },
     [DR_SEALED_KEY] = { "sealed_key",
-        "Manifest v5. A `sealed` hash on one side only, or on both under different sealing keys "
-        "(the manifests' `sealed_key`): the hashes do not compare." },
+        "Manifest v5. A `sealed` hash on both sides under different sealing keys (the manifests' "
+        "`sealed_key`): the hashes do not compare." },
+    [DR_CLASS_CHANGED] = { "class_changed",
+        "Manifest v5. A `sealed` hash on one side only: the file moved between the class whose "
+        "content is kept and the class that is sealed, and a keyed hash does not compare with a "
+        "plain one, whatever the keys." },
 };
 
 #define T_REG  TBIT(BELAY_T_REG)
@@ -142,9 +146,10 @@ const struct field_change DIFF_FIELDS[F_COUNT] = {
                    "difference, never `metadata_only`. Against a hash on the other side: `unknown` "
                    "unless `size` differs." },
     [F_SEALED] = { CC_RULE, T_REG, US_NONE, DR_NONE, C, AM_FLAG,
-                   "A keyed hash. On both sides under one `sealed_key`, `sha256` compares as any; on "
-                   "one side only, or under different keys, it does not: `unknown` (reason "
-                   "`sealed_key`) unless `size` differs. No record carries a sealed entry's hash." },
+                   "A keyed hash. On both sides under one `sealed_key`, `sha256` compares as any; "
+                   "under different keys it does not: `unknown` (reason `sealed_key`) unless `size` "
+                   "differs. On one side only: `unknown` (reason `class_changed`) unless `size` "
+                   "differs. No record carries a sealed entry's hash." },
 };
 #undef C
 #undef NC
