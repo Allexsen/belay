@@ -302,11 +302,12 @@ TEST(not_read_directories) {
 
 /* The home of V5-D4b's fixtures before anything was added: partial, with a
  * .config that is partial in its turn (its systemd/user is looked for). */
-static void home_before(void) {
+static void home_before_as(const char *name) {
     m_new(HOME_ROOTS, NULL);
     dir(".", P); dir("home", P); dir("home/u", P); dir("home/u/.config", P);
-    m_write("before");
+    m_write(name);
 }
+static void home_before(void) { home_before_as("before"); }
 
 /* V5-D4b, the first fixture: a first .ssh/authorized_keys in an existing
  * home is added. */
@@ -407,6 +408,38 @@ TEST(a_link_on_the_way_to_a_root) {
     IS("{\"path\":\"home/u/.config\",\"outcome\":\"added\",\"type\":\"lnk\"}", rec("home/u/.config"));
 }
 
+/* V5-A4, the root itself: a link where a root is looked for is recorded and
+ * that root not found. On one side only, against a side that looked for the
+ * root and found nothing, it is added or removed: its absence was known. In
+ * place of the directory that was the root, it is a type change. */
+TEST(a_link_where_a_root_is_looked_for) {
+    home_before();
+    m_new(HOME_ROOTS, NULL);
+    dir(".", P); dir("home", P); dir("home/u", P); lnk("home/u/.bashrc"); dir("home/u/.config", P); lnk("home/u/.ssh");
+    m_write("after");
+    REQUIRE_MSG(run() == 0, "%s", belay_err_msg());
+    IS("{\"path\":\"home/u/.ssh\",\"outcome\":\"added\",\"type\":\"lnk\"}", rec("home/u/.ssh"));
+    IS("{\"path\":\"home/u/.bashrc\",\"outcome\":\"added\",\"type\":\"lnk\"}", rec("home/u/.bashrc"));
+    /* the other way round: removed */
+    m_new(HOME_ROOTS, NULL);
+    dir(".", P); dir("home", P); dir("home/u", P); dir("home/u/.config", P); lnk("home/u/.ssh");
+    m_write("before");
+    home_before_as("after");
+    REQUIRE_MSG(run() == 0, "%s", belay_err_msg());
+    IS("{\"path\":\"home/u/.ssh\",\"outcome\":\"removed\",\"type\":\"lnk\"}", rec("home/u/.ssh"));
+    /* a real ~/.ssh with a key, then a link in its place: a type change, and the key below it removed */
+    m_new(RT("home/u/.bashrc", "content", "false") RT("home/u/.config/systemd/user", "content", "false")
+          RT("home/u/.ssh", "content", "true"), NULL);
+    dir(".", P); dir("home", P); dir("home/u", P); dir("home/u/.config", P); dir("home/u/.ssh", ""); reg("home/u/.ssh/authorized_keys", SHA(HA));
+    m_write("before");
+    m_new(HOME_ROOTS, NULL);
+    dir(".", P); dir("home", P); dir("home/u", P); dir("home/u/.config", P); lnk("home/u/.ssh");
+    m_write("after");
+    REQUIRE_MSG(run() == 0, "%s", belay_err_msg());
+    ASSERT_TRUE(strstr(rec("home/u/.ssh"), "\"outcome\":\"type_changed\",\"type\":\"lnk\",\"type_before\":\"dir\"") != NULL);
+    ASSERT_TRUE(strstr(rec("home/u/.ssh/authorized_keys"), "\"outcome\":\"removed\"") != NULL);
+}
+
 /* V5-A6: sealed on one side only is the file's class changing, not a key's:
  * `class_changed`, whether the other manifest carries the same key (another
  * file there is sealed), another, or none. */
@@ -497,6 +530,7 @@ int main(void) {
     RUN(a_first_user_unit_in_a_home_is_added);
     RUN(a_path_under_a_partial_directory_on_the_other_side);
     RUN(a_link_on_the_way_to_a_root);
+    RUN(a_link_where_a_root_is_looked_for);
     RUN(the_new_reasons_come_last);
     RUN(an_added_meta_file_says_its_content_was_not_read);
     RUN(the_header_says_when_the_roots_differ);

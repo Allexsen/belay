@@ -400,7 +400,11 @@ directories (as `not_read`) and, directly under `/`, the symbolic links (`bin`, 
 merged-`/usr` machine) are recorded. A file in your home directory outside the list above is not
 recorded at all, not even its name. A symbolic link standing where a directory on the way to a
 root is looked for (`~/.config` as a link) is recorded as that link and not followed: what is
-behind it is not read, and the roots below it are listed as not found.
+behind it is not read, and the roots below it are listed as not found. So is a link standing where
+a root itself is looked for -- `~/.ssh` as a link, or a startup file such as `~/.bashrc` linked
+into a dotfiles directory: the link and its target are recorded, the root is listed as not found,
+and the file or directory behind the link is not read. Replacing the link, or pointing it
+elsewhere, shows in a diff; a change to what it points at does not.
 
 **Sealed.** Under the roots that are read, a file others cannot read -- its mode has no read bit
 for others, or a directory above it has no search bit for others, as everything in `/root` -- is

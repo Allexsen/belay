@@ -180,7 +180,10 @@ static int visit(int parent_fd, const char *name, char *rel, size_t relsz,
             x->ino = (uint64_t)st.st_ino;
             return VISIT_EXCLUDED;
         }
-        if (is_root) wc->root_found[root_at] = true;
+        /* A link standing where a root is looked for is recorded as a link,
+         * below, and never followed: what was looked for -- a directory, or
+         * a root's one file -- is not there (manifest-v5-addendum V5-A4). */
+        if (is_root && !S_ISLNK(st.st_mode)) wc->root_found[root_at] = true;
         if (!rule_not_read) {       /* a not_read directory's ctime is not recorded (V5-4) */
             const int64_t ct = ident_of_stat(&st).ctime_ns;
             if (ct > wc->newest_ctime_ns) wc->newest_ctime_ns = ct;

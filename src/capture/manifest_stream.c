@@ -14,7 +14,9 @@
  *    - No roots: a whole scope, as version 4: none of the four flags.
  *    - Under a root (the longest listed path that is the entry's or above
  *      it): the root was found; no `partial`; `meta` only where the root is
- *      metadata, `sealed` only where it is content.
+ *      metadata, `sealed` only where it is content. Or, exactly at a root
+ *      that was not found, a link: the link standing where it was looked
+ *      for (V5-A4) -- and at a root that was found, never a link.
  *    - Outside every root: the directory it is in is partial, and it is a
  *      directory, or a link directly under the scope root or on the way to a
  *      root; never `meta` or `sealed`.
@@ -45,6 +47,15 @@ static int zone_check(const struct belay_manifest_header *h, const struct belay_
         do k--; while (k > 0 && e->path[k] != '/');     /* the next shorter prefix */
     }
     if (root != NULL) {
+        /* Addendum V5-A4: a link standing where a root is looked for is
+         * recorded, and that root is not found -- the one entry such a root
+         * has, exactly at its path; and a root that was found is no link. */
+        const bool at = strlen(root->path) == e->path_len;
+        if (at && e->type == BELAY_T_LNK) {
+            if (root->found) return lex_corrupt("a link at a root that was found");
+            if (e->partial || e->meta || e->sealed) return lex_corrupt("partial, meta or sealed on a link");
+            return 0;
+        }
         if (!root->found) return lex_corrupt("an entry at or below a root that was not found");
         if (e->partial) return lex_corrupt("partial on a directory under a root");
         if (e->meta && root->cls != BELAY_ROOT_METADATA) return lex_corrupt("meta under a content root");
