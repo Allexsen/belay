@@ -459,7 +459,10 @@ TRAILER_KEYS_SHAPE = (['belay_diff_end'] + OUTCOMES + [DIR_TIMESTAMPS_ONLY, EVEN
                       + ['before_' + c for c in INPUT_COUNTS]
                       + ['after_' + c for c in INPUT_COUNTS]
                       + ['provisional', 'before_sha256', 'after_sha256'] + V4_TRAILER_KEYS)
-TRAILER_KEYS = TRAILER_KEYS_SHAPE + SEALING_TRAILER_KEYS
+# diff-fields.md, "The trailer", RT-T1: `runtime`, int, always present, 0 without a runtime
+# section, after every key the trailer has. The pairs here have no runtime record: 0.
+RUNTIME_TRAILER_KEY = 'runtime'
+TRAILER_KEYS = TRAILER_KEYS_SHAPE + SEALING_TRAILER_KEYS + [RUNTIME_TRAILER_KEY]
 # Manifest v5 (manifest-v5.md): the entry flags the diff reads, and the two
 # reasons V5-D1 to V5-D5 name.
 NOT_READ, PARTIAL, META, SEALED = 'not_read', 'partial', 'meta', 'sealed'
@@ -600,7 +603,7 @@ _shape_header, _shape_trailer = shape_example_keys()
 # without them (compare.py says so when it is the latter).
 SHAPE_LACKS_SEALING = _shape_trailer == TRAILER_KEYS_SHAPE
 if _shape_header not in (HEADER_KEYS_SHAPE, HEADER_KEYS) or \
-        _shape_trailer not in (TRAILER_KEYS_SHAPE, TRAILER_KEYS):
+        _shape_trailer not in (TRAILER_KEYS_SHAPE, TRAILER_KEYS_SHAPE + SEALING_TRAILER_KEYS, TRAILER_KEYS):
     raise SystemExit('spec: the "Shape" example\'s header or trailer keys are not the ones '
                      'reference.py writes: %r' % (shape_example_keys(),))
 
@@ -735,6 +738,8 @@ def md_table(text, first_header):
                 if not l2.startswith('|'):
                     break
                 cells = split_row(l2)
+                if len(cells) == len(head) - 1 and head[-1] == 'source':
+                    cells.append('')  # diff-fields.md RT-T1 has no `source` cell (pin defect, reported)
                 assert len(cells) == len(head), l2
                 rows.append(dict(zip(head, cells)))
             return rows
@@ -919,7 +924,12 @@ def sealing_pin():
         if w not in rows[0]['rule']:
             raise SystemExit('pin: diff-fields.md G3-2 no longer says what reference.py '
                              'assumes: %r' % w)
-    others = [r['id'] for r in md_table(text, 'id') if r['id'] != 'G3-2']
+    rt = [r for r in md_table(text, 'id') if r['id'] == 'RT-T1']
+    if len(rt) != 1 or rt[0]['key'] != '`%s`' % RUNTIME_TRAILER_KEY or rt[0]['type'] != 'int' \
+            or 'Always present; 0 when the diff has no `runtime` section.' not in rt[0]['rule'] \
+            or 'After every key the trailer has' not in rt[0]['rule']:
+        raise SystemExit('pin: diff-fields.md RT-T1 no longer says what reference.py assumes')
+    others = [r['id'] for r in md_table(text, 'id') if r['id'] not in ('G3-2', 'RT-T1')]
     if others:
         raise SystemExit('pin: diff-fields.md, "The trailer", has rows reference.py does not '
                          'write: %s' % others)
@@ -3719,6 +3729,8 @@ def diff(before, after, store=None):
     # G3-2: each manifest's sealing directories, "counted from its entries";
     # "In that order, after every key the trailer has." Not among `inputs`.
     trailer += [(k, sealing(es)) for k, es in zip(SEALING_TRAILER_KEYS, (eb, ea))]
+    # RT-T1: no runtime record in these pairs, so 0; last.
+    trailer.append((RUNTIME_TRAILER_KEY, 0))
     assert [k for k, _ in trailer] == TRAILER_KEYS
     return header, records, events, trailer, traces
 
