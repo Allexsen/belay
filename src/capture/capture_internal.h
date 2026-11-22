@@ -101,11 +101,13 @@ struct walk_ctx {
 enum { CLS_WHOLE, CLS_CONTENT, CLS_METADATA };
 
 /* The filesystems a capture with roots has entered at a mount point
- * (manifest-v5-addendum V5-A5): each device once, with the mount root it
- * was entered at. A machine has a handful; past ENTERED_MAX no more are. */
+ * (manifest-v5-addendum V5-A5): each device once, with the id of the mount
+ * it was entered at -- two mounts of one filesystem show one device and one
+ * inode number at both mount points, and differ in that id alone. A machine
+ * has a handful; past ENTERED_MAX no more are. */
 #define ENTERED_MAX 64
 struct entered {
-    uint64_t dev[ENTERED_MAX], ino[ENTERED_MAX];
+    uint64_t dev[ENTERED_MAX], mnt[ENTERED_MAX];
     size_t n;
     bool asked;                 /* the mount table was asked for */
     char *table;                /* the platform's, malloc'd, or NULL */

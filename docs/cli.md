@@ -405,9 +405,11 @@ fails the capture (exit 4); belay does not replace it.
 
 **Mount points.** Under a root, a mount point is entered only when its filesystem is ext2, ext3,
 ext4, xfs, btrfs, vfat, f2fs or zfs, it is the mount of the whole filesystem (its root in
-`/proc/self/mountinfo` is `/`: not a directory or a file of it bound there, and not a btrfs
-subvolume mounted by name), and that filesystem is not one the capture already reads -- the
-scope's own, or one entered at another mount point. Anything else is recorded as a `mount` entry
+`/proc/self/mountinfo` is `/`: not a directory or a file of it bound there) or of a whole btrfs
+subvolume (one mounted by name, as `/home` on `@home`: the mount point's inode number is 256),
+and that filesystem is not one the capture already reads -- the scope's own, or one entered at
+another mount point. The btrfs clause follows the kernel's numbering and has not yet been run on
+a btrfs. Anything else is recorded as a `mount` entry
 and not entered, as in every other scope. On macOS there is no such mount table, so every mount
 point stays a `mount` entry.
 

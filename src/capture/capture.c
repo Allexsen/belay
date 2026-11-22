@@ -421,23 +421,25 @@ bool cap_boundary(const struct walk_ctx *wc, int dfd, const char *name, const st
                   bool mount_root, bool mount_known) {
     if (!cap_crossed(wc, st, mount_root, mount_known)) return false;
     if (wc->opts->n_roots == 0) return true;
-    /* Addendum V5-A5: a whole filesystem of a listed type, on a device the
+    /* Addendum V5-A5: a whole filesystem of a listed type (or a whole btrfs
+     * subvolume, which has a device of its own), on a device the
      * capture neither walks already nor has entered -- unless this is the
      * very mount it entered, met again (by the re-check). The mount table is
      * read once, at the first mount point met. */
     struct entered *en = wc->entered;
     const uint64_t dev = (uint64_t)st->st_dev, ino = (uint64_t)st->st_ino;
+    uint64_t id;
+    if (dev == wc->root_dev || wc->ops->mount_id(wc->ops->ctx, dfd, name, &id) != 0) return true;
     for (size_t i = 0; i < en->n; i++)
-        if (en->dev[i] == dev) return en->ino[i] != ino;
-    if (dev == wc->root_dev || en->n == ENTERED_MAX) return true;
+        if (en->dev[i] == dev) return en->mnt[i] != id;
+    if (en->n == ENTERED_MAX) return true;
     if (!en->asked) {
         en->asked = true;
         en->table = wc->ops->mountinfo(wc->ops->ctx);
     }
-    uint64_t id;
-    if (wc->ops->mount_id(wc->ops->ctx, dfd, name, &id) != 0 || !fsops_mount_whole_listed(en->table, id)) return true;
+    if (!fsops_mount_whole_listed(en->table, id, ino)) return true;
     en->dev[en->n] = dev;
-    en->ino[en->n++] = ino;
+    en->mnt[en->n++] = id;
     return false;
 }
 
