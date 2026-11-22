@@ -36,6 +36,7 @@ struct receipt_meta {
     bool has_caps;
     bool has_iflags;            /* its inode flags were read (inode-flags IF-8) */
     uint64_t iflags;
+    bool sealed;                /* manifest v5: its hash is keyed, its content not kept */
 };
 
 /* A path's metadata on a side (0 before, 1 after): 0 and *m, or -1 when the
@@ -81,6 +82,27 @@ struct receipt_system {
 /* 0, or -1 when it cannot say. */
 typedef int (*receipt_system_fn)(void *ctx, struct receipt_system *q);
 
+/* A system watch's receipt (watch-system.md WS-R1 to WS-R6): the events,
+ * runtime records and records in sections, in this order, each only when
+ * it has something. setuid takes the privilege changes; secret, trust and
+ * firewall the records `section` gives them; a record an event names is
+ * that event's; the rest are `changes`, up to 20. */
+enum receipt_sec { RS_INSTALLED, RS_SERVICES, RS_RUNNING, RS_LISTENING, RS_USER, RS_CRON, RS_SUDO, RS_SSH, RS_SETUID,
+                   RS_SECRET, RS_TRUST, RS_FIREWALL, RS_INIT, RS_CONFIG, RS_COUNT };
+#define RECEIPT_CHANGES 20
+/* RS_SECRET, RS_TRUST or RS_FIREWALL for a record's path; -1: none of them. */
+typedef int (*receipt_section_fn)(void *ctx, const char *path, size_t len, bool dir);
+struct receipt_sections {
+    const char *head;           /* printed first, as it is: could not read, kernel record, end state */
+    const char *roots;          /* WS-10: "+a, -b", the first line of changes; NULL: the roots did not change */
+    const char *put_back;       /* the put back section's lines; NULL: it has none */
+    const char *tail;           /* printed last, as it is: not compared, not read */
+    receipt_section_fn section;
+    void *section_ctx;
+    const char *const *meta;    /* the metadata roots: the records folded into packages, counted per root */
+    size_t n_meta;
+};
+
 struct receipt_opts {
     const char *from, *to;      /* how the two sides are named in the heading */
     bool all;                   /* nothing folded */
@@ -93,6 +115,7 @@ struct receipt_opts {
     void *owner_ctx;
     receipt_system_fn system;   /* NULL, or -1 from it: `not linked into any target` and `lingering` are not said */
     void *system_ctx;
+    const struct receipt_sections *sections;    /* NULL: a diff's receipt, as before */
 };
 
 /* Reads diff.v1 from `diff`, writes the receipt to `out`. 0; -1 with

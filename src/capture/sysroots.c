@@ -99,9 +99,17 @@ static bool at_or_under(const char *path, const char *dir) {
  *  directory of WS-8. `home` is relative to the scope here (the leading "/"
  *  taken off), canonical.
  */
-static bool home_usable(const struct fsops *ops, int root_fd, uint64_t root_dev, char *home, char **table, bool *asked) {
+/* WS-8a's not-read children of `/` a home may name: what the kernel and
+ * the running system keep there, never a home's. */
+static const char *const NOT_A_HOME[] = { "dev", "proc", "run", "sys", "tmp" };
+
+/* Why a home is none, into `why`; NULL when it is one. */
+static const char *home_usable(const struct fsops *ops, int root_fd, uint64_t root_dev, char *home, char **table, bool *asked,
+                               char *why, size_t cap) {
     for (size_t i = 0; i < N(NOT_READ); i++)
-        if (at_or_under(home, NOT_READ[i])) return false;
+        if (at_or_under(home, NOT_READ[i])) { snprintf(why, cap, "under %s, not read", NOT_READ[i]); return why; }
+    for (size_t i = 0; i < N(NOT_A_HOME); i++)
+        if (at_or_under(home, NOT_A_HOME[i])) { snprintf(why, cap, "under %s, not read", NOT_A_HOME[i]); return why; }
     /* Each prefix in turn: a link anywhere on the way is refused before
      * anything is looked up through it. */
     for (char *s = home; ; s++) {
@@ -118,6 +126,11 @@ static bool home_usable(const struct fsops *ops, int root_fd, uint64_t root_dev,
         const bool dir = r == 0 && S_ISDIR(st.st_mode);
         const bool mount = dir && (mk ? mr : (uint64_t)st.st_dev != root_dev);
         bool ok = dir;
+        if (!dir) {
+            if (r != 0) snprintf(why, cap, "not there");
+            else if (S_ISLNK(st.st_mode)) snprintf(why, cap, "/%s is a symbolic link", home);
+            else snprintf(why, cap, "/%s is not a directory", home);
+        }
         if (ok && mount) {              /* V5-E6, V5-A5: a whole filesystem of a listed type */
             uint64_t id;
             if (!*asked) {
@@ -125,12 +138,15 @@ static bool home_usable(const struct fsops *ops, int root_fd, uint64_t root_dev,
                 *table = ops->mountinfo(ops->ctx);
             }
             ok = ops->mount_id(ops->ctx, root_fd, home, &id) == 0 && fsops_mount_whole_listed(*table, id, (uint64_t)st.st_ino);
+            if (!ok) snprintf(why, cap, "on a filesystem not entered");
         }
         *s = keep;
-        if (!ok) return false;
-        if (keep == '\0') return true;
+        if (!ok) return why;
+        if (keep == '\0') return NULL;
     }
 }
+
+static int str_cmp(const void *a, const void *b) { return strcmp(*(char *const *)a, *(char *const *)b); }
 
 /* A passwd home as a path relative to the scope, canonical, into `out`:
  * false when it is not absolute, is "/", or has an empty, "." or ".."
@@ -205,6 +221,9 @@ int sysroots_resolve(const struct fsops *ops, const char *scope, struct belay_sy
      * which homes are read depend on where belay was built. */
     char line[2 * 4096], rel[4096];
     struct build homes = { 0 };         /* candidate homes, relative; `roots` unused but for the paths */
+    char **left = NULL;                 /* WS-8a: the homes that are none, with why */
+    size_t n_left = 0, cap_left = 0;
+    char why[200], said[4096 + 220];
     size_t ll = 0;
     bool bad = false;
     for (int ch = pw != NULL ? getc(pw) : EOF; pw != NULL; ch = getc(pw)) {
@@ -220,9 +239,28 @@ int sysroots_resolve(const struct fsops *ops, const char *scope, struct belay_sy
             while (field < 5 && (f = strchr(f, ':')) != NULL) { f++; field++; }
             /* WS-8a leaves a home out when it cannot be one; so is one whose
              * deepest root would not fit a path (PATH_MAX with its NUL). */
-            if (f != NULL && field == 5 && home_rel(f, strcspn(f, ":"), rel, sizeof rel) &&
-                strlen(rel) + sizeof "/.config/systemd/user" < 4096 && strlen(rel) + sizeof "/.config/fish/config.fish" < 4096)
+            const size_t hl = f != NULL && field == 5 ? strcspn(f, ":") : 0;
+            const char *bad_why = NULL;
+            if (hl == 0) {
+                /* a line without a sixth field names no home */
+            } else if (!home_rel(f, hl, rel, sizeof rel)) {
+                bad_why = hl == 1 && f[0] == '/' ? "the root directory" : "not an absolute path";
+            } else if (strlen(rel) + sizeof "/.config/systemd/user" >= 4096 || strlen(rel) + sizeof "/.config/fish/config.fish" >= 4096) {
+                bad_why = "too long";
+            } else {
                 add(&homes, NULL, rel, BELAY_ROOT_CONTENT, false);
+            }
+            if (bad_why != NULL && hl < 4096) {
+                snprintf(said, sizeof said, "%.*s: %s", (int)hl, f, bad_why);
+                if (n_left == cap_left) {
+                    const size_t c = cap_left ? cap_left * 2 : 16;
+                    char **q = realloc(left, c * sizeof *q);
+                    if (q == NULL) b.oom = true;
+                    else { left = q; cap_left = c; }
+                }
+                if (n_left < cap_left && (left[n_left] = strdup(said)) != NULL) n_left++;
+                else b.oom = true;
+            }
         }
         ll = 0;
         bad = false;
@@ -233,7 +271,19 @@ int sysroots_resolve(const struct fsops *ops, const char *scope, struct belay_sy
     for (size_t i = 0; !homes.oom && i < homes.n; i++) {
         if (i > 0 && strcmp(homes.roots[i - 1].path, homes.roots[i].path) == 0) continue;
         snprintf(rel, sizeof rel, "%s", homes.roots[i].path);
-        if (!home_usable(ops, root_fd, (uint64_t)rst.st_dev, rel, &table, &asked)) continue;
+        if (home_usable(ops, root_fd, (uint64_t)rst.st_dev, rel, &table, &asked, why, sizeof why) != NULL) {
+            snprintf(said, sizeof said, "/%s: %s", homes.roots[i].path, why);
+            if (n_left == cap_left) {
+                const size_t c = cap_left ? cap_left * 2 : 16;
+                char **q = realloc(left, c * sizeof *q);
+                if (q == NULL) { b.oom = true; continue; }
+                left = q;
+                cap_left = c;
+            }
+            if ((left[n_left] = strdup(said)) != NULL) n_left++;
+            else b.oom = true;
+            continue;
+        }
         for (size_t k = 0; k < N(HOME_DIRS); k++) add(&b, rel, HOME_DIRS[k], BELAY_ROOT_CONTENT, false);
         for (size_t k = 0; k < N(HOME_FILES); k++) add(&b, rel, HOME_FILES[k], BELAY_ROOT_CONTENT, true);
     }
@@ -247,6 +297,8 @@ int sysroots_resolve(const struct fsops *ops, const char *scope, struct belay_sy
     if (b.oom || read_failed) {
         free(b.roots);
         free(b.names);
+        for (size_t i = 0; i < n_left; i++) free(left[i]);
+        free(left);
         if (b.oom) belay_err_set(BELAY_ERR_NOMEM, 0, "system roots: out of memory");
         else belay_err_set(BELAY_ERR_IO, errno, "cannot read %s/etc/passwd", scope);
         return -1;
@@ -261,6 +313,14 @@ int sysroots_resolve(const struct fsops *ops, const char *scope, struct belay_sy
     out->names = b.names;
     out->not_read = NOT_READ;
     out->n_not_read = N(NOT_READ);
+    if (n_left > 1) qsort(left, n_left, sizeof *left, str_cmp);
+    size_t wl = 0;                      /* one home on several lines: once */
+    for (size_t i = 0; i < n_left; i++) {
+        if (wl > 0 && strcmp(left[wl - 1], left[i]) == 0) { free(left[i]); continue; }
+        left[wl++] = left[i];
+    }
+    out->left_out = left;
+    out->n_left_out = wl;
     return 0;
 }
 
@@ -268,5 +328,7 @@ void belay_system_roots_free(struct belay_system_roots *r) {
     if (r == NULL) return;
     free(r->roots);
     free(r->names);
+    for (size_t i = 0; i < r->n_left_out; i++) free(r->left_out[i]);
+    free(r->left_out);
     memset(r, 0, sizeof *r);
 }

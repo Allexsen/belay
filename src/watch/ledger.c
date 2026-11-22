@@ -141,7 +141,17 @@ static void state_json(struct wsb *b, const struct wstate *s) {
     for (size_t i = 0; i < s->n_kills; i++) wsb_f(b, "%s[\"%s\",%ld]", i ? "," : "", s->kills[i].session, s->kills[i].n);
     wsb_f(b, "],\"told\":[");
     for (size_t i = 0; i < s->n_told; i++) wsb_f(b, "%s\"%s\"", i ? "," : "", s->told[i]);
-    wsb_f(b, "]}");
+    wsb_f(b, "]");
+    if (s->sys_started_ns || s->sys_start || s->walk_ns || s->pending || s->n_late) {
+        wsb_f(b, ",\"system\":{\"started_ns\":%lld,\"start\":%ld,\"walk\":[%lld,", (long long)s->sys_started_ns,
+              s->sys_start, (long long)s->walk_ns);
+        wsb_json(b, s->walk_reason);
+        wsb_f(b, "],\"pending\":[%ld,%lld,%lld],\"late\":[", s->pending, (long long)s->pending_ns,
+              (long long)s->pending_walk_ns);
+        for (size_t i = 0; i < s->n_late && i < W_LATE_MAX; i++) wsb_f(b, "%s%ld", i ? "," : "", s->late[i]);
+        wsb_f(b, "],\"n_late\":%zu}", s->n_late);
+    }
+    wsb_f(b, "}");
 }
 
 static bool state_parse(const struct jval *line, struct wstate *s);
@@ -212,6 +222,31 @@ static bool state_parse(const struct jval *line, struct wstate *s) {
     if (a == NULL || a->t != J_ARR || a->n > W_TOLD_MAX) return false;
     for (size_t i = 0; i < a->n; i++)
         if (!id_at(a, i, s->told[s->n_told++])) return false;
+    const struct jval *y = jget(v, "system");         /* a system watch's, when there is one */
+    if (y == NULL) return true;
+    int64_t n;
+    if (y->t != J_OBJ) return false;
+    s->sys_started_ns = jint(y, "started_ns", 0);
+    s->sys_start = (long)jint(y, "start", 0);
+    a = jget(y, "walk");
+    if (a == NULL || a->t != J_ARR || a->n != 2 || !int_at(a, 0, &s->walk_ns) || a->kids[1].t != J_STR ||
+        a->kids[1].s_len >= sizeof s->walk_reason)
+        return false;
+    memcpy(s->walk_reason, a->kids[1].s, a->kids[1].s_len + 1);
+    a = jget(y, "pending");
+    if (a == NULL || a->t != J_ARR || a->n != 3 || !int_at(a, 0, &n) || n < 0 || n > 999999999L ||
+        !int_at(a, 1, &s->pending_ns) || !int_at(a, 2, &s->pending_walk_ns))
+        return false;
+    s->pending = (long)n;
+    a = jget(y, "late");
+    if (a == NULL || a->t != J_ARR || a->n > W_LATE_MAX) return false;
+    for (size_t i = 0; i < a->n; i++) {
+        if (!int_at(a, i, &n) || n < 0) return false;
+        s->late[i] = (long)n;
+    }
+    n = jint(y, "n_late", -1);
+    if (n < (int64_t)a->n || s->sys_start < 0) return false;
+    s->n_late = (size_t)n;
     return true;
 }
 
@@ -461,6 +496,14 @@ int ledger_append_step(struct ledger *l, struct wstep *s) {
     wsb_f(&rest, "],\"trouble\":[");
     for (size_t i = 0; i < s->n_trouble; i++) { wsb_f(&rest, "%s", i ? "," : ""); wsb_json(&rest, s->trouble[i]); }
     wsb_f(&rest, "],\"sec\":[\"%s\",%ld,%ld,\"%s\"],", s->sec_file, s->sec_off, s->sec_len, s->sec_sha);
+    if (s->since_ns || s->quiet || s->by_installed || s->roots != NULL) {     /* a system watch's step */
+        wsb_f(&rest, "\"sys\":[%lld,%llu,", (long long)s->since_ns, (unsigned long long)s->quiet);
+        wsb_json(&rest, s->quiet_under);
+        wsb_f(&rest, ",%llu,", (unsigned long long)s->by_installed);
+        if (s->roots != NULL) wsb_json(&rest, s->roots);
+        else wsb_f(&rest, "null");
+        wsb_f(&rest, "],");
+    }
     state_json(&rest, &l->st);
     head(&b, "step", s->session, s->ns);
     /* room for the two arrays of cut counts, at 21 digits a number */
@@ -469,7 +512,7 @@ int ledger_append_step(struct ledger *l, struct wstep *s) {
     size_t kept = 0;
     for (size_t i = 0; i < s->n_flags && !b.bad && !rest.bad; i++) {
         const size_t before = b.n;
-        wsb_f(&b, "%s[%d,%d,", kept ? "," : "", (int)s->flags[i].kind, s->flags[i].note ? 1 : 0);
+        wsb_f(&b, "%s[%d,%d,", kept ? "," : "", (int)s->flags[i].kind, s->flags[i].own ? 2 : s->flags[i].note ? 1 : 0);
         wsb_json(&b, s->flags[i].text);
         wsb_f(&b, "]");
         if (b.n + fixed > WATCH_LINE_MAX) {     /* LN-8: counted, not kept */
@@ -606,6 +649,15 @@ int ledger_read(const struct ledger *l, const char *day, long from, ledger_line_
     return rc;
 }
 
+/* A count of a kind a line written before that kind existed: zero. */
+static bool u64_or_zero(const struct jval *arr, size_t i, uint64_t *out) {
+    if (arr != NULL && arr->t == J_ARR && i >= arr->n && arr->n > 0) { *out = 0; return true; }
+    int64_t v;
+    if (!int_at(arr, i, &v) || v < 0) return false;
+    *out = (uint64_t)v;
+    return true;
+}
+
 static bool u64_at(const struct jval *arr, size_t i, uint64_t *out) {
     int64_t v;
     if (!int_at(arr, i, &v) || v < 0) return false;
@@ -640,11 +692,12 @@ int ledger_step(const struct jval *line, struct wstep *s) {
                 goto bad;
             s->flags[i].kind = (enum wkind)kind;
             s->flags[i].note = note != 0;
+            s->flags[i].own = note == 2;
             s->n_flags++;
         }
     }
     for (size_t k = 0; k < WK_COUNT; k++) {
-        if (!u64_at(jget(line, "cut_flag"), k, &s->cut_flag[k]) || !u64_at(jget(line, "cut_note"), k, &s->cut_note[k]))
+        if (!u64_or_zero(jget(line, "cut_flag"), k, &s->cut_flag[k]) || !u64_or_zero(jget(line, "cut_note"), k, &s->cut_note[k]))
             goto bad;
     }
     for (size_t k = 0; k < WATCH_OUTCOMES; k++)
@@ -672,6 +725,17 @@ int ledger_step(const struct jval *line, struct wstep *s) {
         !int_at(a, 1, &off) || !int_at(a, 2, &len) || a->kids[0].s_len >= sizeof s->sec_file ||
         a->kids[3].s_len >= sizeof s->sec_sha)
         goto bad;
+    const struct jval *y = jget(line, "sys");
+    if (y != NULL) {
+        int64_t v;
+        if (y->t != J_ARR || y->n != 5 || !int_at(y, 0, &v) || !u64_at(y, 1, &s->quiet) || y->kids[2].t != J_STR ||
+            y->kids[2].s_len >= sizeof s->quiet_under || !u64_at(y, 3, &s->by_installed) ||
+            (y->kids[4].t != J_STR && y->kids[4].t != J_NULL) ||
+            (y->kids[4].t == J_STR && (s->roots = strdup(y->kids[4].s)) == NULL))
+            goto bad;
+        s->since_ns = v;
+        memcpy(s->quiet_under, y->kids[2].s, y->kids[2].s_len + 1);
+    }
     snprintf(s->sec_file, sizeof s->sec_file, "%s", a->kids[0].s);
     snprintf(s->sec_sha, sizeof s->sec_sha, "%s", a->kids[3].s);
     s->sec_off = (long)off;

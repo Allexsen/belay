@@ -782,9 +782,9 @@ static bool number(const char *s, long *v) {
 }
 
 int cmd_prune(int argc, char **argv, FILE *out, FILE *err) {
-    const char *scope = NULL, *docker = NULL;
+    const char *scope = NULL, *docker = NULL, *system_root = NULL;
     long days = -1, last = -1, from = 0;
-    bool dry = false, json = false, watch_only = false;
+    bool dry = false, json = false, watch_only = false, system = false;
     struct marks m = { 0 };
     long *ids = calloc((size_t)argc, sizeof *ids);
     size_t n_ids = 0;
@@ -795,7 +795,13 @@ int cmd_prune(int argc, char **argv, FILE *out, FILE *err) {
         if (!strcmp(a, "--dry-run")) { dry = true; continue; }
         if (!strcmp(a, "--json")) { json = true; continue; }
         if (!strcmp(a, "--watch-only")) { watch_only = true; continue; }
+        if (!strcmp(a, "--system")) {                   /* watch-system WS-1 */
+            if (system) { rc = cli_usage(err, "--system given twice"); goto done; }
+            system = true;
+            continue;
+        }
         const bool known = !strcmp(a, "--scope") || !strcmp(a, "--docker") || !strcmp(a, "--keep-days") ||
+                           !strcmp(a, "--system-root") ||
                            !strcmp(a, "--keep-last") || !strcmp(a, "--keep-id") || !strcmp(a, "--keep-from");
         char why[256];
         if (!known) {
@@ -811,6 +817,7 @@ int cmd_prune(int argc, char **argv, FILE *out, FILE *err) {
         const char *v = argv[++i];
         long x = 0;
         if (strcmp(a, "--keep-id") && ((!strcmp(a, "--scope") && scope) || (!strcmp(a, "--docker") && docker) ||
+                                       (!strcmp(a, "--system-root") && system_root) ||
                                        (!strcmp(a, "--keep-days") && days >= 0) || (!strcmp(a, "--keep-last") && last >= 0) ||
                                        (!strcmp(a, "--keep-from") && from))) {
             snprintf(why, sizeof why, "%s given twice", a);
@@ -819,6 +826,7 @@ int cmd_prune(int argc, char **argv, FILE *out, FILE *err) {
         }
         if (!strcmp(a, "--scope")) scope = v;
         else if (!strcmp(a, "--docker")) docker = v;
+        else if (!strcmp(a, "--system-root")) system_root = v;     /* cli_system_scope */
         else if (!strcmp(a, "--keep-days") ? !number(v, &days) : !strcmp(a, "--keep-last") ? !number(v, &last) : false) {
             snprintf(why, sizeof why, "%s needs a number", a);
             rc = cli_usage(err, why);
@@ -834,6 +842,7 @@ int cmd_prune(int argc, char **argv, FILE *out, FILE *err) {
             else from = x;
         }
     }
+    if ((system || system_root != NULL) && (rc = cli_system_scope(system, system_root, &scope, docker, err)) != 0) goto done;
     if (scope == NULL) { rc = cli_usage(err, "--scope DIR is required"); goto done; }
     if (days < 0 && last < 0) { rc = cli_usage(err, "--keep-days or --keep-last is required"); goto done; }
     struct state st;

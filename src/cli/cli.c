@@ -49,13 +49,14 @@ static const char USAGE[] =
     "  prune --scope DIR [--keep-days N] [--keep-last N] [--keep-id ID]... [--keep-from ID] [--watch-only] [--dry-run] [--json]\n"
     "                                        remove old checkpoints, and stored copies nothing refers to\n"
     "  watch step|close|mark|summary|receipt|patterns --scope DIR ...\n"
+    "  watch start|step|receipt|stop|summary|patterns --system ...\n"
     "                                        a running record of DIR while an agent works in it (belay help watch)\n"
     "  hook claude-code EVENT                the Claude Code plugin's hook: reads the hook's input, always exits 0\n"
     "  help [command]                        this, or one command's options\n"
     "  --version\n"
     "\n"
-    "  --system in place of --scope DIR on check, mark, diff, log, manifest: the machine's /, read by a\n"
-    "    fixed list of roots (docs/cli.md); baseline export and verify refuse it\n"
+    "  --system in place of --scope DIR on check, mark, diff, log, manifest, prune and watch: the machine's /,\n"
+    "    read by a fixed list of roots (docs/cli.md); baseline export and verify refuse it\n"
     "  --docker CONTAINER on any of these: the scope is a path inside a Docker container, read from its\n"
     "                                        layers on the host (Linux, root; export and verify: paused)\n"
     "exit codes: 0 done, 1 diff --exit-code found a change (verify: a violation), 2 usage, 3 refused, 4 failed\n";
@@ -103,7 +104,7 @@ static const struct { const char *cmd, *text; } HELP[] = {
                "  --exit-code  exit 1 when any record is a violation (signals never)\n" },
     { "manifest", "usage: belay manifest --scope DIR --id ID\n"
                "  Prints checkpoint ID's manifest, rebuilt and checked when it is stored as a delta.\n" },
-    { "prune", "usage: belay prune --scope DIR [--keep-days N] [--keep-last N] [--keep-id ID]... [--keep-from ID] [--watch-only]\n"
+    { "prune", "usage: belay prune (--scope DIR | --system) [--keep-days N] [--keep-last N] [--keep-id ID]... [--keep-from ID] [--watch-only]\n"
                "                   [--dry-run] [--json]\n"
                "  Removes the checkpoints outside the limits given, at least one of them required:\n"
                "  older than N days, and not among the last N. Then the stored copies no remaining\n"
@@ -120,6 +121,8 @@ static const struct { const char *cmd, *text; } HELP[] = {
                "       belay watch summary  --scope DIR --session S --since NAME\n"
                "       belay watch receipt  --scope DIR [--max-lines N] [--path]\n"
                "       belay watch patterns --scope DIR [--entries]\n"
+               "       belay watch start|receipt|stop --system [--max-lines N] [--path]\n"
+               "       belay watch step|summary|patterns --system ...   as with --scope\n"
                "  A running record of DIR while an agent works in it (test/expect/watch-v1.md).\n"
                "  step      records what changed since the last step and prints one line: anything in\n"
                "            a sensitive place or matching .belay-donttouch first, the rest counted.\n"
@@ -130,7 +133,11 @@ static const struct { const char *cmd, *text; } HELP[] = {
                "  receipt   every change of every step, newest first, nothing folded (--path: as a\n"
                "            file, whose path is printed)\n"
                "  patterns  the lists in force and how many current entries each pattern matches\n"
-               "            (--entries: each entry that a list covers)\n" },
+               "            (--entries: each entry that a list covers)\n"
+               "  --system  the machine's / by its roots (watch-system.md): start takes the first walk and\n"
+               "            prints the receipt's opening lines; a step's walk past 45 s goes on in its own\n"
+               "            process and is reported by the next step; receipt and stop take a walk with no\n"
+               "            time limit and print the receipt in sections; stop ends the watch\n" },
     { "hook",  "usage: belay hook claude-code start|pre|post|batch|prompt|stop|subagent-stop|end|receipt [--scope DIR]\n"
                "  The Claude Code plugin's hook: reads the hook's JSON on standard input, runs the\n"
                "  matching belay watch commands, and prints the hook's reply. Exits 0 always.\n" },
@@ -598,7 +605,6 @@ static int pathcmp(const char *a, size_t al, const char *b, size_t bl) {
  * 4 MiB), and at most CLI_LINGER_MAX names. */
 #define CLI_LINGER_MAX 4096
 #define CLI_PASSWD_MAX (4u * 1024u * 1024u)
-struct cli_system { const char *manifest; const char *store; };
 
 static bool ends_in(const char *s, size_t n, const char *tail) {
     const size_t tl = strlen(tail);
@@ -630,7 +636,7 @@ static size_t passwd_name_of(const char *buf, size_t len, const char *home, cons
     return found;
 }
 
-static int cli_system_of(void *ctx, struct receipt_system *q) {
+int cli_system_of(void *ctx, struct receipt_system *q) {
     static const char LINGER[] = "var/lib/systemd/linger";
     const struct cli_system *c = ctx;
     struct belay_manifest_reader *r = NULL;
@@ -708,8 +714,7 @@ done:
 /* The receipt's owners (system-interpreters.md SD-3, SI-5): which package's
  * file list names each path, by the dpkg database of one side's manifest
  * and the copies in the store. One read of that manifest. */
-struct cli_owners { const char *manifest[2]; const char *store; };
-static int cli_owner_of(void *ctx, int side, const char *const *paths, const size_t *lens, size_t n, char **owner) {
+int cli_owner_of(void *ctx, int side, const char *const *paths, const size_t *lens, size_t n, char **owner) {
     const struct cli_owners *c = ctx;
     struct owners *o = NULL;
     if (owners_of_manifest(c->manifest[side], c->store, paths, lens, n, &o) == -1) return -1;
@@ -740,6 +745,7 @@ int cli_mode_of(void *ctx, int side, const char *path, size_t len, struct receip
     m->has_caps = c->e.has_caps;
     m->has_iflags = c->e.has_iflags;
     m->iflags = c->e.iflags;
+    m->sealed = c->e.sealed;
     return 0;
 }
 

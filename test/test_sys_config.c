@@ -12,15 +12,16 @@
 
 #define EV(kind, fields, text, path) \
     "{\"event\":\"" kind "\",\"interp\":\"config\"," fields ",\"text\":\"" text "\",\"paths\":[\"" path "\"]}\n"
+/* ct is the context as the text shows it, with a space before it when it is not empty */
 #define ARROW " \xe2\x80\xba "
 #define KV(word, path, g, cj, ct, key, value) \
     EV("config_key_" word, "\"path\":\"" path "\",\"grammar\":\"" g "\",\"context\":[" cj "],\"key\":\"" key \
-       "\",\"value\":\"" value "\"", path ": " ct ARROW key " " word ": " value, path)
+       "\",\"value\":\"" value "\"", path ":" ct ARROW key " " word ": " value, path)
 #define ADDED(path, g, cj, ct, key, value)   KV("added", path, g, cj, ct, key, value)
 #define REMOVED(path, g, cj, ct, key, value) KV("removed", path, g, cj, ct, key, value)
 #define CHANGED(path, g, cj, ct, key, from, to) \
     EV("config_key_changed", "\"path\":\"" path "\",\"grammar\":\"" g "\",\"context\":[" cj "],\"key\":\"" key \
-       "\",\"from\":\"" from "\",\"to\":\"" to "\"", path ": " ct ARROW key " " from " -> " to, path)
+       "\",\"from\":\"" from "\",\"to\":\"" to "\"", path ":" ct ARROW key " " from " -> " to, path)
 #define NOT_KEYED(path, g, why) \
     EV("config_not_keyed", "\"path\":\"" path "\",\"grammar\":\"" g "\",\"why\":\"" why "\"", \
        path ": shown as lines (" why ")", path)
@@ -138,25 +139,25 @@ TEST(ini_units_and_drop_ins_by_section_and_key) {
         /* systemd's event of the same path stands before config's (E13) */
         "{\"event\":\"unit_file_added\",\"interp\":\"systemd\",\"path\":\"" OV "\",\"text\":\"unit file " OV
         " added\",\"paths\":[\"" OV "\"]}\n"
-        CHANGED(JD, "ini", "\"Journal\"", "Journal", "Storage", "auto", "persistent")
+        CHANGED(JD, "ini", "\"Journal\"", " Journal", "Storage", "auto", "persistent")
         ADDED(JDD, "ini", "", "", "Top", "level")
-        ADDED(JDD, "ini", "\"Journal\"", "Journal", "SystemMaxUse", "1G")
-        ADDED(OV, "ini", SVC, "Service", "Environment", "A=1 B=2")
+        ADDED(JDD, "ini", "\"Journal\"", " Journal", "SystemMaxUse", "1G")
+        ADDED(OV, "ini", SVC, " Service", "Environment", "A=1 B=2")
         /* an empty assignment is a value, the empty one; two values are a set */
-        ADDED(OV, "ini", SVC, "Service", "ExecStart", "")
-        ADDED(OV, "ini", SVC, "Service", "ExecStart", "/usr/bin/nginx -g 'daemon off;' -c /etc/x")
-        ADDED(OV, "ini", SVC, "Service", "User", "www"),
+        ADDED(OV, "ini", SVC, " Service", "ExecStart", "")
+        ADDED(OV, "ini", SVC, " Service", "ExecStart", "/usr/bin/nginx -g 'daemon off;' -c /etc/x")
+        ADDED(OV, "ini", SVC, " Service", "User", "www"),
         t_events(1, 2));
     /* One changed value; a unit file elsewhere; a repeated key never changed. */
     t_file(OV, "[Service]\nExecStart=\nExecStart=/usr/bin/nginx\nUser=nginx\nEnvironment=A=1 B=2\n", 0644);
     t_file(UF, "[Unit]\nDescription=probe\n[Service]\nExecStart=/bin/true\n", 0644);
     REQUIRE(t_snap(3) == 0);
     const char *ev = t_events(2, 3);
-    ASSERT_TRUE(strstr(ev, CHANGED(OV, "ini", SVC, "Service", "User", "www", "nginx")) != NULL);
-    ASSERT_TRUE(strstr(ev, REMOVED(OV, "ini", SVC, "Service", "ExecStart", "/usr/bin/nginx -g 'daemon off;' -c /etc/x")
-                           ADDED(OV, "ini", SVC, "Service", "ExecStart", "/usr/bin/nginx")) != NULL);
-    ASSERT_TRUE(strstr(ev, ADDED(UF, "ini", SVC, "Service", "ExecStart", "/bin/true")
-                           ADDED(UF, "ini", "\"Unit\"", "Unit", "Description", "probe")) != NULL);
+    ASSERT_TRUE(strstr(ev, CHANGED(OV, "ini", SVC, " Service", "User", "www", "nginx")) != NULL);
+    ASSERT_TRUE(strstr(ev, REMOVED(OV, "ini", SVC, " Service", "ExecStart", "/usr/bin/nginx -g 'daemon off;' -c /etc/x")
+                           ADDED(OV, "ini", SVC, " Service", "ExecStart", "/usr/bin/nginx")) != NULL);
+    ASSERT_TRUE(strstr(ev, ADDED(UF, "ini", SVC, " Service", "ExecStart", "/bin/true")
+                           ADDED(UF, "ini", "\"Unit\"", " Unit", "Description", "probe")) != NULL);
     ASSERT_TRUE(strstr(ev, "config_key_removed\",\"interp\":\"config\",\"path\":\"" OV "\",\"grammar\":\"ini\","
                            "\"context\":[\"Service\"],\"key\":\"ExecStart\",\"value\":\"\"") == NULL);
     /* CF-3: a section twice on a side; CF-4: a line without `=`, a bad header. */
@@ -195,8 +196,8 @@ TEST(sshd_keywords_and_match_contexts) {
     ASSERT_EQ_STR(ADDED(SS, "sshd", "", "", "AcceptEnv", "LANG")
                   ADDED(SS, "sshd", "", "", "AcceptEnv", "LC_*")
                   CHANGED(SS, "sshd", "", "", "port", "22", "2222")
-                  ADDED(SS, "sshd", "\"Match User bob\"", "Match User bob", "PasswordAuthentication", "yes")
-                  ADDED(SS, "sshd", "\"match Address 10.0.0.0/8\"", "match Address 10.0.0.0/8", "PermitRootLogin", "yes")
+                  ADDED(SS, "sshd", "\"Match User bob\"", " Match User bob", "PasswordAuthentication", "yes")
+                  ADDED(SS, "sshd", "\"match Address 10.0.0.0/8\"", " match Address 10.0.0.0/8", "PermitRootLogin", "yes")
                   ADDED(SSD, "sshd", "", "", "X11Forwarding", "no"),
                   t_events(1, 2));
     ASSERT_TRUE(has_text_finding(1, 2, SS));
@@ -245,17 +246,17 @@ TEST(nginx_directives_blocks_and_opaque_blocks) {
                "}\n", 0644);
     REQUIRE(t_snap(2) == 0);
     ASSERT_EQ_STR(
-        CHANGED(NG, "nginx", "\"events\"", "events", "worker_connections", "768", "1024")
-        ADDED(NG, "nginx", HT, "http", "map $http_upgrade $connection_upgrade",
+        CHANGED(NG, "nginx", "\"events\"", " events", "worker_connections", "768", "1024")
+        ADDED(NG, "nginx", HT, " http", "map $http_upgrade $connection_upgrade",
               "82efc7faf265ad05558253324ea3a33eb4c252d0ef6b6db5636e786bb2e14e7d")
         /* words as written, quotes kept, one space between */
-        ADDED(NG, "nginx", HS, "http, server", "add_header", "X-A \\\"a  b\\\" always")
-        ADDED(NG, "nginx", HS, "http, server", "content_by_lua_block",
+        ADDED(NG, "nginx", HS, " http, server", "add_header", "X-A \\\"a  b\\\" always")
+        ADDED(NG, "nginx", HS, " http, server", "content_by_lua_block",
               "d0ea62f1db1d426cf548eb8087c6e4d04cea7373e62855c404b5ba8fa0c3def1")
-        ADDED(NG, "nginx", HS, "http, server", "listen", "[::]:80 default_server")
-        ADDED(NG, "nginx", HS, "http, server", "set", "$x ${host}a")
-        CHANGED(NG, "nginx", HS ",\"location /\"", "http, server, location /", "root", "/var/www", "\\\"/srv/www\\\"")
-        ADDED(NG, "nginx", HS ",\"location ~ \\\\.php$\"", "http, server, location ~ \\\\.php$", "fastcgi_pass",
+        ADDED(NG, "nginx", HS, " http, server", "listen", "[::]:80 default_server")
+        ADDED(NG, "nginx", HS, " http, server", "set", "$x ${host}a")
+        CHANGED(NG, "nginx", HS ",\"location /\"", " http, server, location /", "root", "/var/www", "\\\"/srv/www\\\"")
+        ADDED(NG, "nginx", HS ",\"location ~ \\\\.php$\"", " http, server, location ~ \\\\.php$", "fastcgi_pass",
               "unix:/run/php.sock"),
         t_events(1, 2));
     ASSERT_TRUE(has_text_finding(1, 2, NG));
@@ -270,7 +271,7 @@ TEST(nginx_a_link_is_its_targets_file_once) {
     t_file(AV, "server { listen 8080; }\n", 0644);
     t_link(EN, "../sites-available/site");
     REQUIRE(t_snap(2) == 0);
-    ASSERT_EQ_STR(CHANGED(AV, "nginx", "\"server\"", "server", "listen", "80", "8080"), t_events(1, 2));
+    ASSERT_EQ_STR(CHANGED(AV, "nginx", "\"server\"", " server", "listen", "80", "8080"), t_events(1, 2));
     /* A file replaced by a link: its keys are gone from its path. */
     t_rm(EN);
     t_file(EN, "server { listen 81; }\n", 0644);
@@ -278,7 +279,7 @@ TEST(nginx_a_link_is_its_targets_file_once) {
     t_rm(EN);
     t_link(EN, "../sites-available/site");
     REQUIRE(t_snap(4) == 0);
-    ASSERT_EQ_STR(REMOVED(EN, "nginx", "\"server\"", "server", "listen", "81"), t_events(3, 4));
+    ASSERT_EQ_STR(REMOVED(EN, "nginx", "\"server\"", " server", "listen", "81"), t_events(3, 4));
 }
 
 /* CF-3, CF-4: two blocks with one header under one parent; what does not
@@ -329,7 +330,7 @@ TEST(nginx_what_is_not_keyed) {
     ASSERT_EQ_STR(NOT_KEYED(NG, "nginx", "does not parse"), t_events(3, 4));
     ASSERT_EQ_STR(NOT_KEYED(NG, "nginx", "does not parse"), t_events(4, 3));
     ev = t_events(1, 2);
-    ASSERT_TRUE(strstr(ev, ADDED(NG, "nginx", "\"stream\",\"server\"", "stream, server", "listen", "81")) != NULL);
+    ASSERT_TRUE(strstr(ev, ADDED(NG, "nginx", "\"stream\",\"server\"", " stream, server", "listen", "81")) != NULL);
 }
 
 /* ---- every grammar: what cannot be read, what is not a file ---- */
@@ -373,7 +374,7 @@ TEST(what_cannot_be_read_could_not_be_interpreted) {
     /* Unknown: read all the same, its events provisional (E2). */
     a = t_entry(LD, BELAY_T_REG, 0644, t_put("UID_MIN 500\n"));
     ASSERT_EQ_STR("{\"event\":\"config_key_changed\",\"interp\":\"config\",\"path\":\"" LD "\",\"grammar\":\"namevalue\","
-                  "\"context\":[],\"key\":\"UID_MIN\",\"from\":\"1000\",\"to\":\"500\",\"text\":\"" LD ":  \xe2\x80\xba "
+                  "\"context\":[],\"key\":\"UID_MIN\",\"from\":\"1000\",\"to\":\"500\",\"text\":\"" LD ": \xe2\x80\xba "
                   "UID_MIN 1000 -> 500\",\"provisional\":true,\"paths\":[\"" LD "\"]}\n",
                   by_hand(LD, &b, &a, "unknown"));
     /* A path config does not claim is declined. */

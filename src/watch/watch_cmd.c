@@ -20,6 +20,7 @@
 #include "util/pattern.h"
 #include "watch/ledger.h"
 #include "watch/run.h"
+#include "watch/sysflag.h"
 
 /* ---- the full receipt ---- */
 
@@ -231,6 +232,92 @@ out:
     return rc;
 }
 
+/* `watch patterns --system` (WS-8a, WS-9): the roots as the machine is now,
+ * with their classes and how many entries of the newest checkpoint each
+ * holds (a longer root wins), the directories not read, the homes left out
+ * and why, then the flag list with the entries each path row matches. */
+static int cmd_patterns_system(const char *scope, FILE *out, FILE *err) {
+    struct scope sc;
+    struct state st;
+    st.dir_fd = st.cp_fd = st.lock_fd = -1;
+    struct belay_system_roots sr = { 0 };
+    struct manifest_file mf = { .temporary = false };
+    struct belay_manifest_reader *r = NULL;
+    struct checkpoint *cps = NULL;
+    size_t n_cps = 0, *per = NULL, *rows = NULL;
+    int rc = 0;
+    if (scope_resolve(scope, &sc) == -1) { cli_err_line(err); belay_err_clear(); return EXIT_REFUSED; }
+    if (belay_system_roots(sc.path, &sr) == -1 || state_open(&sc, false, &st, NULL) == -1 ||
+        (per = calloc(sr.n_roots + 1, sizeof *per)) == NULL || (rows = calloc(sysflag_n_rows, sizeof *rows)) == NULL) {
+        if (belay_err_code() == BELAY_OK) belay_err_set(BELAY_ERR_NOMEM, 0, "out of memory");
+        rc = cli_failed(err);
+        goto out;
+    }
+    long id = 0;
+    if (st.cp_fd != -1) {
+        if (state_list(&st, &cps, &n_cps) == -1) { rc = cli_failed(err); goto out; }
+        id = n_cps > 0 ? cps[n_cps - 1].id : 0;
+    }
+    if (id != 0) {
+        if (manifest_acquire(&st, id, &mf) == -1 || belay_manifest_open(mf.path, &r) == -1) { rc = cli_failed(err); goto out; }
+        static struct belay_entry e;
+        int got;
+        while ((got = belay_manifest_next(r, &e)) == 1) {
+            size_t best = sr.n_roots, bl = 0;
+            for (size_t i = 0; i < sr.n_roots; i++) {
+                const size_t n = strlen(sr.roots[i].path);
+                if (n > bl && e.path_len >= n && memcmp(e.path, sr.roots[i].path, n) == 0 && (e.path_len == n || e.path[n] == '/')) {
+                    best = i;
+                    bl = n;
+                }
+            }
+            per[best]++;
+            for (size_t i = 0; i < sysflag_n_rows; i++) {
+                const struct sysrow *w = &sysflag_rows[i];
+                if (pattern_match(w->pattern, strlen(w->pattern), e.path, e.path_len, PATTERN_DOTS | PATTERN_NOCASE) != 0 &&
+                    (w->except == NULL || pattern_match(w->except, strlen(w->except), e.path, e.path_len, PATTERN_DOTS) == 0))
+                    rows[i]++;
+            }
+        }
+        if (got == -1) { rc = cli_failed(err); goto out; }
+    }
+    if (id == 0) fputs("no checkpoint of the system yet: nothing to count\n", out);
+    else fprintf(out, "counted over checkpoint %ld\n", id);
+    fprintf(out, "roots: %zu\n", sr.n_roots);
+    for (size_t i = 0; i < sr.n_roots; i++) {
+        fprintf(out, "  %-8s  ", sr.roots[i].cls == BELAY_ROOT_CONTENT ? "content" : "metadata");
+        receipt_fputs(out, sr.roots[i].path);
+        if (id != 0) fprintf(out, "  %zu entr%s", per[i], per[i] == 1 ? "y" : "ies");
+        fputc('\n', out);
+    }
+    fprintf(out, "not read: every other child of /, and %zu directories under the roots\n", sr.n_not_read);
+    for (size_t i = 0; i < sr.n_not_read; i++) fprintf(out, "  %s\n", sr.not_read[i]);
+    fprintf(out, "homes left out: %zu\n", sr.n_left_out);
+    for (size_t i = 0; i < sr.n_left_out; i++) {
+        fputs("  ", out);
+        receipt_fputs(out, sr.left_out[i]);
+        fputc('\n', out);
+    }
+    fprintf(out, "flag list (watch-system.md): %zu path rows\n", sysflag_n_rows);
+    for (size_t i = 0; i < sysflag_n_rows; i++) {
+        const struct sysrow *w = &sysflag_rows[i];
+        fprintf(out, "  %zu\t%s\t%s\t%s%s%s\n", rows[i], w->pattern, w->label, w->id, w->except ? "; except " : "",
+                w->except ? w->except : "");
+    }
+    fprintf(out, "and rows that read events, fields and runtime records: %zu\n", sysflag_n_event_rows);
+    for (size_t i = 0; i < sysflag_n_event_rows; i++)
+        fprintf(out, "  %s\t%s\n", sysflag_event_rows[i][0], sysflag_event_rows[i][1]);
+out:
+    belay_manifest_close(r);
+    manifest_release(&mf);
+    free(cps);
+    free(per);
+    free(rows);
+    belay_system_roots_free(&sr);
+    state_close(&st);
+    return rc;
+}
+
 /* ---- the command line ---- */
 
 static bool number(const char *s, long *v, long max) {
@@ -241,10 +328,11 @@ static bool number(const char *s, long *v, long max) {
 }
 
 int cmd_watch(int argc, char **argv, FILE *out, FILE *err) {
-    if (argc < 3) return cli_usage(err, "watch needs a command: step, close, mark, summary, receipt or patterns");
+    if (argc < 3) return cli_usage(err, "watch needs a command: start, step, close, mark, summary, receipt, stop or patterns");
     const char *sub = argv[2];
     const char *scope = NULL, *session = NULL, *begin = NULL, *finish = NULL, *agent = NULL, *name = NULL, *since = NULL;
-    bool first_ok = false, all = false, path = false, entries = false;
+    const char *system_root = NULL;
+    bool first_ok = false, all = false, path = false, entries = false, system = false;
     long deadline = WATCH_DEADLINE_S, max_lines = 0;
     struct wsb ids = { 0 };
     char why[256];
@@ -256,6 +344,11 @@ int cmd_watch(int argc, char **argv, FILE *out, FILE *err) {
         if (!strcmp(a, "--all")) { all = true; continue; }
         if (!strcmp(a, "--path")) { path = true; continue; }
         if (!strcmp(a, "--entries")) { entries = true; continue; }
+        if (!strcmp(a, "--system")) {                   /* watch-system WS-1 */
+            if (system) { rc = cli_usage(err, "--system given twice"); goto done; }
+            system = true;
+            continue;
+        }
         if (!strcmp(a, "--scope")) val = &scope;
         else if (!strcmp(a, "--session")) val = &session;
         else if (!strcmp(a, "--begin")) val = &begin;
@@ -263,6 +356,7 @@ int cmd_watch(int argc, char **argv, FILE *out, FILE *err) {
         else if (!strcmp(a, "--agent")) val = &agent;
         else if (!strcmp(a, "--name")) val = &name;
         else if (!strcmp(a, "--since")) val = &since;
+        else if (!strcmp(a, "--system-root")) val = &system_root;      /* cli_system_scope */
         else if (strcmp(a, "--id") && strcmp(a, "--deadline") && strcmp(a, "--max-lines")) {
             snprintf(why, sizeof why, "unknown option %.200s", a);
             rc = cli_usage(err, why);
@@ -290,10 +384,49 @@ int cmd_watch(int argc, char **argv, FILE *out, FILE *err) {
             goto done;
         }
     }
+    if (system || system_root != NULL) {
+        if ((rc = cli_system_scope(system, system_root, &scope, NULL, err)) != 0) goto done;
+        system = true;
+    }
     if (scope == NULL) { rc = cli_usage(err, "--scope DIR is required"); goto done; }
     const bool is_step = !strcmp(sub, "step"), is_close = !strcmp(sub, "close"), is_mark = !strcmp(sub, "mark"),
-               is_summary = !strcmp(sub, "summary");
-    if (!strcmp(sub, "patterns")) { rc = cmd_patterns(scope, entries, out, err); goto done; }
+               is_summary = !strcmp(sub, "summary"), is_start = !strcmp(sub, "start"), is_stop = !strcmp(sub, "stop");
+    if ((is_start || is_stop) && !system) { rc = cli_usage(err, "start and stop are a system watch's: give --system"); goto done; }
+    if (system && (is_close || is_mark)) { rc = cli_usage(err, "--system is start's, step's, receipt's, stop's, summary's and patterns'"); goto done; }
+    if (!strcmp(sub, "patterns")) { rc = system ? cmd_patterns_system(scope, out, err) : cmd_patterns(scope, entries, out, err); goto done; }
+    if (system && (is_start || is_stop || !strcmp(sub, "receipt"))) {
+        /* WS-2, WS-3, K12: a walk under the lock, no time limit, a line on standard error every 10 s */
+        if (session != NULL && !ledger_id_valid(session)) { rc = cli_usage(err, "--session needs an id: printable, no spaces, at most 96 bytes"); goto done; }
+        struct wreq q = { .scope = scope, .session = session != NULL ? session : "system", .agent = "", .first_ok = true,
+                          .deadline_s = 0, .words = { "call", "", "" }, .system = true, .progress = err };
+        if (is_start) q.ops[q.n_ops++] = (struct wop){ WOP_START, NULL, 0 };
+        q.ops[q.n_ops++] = (struct wop){ WOP_STEP, NULL, WSTEP_PLAIN };
+        if (!is_start) q.ops[q.n_ops++] = (struct wop){ WOP_RECEIPT, NULL, is_stop ? 1 : 0 };
+        struct wsb text = { 0 };
+        const int wr = watch_run(&q, &text);
+        char file[PATH_MAX + 120];
+        if (text.bad) {
+            fputs("belay: out of memory\n", err);
+            rc = EXIT_FAILED;
+        } else if (wr == 0 && path && !is_start) {
+            if (watch_receipt_file(scope, &text, file, sizeof file) == -1) rc = cli_failed(err);
+            else fprintf(out, "%s\n", file);
+        } else {
+            long lines = 0;
+            const char *p = text.p != NULL ? text.p : "";
+            while (*p != '\0' && (max_lines == 0 || lines < max_lines)) {
+                const char *nl = strchr(p, '\n');
+                const size_t n = nl != NULL ? (size_t)(nl - p) + 1 : strlen(p);
+                fwrite(p, 1, n, out);
+                p += n;
+                lines++;
+            }
+            if (*p != '\0') fputs("... the rest: belay watch receipt without --max-lines\n", out);
+        }
+        free(text.p);
+        if (rc == 0) rc = wr == 0 ? EXIT_DONE : wr == 3 ? EXIT_REFUSED : EXIT_FAILED;
+        goto done;
+    }
     if (!strcmp(sub, "receipt")) {
         struct wsb text = { 0 };
         size_t n_steps;
@@ -332,7 +465,7 @@ int cmd_watch(int argc, char **argv, FILE *out, FILE *err) {
         goto done;
     }
     struct wreq q = { .scope = scope, .session = session, .agent = agent != NULL ? agent : "", .first_ok = first_ok,
-                      .deadline_s = deadline, .words = { "call", "", "" } };
+                      .deadline_s = deadline, .words = { "call", "", "" }, .system = system };
     char span[WATCH_ID_MAX + 16];
     if (is_step) {
         if (begin != NULL && finish != NULL) { rc = cli_usage(err, "--begin or --finish, not both"); goto done; }

@@ -10,6 +10,8 @@
 static const char *const KIND[WK_COUNT] = {
     "don't-touch", "git hooks and config", "agent rules", "privilege", "loads on its own", "package source",
     "CI", "credentials", "replaced by a symlink", "history", "could not be read", "coverage",
+    "sudo", "ssh", "accounts", "authentication", "services", "scheduled", "secret", "listening", "trust store",
+    "firewall", "packages",
 };
 const char *wkind_name(enum wkind k) { return (unsigned)k < WK_COUNT ? KIND[k] : "?"; }
 
