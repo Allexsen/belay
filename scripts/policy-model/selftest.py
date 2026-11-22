@@ -461,7 +461,7 @@ def fixture_writer_open():
     locked["iflags"] = None
     check("last among the reasons (V4-D4)", rec(x, locked, wb=H)["unknown"],
           ["unverified", "unreadable", "iflags_unknown", "writer_open"])
-    check("the order of the reasons ends in writer_open", model.REASON_ORDER[-2:], ("listing_incomplete", "writer_open"))
+    check("writer_open after every reason before v5 (V4-D4)", model.REASON_ORDER[-5:-3], ("listing_incomplete", "writer_open"))
     # the capture: no copy, no mark without a hash (V4-2, V4-R5)
     v = model.view({b"f": x, b"same": dict(x)}, model.HASH_DEFAULT, H)
     check("held: marked, no copy, every name of the inode", [(e["writer_open"], e["stored"]) for e in v.values()],
@@ -670,6 +670,26 @@ def fixture_not_read():
     check("PV2-9: a file that is there is there", kinds_of(nd, A, A), [])
     # PV2-11, P-G5: created under no_delete alone is no finding; O11 in the model's diff
     check("PV2-11: a directory created sealed: no finding", kinds_of(nd, N_, T0), [])
+    # PV2-12, P-G6: a directory whose listing was incomplete
+    def unstable(tree):
+        v = model.view(tree, model.HASH_BOUND_SPEC)
+        v[b"g/d"]["unstable"] = True
+        return v
+    def flags_of(B_, A_, rules=nd):
+        ctx = {"scope": "/w", "bundle_sha256": "b" * 64, "spec": model.parse_spec(('{"belay_protect":2,"protect":[%s]}' % rules).encode()),
+               "before": model.Side(B_, 10, []), "after": model.Side(A_, 10, []), "bundle_lines": [], "outside_scope": 0,
+               "before_sha256": "1" * 64, "after_sha256": "2" * 64, "source": None}
+        out, _f, _r, _e = model.verify_lines(ctx)
+        return [(o["flag"], o.get("reasons")) for o in map(dict, out[1:-1]) if o["flag"].startswith("protected_")]
+    plain_ = lambda tree: model.view(tree, model.HASH_BOUND_SPEC)
+    unv = ("protected_path_unverifiable", ["unstable"])
+    check("PV2-12: unstable at reset", flags_of(unstable(T1), plain_(T1)), [unv])
+    check("PV2-12: unstable after", flags_of(plain_(T1), unstable(T1)), [unv])
+    check("PV2-12: unstable on both sides", flags_of(unstable(T1), unstable(T1)), [unv])
+    check("PV2-12: unstable at reset and removed: deleted too", flags_of(unstable(T1), plain_(N_)),
+          [("protected_path_deleted", None), unv])
+    check("PV2-12, PV2-11: created unstable: no finding", flags_of(plain_(N_), unstable(T1)), [])
+    check("V5-D5, V5-A6: the reasons' order ends", model.REASON_ORDER[-4:], ("writer_open", "not_read", "sealed_key", "class_changed"))
     check("PV2-11: a file created unreadable: no finding", kinds_of(nd, N_, A), [])
     check("PV2-10: with a no_create rule too, as before PV2-8",
           kinds_of(nd + ',{"path":"g/d","mode":["no_create"]}', N_, T0),

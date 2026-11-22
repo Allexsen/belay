@@ -709,8 +709,12 @@ def _run(sc, rep, cov, vstate, tmp, answered, holds):
                "bundle_lines": exp["lines"], "outside_scope": exp["outside"],
                "before_sha256": before_sha, "after_sha256": after_sha,
                "source": before_source,                         # not refused: the after's too (V3-R4)
-               "walk_counts": (0, 0, sum(1 for e in exp["B"].values() if e["raced"]),      # V4-D6
-                               0, 0, sum(1 for e in A.values() if e["raced"]))}
+               # vanished, unstable, raced of each manifest's trailer (V4-D6); `unstable` only
+               # where a scenario wrote the flag into a manifest by hand (PV2-12)
+               "walk_counts": (0, sum(1 for e in exp["B"].values() if e["unstable"]),
+                               sum(1 for e in exp["B"].values() if e["raced"]),
+                               0, sum(1 for e in A.values() if e["unstable"]),
+                               sum(1 for e in A.values() if e["raced"]))}
         lines, flags, _recs, _events = model.verify_lines(ctx)
         if sc["name"] in REQUIRED_SCENARIOS:
             cov.exp("scenario " + sc["name"])
@@ -795,7 +799,12 @@ REQUIRED_SCENARIOS = (["pv2-8-nd-%s-one-rule-%s" % (o, w) for o in ("nc", "hash"
                          "pv2-9-sealed-dir-removed", "pv2-9-file-becomes-sealed-dir"]
                       # PV2-11: created under no_delete alone, and with another rule (PV2-10)
                       + ["pv2-11-%s%s" % (w, x) for w in ("dir-created-sealed", "file-created-unreadable")
-                         for x in ("", "-two-no-delete-rules", "-with-no-create-rule")])
+                         for x in ("", "-two-no-delete-rules", "-with-no-create-rule")]
+                      # PV2-12: a directory `unstable` on a side, under no_delete alone
+                      + ["pv2-12-" + w for w in ("unstable-at-reset", "unstable-after", "unstable-both",
+                                                 "unstable-at-reset-removed", "unstable-after-file-below-gone",
+                                                 "created-unstable", "unstable-at-reset-with-no-create-rule",
+                                                 "unstable-rule-names-it")])
 
 
 def gate(cov, verify_ran, probe):

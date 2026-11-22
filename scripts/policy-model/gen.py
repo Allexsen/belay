@@ -1231,6 +1231,20 @@ def not_read_scenarios():
         add(S("pv2-11-" + what + "-two-no-delete-rules", BASE, episode, ND2, tags=["P25", "P75"]))
         add(S("pv2-11-" + what + "-with-no-create-rule", BASE, episode,
               spec_of(rule("grader/**", "no_delete"), rule("grader/new*", "no_create")), tags=["P25", "P68", "P75"]))
+    # -- PV2-12, P-G6: a directory whose listing was incomplete (`unstable`), under `no_delete`
+    #    alone; the flag is written into the manifest by hand. Required by run.py's gate.
+    SUBB = b"grader/sub"
+    AT_RESET = {"manifest": "flags", "flags": {SUBB: ["unstable"]}}
+    AFTER_ = {"to": "check", "after_flags": {SUBB: ["unstable"]}}
+    add(S("pv2-12-unstable-at-reset", SUBX, [], ND, verify=AT_RESET, tags=["P77"]))
+    add(S("pv2-12-unstable-after", SUBX, [], ND, verify=AFTER_, tags=["P77"]))
+    add(S("pv2-12-unstable-both", SUBX, [], ND, verify=dict(AT_RESET, **AFTER_), tags=["P77"]))
+    add(S("pv2-12-unstable-at-reset-removed", SUBX, [("rmtree", "grader/sub")], ND, verify=AT_RESET, tags=["P77"]))
+    add(S("pv2-12-unstable-after-file-below-gone", SUBX, [("rm", "grader/sub/x.txt")], ND, verify=AFTER_, tags=["P50", "P77"]))
+    add(S("pv2-12-created-unstable", BASE, [("file", "grader/sub/x.txt", b"x\n")], ND, verify=AFTER_, tags=["P75", "P77"]))
+    add(S("pv2-12-unstable-at-reset-with-no-create-rule", SUBX, [],
+          spec_of(rule("grader/**", "no_delete"), rule("grader/sub", "no_create")), verify=AT_RESET, tags=["P68", "P77"]))
+    add(S("pv2-12-unstable-rule-names-it", SUBX, [], spec_of(rule("grader/sub", "no_delete")), verify=AFTER_, tags=["P77"]))
     add(S("pv2-9-file-becomes-sealed-dir", BASE + [("file", key, b"k3y\n")], [("rm", key), ("dir", key, 0o000)], ND,
           diff=True, tags=["P25", "P71", "P75"]))
     add(S("pv2-9-sealed-dir-rule-names-it", CLOSED, [], spec_of(rule("grader/sub", "no_delete")), tags=["P25", "P71"]))
