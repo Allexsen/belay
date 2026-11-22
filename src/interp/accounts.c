@@ -16,15 +16,29 @@
  *  Lookups (SI-4), asked only when an event needs them: the `etc/login.defs`
  *  beside the passwd for uid_min; the presence of an `etc/shadow` beside it
  *  for an empty second field.
+ *
+ *  SA-6: `shadow` and `gshadow` are sealed, and no interpreter is given
+ *  their bytes. What reaches this one is each capture's per-line digest
+ *  file (belay_manifest_opts.shadow_lines_path): a first field and a keyed
+ *  digest per line. Where both captures kept one under the same sealing
+ *  key, an entry whose digest appeared, went or differs is named, for the
+ *  files both digested. A digest file that is not what belay writes is
+ *  could_not_interpret for the two files, never "no entries".
  */
+#define _GNU_SOURCE                     /* getline */
 #include "builtins.h"
 #include "stored.h"
 #include "sysev.h"
 
+#include "belay/error.h"
+#include "belay/json.h"
 #include "belay/manifest.h"
+#include "util/jsonr.h"
 
+#include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/types.h>
 
 #define ROOTS_MAX 4096u         /* trees with a passwd whose lookups are made; past it: not asked */
 #define AUX_EMPTY 0x80000000u   /* user_password_in_passwd for an empty field: dropped where a shadow is */
@@ -342,12 +356,171 @@ static int shadow_fn(void *ctx, const struct belay_entry *e) {
     return 0;
 }
 
+/* ---- SA-6: the lines of shadow and gshadow ---- */
+
+static const char *const PW_FILE[2] = { "etc/gshadow", "etc/shadow" };
+
+struct pent { int file; char *name; size_t nlen; char hmac[65]; uint32_t place; };
+struct plines { struct pent *v; size_t n, cap; char key[17]; bool has[2]; };
+
+static void plines_free(struct plines *p) {
+    for (size_t i = 0; i < p->n; i++) free(p->v[i].name);
+    free(p->v);
+    memset(p, 0, sizeof *p);
+}
+
+static bool hex_n(const char *s, size_t n) {
+    if (strlen(s) != n) return false;
+    for (size_t i = 0; i < n; i++)
+        if (!((s[i] >= '0' && s[i] <= '9') || (s[i] >= 'a' && s[i] <= 'f'))) return false;
+    return true;
+}
+
+static int pw_file(const char *s) {
+    for (int i = 0; i < 2; i++)
+        if (strcmp(s, PW_FILE[i]) == 0) return i;
+    return -1;
+}
+
+enum { L_OK, L_BAD, L_NOMEM };
+
+/* One line of a digest file, parsed: the header (`first`) or an entry. */
+static int pline(struct plines *p, const char *line, size_t len, bool first, uint32_t place[2]) {
+    struct jval v;
+    if (jsonr_parse(line, len, &v) == -1) { belay_err_clear(); return L_BAD; }
+    int rc = L_BAD;
+    if (v.t != J_OBJ) goto done;
+    if (first) {
+        const struct jval *ver = jget(&v, "belay_shadow_lines"), *files = jget(&v, "files");
+        const char *key = jstr(&v, "sealed_key");
+        if (ver == NULL || ver->t != J_NUM || ver->i != 1 || ver->num != 1.0 || !hex_n(key, 16) ||
+            files == NULL || files->t != J_ARR)
+            goto done;
+        for (size_t i = 0; i < files->n; i++) {
+            const int f = files->kids[i].t == J_STR ? pw_file(files->kids[i].s) : -1;
+            if (f < 0 || p->has[f]) goto done;
+            p->has[f] = true;
+        }
+        memcpy(p->key, key, 17);
+        rc = L_OK;
+        goto done;
+    }
+    const struct jval *file = jget(&v, "file"), *name = jget(&v, "name"), *b64 = jget(&v, "name_b64");
+    const char *hmac = jstr(&v, "hmac");
+    const int f = file != NULL && file->t == J_STR ? pw_file(file->s) : -1;
+    if (f < 0 || !p->has[f] || !hex_n(hmac, 64) || (name == NULL) == (b64 == NULL) ||
+        (name != NULL && name->t != J_STR) || (b64 != NULL && b64->t != J_STR))
+        goto done;
+    if (p->n == p->cap) {
+        const size_t c = p->cap ? 2 * p->cap : 64;
+        struct pent *q = realloc(p->v, c * sizeof *q);
+        if (q == NULL) { rc = L_NOMEM; goto done; }
+        p->v = q;
+        p->cap = c;
+    }
+    struct pent *e = &p->v[p->n];
+    memset(e, 0, sizeof *e);
+    const char *src = name != NULL ? name->s : b64->s;
+    const size_t sl = name != NULL ? name->s_len : strlen(src);
+    if ((e->name = malloc(sl + 1)) == NULL) { rc = L_NOMEM; goto done; }
+    if (name != NULL) {
+        memcpy(e->name, src, sl + 1);
+        e->nlen = sl;
+    } else if (belay_base64_decode(e->name, sl + 1, &e->nlen, src) == -1) {
+        belay_err_clear();
+        free(e->name);
+        goto done;
+    }
+    e->file = f;
+    e->place = ++place[f];
+    memcpy(e->hmac, hmac, 65);
+    p->n++;
+    rc = L_OK;
+done:
+    jsonr_free(&v);
+    return rc;
+}
+
+static int plines_load(const char *path, struct plines *p) {
+    memset(p, 0, sizeof *p);
+    FILE *f = fopen(path, "rb");
+    if (f == NULL) return L_BAD;
+    char *line = NULL;
+    size_t cap = 0;
+    ssize_t n;
+    int rc = L_OK;
+    bool first = true;
+    uint32_t place[2] = { 0, 0 };
+    while (rc == L_OK && (n = getline(&line, &cap, f)) > 0) {
+        if (line[n - 1] != '\n' || memchr(line, '\0', (size_t)n) != NULL) { rc = L_BAD; break; }   /* cut short */
+        rc = pline(p, line, (size_t)n - 1, first, place);
+        first = false;
+    }
+    if (rc == L_OK && (first || ferror(f))) rc = L_BAD;     /* no header at all */
+    free(line);
+    fclose(f);
+    if (rc != L_OK) plines_free(p);
+    return rc;
+}
+
+/* By file, then name, then place: equal names pair off in their order. */
+static int pent_cmp(const void *a, const void *b) {
+    const struct pent *x = a, *y = b;
+    if (x->file != y->file) return x->file - y->file;
+    const int c = memcmp(x->name, y->name, x->nlen < y->nlen ? x->nlen : y->nlen);
+    if (c) return c;
+    if (x->nlen != y->nlen) return x->nlen < y->nlen ? -1 : 1;
+    return (x->place > y->place) - (x->place < y->place);
+}
+static int pent_key(const struct pent *x, const struct pent *y) {
+    if (x->file != y->file) return x->file - y->file;
+    const int c = memcmp(x->name, y->name, x->nlen < y->nlen ? x->nlen : y->nlen);
+    return c ? c : (x->nlen > y->nlen) - (x->nlen < y->nlen);
+}
+
+static void pw_event(struct accounts *st, int kind, const struct pent *e, int rank) {
+    const char *file = PW_FILE[e->file];
+    const struct belay_fv v[] = { { .s = file, .len = strlen(file) }, { .s = e->name, .len = e->nlen } };
+    sysevs_add(st->evs, kind, file, strlen(file), e->place, rank, false, v, 2);
+}
+
+/* 0, or -1 (memory). */
+static int password_entries(struct accounts *st, struct belay_lookup *lk) {
+    const char *pb = belay_lookup_shadow_lines(lk, 0), *pa = belay_lookup_shadow_lines(lk, 1);
+    if (pb == NULL || pa == NULL) return 0;             /* a capture kept none: no names (SA-6) */
+    struct plines b, a;
+    const int rb = plines_load(pb, &b), ra = rb == L_OK ? plines_load(pa, &a) : L_OK;
+    if (rb != L_OK || ra != L_OK) {
+        if (rb == L_OK) plines_free(&b);
+        if (rb == L_NOMEM || ra == L_NOMEM) return -1;
+        for (int f = 0; f < 2; f++) sysevs_not_interpreted(st->evs, PW_FILE[f], strlen(PW_FILE[f]), false);
+        return 0;
+    }
+    if (strcmp(b.key, a.key) == 0) {                    /* another key: the digests do not compare */
+        if (b.n > 1) qsort(b.v, b.n, sizeof *b.v, pent_cmp);
+        if (a.n > 1) qsort(a.v, a.n, sizeof *a.v, pent_cmp);
+        for (size_t i = 0, j = 0; i < b.n || j < a.n; ) {
+            const int c = i == b.n ? 1 : j == a.n ? -1 : pent_key(&b.v[i], &a.v[j]);
+            const struct pent *x = c <= 0 ? &b.v[i++] : NULL, *y = c >= 0 ? &a.v[j++] : NULL;
+            const int f = x != NULL ? x->file : y->file;
+            if (!b.has[f] || !a.has[f]) continue;       /* a side did not digest this file */
+            if (y == NULL) pw_event(st, FK_PASSWORD_ENTRY_REMOVED, x, SYS_REMOVED);
+            else if (x == NULL) pw_event(st, FK_PASSWORD_ENTRY_ADDED, y, SYS_ADDED);
+            else if (strcmp(x->hmac, y->hmac) != 0) pw_event(st, FK_PASSWORD_ENTRY_CHANGED, y, SYS_ADDED);
+        }
+    }
+    plines_free(&b);
+    plines_free(&a);
+    return 0;
+}
+
 static enum belay_interp_result prepare(void *state, struct belay_lookup *lk) {
     struct accounts *st = state;
     if (st == NULL) return BELAY_INTERP_ERROR;
     if (st->asked) return BELAY_INTERP_FINDINGS;
     st->asked = true;
     st->lk = lk;
+    if (password_entries(st, lk) == -1) return BELAY_INTERP_ERROR;
     char path[4096 + 16];
     for (size_t i = 0; i < st->nroots; i++) {
         struct root *r = &st->roots[i];

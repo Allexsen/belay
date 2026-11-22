@@ -511,6 +511,332 @@ TEST(hostile_files_are_read_within_bounds) {
     tr_free(&r);
 }
 
+/* ================= SA-6: the lines of shadow and gshadow ================= */
+
+#include <fcntl.h>
+
+/* HMAC-SHA256 (RFC 2104) under a 32-byte key, from the definition. */
+static void hmac_hex(const uint8_t key[32], const char *msg, char hex[65]) {
+    uint8_t ipad[64], opad[64], inner[32], out[32];
+    memset(ipad, 0x36, 64);
+    memset(opad, 0x5c, 64);
+    for (int i = 0; i < 32; i++) { ipad[i] ^= key[i]; opad[i] ^= key[i]; }
+    struct belay_sha256 h;
+    belay_sha256_init(&h);
+    belay_sha256_update(&h, ipad, 64);
+    belay_sha256_update(&h, msg, strlen(msg));
+    belay_sha256_final(&h, inner);
+    belay_sha256_init(&h);
+    belay_sha256_update(&h, opad, 64);
+    belay_sha256_update(&h, inner, 32);
+    belay_sha256_final(&h, out);
+    belay_hex_encode(hex, out, 32);
+}
+
+static char g_lines[2][400];    /* what a diff is given: "" for none */
+
+/* Captures the tree by one root, `etc`, with the state's sealing key: the
+ * manifest m<k> and the per-line digests l<k>. With `prev`, as a mark
+ * prefiltered against manifest m<prev>. */
+static int snap_roots(int k, int prev, struct belay_manifest_stats *st) {
+    char m[400], root[400], store[400], key[400], lines[400], pm[400];
+    snprintf(m, sizeof m, "%s/m%d", g_dir, k);
+    snprintf(pm, sizeof pm, "%s/m%d", g_dir, prev);
+    snprintf(root, sizeof root, "%s/root", g_dir);
+    snprintf(store, sizeof store, "%s/store", g_dir);
+    snprintf(key, sizeof key, "%s/sealing.key", g_dir);
+    snprintf(lines, sizeof lines, "%s/l%d", g_dir, k);
+    static const struct belay_root R[] = { { "etc", BELAY_ROOT_CONTENT, false, false } };
+    struct belay_manifest_opts o;
+    memset(&o, 0, sizeof o);
+    o.hash_max_bytes = BELAY_HASH_MAX_BYTES_DEFAULT;
+    o.store_max_bytes = BELAY_STORE_MAX_BYTES_DEFAULT;
+    o.store_dir = store;
+    o.roots = R;
+    o.n_roots = 1;
+    o.sealing_key_path = key;
+    o.shadow_lines_path = lines;
+    if (prev > 0) o.previous = pm;
+    unlink(m);
+    if (belay_manifest_write(m, root, &o, st) != 0) {
+        BELAY_FAIL("capture %d: %s", k, belay_err_msg());
+        belay_err_clear();
+        return -1;
+    }
+    return 0;
+}
+
+static const char *events_with_lines(int a, int b) {
+    snprintf(g_lines[0], sizeof g_lines[0], "%s/l%d", g_dir, a);
+    snprintf(g_lines[1], sizeof g_lines[1], "%s/l%d", g_dir, b);
+    const struct belay_diff_opts o = { .shadow_lines_before = access(g_lines[0], F_OK) == 0 ? g_lines[0] : NULL,
+                                       .shadow_lines_after = access(g_lines[1], F_OK) == 0 ? g_lines[1] : NULL };
+    t_diff_opts(a, b, &o);
+    return t_only_events(g_text);
+}
+
+#define PE(what, file, name) \
+    "{\"event\":\"password_entry_" what "\",\"interp\":\"accounts\",\"file\":\"" file "\",\"name\":\"" name "\"," \
+    "\"text\":\"password database: entry " what " for " name "\",\"paths\":[\"" file "\"]}\n"
+
+#define SH_ROOT1 "root:$y$j9T$MARKERONE$MARKERHASHONE:19000:0:99999:7:::"
+#define SH_ROOT2 "root:$y$j9T$MARKERTWO$MARKERHASHTWO:19500:0:99999:7:::"
+#define SH_DAEMON "daemon:*:19000:0:99999:7:::"
+#define SH_OLD "old:!:19000::::::"
+#define SH_SITE "siteuser:!:19500:0:99999:7:::"
+
+/* The capture: one line of digest per line of the two files, keyed, their
+ * first field and nothing else; mode 600; and its sha256 in the stats. */
+TEST(the_capture_keeps_a_keyed_digest_of_each_shadow_line) {
+    t_reset();
+    char p[500];
+    snprintf(p, sizeof p, "%s/sealing.key", g_dir);
+    unlink(p);
+    t_file("etc/passwd", ROOT, 0644);
+    t_file("etc/shadow", SH_ROOT1 "\n" SH_DAEMON "\n\n" SH_OLD, 0640);       /* an empty line, no final newline */
+    t_file("etc/gshadow", "root:*::\nsudo:!MARKERGSH::ubuntu\n", 0640);
+    struct belay_manifest_stats st;
+    REQUIRE(snap_roots(1, 0, &st) == 0);
+    uint8_t key[32];
+    const int fd = open(p, O_RDONLY);
+    REQUIRE(fd != -1 && read(fd, key, 32) == 32);
+    close(fd);
+    struct belay_sha256 h;
+    uint8_t d[32];
+    char id[65], h1[65], h2[65], h3[65], g1[65], g2[65], want[2000];
+    belay_sha256_init(&h);
+    belay_sha256_update(&h, key, 32);
+    belay_sha256_final(&h, d);
+    belay_hex_encode(id, d, 32);
+    id[16] = '\0';
+    hmac_hex(key, SH_ROOT1, h1);
+    hmac_hex(key, SH_DAEMON, h2);
+    hmac_hex(key, SH_OLD, h3);
+    hmac_hex(key, "root:*::", g1);
+    hmac_hex(key, "sudo:!MARKERGSH::ubuntu", g2);
+    snprintf(want, sizeof want,
+             "{\"belay_shadow_lines\":1,\"sealed_key\":\"%s\",\"files\":[\"etc/gshadow\",\"etc/shadow\"]}\n"
+             "{\"file\":\"etc/gshadow\",\"name\":\"root\",\"hmac\":\"%s\"}\n"
+             "{\"file\":\"etc/gshadow\",\"name\":\"sudo\",\"hmac\":\"%s\"}\n"
+             "{\"file\":\"etc/shadow\",\"name\":\"root\",\"hmac\":\"%s\"}\n"
+             "{\"file\":\"etc/shadow\",\"name\":\"daemon\",\"hmac\":\"%s\"}\n"
+             "{\"file\":\"etc/shadow\",\"name\":\"old\",\"hmac\":\"%s\"}\n", id, g1, g2, h1, h2, h3);
+    snprintf(p, sizeof p, "%s/l1", g_dir);
+    char *got = t_slurp(p);
+    REQUIRE(got != NULL);
+    ASSERT_EQ_STR(want, got);
+    struct stat ls;
+    REQUIRE(stat(p, &ls) == 0);
+    ASSERT_EQ_INT(0600, (int)(ls.st_mode & 07777));
+    belay_sha256_init(&h);
+    belay_sha256_update(&h, got, strlen(got));
+    belay_sha256_final(&h, d);
+    belay_hex_encode(id, d, 32);
+    ASSERT_EQ_STR(id, st.shadow_lines_sha256);
+    free(got);
+    /* No part of a line but its first field, anywhere: the manifest, the
+     * digests, the store, the key. */
+    char cmd[900];
+    snprintf(cmd, sizeof cmd, "! grep -r -q MARKER '%s/m1' '%s/l1' '%s/store' '%s/sealing.key'", g_dir, g_dir, g_dir, g_dir);
+    ASSERT_EQ_INT(0, system(cmd));
+    /* A mark against it reads the two files again, though they did not
+     * change: their lines are of this capture's read, not carried. */
+    REQUIRE(snap_roots(2, 1, &st) == 0);
+    ASSERT_TRUE(st.prefilter);
+    char *again = t_slurp(p), *l2;
+    snprintf(p, sizeof p, "%s/l2", g_dir);
+    l2 = t_slurp(p);
+    REQUIRE(again != NULL && l2 != NULL);
+    ASSERT_EQ_STR(again, l2);
+    free(again);
+    free(l2);
+    ASSERT_EQ_STR("", events_with_lines(1, 2));
+    /* Neither file there, or neither sealed: no digest file, and none left
+     * from a capture before at that path. */
+    snprintf(cmd, sizeof cmd, "cp '%s/l1' '%s/l3'", g_dir, g_dir);
+    REQUIRE(system(cmd) == 0);
+    t_rm("etc/gshadow");
+    t_file("etc/shadow", SH_ROOT1 "\n", 0644);          /* readable by all: not sealed, so not belay's to digest */
+    REQUIRE(snap_roots(3, 0, &st) == 0);
+    ASSERT_EQ_STR("", st.shadow_lines_sha256);
+    snprintf(p, sizeof p, "%s/l3", g_dir);
+    ASSERT_EQ_INT(-1, access(p, F_OK));
+}
+
+/* SA-3, SA-6: useradd adds a line to passwd and group and rewrites shadow
+ * and gshadow: the entries are named, by path and then place; a changed
+ * entry is one event; nothing of the hash field is anywhere in the diff. */
+TEST(password_entries_are_named_by_their_first_field) {
+    t_reset();
+    t_file("etc/passwd", ROOT, 0644);
+    t_file("etc/group", "root:x:0:\n", 0644);
+    t_file("etc/shadow", SH_ROOT1 "\n" SH_DAEMON "\n" SH_OLD "\n", 0640);
+    t_file("etc/gshadow", "root:*::\n", 0640);
+    REQUIRE(snap_roots(1, 0, NULL) == 0);
+    t_file("etc/passwd", ROOT SITE, 0644);
+    t_file("etc/group", "root:x:0:\nsiteuser:x:1002:\n", 0644);
+    t_file("etc/shadow", SH_ROOT2 "\n" SH_DAEMON "\n" SH_SITE "\n", 0640);
+    t_file("etc/gshadow", "root:*::\nsiteuser:!::\n", 0640);
+    REQUIRE(snap_roots(2, 0, NULL) == 0);
+    ASSERT_EQ_STR(EV("group_added", "\"name\":\"siteuser\",\"gid\":1002", "group siteuser added (gid 1002)", "etc/group")
+                  PE("added", "etc/gshadow", "siteuser")
+                  EV("user_added", "\"name\":\"siteuser\",\"uid\":1002,\"gid\":1002,\"home\":\"/home/siteuser\","
+                     "\"shell\":\"/bin/sh\",\"uid_min\":null",
+                     "user siteuser added: uid 1002, home /home/siteuser, shell /bin/sh", "etc/passwd")
+                  PE("changed", "etc/shadow", "root") PE("removed", "etc/shadow", "old") PE("added", "etc/shadow", "siteuser"),
+                  events_with_lines(1, 2));
+    ASSERT_TRUE(strstr(g_text, "MARKER") == NULL);
+    /* The record of shadow stands as it was: sealed, modified. */
+    const struct belay_diff_opts o = { .shadow_lines_before = g_lines[0], .shadow_lines_after = g_lines[1] };
+    const char *d = t_diff_opts(1, 2, &o);
+    ASSERT_TRUE(strstr(t_record(d, "etc/shadow"), "\"outcome\":\"modified\"") != NULL);
+    /* Without the two digest files: the diff of before this row, no names. */
+    ASSERT_TRUE(strstr(t_events(1, 2), "password_entry") == NULL);
+    /* With one only: nothing to compare. */
+    const struct belay_diff_opts one = { .shadow_lines_after = g_lines[1] };
+    t_diff_opts(1, 2, &one);
+    ASSERT_TRUE(strstr(g_text, "password_entry") == NULL);
+}
+
+/* ---- digest files written by hand ---- */
+
+static void lines_file(int side, const char *text) {
+    snprintf(g_lines[side], sizeof g_lines[side], "%s/hand%d", g_dir, side);
+    FILE *f = fopen(g_lines[side], "wb");
+    if (f == NULL) { BELAY_FAIL("cannot write %s", g_lines[side]); return; }
+    fputs(text, f);
+    fclose(f);
+}
+
+/* The accounts interpreter over no path at all, given the two files. */
+static const char *lines_events(struct t_run *r) {
+    tr_begin(r, BELAY_INTERP_ACCOUNTS);
+    r->lk.shadow_lines[0] = g_lines[0][0] ? g_lines[0] : NULL;
+    r->lk.shadow_lines[1] = g_lines[1][0] ? g_lines[1] : NULL;
+    return tr_end(r, NULL, 0);
+}
+
+#define K1 "{\"belay_shadow_lines\":1,\"sealed_key\":\"1111111111111111\","
+#define K2 "{\"belay_shadow_lines\":1,\"sealed_key\":\"2222222222222222\","
+#define BOTH "\"files\":[\"etc/gshadow\",\"etc/shadow\"]}\n"
+#define HA "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+#define HB "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+#define LN(file, name, h) "{\"file\":\"" file "\",\"name\":\"" name "\",\"hmac\":\"" h "\"}\n"
+
+TEST(password_entries_are_compared_only_under_one_key_and_file_by_file) {
+    struct t_run r;
+    /* The same key: by file, then place; a name twice is its lines in order. */
+    lines_file(0, K1 BOTH LN("etc/gshadow", "g", HA) LN("etc/shadow", "a", HA) LN("etc/shadow", "b", HA)
+                  LN("etc/shadow", "dup", HA) LN("etc/shadow", "dup", HB) LN("etc/shadow", "z", HA));
+    lines_file(1, K1 BOTH LN("etc/gshadow", "g", HB) LN("etc/shadow", "b", HA) LN("etc/shadow", "a", HA)
+                  LN("etc/shadow", "dup", HA) LN("etc/shadow", "new", HA) LN("etc/shadow", "z", HB));
+    ASSERT_EQ_STR(PE("changed", "etc/gshadow", "g")
+                  PE("removed", "etc/shadow", "dup") PE("added", "etc/shadow", "new") PE("changed", "etc/shadow", "z"),
+                  lines_events(&r));
+    tr_free(&r);
+    /* Another key: the digests do not compare, and nothing is said. */
+    lines_file(1, K2 BOTH LN("etc/gshadow", "g", HB) LN("etc/shadow", "new", HA));
+    ASSERT_EQ_STR("", lines_events(&r));
+    tr_free(&r);
+    /* A file one side did not digest (not read, not sealed, torn): its
+     * entries are not "removed". */
+    lines_file(1, K1 "\"files\":[\"etc/gshadow\"]}\n" LN("etc/gshadow", "g", HB));
+    ASSERT_EQ_STR(PE("changed", "etc/gshadow", "g"), lines_events(&r));
+    tr_free(&r);
+    /* A side with no file. */
+    g_lines[1][0] = '\0';
+    ASSERT_EQ_STR("", lines_events(&r));
+    tr_free(&r);
+    /* A name that is not UTF-8 is carried in base64 and is one invalid event (E9). */
+    lines_file(0, K1 BOTH);
+    lines_file(1, K1 BOTH "{\"file\":\"etc/shadow\",\"name_b64\":\"/w==\",\"hmac\":\"" HA "\"}\n" LN("etc/shadow", "ok", HA));
+    ASSERT_EQ_STR("{\"event\":\"invalid_finding\",\"interp\":\"accounts\",\"text\":\"invalid finding\",\"paths\":[\"etc/shadow\"]}\n"
+                  PE("added", "etc/shadow", "ok"), lines_events(&r));
+    tr_free(&r);
+}
+
+/* A digest file that is not what belay writes is said, never read as
+ * "no entries": could_not_interpret naming the files it stands for. */
+TEST(a_digest_file_that_is_not_one_is_could_not_interpret) {
+    static const char *const BAD[] = {
+        "",
+        "not json\n",
+        "{\"belay_shadow_lines\":2,\"sealed_key\":\"1111111111111111\"," BOTH,
+        "{\"belay_shadow_lines\":1,\"sealed_key\":\"short\"," BOTH,
+        "{\"belay_shadow_lines\":1,\"sealed_key\":\"1111111111111111\"}\n",
+        K1 "\"files\":[\"etc/passwd\"]}\n",
+        K1 BOTH "{\"file\":\"etc/shadow\",\"name\":\"a\"}\n",
+        K1 BOTH LN("etc/shadow", "a", "abc"),
+        K1 BOTH LN("etc/passwd", "a", HA),
+        K1 "\"files\":[\"etc/gshadow\"]}\n" LN("etc/shadow", "a", HA),
+        K1 BOTH LN("etc/shadow", "a", HA) "trailing garbage\n",
+        K1 BOTH "{\"file\":\"etc/shadow\",\"name\":\"a\",\"hmac\":\"" HA "\"}",        /* a last line cut short */
+        K1 BOTH "{\"file\":\"etc/shadow\",\"name_b64\":\"!!\",\"hmac\":\"" HA "\"}\n",
+    };
+    for (size_t i = 0; i < sizeof BAD / sizeof BAD[0]; i++) {
+        struct t_run r;
+        lines_file(0, K1 BOTH LN("etc/shadow", "a", HA));
+        lines_file(1, BAD[i]);
+        const char *got = lines_events(&r);
+        if (strcmp(E10("etc/gshadow") E10("etc/shadow"), got) != 0) BELAY_FAIL("case %zu: %s", i, got);
+        tr_free(&r);
+    }
+    /* One that cannot be opened. */
+    struct t_run r;
+    lines_file(0, K1 BOTH);
+    snprintf(g_lines[1], sizeof g_lines[1], "%s/no-such-file", g_dir);
+    ASSERT_EQ_STR(E10("etc/gshadow") E10("etc/shadow"), lines_events(&r));
+    tr_free(&r);
+}
+
+/* Hostile shadow files, read by the capture: NUL bytes, a very long line,
+ * a first field too long to be a name, CRLF, 100,000 lines. */
+TEST(hostile_shadow_files_are_digested_within_bounds) {
+    t_reset();
+    t_file("etc/passwd", ROOT, 0644);
+    static char big[3000000];
+    size_t w = 0;
+    for (int i = 0; i < 100000; i++) w += (size_t)snprintf(big + w, sizeof big - w, "u%d:!:19000::::::\n", i);
+    w += (size_t)snprintf(big + w, sizeof big - w, "long:");
+    memset(big + w, 'h', 200000);
+    w += 200000;
+    w += (size_t)snprintf(big + w, sizeof big - w, "\ncr:!:1::::::\r\nnocolon\n");
+    t_bytes("etc/shadow", big, w, 0600);
+    t_bytes("etc/gshadow", "a:\0:x\n\xff\xfe:!::\n", 13, 0600);
+    struct belay_manifest_stats st;
+    REQUIRE(snap_roots(1, 0, &st) == 0);
+    char p[400];
+    snprintf(p, sizeof p, "%s/l1", g_dir);
+    char *got = t_slurp(p);
+    REQUIRE(got != NULL);
+    size_t lines = 0;
+    for (const char *q = got; (q = strchr(q, '\n')) != NULL; q++) lines++;
+    ASSERT_EQ_INT(1 + 2 + 100003, (int)lines);
+    ASSERT_TRUE(strstr(got, "{\"file\":\"etc/gshadow\",\"name\":\"a\",\"hmac\":\"") != NULL);
+    ASSERT_TRUE(strstr(got, "{\"file\":\"etc/gshadow\",\"name_b64\":\"//4=\",\"hmac\":\"") != NULL);
+    ASSERT_TRUE(strstr(got, "{\"file\":\"etc/shadow\",\"name\":\"u99999\",\"hmac\":\"") != NULL);
+    ASSERT_TRUE(strstr(got, "{\"file\":\"etc/shadow\",\"name\":\"long\",\"hmac\":\"") != NULL);
+    ASSERT_TRUE(strstr(got, "{\"file\":\"etc/shadow\",\"name\":\"cr\",\"hmac\":\"") != NULL);
+    ASSERT_TRUE(strstr(got, "{\"file\":\"etc/shadow\",\"name\":\"nocolon\",\"hmac\":\"") != NULL);
+    ASSERT_TRUE(strstr(got, "hhhh") == NULL);
+    free(got);
+    /* A first field past 1,024 bytes names nothing: that file's lines are
+     * not kept, the other's are. */
+    memset(big, 'n', 2000);
+    snprintf(big + 2000, sizeof big - 2000, ":!:1::::::\n");
+    t_file("etc/shadow", big, 0600);
+    REQUIRE(snap_roots(2, 0, &st) == 0);
+    snprintf(p, sizeof p, "%s/l2", g_dir);
+    got = t_slurp(p);
+    REQUIRE(got != NULL);
+    ASSERT_TRUE(strstr(got, ",\"files\":[\"etc/gshadow\"]}\n") != NULL);
+    ASSERT_TRUE(strstr(got, "etc/shadow") == NULL && strstr(got, "nnnn") == NULL);
+    free(got);
+    /* And the diff of the two says nothing of shadow's entries: 100,000
+     * were not "removed". */
+    ASSERT_EQ_STR("", events_with_lines(1, 2));
+}
+
 int main(void) {
     t_begin("accounts");
     RUN(useradd_is_a_user_added_and_a_group_added);
@@ -529,6 +855,11 @@ int main(void) {
     RUN(an_unknown_outcome_gives_provisional_events);
     RUN(a_login_defs_that_cannot_be_read_is_null);
     RUN(hostile_files_are_read_within_bounds);
+    RUN(the_capture_keeps_a_keyed_digest_of_each_shadow_line);
+    RUN(password_entries_are_named_by_their_first_field);
+    RUN(password_entries_are_compared_only_under_one_key_and_file_by_file);
+    RUN(a_digest_file_that_is_not_one_is_could_not_interpret);
+    RUN(hostile_shadow_files_are_digested_within_bounds);
     free(g_text);
     t_end();
     return belay_test_report();

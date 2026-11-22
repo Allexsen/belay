@@ -90,6 +90,8 @@ struct walk_ctx {
     char   sealed_key_id[BELAY_SEALED_KEY_HEX + 1];
     bool   prev_key_same;       /* the previous manifest's sealed_key is this state's (V5-E7) */
 
+    struct cap_lines *lines;    /* SA-6: the per-line digests of shadow and gshadow; NULL: not kept */
+
     struct belay_store *store;  /* NULL when content storage is off */
     size_t store_failed;        /* copies the store failed to keep (R11) */
     char  *abs;                 /* scope + "/" + rel, for interpreter claims */
@@ -153,6 +155,32 @@ bool cap_crossed(const struct walk_ctx *wc, const struct stat *st, bool mount_ro
 bool cap_boundary(const struct walk_ctx *wc, int dfd, const char *name, const struct stat *st,
                   bool mount_root, bool mount_known);
 int  cap_seal_key(struct walk_ctx *wc, bool create);
+
+/*
+ *  The per-line digests of `etc/shadow` and `etc/gshadow` (system-
+ *  interpreters.md SA-6; belay_manifest_opts.shadow_lines_path): fed the
+ *  bytes of the file as the capture hashes it, one read. For each line
+ *  that is not empty: its first field (to the first `:`) and HMAC-SHA256
+ *  of the whole line, without its newline, under the sealing key. Nothing
+ *  else of a line is kept, in memory or anywhere. A file whose first field
+ *  passes CAP_LINES_NAME_MAX on some line, or whose lines pass
+ *  CAP_LINES_MAX bytes of output, has no lines kept at all.
+ */
+#define CAP_LINES_NAME_MAX 1024u
+#define CAP_LINES_MAX (64u * 1024u * 1024u)
+struct cap_lines;
+struct cap_lines *cap_lines_new(void);
+void cap_lines_free(struct cap_lines *l);
+/* Which of the two `rel` is: 0 `etc/gshadow`, 1 `etc/shadow`, -1 neither. */
+int  cap_lines_which(const char *rel, size_t len);
+void cap_lines_begin(struct cap_lines *l, int which, const uint8_t key[BELAY_SEALING_KEY_BYTES]);
+void cap_lines_feed(struct cap_lines *l, const unsigned char *buf, size_t n);
+/* The read ended; `keep` false: it was not one state of the file. */
+void cap_lines_end(struct cap_lines *l, bool keep);
+/* Writes the file at `path`, mode 600, through a temporary beside it, when
+ * a file's lines were kept, with its sha256 in `hex`; else removes what is
+ * at `path` and sets hex to "". 0, or -1 (errno). */
+int  cap_lines_write(struct cap_lines *l, const char *path, const char *key_id, char hex[65]);
 void cap_wipe(void *p, size_t n);
 void cap_fill_from_stat(struct belay_entry *e, const struct stat *st);
 int  cap_read_extras(struct walk_ctx *wc, int fd, int pfd, const char *name,

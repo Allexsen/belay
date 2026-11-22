@@ -203,6 +203,11 @@ int capture_write_root(const struct fsops *ops, const char *out_path, const char
         wc->scope_overlay = ops->is_overlay(ops->ctx, root_fd);
     }
 
+    if (opts->shadow_lines_path != NULL && opts->n_roots > 0 && opts->sealing_key_path != NULL &&
+        (wc->lines = cap_lines_new()) == NULL) {
+        belay_err_set(BELAY_ERR_NOMEM, 0, "manifest: out of memory");
+        goto cleanup;
+    }
     if (opts->store_dir != NULL || opts->n_roots > 0) {     /* claims are asked for sealing too (V5-E5) */
         wc->abs = malloc(PATH_MAX * 2);
         if (wc->abs == NULL) {
@@ -414,6 +419,15 @@ int capture_write_root(const struct fsops *ops, const char *out_path, const char
      * it is not published (decided 2026-10-31); their bytes are verified on
      * read (store.h). */
     if (belay_store_sync(wc->store) == -1) goto cleanup;
+    /* SA-6: the per-line digests of shadow and gshadow, before the manifest
+     * they belong to is published. One that cannot be written is none: a
+     * diff then names no entry, and the manifest stands (R11). */
+    char lines_sha[65] = "";
+    if (wc->lines != NULL &&
+        cap_lines_write(wc->lines, opts->shadow_lines_path, wc->have_key ? wc->sealed_key_id : "", lines_sha) == -1) {
+        lines_sha[0] = '\0';
+        unlink(opts->shadow_lines_path);
+    }
     if (rename(outtmp, out_path) != 0) {
         belay_err_set(BELAY_ERR_IO, errno, "manifest: cannot rename into %s", out_path);
         goto cleanup;
@@ -429,6 +443,7 @@ int capture_write_root(const struct fsops *ops, const char *out_path, const char
         *stats = tally;
         stats->vanished = wc->tally.vanished;
         stats->store_failed = wc->store_failed;
+        memcpy(stats->shadow_lines_sha256, lines_sha, sizeof lines_sha);
         stats->excluded = wc->excluded;
         stats->prefilter = wc->prev != NULL;
         stats->prefilter_skipped = prev_why;
@@ -464,6 +479,7 @@ cleanup:
         if (wc->entered != NULL) free(wc->entered->table);
         free(wc->entered);
         cap_wipe(wc->key, sizeof wc->key);      /* the sealing key does not outlive the capture */
+        cap_lines_free(wc->lines);
         free(wc->abs);
         prev_free(wc->prev);
         belay_store_close(wc->store);
