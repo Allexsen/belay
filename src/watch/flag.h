@@ -12,10 +12,14 @@
 #include "cli/receipt.h"
 #include "util/jsonr.h"
 
-/* FK-1 to FK-12, in the order flags are named. */
+/* FK-1 to FK-12, in the order flags are named; then a system watch's
+ * (watch-system.md WS-F, WS-N), after them so a ledger line written before
+ * they existed keeps its numbers. */
 enum wkind {
     WK_DONTTOUCH, WK_GIT, WK_AGENT, WK_PRIVILEGE, WK_LOAD, WK_PKG, WK_CI, WK_CRED,
-    WK_SYMLINK, WK_HISTORY, WK_UNREAD, WK_COVERAGE, WK_COUNT
+    WK_SYMLINK, WK_HISTORY, WK_UNREAD, WK_COVERAGE,
+    WK_SUDO, WK_SSH, WK_ACCOUNT, WK_AUTH, WK_SERVICE, WK_SCHEDULE, WK_SECRET, WK_LISTEN, WK_TRUST,
+    WK_FIREWALL, WK_DPKG, WK_COUNT
 };
 const char *wkind_name(enum wkind k);
 
@@ -59,6 +63,7 @@ struct wflag {
     enum wkind kind;
     bool note;          /* FL-2: named, no red circle */
     char *text;         /* how the line names it (LN-3); malloc'd */
+    bool own;           /* a noted line of its own, after the step's (WS-N5: `, in no package`) */
 };
 
 /* One path record of a diff. 1 with *out when it is flagged or noted, 0

@@ -4,6 +4,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <time.h>
 
 #define RED "\xf0\x9f\x94\xb4"          /* U+1F534 */
 #define DOT " \xc2\xb7 "                /* " · " */
@@ -44,6 +45,7 @@ void wstep_free(struct wstep *s) {
     free(s->under);
     for (size_t i = 0; i < s->n_trouble; i++) free(s->trouble[i]);
     free(s->trouble);
+    free(s->roots);
     memset(s, 0, sizeof *s);
 }
 
@@ -66,14 +68,15 @@ int wstep_add_trouble(struct wstep *s, const char *fmt, ...) {
 /* Flags of one level from `n` steps: at most `room` named into `out`, one
  * of each kind before a second of any, kinds in FK's order; the rest are
  * counted into rest[]. The number named. */
-static size_t choose(const struct wstep *steps, size_t n, bool note, size_t room, const struct wflag **out,
+static size_t choose(const struct wstep *steps, size_t n, bool note, bool own, size_t room, const struct wflag **out,
                      uint64_t rest[WK_COUNT], uint64_t *total) {
+#define TAKES(f) ((f)->note == note && (own || !(f)->own))
     size_t have[WK_COUNT] = { 0 }, taken[WK_COUNT] = { 0 }, named = 0;
     memset(rest, 0, WK_COUNT * sizeof rest[0]);
     *total = 0;
     for (size_t s = 0; s < n; s++) {
         for (size_t i = 0; i < steps[s].n_flags; i++)
-            if (steps[s].flags[i].note == note) have[steps[s].flags[i].kind]++;
+            if (TAKES(&steps[s].flags[i])) have[steps[s].flags[i].kind]++;
         for (int k = 0; k < WK_COUNT; k++) rest[k] += note ? steps[s].cut_note[k] : steps[s].cut_flag[k];
     }
     for (int k = 0; k < WK_COUNT; k++) *total += have[k] + rest[k];
@@ -86,7 +89,7 @@ static size_t choose(const struct wstep *steps, size_t n, bool note, size_t room
             for (size_t s = 0; s < n && taken[k] == round; s++)
                 for (size_t i = 0; i < steps[s].n_flags; i++) {
                     const struct wflag *f = &steps[s].flags[i];
-                    if (f->note != note || (int)f->kind != k) continue;
+                    if (!TAKES(f) || (int)f->kind != k) continue;
                     if (seen++ == round) { out[named++] = f; taken[k]++; break; }
                 }
         }
@@ -94,6 +97,7 @@ static size_t choose(const struct wstep *steps, size_t n, bool note, size_t room
     }
     for (int k = 0; k < WK_COUNT; k++) rest[k] += have[k] - taken[k];
     return named;
+#undef TAKES
 }
 
 static void more(struct wsb *out, const char *what, const uint64_t rest[WK_COUNT]) {
@@ -111,15 +115,15 @@ static void more(struct wsb *out, const char *what, const uint64_t rest[WK_COUNT
 
 /* The flagged, then the noted, of `n` steps as LN-4 names them. What was
  * written: flagged and noted totals in *nf and *nn. */
-static void named(struct wsb *out, const struct wstep *steps, size_t n, bool flags, bool notes, uint64_t *nf,
+static void named(struct wsb *out, const struct wstep *steps, size_t n, bool flags, bool notes, bool own, uint64_t *nf,
                   uint64_t *nn) {
     const struct wflag *pick[3];
     uint64_t rest_f[WK_COUNT], rest_n[WK_COUNT];
     size_t k = 0;
     *nf = *nn = 0;
-    if (flags) k = choose(steps, n, false, 3, pick, rest_f, nf);
+    if (flags) k = choose(steps, n, false, own, 3, pick, rest_f, nf);
     else memset(rest_f, 0, sizeof rest_f);
-    if (notes) k += choose(steps, n, true, 3 - k, pick + k, rest_n, nn);
+    if (notes) k += choose(steps, n, true, own, 3 - k, pick + k, rest_n, nn);
     else memset(rest_n, 0, sizeof rest_n);
     for (size_t i = 0; i < k; i++) wsb_f(out, "%s%s", i ? "; " : "", pick[i]->text);
     more(out, "flagged", rest_f);
@@ -141,26 +145,46 @@ void lines_step(struct wsb *out, const struct wstep *s) {
     for (size_t i = 0; i < s->n_trouble; i++) wsb_f(out, "belay: " RED " %s\n", s->trouble[i]);
     uint64_t nf = 0, nn = 0, u = 0;
     for (int i = 0; i < WATCH_OUTCOMES; i++) u += s->counts[i];
-    bool red = false;
-    for (size_t i = 0; i < s->n_flags; i++) red |= !s->flags[i].note;
-    for (int k = 0; k < WK_COUNT; k++) red |= s->cut_flag[k] > 0;
-    bool any = s->n_flags > 0;
-    for (int k = 0; k < WK_COUNT; k++) any |= s->cut_flag[k] > 0 || s->cut_note[k] > 0;
-    if (!any && u == 0) return;                                             /* LN-1 */
-    wsb_f(out, "belay: %s%s", red ? RED " " : "", s->n_calls == 0 ? "outside tool calls: " : "");
-    if (any) {
-        named(out, s, 1, true, true, &nf, &nn);
-        if (u > 0) {
-            wsb_f(out, DOT "%llu more: ", (unsigned long long)u);
-            counts(out, s, u);
-        }
-    } else {
-        wsb_f(out, "%llu change%s: ", (unsigned long long)u, u == 1 ? "" : "s");
-        if (u <= 3 && s->n_names == u)
-            for (size_t i = 0; i < s->n_names; i++) wsb_f(out, "%s%s", i ? "; " : "", s->names[i]);
-        else counts(out, s, u);
+    bool red = false, any = s->by_installed > 0;
+    for (size_t i = 0; i < s->n_flags; i++) {
+        red |= !s->flags[i].note;
+        any |= !s->flags[i].own;
     }
-    wsb_f(out, "\n");
+    for (int k = 0; k < WK_COUNT; k++) red |= s->cut_flag[k] > 0;
+    for (int k = 0; k < WK_COUNT; k++) any |= s->cut_flag[k] > 0 || s->cut_note[k] > 0;
+    if (any || u > 0 || s->roots != NULL) {                                 /* LN-1 */
+        wsb_f(out, "belay: %s", red ? RED " " : "");
+        if (s->since_ns != 0) {                     /* reported late (watch-system WS-3a) */
+            char at[8];
+            const time_t t = (time_t)(s->since_ns / 1000000000LL);
+            struct tm tm;
+            localtime_r(&t, &tm);
+            strftime(at, sizeof at, "%H:%M", &tm);
+            wsb_f(out, "since %s: ", at);
+        }
+        wsb_f(out, "%s", s->n_calls == 0 ? "outside tool calls: " : "");
+        if (any) {
+            named(out, s, 1, true, true, false, &nf, &nn);
+            if (s->by_installed > 0)                /* WS-N5 */
+                wsb_f(out, "%sand %llu other%s by packages installed here", nf + nn > 0 ? "; " : "",
+                      (unsigned long long)s->by_installed, s->by_installed == 1 ? "" : "s");
+            if (u > 0) {
+                wsb_f(out, DOT "%llu more: ", (unsigned long long)u);
+                counts(out, s, u);
+            }
+        } else if (u > 0 && s->quiet == u) {        /* WS-L1 */
+            wsb_f(out, "%llu entr%s changed under %s", (unsigned long long)u, u == 1 ? "y" : "ies", s->quiet_under);
+        } else if (u > 0) {
+            wsb_f(out, "%llu change%s: ", (unsigned long long)u, u == 1 ? "" : "s");
+            if (u <= 3 && s->n_names == u)
+                for (size_t i = 0; i < s->n_names; i++) wsb_f(out, "%s%s", i ? "; " : "", s->names[i]);
+            else counts(out, s, u);
+        }
+        if (s->roots != NULL) wsb_f(out, "%sroots changed: %s", any || u > 0 ? DOT : "", s->roots);     /* WS-10 */
+        wsb_f(out, "\n");
+    }
+    for (size_t i = 0; i < s->n_flags; i++)         /* WS-N5: a line of its own */
+        if (s->flags[i].own) wsb_f(out, "belay: %s\n", s->flags[i].text);
 }
 
 void lines_summary(struct wsb *out, const struct wstep *steps, size_t n, const char *session,
@@ -185,11 +209,11 @@ void lines_summary(struct wsb *out, const struct wstep *steps, size_t n, const c
     }
     uint64_t nf = 0, nn = 0, total = 0, in_calls = 0, outside = 0;
     struct wsb line = { 0 };
-    named(&line, steps, n, true, false, &nf, &nn);
+    named(&line, steps, n, true, false, true, &nf, &nn);
     if (nf > 0) wsb_f(out, "belay: " RED " %llu flagged: %s\n", (unsigned long long)nf, line.p ? line.p : "");
     line.n = 0;
     if (line.p) line.p[0] = '\0';
-    named(&line, steps, n, false, true, &nf, &nn);
+    named(&line, steps, n, false, true, true, &nf, &nn);
     if (nn > 0) wsb_f(out, "belay: %llu noted: %s\n", (unsigned long long)nn, line.p ? line.p : "");
     out->bad |= line.bad;
     free(line.p);

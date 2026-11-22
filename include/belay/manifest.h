@@ -452,6 +452,8 @@ struct belay_system_roots {
     const char *const *not_read;
     size_t n_not_read;
     char *names;                /* what the roots' paths point into */
+    char **left_out;            /* WS-8a: each home of etc/passwd that is none, "/run/sshd: under run, not read", sorted */
+    size_t n_left_out;
 };
 int  belay_system_roots(const char *scope, struct belay_system_roots *out);
 void belay_system_roots_free(struct belay_system_roots *r);

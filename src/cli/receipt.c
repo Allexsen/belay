@@ -17,10 +17,10 @@ size_t receipt_owner_asks = 262144;
 #include <sys/stat.h>
 
 /* Rendered lines, kept until the trailer is read: the heading comes first. */
-struct lines { char **v; size_t n, cap, more; };
+struct lines { char **v; size_t n, cap, more, fold_at; };
 
 static int keep(struct lines *l, char *s, bool fold, bool all) {
-    if (fold && !all && l->n >= RECEIPT_FOLD) { free(s); l->more++; return 0; }
+    if (fold && !all && l->n >= (l->fold_at ? l->fold_at : RECEIPT_FOLD)) { free(s); l->more++; return 0; }
     if (l->n == l->cap) {
         const size_t c = l->cap ? l->cap * 2 : 32;
         char **q = realloc(l->v, c * sizeof *q);
@@ -181,7 +181,7 @@ static void privilege(struct sb *b, const struct jval *r, const char *path, size
     const bool sides = has(ch, "mode") || has(ch, "iflags") || one_side || strcmp(outcome, "type_changed") == 0;
     bool iflags_known = false, iflags_count = false;    /* by test/expect/inode-flags.md */
     if (sides && o->mode != NULL && path != NULL) {
-        struct receipt_meta m[2] = { { 0, false, false, 0 }, { 0, false, false, 0 } };
+        struct receipt_meta m[2] = { { 0, false, false, 0, false }, { 0, false, false, 0, false } };
         bool on[2];
         for (int s = 0; s < 2; s++) on[s] = o->mode(o->mode_ctx, s, path, len, &m[s]) == 0;
         /* Inode flags: a record that lists them has both sides' (a side
@@ -377,7 +377,54 @@ struct ctx {
     bool *sys_linked;
     int *sys_linger;
     bool sys_ok;
+    /* A system watch's receipt (sections): its lines by section, the events
+     * that are no section's, the paths the events name (sorted), the paths
+     * folded into a package installed or upgraded here, the config events
+     * of those, and the records folded per metadata root. */
+    const struct receipt_sections *sec;
+    struct lines s[RS_COUNT], core;
+    char **taken, **folded;
+    size_t n_taken, cap_taken, n_folded, cap_folded, config_folded;
+    size_t *meta_folded;
+    bool folded_sorted;
 };
+
+static int str_cmp(const void *a, const void *b) { return strcmp(*(char *const *)a, *(char *const *)b); }
+
+static bool str_in(char **v, size_t n, const char *s) {
+    return n > 0 && bsearch(&s, v, n, sizeof *v, str_cmp) != NULL;
+}
+
+static int str_add(char ***v, size_t *n, size_t *cap, const char *s, size_t len) {
+    if (*n == *cap) {
+        const size_t c = *cap ? *cap * 2 : 64;
+        char **q = realloc(*v, c * sizeof *q);
+        if (q == NULL) return -1;
+        *v = q;
+        *cap = c;
+    }
+    char *d = malloc(len + 1);
+    if (d == NULL) return -1;
+    memcpy(d, s, len);
+    d[len] = '\0';
+    (*v)[(*n)++] = d;
+    return 0;
+}
+
+/* The section of an event (WS-R1); -1: changes. */
+static int event_section(const struct jval *e) {
+    const char *k = jstr(e, "event"), *in = jstr(e, "interp");
+    if (!strcmp(in, "dpkg") || !strcmp(in, "pip")) return RS_INSTALLED;
+    if (!strcmp(in, "systemd"))
+        return !strncmp(k, "init_script_", 12) ? RS_INIT : !strncmp(k, "timer_file_", 11) ? RS_CRON : RS_SERVICES;
+    if (!strcmp(in, "accounts")) return RS_USER;
+    if (!strcmp(in, "cron")) return RS_CRON;
+    if (!strcmp(in, "sudoers")) return RS_SUDO;
+    if (!strcmp(in, "sshkeys")) return RS_SSH;
+    if (!strcmp(in, "trust")) return RS_TRUST;
+    if (!strcmp(in, "config")) return !strcmp(jstr(e, "grammar"), "sshd") ? RS_SSH : RS_CONFIG;
+    return -1;
+}
 
 /* ---- systemd's events (system-interpreters.md SY-3a, SY-3b, SY-4) ---- */
 
@@ -517,6 +564,7 @@ static int record(const struct jval *r, struct ctx *x, const struct receipt_opts
     unsigned char c = GC_UNTRACKED;
     if (have_path && gp < 0 && x->cls != NULL) c = x->cls[x->ci++];
     const size_t ri = have_path && gp < 0 ? x->ri++ : (size_t)-1;      /* its place among the paths asked */
+
     /* An edit to a git-ignored file -- its text, or its type, not a
      * directory's -- is named, never folded: it is often .env or local
      * configuration (2026-11-04). A binary rewritten (build output) folds,
@@ -601,6 +649,21 @@ static int record(const struct jval *r, struct ctx *x, const struct receipt_opts
      * reliably: each is named on its own line (S7 2026-10-31, row 73). */
     const bool is_priv = why.n != 0, unknown = strcmp(outcome, "unknown") == 0;
     if (is_priv) return keep(&x->priv, b.p, false, o->all);
+    if (x->sec != NULL && have_path && !o->all && plen < sizeof path) {
+        path[plen] = '\0';
+        if (memchr(path, '\0', plen) == NULL && str_in(x->taken, x->n_taken, path)) { free(b.p); return 0; }   /* an event's */
+    }
+    const int sec = x->sec != NULL && x->sec->section != NULL && have_path ? x->sec->section(x->sec->section_ctx, path, plen, is_dir) : -1;
+    if (sec == RS_SECRET) {             /* WS-F12: said without content */
+        free(b.p);
+        struct sb t = { 0 };
+        sbf(&t, "  ");
+        esc(&t, path, plen);
+        sbf(&t, " %s", !strcmp(outcome, "modified") ? "changed" : !strcmp(outcome, "unknown") ? "not compared" : outcome);
+        if (t.bad) { free(t.p); belay_err_set(BELAY_ERR_NOMEM, 0, "receipt: out of memory"); return -1; }
+        return keep(&x->s[RS_SECRET], t.p, false, o->all);
+    }
+    if (sec == RS_TRUST || sec == RS_FIREWALL) return keep(&x->s[sec], b.p, false, o->all);
     /* SD-3: counted in the line of the package that owns it, and listed
      * only by --all. Never what is named on a line of its own. */
     if (!o->all && !unknown && !named && ri != (size_t)-1) {
@@ -608,6 +671,20 @@ static int record(const struct jval *r, struct ctx *x, const struct receipt_opts
         if (owner != NULL) {
             free(b.p);
             owner->count++;
+            if (x->sec != NULL) {
+                for (size_t i = 0; i < x->sec->n_meta; i++) {        /* per metadata root (WS-R5) */
+                    const size_t ml = strlen(x->sec->meta[i]);
+                    if (plen >= ml && memcmp(path, x->sec->meta[i], ml) == 0 && (plen == ml || path[ml] == '/')) {
+                        x->meta_folded[i]++;
+                        break;
+                    }
+                }
+                if (owner->kind != PK_REMOVED && memchr(path, '\0', plen) == NULL &&
+                    str_add(&x->folded, &x->n_folded, &x->cap_folded, path, plen) == -1) {
+                    belay_err_set(BELAY_ERR_NOMEM, 0, "receipt: out of memory");
+                    return -1;
+                }
+            }
             return 0;
         }
     }
@@ -692,7 +769,7 @@ static int installed_line(struct ctx *x, struct lines *ev, const struct receipt_
     bool prov = false;
     struct pk **most = malloc((x->npk + 1) * sizeof *most);
     if (most == NULL) { belay_err_set(BELAY_ERR_NOMEM, 0, "receipt: out of memory"); return -1; }
-    sbf(&b, "  dpkg  installed");
+    sbf(&b, x->sec != NULL ? "  installed" : "  dpkg  installed");
     for (size_t i = 0; i < x->npk; i++) {
         const struct pk *p = &x->pk[i];
         if (p->kind != PK_INSTALLED) continue;
@@ -737,12 +814,23 @@ static int event(const struct jval *e, struct ctx *x, struct lines *ev, const st
     if (pk != NULL && !o->all && pk->kind == PK_INSTALLED && x->n_installed > 1) {
         if (x->installed_said) return 0;
         x->installed_said = true;
-        return installed_line(x, ev, o);
+        return installed_line(x, x->sec != NULL ? &x->s[RS_INSTALLED] : ev, o);
     }
+    const int sec = x->sec != NULL ? event_section(e) : -1;
+    if (x->sec != NULL && !x->folded_sorted) {               /* the records are all read: they precede the events */
+        if (x->n_folded > 1) qsort(x->folded, x->n_folded, sizeof *x->folded, str_cmp);
+        x->folded_sorted = true;
+    }
+    if (sec == RS_CONFIG && !o->all && x->n_folded > 0) {      /* a file of a package installed or upgraded here */
+        const char *p = jstr(e, "path");
+        if (str_in(x->folded, x->n_folded, p)) { x->config_folded++; return 0; }
+    }
+    if (x->sec != NULL) ev = sec >= 0 ? &x->s[sec] : &x->core;
     struct sb b = { 0 };
     struct sb in = { 0 };
     escs(&in, jget(e, "interp"));
-    sbf(&b, "  %-5s ", in.p != NULL ? in.p : "");
+    if (x->sec != NULL) sbf(&b, "  ");       /* WS-R6: the event's text */
+    else sbf(&b, "  %-5s ", in.p != NULL ? in.p : "");
     free(in.p);
     escs(&b, jget(e, "text"));
     /* What a field says, in the pins' words (system-interpreters.md):
@@ -807,6 +895,12 @@ static int collect(FILE *diff, struct coll *c, struct ctx *x) {
             size_t len;
             if (jget(&v, "event") != NULL) {
                 c->git_events |= strcmp(jstr(&v, "interp"), "git") == 0;
+                const struct jval *ps = jget(&v, "paths");
+                if (x->sec != NULL && strcmp(jstr(&v, "interp"), "core") != 0 && strcmp(jstr(&v, "interp"), "git") != 0)
+                    for (size_t i = 0; ps != NULL && ps->t == J_ARR && i < ps->n && rc == 0; i++)
+                        if (ps->kids[i].t == J_STR &&
+                            str_add(&x->taken, &x->n_taken, &x->cap_taken, ps->kids[i].s, ps->kids[i].s_len) == -1)
+                            rc = -1;
                 if (strcmp(jstr(&v, "interp"), "systemd") == 0) {
                     bool oom = false;
                     system_collect(x, &v, &oom);
@@ -909,7 +1003,7 @@ nomem:
  * line RT-6 gives them (`udp in the client port range: 51820 (no process
  * holds it), 40000 held by socat`), its text after the address. A kind not
  * known is not shown (RT-D1). */
-static int runtime_line(const struct jval *r, struct lines *rt, struct sb *crange) {
+static int runtime_line(const struct jval *r, struct lines *rt, struct sb *crange, struct ctx *x) {
     static const char *const KNOWN[] = { "incomplete", "listener_opened", "listener_closed", "service_started",
                                          "service_stopped", "service_restarted" };
     const char *k = jstr(r, "runtime");
@@ -932,7 +1026,70 @@ static int runtime_line(const struct jval *r, struct lines *rt, struct sb *crang
     sbf(&l, "  %s", b.p != NULL ? b.p : "");
     free(b.p);
     if (l.bad) { free(l.p); belay_err_set(BELAY_ERR_NOMEM, 0, "receipt: out of memory"); return -1; }
+    if (x->sec != NULL && strncmp(k, "service_", 8) == 0) rt = &x->s[RS_RUNNING];
+    else if (x->sec != NULL) rt = &x->s[RS_LISTENING];
     return keep(rt, l.p, false, true);
+}
+
+/* WS-R1: the sections of a system watch's receipt, in order, each only
+ * when it has something; the caller's first three and last two around them. */
+static int sections_out(FILE *out, struct ctx *x, struct sb *crange) {
+    static const char *const TITLE[RS_COUNT] = { "installed", "services", "running", "listening", "user", "cron", "sudo",
+                                                 "ssh", "setuid", "secret", "trust", "firewall", "init", "config" };
+    const struct receipt_sections *sc = x->sec;
+    if (crange->n) {                    /* RT-6: one line, last in its section */
+        struct sb l = { 0 };
+        sbf(&l, "  udp in the client port range: %s", crange->p);
+        if (l.bad || keep(&x->s[RS_LISTENING], l.p, false, true) == -1) {
+            if (l.bad) { free(l.p); belay_err_set(BELAY_ERR_NOMEM, 0, "receipt: out of memory"); }
+            return -1;
+        }
+    }
+    for (size_t i = 0; i < x->priv.n; i++)          /* the privilege changes are setuid's */
+        if (keep(&x->s[RS_SETUID], x->priv.v[i], false, true) == -1) { x->priv.v[i] = NULL; return -1; }
+    x->s[RS_SETUID].more += x->priv.more;
+    x->priv.n = x->priv.more = 0;
+    fputs(sc->head != NULL ? sc->head : "", out);
+    for (int s = 0; s < RS_COUNT; s++) {
+        const struct lines *l = &x->s[s];
+        const bool cfg = s == RS_CONFIG && x->config_folded > 0;
+        if (l->n == 0 && l->more == 0 && !cfg) continue;
+        fprintf(out, "\n%s\n", TITLE[s]);
+        for (size_t i = 0; i < l->n; i++) fprintf(out, "%s\n", l->v[i]);
+        if (l->more) fprintf(out, "  and %zu more (--all shows them)\n", l->more);
+        if (cfg)                        /* config's own folding */
+            fprintf(out, "  and %zu other%s in files of packages installed here\n", x->config_folded,
+                    x->config_folded == 1 ? "" : "s");
+    }
+    if (sc->put_back != NULL && sc->put_back[0] != '\0') fprintf(out, "\nput back\n%s", sc->put_back);
+    size_t folded = 0;
+    for (size_t i = 0; i < sc->n_meta; i++) folded += x->meta_folded[i];
+    if (sc->roots != NULL || x->core.n || x->other.n || x->other.more || x->rc_added || x->rc_removed || folded) {
+        fputs("\nchanges\n", out);
+        if (sc->roots != NULL) fprintf(out, "  roots changed: %s\n", sc->roots);     /* WS-10 */
+        for (size_t i = 0; i < x->core.n; i++) fprintf(out, "%s\n", x->core.v[i]);
+        for (size_t i = 0; i < x->other.n; i++) fprintf(out, "%s\n", x->other.v[i]);
+        if (x->other.more) fprintf(out, "  %zu more (--all lists them)\n", x->other.more);
+        if (x->rc_added || x->rc_removed) {       /* SY-3b: counted in one line */
+            fputs("  etc/rc?.d: ", out);
+            if (x->rc_added) fprintf(out, "%zu link%s added", x->rc_added, x->rc_added == 1 ? "" : "s");
+            if (x->rc_removed && x->rc_added) fprintf(out, ", %zu removed", x->rc_removed);
+            else if (x->rc_removed) fprintf(out, "%zu link%s removed", x->rc_removed, x->rc_removed == 1 ? "" : "s");
+            fputs(" (--all lists them)\n", out);
+        }
+        for (size_t i = 0; i < sc->n_meta; i++)
+            if (x->meta_folded[i]) {
+                fputs("  ", out);
+                receipt_fputs(out, sc->meta[i]);
+                fprintf(out, ": %zu change%s in packages' files\n", x->meta_folded[i], x->meta_folded[i] == 1 ? "" : "s");
+            }
+    }
+    fputs(sc->tail != NULL ? sc->tail : "", out);
+    if (ferror(out)) {
+        belay_err_set(BELAY_ERR_IO, 0, "receipt: write failed");
+        return -1;
+    }
+    return 0;
 }
 
 int receipt_render(FILE *diff, FILE *out, const struct receipt_opts *o) {
@@ -949,8 +1106,15 @@ int receipt_render(FILE *diff, FILE *out, const struct receipt_opts *o) {
     bool have_trailer = false;
     int rc = -1;
     const long start = ftell(diff);
+    x.sec = o->sections;
+    x.other.fold_at = x.sec != NULL ? RECEIPT_CHANGES : 0;
+    if (x.sec != NULL && (x.meta_folded = calloc(x.sec->n_meta + 1, sizeof *x.meta_folded)) == NULL) {
+        belay_err_set(BELAY_ERR_NOMEM, 0, "receipt: out of memory");
+        goto out;
+    }
     if (start >= 0 && fseek(diff, start, SEEK_SET) == 0) {      /* it can be read twice */
         if (collect(diff, &col, &x) == -1) goto out;
+        if (x.n_taken > 1) qsort(x.taken, x.n_taken, sizeof *x.taken, str_cmp);
         if (fseek(diff, start, SEEK_SET) != 0) {
             belay_err_set(BELAY_ERR_IO, errno, "receipt: cannot read the diff again");
             goto out;
@@ -998,7 +1162,7 @@ int receipt_render(FILE *diff, FILE *out, const struct receipt_opts *o) {
             have_trailer = true;
             continue;
         } else if (jget(&v, "runtime") != NULL) {
-            r = runtime_line(&v, &rt, &crange);
+            r = runtime_line(&v, &rt, &crange, &x);
         } else if (jget(&v, "event") != NULL) {
             r = event(&v, &x, &ev, o);
         } else {
@@ -1013,6 +1177,11 @@ int receipt_render(FILE *diff, FILE *out, const struct receipt_opts *o) {
     }
     if (scope.bad) {
         belay_err_set(BELAY_ERR_NOMEM, 0, "receipt: out of memory");
+        goto out;
+    }
+    if (x.sec != NULL) {
+        if (sections_out(out, &x, &crange) == -1) goto out;
+        rc = 0;
         goto out;
     }
     fprintf(out, "belay diff  %s  %s -> %s\n", scope.p != NULL ? scope.p : "", o->from ? o->from : "before",
@@ -1150,6 +1319,13 @@ out:
     drop(&x.ignedit);
     drop(&x.ignored);
     drop(&x.gitvis);
+    for (int i = 0; i < RS_COUNT; i++) drop(&x.s[i]);
+    drop(&x.core);
+    for (size_t i = 0; i < x.n_taken; i++) free(x.taken[i]);
+    free(x.taken);
+    for (size_t i = 0; i < x.n_folded; i++) free(x.folded[i]);
+    free(x.folded);
+    free(x.meta_folded);
     tallies_free(&x.ign);
     tallies_free(&x.ignu);
     tallies_free(&x.git);

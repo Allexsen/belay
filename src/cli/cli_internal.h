@@ -42,6 +42,12 @@ int  cli_refuse_root(const char *resolved, bool system, const char *docker, FILE
 struct cli_cursor { struct belay_manifest_reader *r; struct belay_entry e; int got; };
 struct cli_modes { struct cli_cursor side[2]; };
 int  cli_mode_of(void *ctx, int side, const char *path, size_t len, struct receipt_meta *m);
+/* The receipt's owners by dpkg's lists of each side (SD-3), and what it asks
+ * the after manifest about timers and lingering (SY-3a, SY-4). */
+struct cli_owners { const char *manifest[2]; const char *store; };
+int  cli_owner_of(void *ctx, int side, const char *const *paths, const size_t *lens, size_t n, char **owner);
+struct cli_system { const char *manifest; const char *store; };
+int  cli_system_of(void *ctx, struct receipt_system *q);
 int  cli_classify(void *ctx, const char *const *paths, const size_t *lens, const bool *dir, size_t n, unsigned char *out);
 void cli_not_compared(FILE *out, const struct belay_manifest_header *hb, const struct belay_manifest_header *ha,
                       const char *prefix);

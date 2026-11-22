@@ -52,6 +52,12 @@ struct wstep {
     uint64_t n_under;
     char **trouble;                     /* lines of "The record could not be kept", without the prefix */
     size_t n_trouble;
+    /* a system watch's step (watch-system.md): */
+    int64_t since_ns;                   /* reported late: the time of the checkpoint before it (WS-3a); 0: not */
+    uint64_t quiet;                     /* of `counts`, the records that never make a line by themselves (WS-L1) */
+    char quiet_under[64];               /* the top-level directories they are under, "usr, var" */
+    uint64_t by_installed;              /* noted events of packages installed here, counted (WS-N5) */
+    char *roots;                        /* "+var/lib/postgresql/.ssh": the roots changed (WS-10); NULL: they did not */
     char sec_file[40];                  /* its section of the receipt: file, offset, length, sha256 */
     long sec_off, sec_len;
     char sec_sha[65];

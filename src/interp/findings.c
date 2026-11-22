@@ -109,6 +109,8 @@ static bool valid(int kind, int interp, unsigned level, const struct belay_fv *v
                 w += sep + el;
             }
             t = close + 1;
+            /* an empty list between two spaces leaves one (`etc/x.conf: › Key`) */
+            if (v[k].nlist == 0 && w > 0 && text[w - 1] == ' ' && *t == ' ') t++;
             continue;
         }
         char num[32];

@@ -18,6 +18,8 @@ enum wop_kind {
     WOP_MARK,           /* a named marker; arg: its name */
     WOP_FORGET,         /* the session is over: its markers and counters go */
     WOP_SUMMARY,        /* the steps since a marker; arg: its name */
+    WOP_START,          /* a system watch starts: refused when one is running (watch-system WS-2) */
+    WOP_RECEIPT,        /* after a step: a system watch's receipt; how 1: and the watch ends (`stop`) */
 };
 
 enum { WSTEP_PLAIN, WSTEP_BEGIN, WSTEP_FINISH };
@@ -36,8 +38,10 @@ struct wreq {
     struct wop ops[WATCH_OPS_MAX];
     size_t n_ops;
     bool first_ok;              /* a first step is expected: the session is starting (TL-1) */
-    long deadline_s;
+    long deadline_s;            /* 0: none (watch-system WS-3: start, receipt, stop) */
     struct wwords words;
+    bool system;                /* the scope is a machine's `/` (watch-system.md) */
+    FILE *progress;             /* with no deadline: a line every watch_progress_ms (WS-3); NULL: none */
 };
 
 /* Runs the event. Its lines, each ending in '\n', are appended to `out`:
@@ -65,5 +69,7 @@ extern long watch_second_ms;
 /* Test hook: the supervisor never answers a request to commit, so the
  * deadline kills a worker that is waiting for the answer. */
 extern bool watch_withhold_go;
+/* Test hook: the progress line's period in milliseconds (WS-3: 10 s). */
+extern long watch_progress_ms;
 
 #endif

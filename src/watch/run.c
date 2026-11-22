@@ -23,6 +23,8 @@
 #include "cli/receipt.h"
 #include "cli/state.h"
 #include "watch/ledger.h"
+#include "watch/sysflag.h"
+#include "watch/sysreceipt.h"
 
 #define RED "\xf0\x9f\x94\xb4"
 #define NS_PER_DAY (86400LL * 1000000000LL)
@@ -31,6 +33,7 @@ void (*watch_stage_hook)(const char *stage) = NULL;
 int64_t (*watch_clock)(void) = NULL;
 long watch_second_ms = WATCH_SECOND_S * 1000;
 bool watch_withhold_go = false;
+long watch_progress_ms = 10000;
 
 static int64_t now_ns(void) {
     if (watch_clock != NULL) return watch_clock();
@@ -104,7 +107,23 @@ struct wctx {
     struct wsb out;
     size_t dropped;             /* calls and markers of sessions that ended without saying so (TL-15) */
     const char *stage;
+    /* a system watch's (watch-system.md WS-2, WS-3a to WS-3c) */
+    struct wstate found;        /* the state as the last commit left it */
+    int status;                 /* the worker's exit status when not 0 by failure (a refusal) */
+    bool starting;              /* `watch start`: its step's checkpoint is the watch's first */
+    bool walk_died;             /* a walk was under way and no worker held the lock */
+    bool walked;                /* this run began a walk */
+    int64_t walk_began;
+    bool parked;                /* the supervisor left during the walk: its checkpoint waits for the next step */
+    bool troubles_only;         /* receipt, stop: their step says only its troubles */
+    struct wsb tail;            /* lines after the steps': start's opening lines, the receipt */
 };
+
+/* The supervisor left (WS-3a): it closed its end. Read without waiting. */
+static bool supervisor_gone(const struct wctx *x) {
+    struct pollfd pf = { x->from_sup, POLLIN, 0 };
+    return poll(&pf, 1, 0) > 0;
+}
 
 static void stage(struct wctx *x, const char *name) {
     x->stage = name;
@@ -469,7 +488,7 @@ static int render_section(struct wctx *x, const struct wstep *s, const char *a, 
     fputs("\n", mem);
     snprintf(la, sizeof la, "checkpoint %ld", s->from);
     snprintf(lb, sizeof lb, "checkpoint %ld", s->to);
-    const struct receipt_opts ro = { la, lb, true, cli_mode_of, &m, x->st.scope.docker[0] ? NULL : cli_classify,
+    const struct receipt_opts ro = { la, lb, true, cli_mode_of, &m, x->st.scope.docker[0] || x->q->system ? NULL : cli_classify,
                                      x->st.scope.path, NULL, NULL, NULL,     /* --all: nothing folds, no owner asked */
                                      NULL, NULL };  /* nor the after manifest about timers and lingering */
     if (receipt_render(in, mem, &ro) == -1) goto out;
@@ -492,7 +511,21 @@ static struct pending *pend(struct wctx *x, const char *type) {
     return p;
 }
 
-static int do_step(struct wctx *x, const struct wop *op) {
+/* WS-3a: the walk ended after its step's limit. Its checkpoint is recorded
+ * as waiting, from the state before the step, so the next step or receipt
+ * reports it and nothing is said twice. Nothing else of this run is kept. */
+static int park(struct wctx *x, const struct wstate *before, const struct checkpoint *c) {
+    x->l.st = *before;
+    x->l.st.walk_ns = 0;
+    x->l.st.walk_reason[0] = '\0';
+    x->l.st.pending = c->id;
+    x->l.st.pending_ns = c->created_ns;
+    x->l.st.pending_walk_ns = x->walk_began;
+    x->parked = true;
+    return ledger_append(&x->l, "walked", x->q->session, x->now, "", NULL);
+}
+
+static int do_step(struct wctx *x, const struct wop *op, bool late) {
     const struct wreq *q = x->q;
     struct wstate *st = &x->l.st;
     struct wstep *s = calloc(1, sizeof *s);
@@ -508,6 +541,9 @@ static int do_step(struct wctx *x, const struct wop *op) {
         s->n_calls++;
     }
     if (x->l.unfinished && wstep_add_trouble(s, "the previous step did not finish") == -1) return nomem();
+    x->l.unfinished = false;
+    if (x->walk_died && wstep_add_trouble(s, "the last walk did not finish") == -1) return nomem();       /* WS-3b */
+    x->walk_died = false;
     if (x->dropped > 0 &&
         wstep_add_trouble(s, "%zu call%s of a session that ended without saying so %s closed", x->dropped,
                           x->dropped == 1 ? "" : "s", x->dropped == 1 ? "was" : "were") == -1)
@@ -516,7 +552,6 @@ static int do_step(struct wctx *x, const struct wop *op) {
     /* an attempt, so a step that does not finish is known to have begun */
     if (ledger_append(&x->l, "attempt", q->session, x->now, "", NULL) == -1) return -1;
 
-    stage(x, "capturing");
     /* the cursor's checkpoint, looked for before the capture: once it is
      * gone its id is free, and the capture below could take it */
     const long cursor = st->cursor;
@@ -531,9 +566,39 @@ static int do_step(struct wctx *x, const struct wop *op) {
         have = have && state_check_manifest(&x->st, cursor) == 0;
         belay_err_clear();
     }
-    const struct capture_req req = { "mark", true, false, 50, 0, false, true, false, false };
-    struct checkpoint c;
-    if (state_capture(&x->st, &req, &c) == -1) return -1;
+    const struct capture_req req = { "mark", true, false, 50, 0, false, true, q->system, false };
+    struct checkpoint c = { 0 };
+    static struct wstate before;
+    before = *st;
+    if (late) {                         /* WS-3a: the walk an earlier step left, reported now */
+        c.id = st->pending;
+        c.created_ns = st->pending_ns;
+        s->since_ns = st->cursor_ns;
+    } else if (q->system) {
+        /* WS-3a: a walk, under the lock, said in the record before it begins */
+        char words[96];
+        snprintf(words, sizeof words, "walking (%s)", watch_walk_reason());
+        x->stage = "walking";
+        msg(x->to_sup, 'S', words, strlen(words));
+        if (watch_stage_hook != NULL) watch_stage_hook("walking");
+        x->walked = true;
+        x->walk_began = now_ns();
+        st->walk_ns = x->walk_began;
+        snprintf(st->walk_reason, sizeof st->walk_reason, "%s", watch_walk_reason());
+        if (ledger_append(&x->l, "walk", q->session, x->now, "", NULL) == -1) return -1;
+        if (state_capture(&x->st, &req, &c) == -1) return -1;
+        st->walk_ns = 0;
+        st->walk_reason[0] = '\0';
+        if (supervisor_gone(x)) {
+            x->n_pend--;
+            wstep_free(s);
+            free(s);
+            return park(x, &before, &c);
+        }
+    } else {
+        stage(x, "capturing");
+        if (state_capture(&x->st, &req, &c) == -1) return -1;
+    }
     s->to = c.id;
     char at[6];
     hhmm(x->now, at);
@@ -541,7 +606,7 @@ static int do_step(struct wctx *x, const struct wop *op) {
     bool have_old = list_in_force(&x->l, &old), have_fresh = false;
     int rc = -1;
     struct manifest_file mf_a = { .temporary = false }, mf_b = { .temporary = false };
-    if (donttouch_step(x, c.id, s, have_old, &fresh, &have_fresh) == -1) goto out;
+    if (!q->system && donttouch_step(x, c.id, s, have_old, &fresh, &have_fresh) == -1) goto out;
     if (!have) {
         /* nothing to diff against: a first step, or the record was interrupted */
         const int tr = cursor != 0 ? wstep_add_trouble(s, "the record was interrupted: resuming from checkpoint %ld (%s)", c.id, at)
@@ -573,13 +638,14 @@ static int do_step(struct wctx *x, const struct wop *op) {
         int mr = -1;
         if (belay_manifest_open(mf_a.path, &m.side[0].r) == 0 && belay_manifest_open(mf_b.path, &m.side[1].r) == 0) {
             for (int sd = 0; sd < 2; sd++) m.side[sd].got = belay_manifest_next(m.side[sd].r, &m.side[sd].e);
-            mr = match_diff(x, d, &fx, s);
+            mr = q->system ? sysflag_step(d, mf_a.path, mf_b.path, x->st.store, cli_mode_of, &m, s)     /* WS-F, WS-N */
+                           : match_diff(x, d, &fx, s);
         }
         belay_manifest_close(m.side[0].r);
         belay_manifest_close(m.side[1].r);
         flagctx_free(&fx);
         if (mr == -1) goto out;
-        if (s->changes > 0 || s->n_flags > 0) {
+        if (s->changes > 0 || s->n_flags > 0 || s->roots != NULL) {
             stage(x, "rendering");
             if (render_section(x, s, mf_a.path, mf_b.path, d, &p->section, &p->section_len) == -1) goto out;
         }
@@ -587,6 +653,17 @@ static int do_step(struct wctx *x, const struct wop *op) {
     /* the step is made: what it leaves in the state */
     st->cursor = c.id;
     st->cursor_ns = c.created_ns;
+    if (late) {                         /* WS-3c: counted, with how long its walk took */
+        if (st->n_late < W_LATE_MAX) st->late[st->n_late] = (long)((st->pending_ns - st->pending_walk_ns + 500000000LL) / 1000000000LL);
+        st->n_late++;
+        st->pending = 0;
+        st->pending_ns = st->pending_walk_ns = 0;
+    }
+    if (x->starting) {                  /* WS-2: the watch's first checkpoint */
+        st->sys_started_ns = x->now;
+        st->sys_start = c.id;
+        x->starting = false;
+    }
     struct wkill *k = kill_of(st, q->session, false);
     if (k != NULL) k->n = 0;
     if (op->how == WSTEP_FINISH) {
@@ -797,18 +874,123 @@ static int commit(struct wctx *x) {
     return 0;
 }
 
+/* What is pending, asked for and written: "go" or a kill, never both
+ * (TM-2); then the steps' lines. A system watch's walk whose supervisor
+ * left before the answer is parked instead (WS-3a): 1. 0, or -1. */
+static int flush(struct wctx *x, const struct wstate *before, const struct checkpoint *walk) {
+    if (x->n_pend == 0) return 0;
+    if (watch_stage_hook != NULL) watch_stage_hook("committing");
+    char go = 0;
+    ssize_t k = msg(x->to_sup, 'C', "", 0) == -1 ? 0 : 1;
+    while (k == 1 && (k = read(x->from_sup, &go, 1)) == -1 && errno == EINTR) {}
+    if (k != 1 || go != 'g') {          /* the supervisor is gone or said no: nothing is written */
+        if (walk == NULL) _exit(4);
+        for (size_t i = 0; i < x->n_pend; i++) {
+            if (x->pend[i].step != NULL) { wstep_free(x->pend[i].step); free(x->pend[i].step); }
+            free(x->pend[i].section);
+        }
+        x->n_pend = 0;
+        return park(x, before, walk) == -1 ? -1 : 1;
+    }
+    stage(x, "writing the record");
+    if (commit(x) == -1) return -1;
+    for (size_t i = 0; i < x->n_pend; i++) {
+        struct wstep *s = x->pend[i].step;
+        if (s == NULL) continue;
+        if (!x->troubles_only) lines_step(&x->out, s);
+        else
+            for (size_t t = 0; t < s->n_trouble; t++) wsb_f(&x->out, "belay: " RED " %s\n", s->trouble[t]);
+    }
+    return 0;
+}
+
+/* The pending entries, once written, are forgotten: what came after them
+ * starts from the state they left. */
+static void forget_pending(struct wctx *x) {
+    for (size_t i = 0; i < x->n_pend; i++) {
+        if (x->pend[i].step != NULL) { wstep_free(x->pend[i].step); free(x->pend[i].step); }
+        free(x->pend[i].section);
+    }
+    x->n_pend = 0;
+    x->written = 0;
+    x->found = x->l.st;
+}
+
 static int work(struct wctx *x) {
     const struct wreq *q = x->q;
-    bool summary = false;
-    for (size_t i = 0; i < q->n_ops; i++) summary |= q->ops[i].op == WOP_SUMMARY;
+    bool summary = false, steps = false;
+    for (size_t i = 0; i < q->n_ops; i++) {
+        summary |= q->ops[i].op == WOP_SUMMARY;
+        steps |= q->ops[i].op == WOP_STEP;
+        x->troubles_only |= q->ops[i].op == WOP_RECEIPT;
+    }
     drop_stale(x);
+    if (q->system && x->l.st.walk_ns != 0) {    /* WS-3b: its worker held the lock, and no one does */
+        x->walk_died = true;
+        x->l.st.walk_ns = 0;
+        x->l.st.walk_reason[0] = '\0';
+    }
+    if (q->system && steps && x->l.st.pending != 0) {
+        /* WS-3b: the walk an earlier step left is reported first, and written
+         * before this run's own walk begins, its line sent at once */
+        const struct wop late = { WOP_STEP, NULL, WSTEP_PLAIN };
+        if (do_step(x, &late, true) == -1) return -1;
+        const int f = flush(x, NULL, NULL);
+        if (f == -1) return -1;
+        forget_pending(x);
+        if (x->out.n > 0 && !x->out.bad) {
+            msg(x->to_sup, 'O', x->out.p, x->out.n);
+            x->out.n = 0;
+            x->out.p[0] = '\0';
+        }
+    }
+    static struct wstate before;
+    before = x->l.st;
+    struct checkpoint walk = { 0 };
     for (size_t i = 0; i < q->n_ops; i++) {
         const struct wop *op = &q->ops[i];
         struct wstate *st = &x->l.st;
         switch (op->op) {
         case WOP_STEP:
-            if (do_step(x, op) == -1) return -1;
+            if (do_step(x, op, false) == -1) return -1;
+            if (x->parked) return 0;            /* the supervisor left during the walk */
+            if (q->system && x->n_pend > 0 && x->pend[x->n_pend - 1].step != NULL) {
+                walk.id = x->pend[x->n_pend - 1].step->to;
+                walk.created_ns = x->pend[x->n_pend - 1].snap.cursor_ns;
+            }
             break;
+        case WOP_START:                         /* WS-2 */
+            if (st->sys_started_ns != 0) {
+                char at[6];
+                hhmm(st->sys_started_ns, at);
+                wsb_f(&x->out, "belay: refused: a system watch of this scope is running since %s (watch stop ends it)\n", at);
+                x->status = 3;
+                return 0;
+            }
+            x->starting = true;
+            break;
+        case WOP_RECEIPT: {                     /* WS-R, after the step that is its end state (K12) */
+            struct wstate *snap = x->n_pend > 0 ? &x->pend[x->n_pend - 1].snap : st;
+            long from = snap->sys_start != 0 && state_checkpoint_exists(&x->st, snap->sys_start) == 1 ? snap->sys_start : 0;
+            belay_err_clear();
+            if (from == 0) {                    /* not started, or its checkpoint is gone: the oldest there is */
+                struct checkpoint *list = NULL;
+                size_t n = 0;
+                if (state_list(&x->st, &list, &n) == -1) return -1;
+                from = n > 0 ? list[0].id : snap->cursor;
+                free(list);
+            }
+            if (snap->cursor == 0 || sysreceipt(&x->st, snap, from, snap->cursor, snap->cursor_ns, &x->tail) == -1) {
+                if (snap->cursor == 0) belay_err_set(BELAY_ERR_IO, 0, "no checkpoint to end the receipt with");
+                return -1;
+            }
+            if (op->how == 1) {                 /* stop: the watch ends */
+                snap->sys_started_ns = 0;
+                snap->sys_start = 0;
+                if (snap != st) { st->sys_started_ns = 0; st->sys_start = 0; }
+            }
+            break;
+        }
         case WOP_CLOSE:                         /* ids, separated by a space: one that is not open is nothing */
             for (const char *id = op->arg; *id != '\0';) {
                 const size_t n = strcspn(id, " ");
@@ -883,19 +1065,15 @@ static int work(struct wctx *x) {
         struct pending *p = pend(x, "close");
         p->snap = x->l.st;
     }
-    if (x->n_pend > 0) {
-        /* commit is asked for, not announced: "go" or a kill, never both (TM-2) */
-        if (watch_stage_hook != NULL) watch_stage_hook("committing");
-        char go = 0;
-        if (msg(x->to_sup, 'C', "", 0) == -1) _exit(4);
-        ssize_t k;
-        while ((k = read(x->from_sup, &go, 1)) == -1 && errno == EINTR) {}
-        if (k != 1 || go != 'g') _exit(4);      /* the supervisor is gone or said no: nothing is written */
-        stage(x, "writing the record");
-        if (commit(x) == -1) return -1;
-    }
-    for (size_t i = 0; i < x->n_pend; i++)
-        if (x->pend[i].step != NULL) lines_step(&x->out, x->pend[i].step);
+    const int f = flush(x, &before, q->system && walk.id != 0 ? &walk : NULL);
+    if (f == -1) return -1;
+    if (f == 1) return 0;                       /* parked */
+    for (size_t i = 0; q->system && i < q->n_ops; i++)     /* WS-2: start prints the receipt's opening lines */
+        if (q->ops[i].op == WOP_START && x->l.st.cursor != 0 &&
+            sysreceipt_head(&x->st, x->l.st.cursor, &x->l.st, &x->out) == -1)
+            return -1;
+    if (q->system) wsb_f(&x->out, "%s", x->tail.p != NULL ? x->tail.p : "");
+    if (x->tail.bad) x->out.bad = true;
     for (size_t i = 0; summary && i < q->n_ops; i++)
         if (q->ops[i].op == WOP_SUMMARY && do_summary(x, q->ops[i].arg) == -1) return -1;
     return 0;
@@ -912,6 +1090,18 @@ static void worker(const struct wreq *q, int to_sup, int from_sup) {
     x.st.dir_fd = x.st.cp_fd = x.st.lock_fd = -1;
     x.l.dfd = -1;
     int status = 0;
+    if (q->system) {
+        /* WS-3a: a session of its own, so it outlives the step and its hook;
+         * nothing of theirs held open, so neither waits for it */
+        setsid();
+        const int nul = open("/dev/null", O_RDWR | O_CLOEXEC);
+        if (nul != -1) {
+            dup2(nul, 0);
+            dup2(nul, 1);
+            dup2(nul, 2);
+            if (nul > 2) close(nul);
+        }
+    }
     char why[1024];
     stage(&x, "waiting for the lock");
     struct scope sc;
@@ -921,7 +1111,7 @@ static void worker(const struct wreq *q, int to_sup, int from_sup) {
         status = 3;
         goto done;
     }
-    if (watch_too_wide(sc.path)) {
+    if (!q->system && watch_too_wide(sc.path)) {
         char *shown = flag_shown(sc.path, strlen(sc.path));
         wsb_f(&x.out, "belay: " RED " not watching %s: too wide\n", shown != NULL ? shown : "it");
         free(shown);
@@ -949,6 +1139,39 @@ static void worker(const struct wreq *q, int to_sup, int from_sup) {
         belay_err_clear();
         if (status != 0) goto done;
     }
+    /* WS-3b: a step that finds a walk under way says so and starts none */
+    bool plain_step = q->system;
+    for (size_t i = 0; i < q->n_ops; i++) plain_step &= q->ops[i].op == WOP_STEP;
+    if (plain_step) {
+        struct state ro;
+        ro.dir_fd = ro.cp_fd = ro.lock_fd = -1;
+        struct wstate w = { 0 };
+        if (state_open(&sc, false, &ro, NULL) == 0) {
+            struct ledger rl;
+            if (ledger_open(&ro, false, &rl) == 0) {
+                w = rl.st;
+                ledger_close(&rl);
+            }
+        }
+        state_close(&ro);
+        belay_err_clear();
+        if (w.walk_ns != 0) {
+            state_lock_wait_ms = 0;
+            state_lock_timed_out = false;
+            const int got = state_open(&sc, true, &x.st, NULL);
+            state_lock_wait_ms = -1;
+            if (got == -1 && state_lock_timed_out) {
+                char at[6];
+                hhmm(w.walk_ns, at);
+                wsb_f(&x.out, "belay: walk in progress since %s (%s)\n", at, w.walk_reason);
+                belay_err_clear();
+                goto done;
+            }
+            if (got == 0) state_close(&x.st);       /* no one holds it: taken again below, as always */
+            x.st.dir_fd = x.st.cp_fd = x.st.lock_fd = -1;
+            belay_err_clear();
+        }
+    }
     if (state_open(&sc, true, &x.st, NULL) == -1 || ledger_open(&x.st, true, &x.l) == -1) {
         const bool refused = belay_err_code() == BELAY_ERR_INVALID;
         err_text(why, sizeof why);
@@ -957,8 +1180,7 @@ static void worker(const struct wreq *q, int to_sup, int from_sup) {
         goto done;
     }
     x.pend = calloc(WATCH_OPS_MAX + 1, sizeof *x.pend);
-    static struct wstate found;
-    found = x.l.st;
+    x.found = x.l.st;
     if (x.pend == NULL || work(&x) == -1) {
         if (x.pend == NULL) nomem();
         err_text(why, sizeof why);
@@ -968,7 +1190,7 @@ static void worker(const struct wreq *q, int to_sup, int from_sup) {
         if (x.out.p != NULL) x.out.p[0] = '\0';
         if (x.written == 0) {
             /* nothing of it is on disk: the event leaves the state as it found it */
-            x.l.st = found;
+            x.l.st = x.found;
             snprintf(text, sizeof text, "could not record: %s", why);
         } else {
             /* A line of it is on disk, and the cursor with it. What is written
@@ -989,6 +1211,11 @@ static void worker(const struct wreq *q, int to_sup, int from_sup) {
         belay_err_clear();
         wsb_f(&x.out, "belay: " RED " %s\n", text);
         status = 4;
+    }
+    if (x.status != 0) status = x.status;
+    if (x.parked) {                         /* WS-3a: no one is listening */
+        x.out.n = 0;
+        if (x.out.p != NULL) x.out.p[0] = '\0';
     }
     if (x.l.unconfirmed) {                  /* written, and not known to have reached the disk */
         wsb_f(&x.out, "belay: " RED " could not confirm the record\n");
@@ -1012,7 +1239,18 @@ done:
 /* ---- the supervisor ---- */
 
 /* What the worker has sent so far. */
-struct sup { char stage[40]; bool commit, done; int status; struct wsb lines; char *in; size_t have, cap; bool bad; };
+struct sup {
+    char stage[96];
+    size_t asked;               /* requests to commit; each gets one answer */
+    bool committing;            /* told to go, and no other stage since */
+    char walking[96];           /* the walk's words, once it began (WS-3a); "" */
+    bool done;
+    int status;
+    struct wsb lines;
+    char *in;
+    size_t have, cap;
+    bool bad;
+};
 
 /* Reads what there is. 1: more may come; 0: the pipe is closed (or memory ran out). */
 static int drain(int fd, struct sup *s) {
@@ -1035,8 +1273,11 @@ static int drain(int fd, struct sup *s) {
         const size_t n = ((size_t)h[1] << 24) | ((size_t)h[2] << 16) | ((size_t)h[3] << 8) | (size_t)h[4];
         if (s->have - at - 5 < n) break;
         const char *body = s->in + at + 5;
-        if (h[0] == 'S') snprintf(s->stage, sizeof s->stage, "%.*s", (int)n, body);
-        else if (h[0] == 'C') s->commit = true;
+        if (h[0] == 'S') {
+            snprintf(s->stage, sizeof s->stage, "%.*s", (int)n, body);
+            if (strcmp(s->stage, "writing the record") != 0) s->committing = false;
+            if (strncmp(s->stage, "walking", 7) == 0) snprintf(s->walking, sizeof s->walking, "%s", s->stage);
+        } else if (h[0] == 'C') s->asked++;
         else if (h[0] == 'O') wsb_f(&s->lines, "%.*s", (int)n, body);
         else if (h[0] == 'X' && n == 1) { s->done = true; s->status = body[0]; }
         at += 5 + n;
@@ -1113,21 +1354,44 @@ int watch_run(const struct wreq *q, struct wsb *out) {
     struct timespec t0;
     clock_gettime(CLOCK_MONOTONIC, &t0);
     const long deadline = q->deadline_s * 1000, second = deadline + watch_second_ms;
-    bool went = false, open = true;
+    const bool unlimited = q->deadline_s == 0;      /* watch-system WS-3: start, receipt, stop */
+    long next_progress = watch_progress_ms;
+    bool open = true, late = false;
+    size_t answered = 0;
     int rc = 4;
     for (;;) {
-        if (s.commit && !went && !watch_withhold_go) {
-            went = true;
+        if (s.asked > answered && !watch_withhold_go) {
+            answered++;
+            s.committing = true;
             if (write(down[1], "g", 1) != 1) open = false;
         }
         if (s.done || !open) break;
-        const long left = (went ? second : deadline) - ms_since(&t0);
-        if (left <= 0) break;
+        const long el = ms_since(&t0);
+        long left = 1000;
+        if (!unlimited) {
+            /* WS-3a: a walk past the limit is not killed; it ends in its own time */
+            if (q->system && s.walking[0] != '\0' && !s.committing && el >= deadline) { late = true; break; }
+            left = (s.committing ? second : deadline) - el;
+            if (left <= 0) break;
+        } else if (q->progress != NULL) {
+            if (el >= next_progress) {
+                fprintf(q->progress, "belay: still %s (%ld s)\n", s.stage, el / 1000);
+                fflush(q->progress);
+                next_progress += watch_progress_ms;
+            }
+            left = next_progress - el;
+        }
         struct pollfd pf = { up[0], POLLIN, 0 };
-        const int pr = poll(&pf, 1, left > 1000 ? 1000 : (int)left);
+        const int pr = poll(&pf, 1, left > 1000 ? 1000 : left < 1 ? 1 : (int)left);
         if (pr > 0) open = drain(up[0], &s) == 1;
     }
-    if (s.done) {
+    if (late) {
+        /* the lines so far (a late step's), then what this one is doing: its walk goes on, and its
+         * checkpoint is the next step's to report */
+        wsb_f(out, "%s", s.lines.p != NULL ? s.lines.p : "");
+        wsb_f(out, "belay: %s: not finished in %ld s; what changed will be in the next line\n", s.walking, q->deadline_s);
+        rc = 0;
+    } else if (s.done) {
         /* the worker's own lines, whatever they say */
         wsb_f(out, "%s", s.lines.p != NULL ? s.lines.p : "");
         rc = s.status;
@@ -1135,7 +1399,7 @@ int watch_run(const struct wreq *q, struct wsb *out) {
     } else if (!open) {
         waitpid(pid, NULL, 0);
         wsb_f(out, "belay: " RED " belay stopped unexpectedly while %s\n", s.stage);
-    } else if (went) {
+    } else if (s.committing) {
         /* told to go, and no word by the second limit: not killed, a write may be half done */
         wsb_f(out, "belay: " RED " could not confirm the record\n");
     } else {

@@ -24,6 +24,7 @@
 #define W_MARK_MAX 32
 #define W_KILL_MAX 16
 #define W_TOLD_MAX 32
+#define W_LATE_MAX 16
 
 struct wcall { char id[WATCH_ID_MAX + 1], session[WATCH_ID_MAX + 1], agent[WATCH_ID_MAX + 1]; int64_t ns; };
 /* ns: when the marker was set; seen_ns: when its session last fired (TM-4) */
@@ -43,6 +44,17 @@ struct wstate {
     size_t n_kills;
     char told[W_TOLD_MAX][WATCH_ID_MAX + 1];    /* sessions told what is not read (CV-2) */
     size_t n_told;
+    /* A system watch's own (watch-system.md WS-2, WS-3a to WS-3c), written
+     * only when one of them is not zero: */
+    int64_t sys_started_ns;             /* `watch start`: when; 0: not started, or stopped */
+    long sys_start;                     /* its checkpoint, the receipt's first side */
+    int64_t walk_ns;                    /* a walk under the lock began then; 0: none */
+    char walk_reason[64];               /* why the capture is a walk */
+    long pending;                       /* a walk that ended after its step's limit: its checkpoint, not yet reported; 0: none */
+    int64_t pending_ns;                 /* that checkpoint's created_ns */
+    int64_t pending_walk_ns;            /* when its walk began */
+    long late[W_LATE_MAX];              /* the seconds of the walks reported one step late (WS-3c), the first W_LATE_MAX */
+    size_t n_late;                      /* how many, all of them */
 };
 
 struct ledger {
