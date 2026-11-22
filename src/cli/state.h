@@ -10,6 +10,9 @@
  *        lock                    flock(2): one writer at a time
  *        checkpoints/<n>/manifest.ndjson
  *        checkpoints/<n>/meta.json   written last: a checkpoint exists once it does
+ *        index/                  the newest manifest's index, named by its sha256: a cache
+ *                                (capture/previous.h; capture-scale SC-M3, SC-M3a)
+ *        tmp/                    rebuilt manifests while a command reads them (delta.h)
  *
  *  The root: $BELAY_STATE_DIR, else $XDG_STATE_HOME/belay, else
  *  $HOME/.local/state/belay. It must be owned by the user belay runs as and
@@ -168,6 +171,8 @@ struct capture_req {
     bool watch;                 /* a step of `belay watch`: the checkpoint is the watch's (WR-14) */
     bool system;                /* --system: the scope is a machine's `/`, read by its roots
                                    (watch-system.md WS-6 to WS-9), resolved at every capture */
+    bool no_index;              /* no capture follows this one in this state (verify's own):
+                                   the index of its manifest is not written */
 };
 
 /* The state root's path relative to the scope, when its resolved path is

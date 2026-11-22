@@ -546,7 +546,7 @@ static int cmd_capture(const struct opts *o, const char *kind, FILE *out, FILE *
         state_close(&st);
         return rc;
     }
-    const struct capture_req req = { kind, strcmp(kind, "mark") == 0, o->full, o->full_every, 0, o->keep, false, o->system };
+    const struct capture_req req = { kind, strcmp(kind, "mark") == 0, o->full, o->full_every, 0, o->keep, false, o->system, false };
     struct checkpoint c;
     if (state_capture(&st, &req, &c) == -1) {
         rc = failed(err);
@@ -660,7 +660,7 @@ static int cmd_diff(const struct opts *o, FILE *out, FILE *err) {
     }
     if (to == 0) {
         /* Q3: the capture is kept as a checkpoint, prefiltered as a mark. */
-        const struct capture_req req = { "diff", true, false, o->full_every, 0, false, false, o->system };
+        const struct capture_req req = { "diff", true, false, o->full_every, 0, false, false, o->system, false };
         if (state_capture(&st, &req, &now) == -1) { rc = failed(err); goto done; }
         to = now.id;
         snprintf(label_b, sizeof label_b, "now (checkpoint %ld)", to);

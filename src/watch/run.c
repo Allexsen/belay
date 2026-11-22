@@ -530,7 +530,7 @@ static int do_step(struct wctx *x, const struct wop *op) {
         have = have && state_check_manifest(&x->st, cursor) == 0;
         belay_err_clear();
     }
-    const struct capture_req req = { "mark", true, false, 50, 0, false, true, false };
+    const struct capture_req req = { "mark", true, false, 50, 0, false, true, false, false };
     struct checkpoint c;
     if (state_capture(&x->st, &req, &c) == -1) return -1;
     s->to = c.id;

@@ -906,6 +906,8 @@ int state_capture(struct state *st, const struct capture_req *req, struct checkp
     /* Prefilter against the latest checkpoint unless a full walk is due
      * (Q8): asked for, none before, or N marks since the last full one. */
     const char *previous = NULL;
+    char prev_sha[65], index_dir[PATH_MAX + 80];
+    bool have_prev_sha = false;
     const long prev_id = n > 0 ? list[n - 1].id : 0;
     long since_full = 0;
     if (n > 0 && list[n - 1].has_since_full) since_full = list[n - 1].since_full;
@@ -924,6 +926,7 @@ int state_capture(struct state *st, const struct capture_req *req, struct checkp
             }
             state_manifest(st, list[n - 1].id, prev, sizeof prev);
             previous = prev;
+            have_prev_sha = manifest_recorded_sha256(st, list[n - 1].id, prev_sha);
         }
     } else if (req->prefilter) {
         snprintf(c.full_reason, sizeof c.full_reason, "no checkpoint before");
@@ -948,6 +951,14 @@ int state_capture(struct state *st, const struct capture_req *req, struct checkp
         .exclude_rel = state_rel(st),
         .expect_root = true, .root_dev = st->scope.dev, .root_ino = st->scope.ino,
     };
+    /* The newest manifest's index is kept in the scope's directory, written
+     * under its lock (capture-scale SC-M3). The walker's: a container's
+     * captures are not prefiltered. */
+    if (st->scope.docker[0] == '\0' && !req->no_index) {
+        snprintf(index_dir, sizeof index_dir, "%s/index", st->dir);
+        o.index_dir = index_dir;
+        if (have_prev_sha) o.previous_sha256 = prev_sha;
+    }
     struct belay_manifest_stats s;
     struct belay_system_roots sys = { 0 };
     char key[PATH_MAX + 80];

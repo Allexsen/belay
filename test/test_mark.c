@@ -78,11 +78,13 @@ static void writef(const char *rel, const char *data, size_t n) {
 
 /* A capture of g_tree into `out`, with `previous` (NULL: full); the previous
  * walk's start comes from its manifest's header (v2). */
+static const char *g_index_dir;     /* where a prefiltered capture keeps its index; NULL: nowhere */
 static int capture(const char *out, const char *previous, struct belay_manifest_stats *st) {
     char store[300];
     snprintf(store, sizeof store, "%s/store", g_dir);
     const struct belay_manifest_opts o = { .hash_max_bytes = 1u << 20, .store_max_bytes = 4096,
-                                           .store_dir = store, .previous = previous };
+                                           .store_dir = store, .previous = previous,
+                                           .index_dir = previous != NULL ? g_index_dir : NULL };
     return capture_write(&g_ops, out, g_tree, &o, st);
 }
 
@@ -245,6 +247,19 @@ static void differential(long round_ns, int steps) {
 TEST(mark_agrees_with_check_on_every_change) { differential(0, 40); }
 TEST(mark_agrees_with_check_on_one_second_timestamps) { differential(1000000000L, 40); }
 TEST(mark_agrees_with_check_on_two_second_timestamps) { differential(2000000000L, 40); }
+/* The same with the index kept from one mark to the next (capture-scale
+ * SC-M3): each mark trusts by the index the mark before it left. */
+TEST(mark_agrees_with_check_by_the_index_the_last_mark_left) {
+    char dir[400];
+    snprintf(dir, sizeof dir, "%s/index", g_dir);
+    g_index_dir = dir;
+    differential(0, 40);
+    differential(1000000000L, 12);
+    g_index_dir = NULL;
+    char cmd[900];
+    snprintf(cmd, sizeof cmd, "[ \"$(ls '%s' | wc -l | tr -d ' ')\" = 2 ] && rm -rf '%s'", dir, dir);
+    ASSERT_EQ_INT(0, system(cmd));              /* one index, the last mark's: its two files */
+}
 
 /* The rule's clauses, each: a stat field that differs, or a ctime at the
  * reference point, means the file is read. */
@@ -894,6 +909,7 @@ int main(void) {
     RUN(mark_agrees_with_check_on_every_change);
     RUN(mark_agrees_with_check_on_one_second_timestamps);
     RUN(mark_agrees_with_check_on_two_second_timestamps);
+    RUN(mark_agrees_with_check_by_the_index_the_last_mark_left);
     RUN(an_unchanged_file_is_trusted_and_a_racy_one_read);
     RUN(a_same_size_rewrite_with_its_mtime_restored_is_read);
     RUN(a_change_in_the_root_is_the_newest_ctime);

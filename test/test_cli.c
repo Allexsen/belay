@@ -885,6 +885,48 @@ static bool same_as_written(int id) {
     return same;
 }
 
+/* capture-scale SC-M1, SC-M3, SC-M3a: the newest checkpoint's index is kept
+ * in the scope's state directory, named by its manifest's sha256, and a
+ * capture leaves the one of what it wrote: a mark builds none, and trusts
+ * by it. Removed or spoiled, it is made again and the mark is the same. */
+TEST(the_newest_checkpoints_index_is_kept_beside_it) {
+    fresh();
+    sh("sleep 0.05");                           /* past the tick the files were made in (the racy rule) */
+    ASSERT_EQ_INT(0, belay("check", "--scope", g_scope, NULL));
+    static const char NAMED[] =
+        "s=$( (sha256sum \"$d/checkpoints/%d/manifest.ndjson\" 2>/dev/null || shasum -a 256 \"$d/checkpoints/%d/manifest.ndjson\") "
+        "| cut -c1-64) && [ \"$(ls \"$d/index\" | tr '\\n' ' ')\" = \"$s.paths $s.recs \" ]";
+    ASSERT_TRUE(holds(NAMED, 1, 1));
+    ASSERT_EQ_INT(0, belay("mark", "--scope", g_scope, NULL));
+    ASSERT_TRUE(strstr(g_out, ", 2 files not read again (unchanged)") != NULL);
+    ASSERT_TRUE(holds(NAMED, 2, 2));
+    /* nothing of it under TMPDIR: a mark with nowhere there to write */
+    char *old = getenv("TMPDIR") != NULL ? strdup(getenv("TMPDIR")) : NULL;
+    char gone[600];
+    snprintf(gone, sizeof gone, "%s/no-such-directory", g_dir);
+    setenv("TMPDIR", gone, 1);
+    ASSERT_TRUE(holds("rm -rf \"$d/index\""));                  /* lost: built again from the manifest */
+    const int rc = belay("mark", "--scope", g_scope, NULL);
+    if (old != NULL) setenv("TMPDIR", old, 1); else unsetenv("TMPDIR");
+    free(old);
+    ASSERT_EQ_INT(0, rc);
+    ASSERT_TRUE(strstr(g_out, ", 2 files not read again (unchanged)") != NULL);
+    ASSERT_TRUE(holds(NAMED, 3, 3));
+    /* another manifest's under this one's name is not used: the file changed is read */
+    ASSERT_TRUE(holds("for f in \"$d\"/index/*; do : > \"$f\"; done"));
+    sh("printf 'changed\\n' > '%s/tool' && sleep 0.05", g_scope);
+    ASSERT_EQ_INT(0, belay("mark", "--scope", g_scope, NULL));
+    ASSERT_TRUE(strstr(g_out, ", 1 files not read again (unchanged)") != NULL);
+    ASSERT_TRUE(holds(NAMED, 4, 4));
+    ASSERT_EQ_INT(0, belay("diff", "--scope", g_scope, "--since", "3", "--to", "4", NULL));
+    ASSERT_TRUE(strstr(g_out, "M tool") != NULL);
+    /* a prune leaves the index of the newest */
+    ASSERT_EQ_INT(0, belay("prune", "--scope", g_scope, "--keep-last", "1", NULL));
+    ASSERT_TRUE(holds(NAMED, 4, 4));
+    ASSERT_EQ_INT(0, belay("mark", "--scope", g_scope, NULL));
+    ASSERT_TRUE(strstr(g_out, ", 2 files not read again (unchanged)") != NULL);
+}
+
 /* capture-scale SC-M3: a rebuilt manifest is a file of the scope's state
  * directory, never of TMPDIR or /tmp; none is left when the command ends. */
 TEST(a_rebuilt_manifest_is_a_file_of_the_state_directory) {
@@ -2295,6 +2337,7 @@ int main(void) {
     RUN(prune_keep_id_lasts_and_is_checked);
     RUN(prune_dry_run_changes_nothing_and_tells_the_truth);
     RUN(prune_sweeps_the_store_and_what_stays_still_works);
+    RUN(the_newest_checkpoints_index_is_kept_beside_it);
     RUN(a_rebuilt_manifest_is_a_file_of_the_state_directory);
     RUN(a_killed_runs_temporary_is_removed_by_the_next);
     RUN(a_delta_holds_only_what_changed);

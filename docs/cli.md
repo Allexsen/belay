@@ -104,13 +104,27 @@ writes is corrupt state (exit 4). Protected paths (a later milestone) will never
     sealing.key                 the key of `--system`'s sealed hashes (below): 32 random bytes,
                                 mode 600, made by the first capture that seals a file
     watch/                      the record `belay watch` keeps (below; state-retention-watch.md)
+    index/<sha256>.recs, .paths the newest manifest's index, which `mark` trusts files by: a cache,
+                                named by that manifest's sha256 and made again when it is missing
+                                or is another manifest's (capture-scale.md)
+    tmp/                        a manifest rebuilt from deltas, while the command that reads it
+                                runs; what a killed run left there is removed by the next
     lock                        one writer at a time
 ```
 
 Only `check`, `mark`, `diff` without `--to`, `baseline export`, `exclude --add`/`--remove`,
 `watch step`, `close` and `mark`, and the hook write there. `log`, `exclude` without options, `verify` and a `diff --to` whose pair's diff is
-already stored read it and write nothing; a `diff --to` stores its pair's diff the first time only,
+already stored read it and leave it as it was; a `diff --to` stores its pair's diff the first time only,
 and every diff is computed afresh, whichever build stored the file.
+
+No command holds a manifest in memory: a capture sorts on disk, deltas are written and rebuilt a
+line at a time, and the newest manifest's index is a file that is mapped. A manifest rebuilt from
+deltas is a file under `tmp/` there, never under `$TMPDIR` or `/tmp` (which may be memory), and is
+removed when the command ends. So `manifest`, `diff`, `verify --to`, `prune` and `watch` need a
+state directory they can write whenever a checkpoint they read is stored as a delta: on a
+read-only one they fail (exit 4) and say where they could not write. `log` reads a delta's header
+where it is and needs none. (`make scale-test` runs every command on manifests of 2,000,000
+entries with its heap limited to 64 MiB; it lists what still needs more.)
 
 The state directory must belong to the user belay runs as and be writable by no one else; every
 directory above it must belong to that user or to root and be writable by no one else, unless it
@@ -484,8 +498,9 @@ no checkpoint before; with `--full`; every `N` prefiltered captures -- marks, an
 to now -- since the last full one (`--full-every N`, default 50; 0: never); when the newest ctime it
 sees is older than the newest the previous checkpoint recorded (the clock went backwards: the walk
 is done again in full); when the previous walk's start is unknown on coarse timestamps (above);
-or when the previous checkpoint cannot be used -- unreadable, of another scope, taken with other
-limits, or too large to index (64 MiB, about 76 bytes a file). A
+or when the previous checkpoint cannot be used -- unreadable, of another scope, or taken with other
+limits. Its size is no reason: its index is a file in the state directory (`index/`), about 150
+bytes an entry and its path, which the capture before left there and `mark` maps. A
 previous manifest that is a symlink or a FIFO is corrupt state (exit 4).
 
 ## The receipt

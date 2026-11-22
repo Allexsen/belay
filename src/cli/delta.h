@@ -53,6 +53,11 @@ bool manifest_is_delta(const struct state *st, long id);
  * files, which are always right, and is not a failed capture. */
 void manifest_store_delta(const struct state *st, long prev, long id);
 
+/* The sha256 of checkpoint `id`'s manifest as its delta records it (the
+ * newest checkpoint has both a whole file and a delta): true with `hex`, or
+ * false when it has no delta or that cannot be read. */
+bool manifest_recorded_sha256(const struct state *st, long id, char hex[65]);
+
 /* Makes a delta a whole file again, checked, before its base goes (PR-4). */
 int  manifest_make_whole(const struct state *st, long id);
 
