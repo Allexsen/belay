@@ -111,8 +111,10 @@ struct fsops {
 
 /* Whether mount `id` of the table `mountinfo` is one a capture with roots
  * may enter (V5-E6, V5-A5): of a listed filesystem type, and the mount of
- * the whole filesystem (its root field is "/"). False for a NULL table. */
-bool fsops_mount_whole_listed(const char *mountinfo, uint64_t id);
+ * the whole filesystem (its root field is "/") or, on btrfs, of a whole
+ * subvolume (`ino`, the mount point's inode number, is 256). False for a
+ * NULL table. */
+bool fsops_mount_whole_listed(const char *mountinfo, uint64_t id, uint64_t ino);
 
 /* belay_system_roots (belay/manifest.h) through a given platform table. */
 struct belay_system_roots;

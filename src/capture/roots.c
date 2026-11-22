@@ -94,8 +94,14 @@ int roots_check(const struct belay_manifest_opts *o) {
  *  first field after the " - " separator, is on the list. Fields are
  *  separated by single spaces and escape a space as \040, so the fourth
  *  field is the root whatever the paths hold.
+ *  A btrfs subvolume mounted by name (`subvol=@home`) has that name as its
+ *  root field (`/@home`), and is whole all the same: what tells it from a
+ *  directory of a subvolume bound somewhere is the mount point's inode
+ *  number, 256 for a subvolume's root (BTRFS_FIRST_FREE_OBJECTID) and for
+ *  no directory inside one.
  */
-bool fsops_mount_whole_listed(const char *mountinfo, uint64_t id) {
+#define BTRFS_SUBVOLUME_ROOT_INO 256
+bool fsops_mount_whole_listed(const char *mountinfo, uint64_t id, uint64_t ino) {
     static const char *const ENTERED[] = { "ext2", "ext3", "ext4", "xfs", "btrfs", "vfat", "f2fs", "zfs" };
     for (const char *l = mountinfo; l != NULL && *l != '\0'; ) {
         const char *nl = strchr(l, '\n');
@@ -109,12 +115,16 @@ bool fsops_mount_whole_listed(const char *mountinfo, uint64_t id) {
                 f = memchr(f, ' ', ll - (size_t)(f - l));
                 if (f != NULL) f++;
             }
-            if (f == NULL || (size_t)(f - l) + 2 > ll || f[0] != '/' || f[1] != ' ') return false;
+            if (f == NULL || (size_t)(f - l) + 2 > ll || f[0] != '/') return false;
+            const bool whole = f[1] == ' ';
             const char *sep = NULL;             /* " - " after the optional fields */
             for (const char *q = f; (size_t)(q - l) + 3 <= ll; q++)
                 if (q[0] == ' ' && q[1] == '-' && q[2] == ' ') { sep = q + 3; break; }
             if (sep == NULL) return false;
             const size_t tl = strcspn(sep, " \n");
+            if (!whole)                         /* by name: a btrfs subvolume's root, or nothing entered */
+                return ino == BTRFS_SUBVOLUME_ROOT_INO && tl == 5 && (size_t)(sep - l) + tl <= ll &&
+                       memcmp(sep, "btrfs", 5) == 0;
             for (size_t t = 0; t < sizeof ENTERED / sizeof ENTERED[0]; t++)
                 if (strlen(ENTERED[t]) == tl && (size_t)(sep - l) + tl <= ll && memcmp(ENTERED[t], sep, tl) == 0) return true;
             return false;

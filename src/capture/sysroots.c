@@ -124,7 +124,7 @@ static bool home_usable(const struct fsops *ops, int root_fd, uint64_t root_dev,
                 *asked = true;
                 *table = ops->mountinfo(ops->ctx);
             }
-            ok = ops->mount_id(ops->ctx, root_fd, home, &id) == 0 && fsops_mount_whole_listed(*table, id);
+            ok = ops->mount_id(ops->ctx, root_fd, home, &id) == 0 && fsops_mount_whole_listed(*table, id, (uint64_t)st.st_ino);
         }
         *s = keep;
         if (!ok) return false;

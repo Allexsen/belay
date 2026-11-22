@@ -886,6 +886,7 @@ static const char *g_mount_name;    /* reported as a mount root */
 static const char *g_mount_name2;   /* a second one, of the same filesystem */
 static const char *g_mountinfo;     /* the mount table the capture is given; NULL: none */
 static bool g_same_dev;             /* the mount is of the scope's own device */
+static bool g_subvol_ino;           /* the mount point's inode number is 256, a btrfs subvolume's root */
 static const char *g_deny;          /* openat of this name fails EACCES (not O_PATH) */
 static void (*g_action)(void);      /* runs once, when the walk is over and before the re-check */
 static int g_tmpfiles;
@@ -903,6 +904,7 @@ static int t_stat_mount(void *ctx, int dfd, const char *name, struct stat *st, b
         *mr = true;
         if (!g_same_dev) st->st_dev += 1000;        /* a mounted filesystem has its own device */
         if (g_mount_inos < 2 && (g_mount_inos == 0 || g_mount_ino[0] != st->st_ino)) g_mount_ino[g_mount_inos++] = st->st_ino;
+        if (g_subvol_ino) st->st_ino = 256;
     }
     if (g_gid_on && st->st_ino == g_gid_ino) st->st_gid += 1;
     return 0;
@@ -911,7 +913,7 @@ static int t_stat_mount(void *ctx, int dfd, const char *name, struct stat *st, b
 static int t_mount_id(void *ctx, int dfd, const char *name, uint64_t *id) {
     (void)ctx; (void)dfd;
     if (g_mount_name != NULL && strcmp(name, g_mount_name) == 0) { *id = 77; return 0; }
-    if (g_mount_name2 != NULL && strcmp(name, g_mount_name2) == 0) { *id = 77; return 0; }   /* the same mount source */
+    if (g_mount_name2 != NULL && strcmp(name, g_mount_name2) == 0) { *id = 78; return 0; }   /* another mount of the same source */
     return -1;
 }
 
@@ -924,7 +926,11 @@ static int t_fstat(void *ctx, int fd, struct stat *st) {
     const int r = g_real->fstat(ctx, fd, st);
     if (r == 0 && g_gid_on && st->st_ino == g_gid_ino) st->st_gid += 1;
     for (int i = 0; r == 0 && !g_same_dev && g_mount_name != NULL && i < g_mount_inos; i++)
-        if (st->st_ino == g_mount_ino[i]) st->st_dev += 1000;
+        if (st->st_ino == g_mount_ino[i]) {
+            st->st_dev += 1000;
+            if (g_subvol_ino) st->st_ino = 256;
+            break;
+        }
     return r;
 }
 
@@ -973,28 +979,40 @@ static void decorate(void) {
 #define MI(id, root, type) #id " 30 8:" #id " " root " /mnt/" #id " rw,relatime shared:1 - " type " /dev/x rw\n"
 TEST(a_mount_is_entered_by_its_filesystem_type) {
     struct belay_manifest_stats st;
-    static const struct { const char *what, *table; bool entered; } C[] = {
-        { "ext4, a whole filesystem", MI(77, "/", "ext4"), true },
-        { "xfs", MI(77, "/", "xfs"), true },
-        { "btrfs", MI(77, "/", "btrfs"), true },
-        { "zfs", MI(77, "/", "zfs"), true },
-        { "tmpfs", MI(77, "/", "tmpfs"), false },
-        { "overlay", MI(77, "/", "overlay"), false },
-        { "proc", MI(77, "/", "proc"), false },
-        { "ext4, a directory of it bound", MI(77, "/srv/data", "ext4"), false },
-        { "ext4, a file of it bound", MI(77, "/etc/hosts", "ext4"), false },
-        { "a type that only starts like one", MI(77, "/", "ext4dev"), false },
-        { "not in the table", MI(76, "/", "ext4") MI(771, "/", "ext4"), false },
-        { "the table unreadable", NULL, false },
-        { "a source that looks like a separator and a type", "77 30 8:1 / /mnt rw - tmpfs a - ext4 rw\n", false },
-        { "optional fields that look like a type", "77 30 8:1 /srv/data /mnt rw - ext4 /dev/x rw\n78 30 8:2 / /ext4 rw - tmpfs none rw\n", false },
+    static const struct { const char *what, *table; bool entered, ino256; } C[] = {
+        /* the btrfs clause: a subvolume mounted by name (`/home` on `@home`) is whole;
+         * a directory of one bound elsewhere is not, nor is inode 256 anything off btrfs */
+        { "btrfs, a subvolume mounted by name", MI(77, "/@home", "btrfs"), true, true },
+        { "btrfs, a nested subvolume by its path", MI(77, "/@/var/lib/machines", "btrfs"), true, true },
+        { "btrfs, the whole filesystem, its root inode 256", MI(77, "/", "btrfs"), true, true },
+        { "btrfs, a directory of a subvolume bound", MI(77, "/@home/u", "btrfs"), false, false },
+        { "ext4, a bound directory whose inode is 256", MI(77, "/srv/data", "ext4"), false, true },
+        { "tmpfs, inode 256", MI(77, "/", "tmpfs"), false, true },
+        { "a type that only starts like btrfs", MI(77, "/@home", "btrfs2"), false, true },
+        { "btrfs, a subvolume, not in the table", MI(76, "/@home", "btrfs"), false, true },
+        { "ext4, a whole filesystem", MI(77, "/", "ext4"), true, false },
+        { "xfs", MI(77, "/", "xfs"), true, false },
+        { "btrfs", MI(77, "/", "btrfs"), true, false },
+        { "zfs", MI(77, "/", "zfs"), true, false },
+        { "tmpfs", MI(77, "/", "tmpfs"), false, false },
+        { "overlay", MI(77, "/", "overlay"), false, false },
+        { "proc", MI(77, "/", "proc"), false, false },
+        { "ext4, a directory of it bound", MI(77, "/srv/data", "ext4"), false, false },
+        { "ext4, a file of it bound", MI(77, "/etc/hosts", "ext4"), false, false },
+        { "a type that only starts like one", MI(77, "/", "ext4dev"), false, false },
+        { "not in the table", MI(76, "/", "ext4") MI(771, "/", "ext4"), false, false },
+        { "the table unreadable", NULL, false, false },
+        { "a source that looks like a separator and a type", "77 30 8:1 / /mnt rw - tmpfs a - ext4 rw\n", false, false },
+        { "optional fields that look like a type", "77 30 8:1 /srv/data /mnt rw - ext4 /dev/x rw\n78 30 8:2 / /ext4 rw - tmpfs none rw\n", false, false },
     };
     for (size_t i = 0; i < sizeof C / sizeof C[0]; i++) {
         tree();
         g_mount_name = "sub";
         g_mountinfo = C[i].table;
+        g_subvol_ino = C[i].ino256;
         const int r = capture_roots(g_m2, NULL, &st);
         g_mount_name = NULL;
+        g_subvol_ino = false;
         if (r != 0 || ent("etc/sub") == NULL) { BELAY_FAIL("%s: no capture (%s)", C[i].what, belay_err_msg()); continue; }
         if (ent("etc/sub")->is_mount == C[i].entered || (ent("etc/sub/x") != NULL) != C[i].entered)
             BELAY_FAIL("%s: %s", C[i].what, C[i].entered ? "not entered" : "entered");
@@ -1007,11 +1025,26 @@ TEST(a_mount_is_entered_by_its_filesystem_type) {
     wr("etc/sub2/y", "y\n", 0644);
     g_mount_name = "sub";
     g_mount_name2 = "sub2";
-    g_mountinfo = MI(77, "/", "ext4");
+    g_mountinfo = MI(77, "/", "ext4") MI(78, "/", "ext4");
     REQUIRE(capture_roots(g_m2, NULL, &st) == 0);
     ASSERT_EQ_INT(1, (int)st.mounts);
     ASSERT_TRUE(ent("etc/sub")->is_mount != ent("etc/sub2")->is_mount);
+    /* as the kernel shows two mounts of one filesystem: one device, and one inode
+     * number at both mount points (run: a tmpfs and a bind of it) -- only the mount's id differs */
+    g_subvol_ino = true;
+    REQUIRE(capture_roots(g_m2, NULL, &st) == 0);
+    g_subvol_ino = false;
+    ASSERT_EQ_INT(1, (int)st.mounts);
+    ASSERT_TRUE(ent("etc/sub")->is_mount != ent("etc/sub2")->is_mount);
     ASSERT_TRUE((ent("etc/sub/x") != NULL) != (ent("etc/sub2/y") != NULL));
+    ASSERT_EQ_INT(0, (int)(st.raced + st.unstable));
+    /* so for a subvolume bound a second time: its device is one already entered */
+    g_mountinfo = MI(77, "/@home", "btrfs") MI(78, "/@home", "btrfs");
+    g_subvol_ino = true;
+    REQUIRE(capture_roots(g_m2, NULL, &st) == 0);
+    g_subvol_ino = false;
+    ASSERT_EQ_INT(1, (int)st.mounts);
+    ASSERT_TRUE(ent("etc/sub")->is_mount != ent("etc/sub2")->is_mount);
     ASSERT_EQ_INT(0, (int)(st.raced + st.unstable));
     g_mount_name2 = NULL;
     /* a mount of the device the scope itself is on (a bind of the scope's own filesystem): never entered */
@@ -1046,7 +1079,7 @@ TEST(the_real_mount_table_is_read) {
     char want[32];
     snprintf(want, sizeof want, "\n%llu ", (unsigned long long)id);
     ASSERT_TRUE(strstr(table, want) != NULL || strncmp(table, want + 1, strlen(want + 1)) == 0);
-    ASSERT_TRUE(!fsops_mount_whole_listed(table, id));
+    ASSERT_TRUE(!fsops_mount_whole_listed(table, id, 2));
     free(table);
 #endif
 }
@@ -1459,6 +1492,15 @@ TEST(system_roots_homes_by_mount_and_without_statx) {
     g_mountinfo = MI(77, "/home", "ext4");          /* a directory of it, bound */
     REQUIRE(sysroots_resolve(&g_ops, g_tree, &g_sr) == 0);
     ASSERT_TRUE(sroot("home/u/.ssh") == NULL);
+    belay_system_roots_free(&g_sr);
+    g_mountinfo = MI(77, "/@home", "btrfs");        /* a subvolume mounted by name (V5-A5): its root's inode is 256 */
+    REQUIRE(sysroots_resolve(&g_ops, g_tree, &g_sr) == 0);
+    ASSERT_TRUE(sroot("home/u/.ssh") == NULL);      /* this directory's is not: a directory of one, bound */
+    belay_system_roots_free(&g_sr);
+    g_subvol_ino = true;
+    REQUIRE(sysroots_resolve(&g_ops, g_tree, &g_sr) == 0);
+    g_subvol_ino = false;
+    ASSERT_TRUE(sroot("home/u/.ssh") != NULL);
     belay_system_roots_free(&g_sr);
     g_mount_name = NULL;
     g_no_statx = true;
