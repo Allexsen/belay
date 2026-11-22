@@ -42,6 +42,16 @@
 
 static char g_dir[256], g_lower[400], g_upper[400], g_proc[400], g_state[400], g_text[200000];
 static char *g_out, *g_err;
+static void sh(const char *fmt, ...) {
+    char cmd[8192];
+    va_list ap;
+    va_start(ap, fmt);
+    vsnprintf(cmd, sizeof cmd, fmt, ap);
+    va_end(ap);
+    if (system(cmd) != 0) { /* the assertions say */ }
+}
+
+#ifdef __linux__
 static long g_pid = 4242, g_pid_after;        /* g_pid_after: from the third look on (H-C5): resolve, capture, still */
 static int g_opens;
 
@@ -60,15 +70,6 @@ static int belayv(const char *const *args) {
     return rc;
 }
 #define belay(...) belayv((const char *const[]){ __VA_ARGS__, NULL })
-
-static void sh(const char *fmt, ...) {
-    char cmd[8192];
-    va_list ap;
-    va_start(ap, fmt);
-    vsnprintf(cmd, sizeof cmd, fmt, ap);
-    va_end(ap);
-    if (system(cmd) != 0) { /* the assertions say */ }
-}
 
 /* What a shell command prints, into g_text. */
 static const char *shout(const char *fmt, ...) {
@@ -91,8 +92,6 @@ static size_t count(const char *hay, const char *needle) {
     for (const char *p = hay; (p = strstr(p, needle)) != NULL; p += strlen(needle)) n++;
     return n;
 }
-
-#ifdef __linux__
 
 /* The container: its upper layer over its image's, as docker_open opens a
  * real one's (H-M3), without overlay xattrs (none is needed here). */
