@@ -162,13 +162,20 @@ static SYS_UNUSED const char *t_diff_opts(int a, int b, const struct belay_diff_
 }
 static SYS_UNUSED const char *t_diff(int a, int b) { return t_diff_opts(a, b, NULL); }
 
+/* An interpreter whose events t_only_events leaves out ("config": its
+ * keys of a unit file are another test's, CF-6), or NULL. */
+static const char *g_events_not_of;
+
 /* Only the event lines of `diff`, in place. */
 static SYS_UNUSED const char *t_only_events(char *diff) {
     char *w = diff;
+    char skip[64] = "";
+    if (g_events_not_of != NULL) snprintf(skip, sizeof skip, "\"interp\":\"%s\"", g_events_not_of);
     for (char *l = diff; l != NULL && *l; ) {
         char *nl = strchr(l, '\n');
         const size_t n = nl ? (size_t)(nl - l) + 1 : strlen(l);
-        if (strncmp(l, "{\"event\":", 9) == 0) { memmove(w, l, n); w += n; }
+        const bool other = skip[0] && strstr(l, skip) != NULL && (nl == NULL || strstr(l, skip) < nl);
+        if (strncmp(l, "{\"event\":", 9) == 0 && !other) { memmove(w, l, n); w += n; }
         l = nl ? nl + 1 : NULL;
     }
     if (w != NULL) *w = '\0';

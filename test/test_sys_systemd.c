@@ -569,6 +569,7 @@ TEST(hostile_timers_are_read_or_refused_never_trusted) {
 
 int main(void) {
     t_begin("systemd");
+    g_events_not_of = "config";     /* the keys of these unit files are test_sys_config's (CF-6) */
     RUN(enable_and_disable_are_a_link_added_and_removed);
     RUN(links_name_their_target_as_written_and_its_owner_where_it_can_be_told);
     RUN(mask_and_unmask_are_a_link_to_dev_null_or_an_empty_file);
