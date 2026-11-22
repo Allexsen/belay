@@ -445,6 +445,33 @@ under the same key, or not read).
 On a checkpoint's line and in the receipt, the directories not read are counted with those that
 could not be listed: `nothing seen below 37 directories`.
 
+**Events.** Beside the path records, a diff states what the text of the files it keeps says, as
+event records. Each kind's fields and text are in the table of
+[docs/spec/diff-v1.md](spec/diff-v1.md); their order in a diff is text, pip, dpkg, accounts,
+sudoers, cron, systemd, sshkeys, trust, git. The files are recognised by their paths, in any scope
+(a container's root as well); `--system` is what reads them on a whole machine.
+
+| interpreter | reads | kinds |
+|---|---|---|
+| accounts | `etc/passwd`, `etc/group`; the per-line digests of `etc/shadow` and `etc/gshadow` | `user_added`, `user_removed`, `user_changed`, `user_password_in_passwd`, `group_added`, `group_removed`, `group_members_changed`, `password_entry_added`, `password_entry_removed`, `password_entry_changed` |
+| sudoers | `etc/sudoers`, `etc/sudoers.d/*` | `sudo_rule_added`, `sudo_rule_removed`, `sudo_line_added`, `sudo_line_removed`, `sudoers_file_not_read_by_sudo` |
+| cron | `etc/crontab`, `etc/cron.d/*`, `var/spool/cron/crontabs/*`, the files of `etc/cron.hourly`, `cron.daily`, `cron.weekly`, `cron.monthly` | `cron_job_added`, `cron_job_removed`, `cron_env_changed`, `cron_script_added`, `cron_script_removed`, `cron_script_changed`, `cron_file_not_run` |
+| systemd | the unit directories under `etc/systemd`, `usr/lib/systemd`, `lib/systemd` and a home's `.config/systemd/user`; `etc/rc.local`, `etc/init.d/*` | `unit_linked`, `unit_unlinked`, `unit_masked`, `unit_unmasked`, `unit_file_added`, `unit_file_removed`, `unit_file_changed`, `unit_overrides_packaged`, `unit_alias_added`, `unit_alias_removed`, `init_script_added`, `init_script_removed`, `init_script_changed`, `timer_file_added`, `timer_file_removed` |
+| dpkg | also `var/lib/apt/extended_states` | `dpkg_installed`, `dpkg_upgraded`, `dpkg_downgraded` and `dpkg_state_changed` carry `auto` |
+| sshkeys | `.ssh/authorized_keys`, `.ssh/authorized_keys2` | `ssh_key_added`, `ssh_key_removed`, `ssh_ca_added`, `ssh_ca_removed` |
+| trust | `etc/ssl/certs/*.pem`, `*.crt` | `trust_anchor_added`, `trust_anchor_removed` |
+
+An event states the text of a file and never an effect. belay does not say what sudo would answer
+or what anyone may run; a unit is `linked into multi-user.target`, never "enabled at boot"; a key
+is named with its file, not with whose login it opens; a cron job's validity is said only where the
+dpkg database has the package `cron` installed; a certificate is not validated. `owner` on an event
+is the package whose file list names the path, `null` when none does, and absent when the capture
+has no dpkg database or it could not be read whole. A file an interpreter reads that is sealed,
+has no kept copy or does not parse gives a `could_not_interpret` event naming it, and its path
+record stands. Of `shadow` and `gshadow` belay keeps, per line, the first field and a keyed digest
+of the line (in the checkpoint's `shadow.lines`, mode 600) and nothing else: a diff says an entry
+was added, removed or changed for a name, when both checkpoints kept digests under one sealing key.
+
 **Refused.** `baseline export`, `verify` and a protect spec are not designed for a system watch:
 with `--system`, or for a scope whose latest checkpoint was taken with it, they exit 3. A bundle
 whose manifest has roots is rejected by every reader. `--system` with `--docker` is not implemented
@@ -555,6 +582,17 @@ added with a uid lower than `UID_MIN` of `etc/login.defs` ends `(below UID_MIN 1
 a timer whose schedule is one of the forms belay puts in words ends `-- every 5 minutes (by cron's
 clock)`. An event about a file that dpkg's file lists name in no package ends `(in no package)`;
 an init script in no package has a line of its own, past the cut too.
+An `etc/rc.local` added or changed without an execute bit ends `(not executable)`: the bit, not
+whether it runs. A timer file added that the diff does not link and that no link in a `.wants` or
+`.requires` directory of the newer side names ends `(not linked into any target)`. A unit linked or
+added under a home's `.config/systemd/user` ends `(lingering: yes)` or `(lingering: no)`: whether
+the newer side records `var/lib/systemd/linger/<name>` for the one user whose home that is by its
+`etc/passwd`; where that cannot be told -- no kept `passwd`, no user or several with that home, that
+directory not recorded -- nothing is said. These three are read from the newer checkpoint's
+manifest: a watch's receipt, and a diff read from a pipe, do not say them.
+
+The links of `etc/rc?.d` added and removed are not listed: one line counts them (`etc/rc?.d: 3
+links added, 1 removed (--all lists them)`).
 
 When the diff has dpkg events, a change to a file that one of their packages owns -- by dpkg's file
 lists (`var/lib/dpkg/info/*.list`, with `diversions`): those of the newer side for a package
@@ -580,8 +618,9 @@ as `\xNN`, a backslash as `\\`. A type change that is also a privilege change sa
 [schema/checkpoint.v3.json](../schema/checkpoint.v3.json). A path that is not UTF-8 is given in
 base64 as `scope_b64` or `manifest_b64` in place of `scope` or `manifest`. checkpoint.v3 adds
 `unreadable` and `sealing` (the two counts of the checkpoint's line, 0 included), `basis` (`walk`),
-`carried` (`0`), and `runtime_sha256`, `journal_seq` and `shadow_lines_sha256` (each `null`): the
-last five have one value in this release. A checkpoint made before it is printed by `log` as the
+`carried` (`0`), `runtime_sha256` and `journal_seq` (each `null`: these four have one value in
+this release), and `shadow_lines_sha256`: the sha256 of the checkpoint's `shadow.lines`, set for a
+system watch's checkpoint that read `etc/shadow` or `etc/gshadow`, `null` otherwise. A checkpoint made before it is printed by `log` as the
 checkpoint.v2 record it was, without the seven keys.
 
 Mixing versions over one state directory: a belay from before checkpoint.v3 reads state this one
