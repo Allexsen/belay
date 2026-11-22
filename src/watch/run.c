@@ -557,9 +557,14 @@ static int do_step(struct wctx *x, const struct wop *op) {
         static char lines_a[PATH_MAX + 200], lines_b[PATH_MAX + 200];      /* SA-6 */
         const int la = state_shadow_lines(&x->st, cursor, lines_a, sizeof lines_a);
         const int lb = la == -1 ? -1 : state_shadow_lines(&x->st, c.id, lines_b, sizeof lines_b);
-        if (la == -1 || lb == -1) goto out;
+        static char rt_a[PATH_MAX + 200], rt_b[PATH_MAX + 200];         /* runtime-v1 RT-D1 */
+        const int ra = la == -1 || lb == -1 ? -1 : state_runtime(&x->st, cursor, rt_a, sizeof rt_a);
+        const int rb = ra == -1 ? -1 : state_runtime(&x->st, c.id, rt_b, sizeof rt_b);
+        if (la == -1 || lb == -1 || ra == -1 || rb == -1) goto out;
         const struct belay_diff_opts dopts = { .store_dir = x->st.store, .shadow_lines_before = la == 1 ? lines_a : NULL,
-                                               .shadow_lines_after = lb == 1 ? lines_b : NULL };
+                                               .shadow_lines_after = lb == 1 ? lines_b : NULL,
+                                               .runtime_before = ra == 1 ? rt_a : NULL,
+                                               .runtime_after = rb == 1 ? rt_b : NULL };
         struct belay_diff_stats ds;
         if (belay_diff(mf_a.path, mf_b.path, d, &dopts, &ds) == -1) goto out;
         stage(x, "matching");

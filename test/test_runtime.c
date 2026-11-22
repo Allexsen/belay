@@ -11,6 +11,8 @@
 #include "belay_test.h"
 #include "belay/error.h"
 #include "belay/runtime.h"
+#include "belay/diff.h"
+#include "cli/cli.h"
 
 #include <errno.h>
 #include <stdarg.h>
@@ -21,7 +23,7 @@
 #include <time.h>
 #include <unistd.h>
 
-static char g_dir[256], g_proc[400], g_out[400];
+static char g_dir[256], g_proc[400], g_out[400], g_tree[400];
 
 static void sh(const char *fmt, ...) {
     char cmd[4096];
@@ -287,10 +289,214 @@ TEST(an_exe_as_read_and_another_process_net) {
                   "{\"listener\":\"tcp\",\"proto\":4,\"addr\":\"0.0.0.0\",\"port\":8080,\"holders\":[" NGINX "]}\n", r);
 }
 
+/* ---- the diff's runtime section (RT-D1 to RT-D5) ---- */
+
+static char g_text[200000];
+
+static int belay(const char *a0, ...) {
+    char *argv[16] = { "belay", (char *)a0 };
+    int argc = 2;
+    va_list ap;
+    va_start(ap, a0);
+    const char *a;
+    while (argc < 15 && (a = va_arg(ap, const char *)) != NULL) argv[argc++] = (char *)a;
+    va_end(ap);
+    FILE *out = fopen("/dev/null", "w"), *err = fopen("/dev/null", "w");
+    const int rc = cli_main(argc, argv, out, err);
+    fclose(out);
+    fclose(err);
+    return rc;
+}
+
+static const char *find1(const char *what) {
+    static char line[800];
+    char cmd[1200];
+    snprintf(cmd, sizeof cmd, "find '%s/state' %s | sort | head -1", g_dir, what);
+    line[0] = '\0';
+    FILE *f = popen(cmd, "r");
+    if (f != NULL && fgets(line, sizeof line, f) != NULL) line[strcspn(line, "\n")] = '\0';
+    if (f != NULL) pclose(f);
+    return line;
+}
+
+/* Two checkpoints of a machine in small whose unit files are
+ * usr/lib/systemd/system/ssh.socket and etc/systemd/system/foo.socket; the
+ * diff of their manifests is given the runtime records at `before` and
+ * `after`. 0 with the diff in g_text, or -1. */
+static int diff_of(const char *before, const char *after) {
+    static char m1[800], m2[800], store[800];
+    if (m1[0] == '\0') {
+        sh("rm -rf '%s' '%s/state' && mkdir -p '%s/usr/lib/systemd/system' '%s/etc/systemd/system' '%s/etc/systemd/system/sockets.target.wants' "
+           "&& chmod 700 '%s'", g_tree, g_dir, g_tree, g_tree, g_tree, g_dir);
+        sh("cd '%s' && printf 'root:x:0:0:root:/root:/bin/sh\\n' > etc/passwd && "
+           "printf '[Socket]\\nListenStream=22\\n# ListenStream=2222\\nListenStream=12222\\nAccept=no\\n' > usr/lib/systemd/system/ssh.socket && "
+           "printf '[Socket]\\n  ListenStream = 0.0.0.0:2222  \\nListenStream=/run/foo.sock\\nListenDatagram=41000\\n' > etc/systemd/system/foo.socket && "
+           "ln -s /usr/lib/systemd/system/ssh.socket etc/systemd/system/sockets.target.wants/ssh.socket", g_tree);
+        if (belay("check", "--system-root", g_tree, NULL) != 0 || belay("check", "--system-root", g_tree, NULL) != 0) return -1;
+        snprintf(m1, sizeof m1, "%s", find1("-path '*/checkpoints/1/manifest.ndjson'"));
+        snprintf(m2, sizeof m2, "%s", find1("-path '*/checkpoints/2/manifest.ndjson'"));
+        snprintf(store, sizeof store, "%s", find1("-type d -name store"));
+    }
+    char out[600];
+    snprintf(out, sizeof out, "%s/diff.ndjson", g_dir);
+    const struct belay_diff_opts o = { .store_dir = store, .runtime_before = before, .runtime_after = after };
+    struct belay_diff_stats st;
+    if (belay_diff(m1, m2, out, &o, &st) == -1) return -1;
+    FILE *f = fopen(out, "r");
+    const size_t n = f != NULL ? fread(g_text, 1, sizeof g_text - 1, f) : 0;
+    if (f != NULL) fclose(f);
+    g_text[n] = '\0';
+    return (int)st.runtime;
+}
+
+/* The section: the lines starting `{"runtime"`, in order. */
+static const char *section(void) {
+    static char sec[100000];
+    size_t w = 0;
+    for (const char *p = g_text; *p;) {
+        const char *nl = strchr(p, '\n');
+        const size_t n = nl != NULL ? (size_t)(nl - p) + 1 : strlen(p);
+        if (strncmp(p, "{\"runtime\"", 10) == 0 && w + n < sizeof sec) {
+            memcpy(sec + w, p, n);
+            w += n;
+        }
+        p += n;
+    }
+    sec[w] = '\0';
+    return sec;
+}
+
+/* The machine later: nginx stopped, socat gone and nc on 41000, resolved
+ * restarted, sshd started, and systemd listening on 2222 and
+ * /run/foo.sock (foo.socket). */
+static void later(void) {
+    put("net/tcp", TCP_HEAD
+        "   0: 3500007F:0035 00000000:0000 0A" TAIL4 "22790 1 0000000000000000 100 0 0 10 5\n"
+        "   1: 00000000:0016 00000000:0000 0A" TAIL4 "8760 1 0000000000000000 100 0 0 10 0\n"
+        "   2: 00000000:08AE 00000000:0000 0A" TAIL4 "8800 1 0000000000000000 100 0 0 10 0\n");
+    put("net/tcp6", TCP_HEAD
+        "   0: 00000000000000000000000000000000:0016 00000000000000000000000000000000:0000 0A" TAIL4 "8762 1 0000000000000000 100 0 0 10 0\n");
+    put("net/udp", UDP_HEAD
+        "  765: 3500007F:0035 00000000:0000 07" TAIL4 "22789 2 0000000000000000 0\n"
+        " 1000: 00000000:CA6C 00000000:0000 07" TAIL4 "40100 2 0000000000000000 0\n"
+        " 1001: 00000000:A028 00000000:0000 07" TAIL4 "40400 2 0000000000000000 0\n");
+    put("net/unix", "Num       RefCount Protocol Flags    Type St Inode Path\n"
+        "0000000000000000: 00000002 00000000 00010000 0001 01 21567 /run/systemd/private\n"
+        "0000000000000000: 00000002 00000000 00010000 0005 01 21600 /run/udev/control\n"
+        "0000000000000000: 00000002 00000000 00010000 0001 01 21900 /run/a socket with spaces\n"
+        "0000000000000000: 00000002 00000000 00010000 0001 01 21990 /run/foo.sock\n");
+    sh("rm -rf '%s/4148' '%s/4150' '%s/5000' '%s/3466' '%s/1'", g_proc, g_proc, g_proc, g_proc, g_proc);
+    process(1, "systemd", "/usr/lib/systemd/systemd", "/init.scope", 2, "8760 8762 21567 8800 21990");
+    process(3466, "systemd-resolve", "/usr/lib/systemd/systemd-resolved", "/system.slice/systemd-resolved.service", 120000,
+            "22790 22789");
+    process(5100, "nc", "/usr/bin/nc.openbsd", "/user.slice/user-1000.slice/session-3.scope", 120100, "40400");
+    process(9000, "sshd", "/usr/sbin/sshd", "/system.slice/ssh.service", 120200, "");
+}
+
+/* RT-D1 to RT-D4: the records, their order, their texts; a systemd
+ * listener's .socket units; the trailer's count. */
+TEST(the_section_names_what_opened_closed_started_stopped_and_restarted) {
+    char a[600], b[600];
+    snprintf(a, sizeof a, "%s/a.ndjson", g_dir);
+    snprintf(b, sizeof b, "%s/b.ndjson", g_dir);
+    struct belay_runtime_stats st;
+    machine();
+    struct belay_runtime_opts o = { .proc_root = g_proc, .root = 1 };
+    REQUIRE(belay_runtime_capture(&o, a, &st) == 1);
+    later();
+    REQUIRE(belay_runtime_capture(&o, b, &st) == 1);
+    const int n = diff_of(a, b);
+    REQUIRE_MSG(n == 9, "%d %s", n, belay_err_msg());
+    ASSERT_EQ_STR(
+        "{\"runtime\":\"listener_closed\",\"listener\":\"tcp\",\"proto\":4,\"addr\":\"0.0.0.0\",\"port\":80,\"holders\":[" NGINX "],"
+        "\"text\":\"closed: tcp 0.0.0.0:80 held by nginx.service\"}\n"
+        "{\"runtime\":\"listener_closed\",\"listener\":\"tcp\",\"proto\":6,\"addr\":\"::\",\"port\":80,\"holders\":[" NGINX "],"
+        "\"text\":\"closed: tcp [::]:80 held by nginx.service\"}\n"
+        "{\"runtime\":\"listener_opened\",\"listener\":\"tcp\",\"proto\":4,\"addr\":\"0.0.0.0\",\"port\":2222,\"holders\":[" SYSTEMD "],"
+        "\"matches\":[\"foo.socket\"],\"text\":\"opened: tcp 0.0.0.0:2222 held by systemd\"}\n"
+        "{\"runtime\":\"listener_closed\",\"listener\":\"udp\",\"proto\":4,\"addr\":\"0.0.0.0\",\"port\":40000,\"client_range\":true,"
+        "\"holders\":[{\"exe\":\"/usr/bin/socat\",\"cgroup\":\"/user.slice/user-1000.slice/session-3.scope\"}],"
+        "\"text\":\"closed: udp 0.0.0.0:40000 held by socat\"}\n"
+        "{\"runtime\":\"listener_opened\",\"listener\":\"udp\",\"proto\":4,\"addr\":\"0.0.0.0\",\"port\":41000,\"client_range\":true,"
+        "\"holders\":[{\"exe\":\"/usr/bin/nc.openbsd\",\"cgroup\":\"/user.slice/user-1000.slice/session-3.scope\"}],"
+        "\"text\":\"opened: udp 0.0.0.0:41000 held by nc.openbsd\"}\n"
+        "{\"runtime\":\"listener_opened\",\"listener\":\"unix\",\"proto\":null,\"addr\":\"/run/foo.sock\",\"port\":null,\"holders\":[" SYSTEMD "],"
+        "\"matches\":[\"foo.socket\"],\"text\":\"opened: unix /run/foo.sock held by systemd\"}\n"
+        "{\"runtime\":\"service_stopped\",\"service\":\"/system.slice/nginx.service\",\"processes\":2,\"exe\":\"/usr/sbin/nginx\","
+        "\"text\":\"stopped: nginx.service\"}\n"
+        "{\"runtime\":\"service_started\",\"service\":\"/system.slice/ssh.service\",\"processes\":1,\"exe\":\"/usr/sbin/sshd\","
+        "\"text\":\"started: ssh.service\"}\n"
+        "{\"runtime\":\"service_restarted\",\"service\":\"/system.slice/systemd-resolved.service\",\"processes\":1,"
+        "\"exe\":\"/usr/lib/systemd/systemd-resolved\",\"text\":\"restarted: systemd-resolved.service\"}\n",
+        section());
+    /* after the events, before the trailer, which counts them last */
+    const char *first = strstr(g_text, "{\"runtime\"");
+    ASSERT_TRUE(first != NULL && strstr(first, "{\"event\"") == NULL && strstr(first, "{\"path\"") == NULL);
+    ASSERT_TRUE(strstr(g_text, ",\"runtime\":9}\n") != NULL);
+    /* systemd's port 22 held on both sides: nothing; a listener held by
+     * systemd and another names both and is matched to no unit */
+    process(9000, "sshd", "/usr/sbin/sshd", "/system.slice/ssh.service", 120200, "8800");
+    REQUIRE(belay_runtime_capture(&o, b, &st) == 1);
+    REQUIRE(diff_of(a, b) == 9);
+    ASSERT_TRUE(strstr(section(), "\"port\":2222,\"holders\":[" SYSTEMD ",{\"exe\":\"/usr/sbin/sshd\",\"cgroup\":"
+                                  "\"/system.slice/ssh.service\"}],\"text\":\"opened: tcp 0.0.0.0:2222 held by ssh.service, systemd\"}\n") != NULL);
+    /* the same record twice: no section records */
+    ASSERT_EQ_INT(0, diff_of(a, a));
+    ASSERT_EQ_STR("", section());
+    ASSERT_TRUE(strstr(g_text, ",\"runtime\":0}\n") != NULL);
+}
+
+/* RT-D5: a side without a record, or with holders not read: the section's
+ * first record says so; without a record nothing is compared. RT-D1:
+ * neither has one, no section. */
+TEST(a_side_without_a_record_or_its_holders_is_incomplete) {
+    char a[600], b[600];
+    snprintf(a, sizeof a, "%s/a.ndjson", g_dir);
+    snprintf(b, sizeof b, "%s/b.ndjson", g_dir);
+    struct belay_runtime_stats st;
+    machine();
+    struct belay_runtime_opts o = { .proc_root = g_proc, .root = 1 };
+    REQUIRE(belay_runtime_capture(&o, a, &st) == 1);
+    REQUIRE(diff_of(NULL, a) == 1);
+    ASSERT_EQ_STR("{\"runtime\":\"incomplete\",\"why\":[\"no_record_before\"],\"text\":\"runtime incomplete: no runtime record before\"}\n",
+                  section());
+    REQUIRE(diff_of(a, NULL) == 1);
+    ASSERT_TRUE(strstr(section(), "\"why\":[\"no_record_after\"]") != NULL);
+    ASSERT_EQ_INT(0, diff_of(NULL, NULL));
+    ASSERT_TRUE(strstr(g_text, "{\"runtime\"") == NULL && strstr(g_text, ",\"runtime\":0}\n") != NULL);
+    later();
+    o.root = 0;
+    REQUIRE(belay_runtime_capture(&o, b, &st) == 1);
+    REQUIRE(diff_of(a, b) == 10);
+    const char *s = section();
+    ASSERT_TRUE(strncmp(s, "{\"runtime\":\"incomplete\",\"why\":[\"holders_unknown_after\"],"
+                           "\"text\":\"runtime incomplete: holders not read after\"}\n", 106) == 0);
+    ASSERT_TRUE(strstr(s, "{\"runtime\":\"listener_opened\",\"listener\":\"tcp\",\"proto\":4,\"addr\":\"0.0.0.0\",\"port\":2222,"
+                          "\"holders\":null,\"text\":\"opened: tcp 0.0.0.0:2222\"}\n") != NULL);
+    ASSERT_TRUE(strstr(s, "\"matches\"") == NULL);
+    /* RT-10: none holds it */
+    machine();
+    put("net/udp", UDP_HEAD " 1000: 00000000:CA6C 00000000:0000 07" TAIL4 "40100 2 0000000000000000 0\n"
+                            " 1003: 00000000:CA6D 00000000:0000 07" TAIL4 "40101 2 0000000000000000 0\n");
+    o.root = 1;
+    REQUIRE(belay_runtime_capture(&o, b, &st) == 1);
+    REQUIRE(diff_of(a, b) > 0);
+    ASSERT_TRUE(strstr(section(), ",\"port\":51821,\"client_range\":true,\"holders\":[],"
+                                  "\"text\":\"opened: udp 0.0.0.0:51821 (no process holds it)\"}\n") != NULL);
+    /* a record that is not one is corrupt input, never a section */
+    sh("printf '{\"listener\":\"tcp\"}\\n' >> '%s'", a);
+    ASSERT_EQ_INT(-1, diff_of(a, b));
+    ASSERT_EQ_INT(BELAY_ERR_CORRUPT, belay_err_code());
+}
+
 int main(void) {
     snprintf(g_dir, sizeof g_dir, "/tmp/belay_rt_%d_%ld", (int)getpid(), (long)time(NULL));
     snprintf(g_proc, sizeof g_proc, "%s/proc", g_dir);
     snprintf(g_out, sizeof g_out, "%s/runtime.ndjson", g_dir);
+    snprintf(g_tree, sizeof g_tree, "%s/tree", g_dir);
+    char state[600];
+    snprintf(state, sizeof state, "%s/state", g_dir);
+    setenv("BELAY_STATE_DIR", state, 1);
     umask(022);
     mkdir(g_dir, 0700);
     setenv("BELAY_RT_OUT", g_out, 1);
@@ -298,6 +504,8 @@ int main(void) {
     RUN(not_root_the_holders_are_null_and_counted);
     RUN(no_proc_writes_nothing_and_a_broken_line_is_an_error);
     RUN(an_exe_as_read_and_another_process_net);
+    RUN(the_section_names_what_opened_closed_started_stopped_and_restarted);
+    RUN(a_side_without_a_record_or_its_holders_is_incomplete);
     sh("chmod -R u+rwx '%s' 2>/dev/null; rm -rf '%s'", g_dir, g_dir);
     return belay_test_report();
 }

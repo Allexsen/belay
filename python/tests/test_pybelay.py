@@ -90,6 +90,7 @@ class Calls(Base):
             self.assertEqual((c.unreadable, c.sealing), (2, 1))
             d = pybelay.diff(self.scope, 1, 2)
             self.assertEqual((d.trailer["before_sealing"], d.trailer["after_sealing"]), (0, 1))
+            self.assertEqual((d.trailer["runtime"], d.runtime), (0, ()))   # runtime-v1 RT-D1: no section here
             os.chmod(os.path.join(self.scope, "shadow"), 0o600)
             self.write("shadow", "longer now\n")
             os.chmod(os.path.join(self.scope, "shadow"), 0)
@@ -128,6 +129,20 @@ class Calls(Base):
         line["nope"] = 1
         with self.assertRaises(pybelay.FormatError):
             pybelay._checkpoint(line)
+
+    def test_a_diffs_runtime_section(self):                         # runtime-v1 RT-D1
+        pybelay.check(self.scope)
+        lines = pybelay._run(["diff", "--scope", self.scope, "--since", "1", "--json"])[0]
+        lines.insert(-1, {"runtime": "listener_opened", "listener": "tcp", "proto": 4, "addr": "0.0.0.0", "port": 80,
+                          "holders": None, "text": "opened: tcp 0.0.0.0:80"})
+        lines.insert(-1, {"runtime": "a_kind_not_known", "text": "x"})
+        d = pybelay._diff(lines)
+        self.assertEqual([(r.runtime, r.text, r.fields.get("port")) for r in d.runtime],
+                         [("listener_opened", "opened: tcp 0.0.0.0:80", 80), ("a_kind_not_known", "x", None)])
+        self.assertEqual(d.records, ())
+        lines.insert(-1, {"runtime": "incomplete"})
+        with self.assertRaises(pybelay.FormatError):
+            pybelay._diff(lines)
 
 
 class Reward(Base):

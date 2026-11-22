@@ -267,7 +267,7 @@ TEST(not_read_directories) {
     IS("", rec("d"));
     ASSERT_TRUE(strstr(last_line(), "\"dir_timestamps_only\":0,") != NULL);
     /* checkpoint-v3 C3-3, G3-2: they seal */
-    ASSERT_TRUE(strstr(last_line(), ",\"before_sealing\":1,\"after_sealing\":1}") != NULL);
+    ASSERT_TRUE(strstr(last_line(), ",\"before_sealing\":1,\"after_sealing\":1,\"runtime\":0}") != NULL);
     /* its mode differs */
     m_new(NULL, NULL); dir(".", ""); dir_m("d", 0700, ",\"not_read\":true"); m_write("after");
     REQUIRE(run() == 0);
