@@ -61,6 +61,7 @@ Rows are matched against events and paths as watch-v1's are (WD-1 to WD-4). No `
 | WS-F14 | `trust_anchor_added` with `owner: null` (system-interpreters.md, the trust store); any change to `etc/ca-certificates.conf` or under `etc/ca-certificates` | events, paths |
 | WS-F15 | any change under `etc/nftables.conf`, `etc/nftables.d`, `etc/ufw`, `etc/default/ufw`, `etc/iptables`, `etc/sysconfig/iptables*`, `etc/firewalld`. These are the rules as files; the ruleset loaded in the kernel is not read. | paths |
 | WS-F16 | a unit event (`unit_file_added`, `unit_linked`, a config event) under a home's `.config/systemd/user` | events |
+| WS-F17 | `could_not_interpret` of the `accounts`, `sudoers` or `sshkeys` interpreter; of `config` on a file of grammar `sshd`; of any interpreter on a unit file under a home's `.config/systemd/user`. These are the files whose events WS-F1, F2, F3, F6, F16 flag: one that can no longer be interpreted is not a count. Said as the event's own text with its first path, as the receipt says it: `🔴 could not interpret: etc/sudoers (sudo)`. In the receipt it is in the section of its interpreter's events (`user`, `sudo`, `ssh`, `config`; systemd's: `services`). | events |
 
 | id | noted (no circle) |
 |---|---|
