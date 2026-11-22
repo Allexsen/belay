@@ -82,9 +82,9 @@ static int by_path(const void *a, const void *b) {
 }
 
 /* Whether `rel` under the scope is a directory itself, not a link to one. */
-static bool is_dir(int root_fd, const char *rel) {
+static bool is_dir(const struct fsops *ops, int root_fd, const char *rel) {
     struct stat st;
-    return fstatat(root_fd, rel, &st, AT_SYMLINK_NOFOLLOW) == 0 && S_ISDIR(st.st_mode);
+    return ops->fstatat(ops->ctx, root_fd, rel, &st, AT_SYMLINK_NOFOLLOW) == 0 && S_ISDIR(st.st_mode);
 }
 
 static bool at_or_under(const char *path, const char *dir) {
@@ -121,7 +121,7 @@ static const char *home_usable(const struct fsops *ops, int root_fd, uint64_t ro
         int r = ops->stat_mount(ops->ctx, root_fd, home, &st, &mr, &mk);
         if (r != 0) {                   /* no statx here: lstat, and the device decides */
             mk = false;
-            r = fstatat(root_fd, home, &st, AT_SYMLINK_NOFOLLOW);
+            r = ops->fstatat(ops->ctx, root_fd, home, &st, AT_SYMLINK_NOFOLLOW);
         }
         const bool dir = r == 0 && S_ISDIR(st.st_mode);
         const bool mount = dir && (mk ? mr : (uint64_t)st.st_dev != root_dev);
@@ -167,19 +167,37 @@ static bool home_rel(const char *home, size_t len, char *out, size_t cap) {
     return true;
 }
 
-/* etc/passwd of the scope, opened without following a link at either
- * component; NULL when there is none to read (no homes then). */
-static FILE *open_passwd(int root_fd) {
-    const int etc = openat(root_fd, "etc", O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC);
-    if (etc == -1) return NULL;
-    const int fd = openat(etc, "passwd", O_RDONLY | O_NOFOLLOW | O_NONBLOCK | O_CLOEXEC);
+/* etc/passwd of the scope, opened through `ops` without following a link
+ * at either component (a container's is its union's, WS-1); -1 when there
+ * is none to read (no homes then). */
+static int open_passwd(const struct fsops *ops, int root_fd) {
+    const int etc = ops->openat(ops->ctx, root_fd, "etc", O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC);
+    if (etc == -1) return -1;
+    const int fd = ops->openat(ops->ctx, etc, "passwd", O_RDONLY | O_NOFOLLOW | O_NONBLOCK | O_CLOEXEC);
     close(etc);
     struct stat st;
-    if (fd == -1) return NULL;
-    if (fstat(fd, &st) != 0 || !S_ISREG(st.st_mode)) { close(fd); return NULL; }
-    FILE *f = fdopen(fd, "rb");
-    if (f == NULL) close(fd);
-    return f;
+    if (fd == -1) return -1;
+    if (ops->fstat(ops->ctx, fd, &st) != 0 || !S_ISREG(st.st_mode)) { close(fd); return -1; }
+    return fd;
+}
+
+/* The file a byte at a time, through `ops`: a byte, or EOF at the end or
+ * on an error (`err` set then). */
+struct rd { const struct fsops *ops; int fd; unsigned char buf[65536]; size_t n, at; bool err; int e; };
+static int rd_getc(struct rd *r) {
+    if (r->at == r->n) {
+        if (r->err) return EOF;
+        ssize_t got;
+        while ((got = r->ops->read(r->ops->ctx, r->fd, r->buf, sizeof r->buf)) == -1 && errno == EINTR) {}
+        if (got <= 0) {
+            r->err = got == -1;
+            r->e = errno;
+            return EOF;
+        }
+        r->n = (size_t)got;
+        r->at = 0;
+    }
+    return r->buf[r->at++];
 }
 
 int belay_system_roots(const char *scope, struct belay_system_roots *out) {
@@ -188,21 +206,31 @@ int belay_system_roots(const char *scope, struct belay_system_roots *out) {
 
 int sysroots_resolve(const struct fsops *ops, const char *scope, struct belay_system_roots *out) {
     memset(out, 0, sizeof *out);
+    const int root_fd = open(scope, O_RDONLY | O_DIRECTORY | O_CLOEXEC);
+    if (root_fd == -1) {
+        belay_err_set(BELAY_ERR_IO, errno, "cannot open %s", scope);
+        return -1;
+    }
+    const int rc = sysroots_resolve_at(ops, root_fd, scope, out);
+    close(root_fd);
+    return rc;
+}
+
+int sysroots_resolve_at(const struct fsops *ops, int root_fd, const char *scope, struct belay_system_roots *out) {
+    memset(out, 0, sizeof *out);
     char *table = NULL;
     bool asked = false;
-    const int root_fd = open(scope, O_RDONLY | O_DIRECTORY | O_CLOEXEC);
     struct stat rst;
-    if (root_fd == -1 || fstat(root_fd, &rst) != 0) {
+    if (ops->fstat(ops->ctx, root_fd, &rst) != 0) {
         belay_err_set(BELAY_ERR_IO, errno, "cannot open %s", scope);
-        if (root_fd != -1) close(root_fd);
         return -1;
     }
     struct build b = { 0 };
     for (size_t i = 0; i < N(CONTENT); i++) add(&b, NULL, CONTENT[i], BELAY_ROOT_CONTENT, false);
     for (size_t i = 0; i < N(METADATA); i++) add(&b, NULL, METADATA[i], BELAY_ROOT_METADATA, false);
     for (size_t i = 0; i < N(METADATA_IF_DIR); i++)
-        if (is_dir(root_fd, METADATA_IF_DIR[i])) add(&b, NULL, METADATA_IF_DIR[i], BELAY_ROOT_METADATA, false);
-    if (is_dir(root_fd, "lib")) add(&b, NULL, "lib/systemd", BELAY_ROOT_CONTENT, false);    /* WS-6 */
+        if (is_dir(ops, root_fd, METADATA_IF_DIR[i])) add(&b, NULL, METADATA_IF_DIR[i], BELAY_ROOT_METADATA, false);
+    if (is_dir(ops, root_fd, "lib")) add(&b, NULL, "lib/systemd", BELAY_ROOT_CONTENT, false);    /* WS-6 */
 
     /*
      *  The sixth field of every line; a line without one names no home. The
@@ -215,7 +243,10 @@ int sysroots_resolve(const struct fsops *ops, const char *scope, struct belay_sy
      *  100,000 lines naming one home makes one home's roots, not 100,000
      *  times as many to sort away.
      */
-    FILE *pw = open_passwd(root_fd);
+    static struct rd pr;
+    struct rd *pw = NULL;
+    pr = (struct rd){ .ops = ops, .fd = open_passwd(ops, root_fd) };
+    if (pr.fd != -1) pw = &pr;
     /* Sized by the manifest's path limit (4096 with the NUL), the same on
      * every platform; not by PATH_MAX, which is 1024 on macOS and would make
      * which homes are read depend on where belay was built. */
@@ -226,7 +257,7 @@ int sysroots_resolve(const struct fsops *ops, const char *scope, struct belay_sy
     char why[200], said[4096 + 220];
     size_t ll = 0;
     bool bad = false;
-    for (int ch = pw != NULL ? getc(pw) : EOF; pw != NULL; ch = getc(pw)) {
+    for (int ch = pw != NULL ? rd_getc(pw) : EOF; pw != NULL; ch = rd_getc(pw)) {
         if (ch != '\n' && ch != EOF) {
             if (ch == '\0' || ll + 1 >= sizeof line) bad = true;
             else line[ll++] = (char)ch;
@@ -291,16 +322,16 @@ int sysroots_resolve(const struct fsops *ops, const char *scope, struct belay_sy
     if (homes.oom) b.oom = true;
     free(homes.roots);
     free(homes.names);
-    const bool read_failed = pw != NULL && ferror(pw);
-    if (pw != NULL) fclose(pw);
-    close(root_fd);
+    const bool read_failed = pw != NULL && pw->err;
+    const int read_errno = pw != NULL ? pw->e : 0;
+    if (pw != NULL) close(pw->fd);
     if (b.oom || read_failed) {
         free(b.roots);
         free(b.names);
         for (size_t i = 0; i < n_left; i++) free(left[i]);
         free(left);
         if (b.oom) belay_err_set(BELAY_ERR_NOMEM, 0, "system roots: out of memory");
-        else belay_err_set(BELAY_ERR_IO, errno, "cannot read %s/etc/passwd", scope);
+        else belay_err_set(BELAY_ERR_IO, read_errno, "cannot read %s/etc/passwd", strcmp(scope, "/") ? scope : "");
         return -1;
     }
     for (size_t i = 0; i < b.n; i++) b.roots[i].path = b.names + (uintptr_t)b.roots[i].path;

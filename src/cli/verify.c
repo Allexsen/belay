@@ -168,7 +168,7 @@ int cmd_baseline(int argc, char **argv, FILE *out, FILE *err) {
     int rc = protect != NULL ? load_spec(protect, &spec, err) : 0;
     if (rc) return rc;
     struct state st;
-    if ((rc = cli_open_scope(scope, docker, true, &st, err)) != 0) {
+    if ((rc = cli_open_scope(scope, docker, true, true, &st, err)) != 0) {
         protect_free(&spec);
         return rc;
     }
@@ -251,7 +251,7 @@ static int checkpoint_after(const struct scope *sc, long id, const struct protec
     state_root_override = NULL;
     struct state own;
     int rc = sc->docker[0] != '\0' ? (state_open(sc, false, &own, err) == -1 ? cli_failed(err) : 0)
-                                    : cli_open_scope(sc->path, NULL, false, &own, err);
+                                    : cli_open_scope(sc->path, NULL, false, false, &own, err);
     state_root_override = saved;
     if (rc) return rc;
     if (state_checkpoint_exists(&own, id) != 1 || state_check_manifest(&own, id) == -1) {
@@ -369,7 +369,7 @@ int cmd_verify(int argc, char **argv, FILE *out, FILE *err) {
      * the one --to names. Before the bundle is read or anything is made. */
     if (docker == NULL) {
         struct state own;
-        if (cli_open_scope(sc.path, NULL, false, &own, err) != 0) {
+        if (cli_open_scope(sc.path, NULL, false, false, &own, err) != 0) {
             protect_free(&spec);
             return EXIT_FAILED;
         }

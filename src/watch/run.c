@@ -825,7 +825,7 @@ int watch_summary(const struct wreq *q, const char *name, struct wsb *out) {
     x.l.dfd = -1;
     struct scope sc;
     int rc = -1;
-    if (scope_resolve(q->scope, &sc) == 0 && state_open(&sc, false, &x.st, NULL) == 0 && ledger_open(&x.st, false, &x.l) == 0)
+    if (scope_resolve_in(q->docker, q->scope, &sc) == 0 && state_open(&sc, false, &x.st, NULL) == 0 && ledger_open(&x.st, false, &x.l) == 0)
         rc = do_summary(&x, name);
     if (rc == 0) wsb_f(out, "%s", x.out.p != NULL ? x.out.p : "");
     out->bad |= x.out.bad;
@@ -1105,7 +1105,7 @@ static void worker(const struct wreq *q, int to_sup, int from_sup) {
     char why[1024];
     stage(&x, "waiting for the lock");
     struct scope sc;
-    if (scope_resolve(q->scope, &sc) == -1) {
+    if (scope_resolve_in(q->docker, q->scope, &sc) == -1) {
         err_text(why, sizeof why);
         wsb_f(&x.out, "belay: " RED " could not record: %s\n", why);
         status = 3;
@@ -1302,7 +1302,7 @@ static void record_kill(const struct wreq *q, const char *text) {
     struct ledger l;
     st.dir_fd = st.cp_fd = st.lock_fd = -1;
     state_lock_wait_ms = 500;
-    if (scope_resolve(q->scope, &sc) == 0 && state_open(&sc, true, &st, NULL) == 0) {
+    if (scope_resolve_in(q->docker, q->scope, &sc) == 0 && state_open(&sc, true, &st, NULL) == 0) {
         if (ledger_open(&st, true, &l) == 0) {
             kill_of(&l.st, q->session, true)->n++;
             struct wsb body = { 0 };

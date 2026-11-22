@@ -17,14 +17,15 @@
 int  cli_usage(FILE *err, const char *why);     /* one line; EXIT_USAGE */
 int  cli_failed(FILE *err);                     /* belay_err as one line; EXIT_REFUSED for INVALID, else EXIT_FAILED */
 void cli_err_line(FILE *err);                   /* belay_err as one line */
-int  cli_open_scope(const char *scope, const char *docker, bool create, struct state *st, FILE *err);   /* 0, or an exit code; docker NULL: the host */
+/* 0, or an exit code; docker NULL: the host; need_paused: H-C4's export and verify */
+int  cli_open_scope(const char *scope, const char *docker, bool need_paused, bool create, struct state *st, FILE *err);
 
 /* --system (watch-system.md WS-1): it takes the place of --scope, and the
  * scope is `/`. `system_root` is the undocumented --system-root DIR, which
  * points the system scope at a directory instead: for tests, which must
- * never capture the machine they run on. Sets *scope; 0, or an exit code
- * with one line on `err` (--scope given too; --docker, whose `/` is not read
- * by roots in this version). */
+ * never capture the machine they run on. With `docker` the scope is the
+ * container's `/`. Sets *scope; 0, or an exit code with one line on `err`
+ * (--scope given too; --system-root with --docker). */
 int  cli_system_scope(bool system, const char *system_root, const char **scope, const char *docker, FILE *err);
 /* manifest-v5 V5-R4: 0, or EXIT_REFUSED with its line when the scope's
  * latest checkpoint -- or checkpoint `id`, when not 0 -- has a manifest

@@ -41,6 +41,7 @@ struct wreq {
     long deadline_s;            /* 0: none (watch-system WS-3: start, receipt, stop) */
     struct wwords words;
     bool system;                /* the scope is a machine's `/` (watch-system.md) */
+    const char *docker;         /* with system: the container whose `/` it is (WS-1); NULL: the host */
     FILE *progress;             /* with no deadline: a line every watch_progress_ms (WS-3); NULL: none */
 };
 

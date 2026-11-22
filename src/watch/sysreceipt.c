@@ -16,7 +16,9 @@
 #include "cli/receipt.h"
 #include "watch/sysflag.h"
 
-#define LISTED 20       /* entries `could not read` and `not read` name, then a count (WS-R2, WS-R5) */
+#define LISTED 20
+/* WS-R3's reason for a container (--docker needs root, so never "not root") */
+#define DOCKER_NO_RECORD "no recorder for a container in this version"       /* entries `could not read` and `not read` name, then a count (WS-R2, WS-R5) */
 
 /* ---- the kernel record: STEP 7 SETS THIS ---- */
 
@@ -100,6 +102,8 @@ int sysreceipt_head(const struct state *st, long cp, const struct wstate *w, str
     wsb_f(out, "\n");
     struct wkrec k;
     watch_kernel_record(w, &k);
+    if (st->scope.docker[0] != '\0' && !k.on)        /* WS-R3: kernel-record K20, K21 are not built yet */
+        snprintf(k.off_why, sizeof k.off_why, "%s", DOCKER_NO_RECORD);
     if (geteuid() != 0) {               /* WS-R2: each part only when it is true of this run */
         const bool holders = holders_unknown(st, cp) > 0;
         struct wsb parts = { 0 };
@@ -240,8 +244,14 @@ int sysreceipt(const struct state *st, const struct wstate *w, long from, long t
     }
     if ((mem = open_memstream(&text, &len)) == NULL) { nomem(); goto out; }
     char *scope = receipt_escaped(st->scope.path, strlen(st->scope.path));
-    fprintf(mem, "belay receipt  %s\n", scope != NULL ? scope : "");
+    fprintf(mem, "belay receipt  %s", scope != NULL ? scope : "");
     free(scope);
+    if (st->scope.docker[0] != '\0') {                /* WS-1: the container's / */
+        char *name = receipt_escaped(st->scope.docker, strlen(st->scope.docker));
+        fprintf(mem, " in the container %s (%.12s)", name != NULL ? name : "?", st->scope.docker_id);
+        free(name);
+    }
+    fputc('\n', mem);
     if (receipt_render(in, mem, &ro) == -1) goto out;
     if (fclose(mem) != 0) { mem = NULL; nomem(); goto out; }
     mem = NULL;

@@ -284,6 +284,46 @@ TEST(bytes_not_utf8_are_base64_and_another_process_net_is_read) {
                   "{\"listener\":\"tcp\",\"proto\":4,\"addr\":\"0.0.0.0\",\"port\":8080,\"holders\":[" NGINX "]}\n", r);
 }
 
+/* RT-12: a container -- its first process's net/, the processes of its
+ * cgroup and below it, services only of such cgroups; a container on the
+ * host's network has no listener lines and `netns` "host". */
+#define CG "/system.slice/docker-4f1c0e8a9b7d.scope"
+TEST(a_container_s_record_is_its_cgroup_s_and_its_namespace_s) {
+    machine();
+    process(9000, "sh", "/bin/sh", CG, 99900, "");
+    process(9010, "nginx", "/usr/sbin/nginx", CG "/system.slice/web.service", 99950, "26700");
+    process(9020, "nope", "/bin/nope", CG "x/a.service", 99960, "26700");      /* a name that only begins like it */
+    put("9000/net/tcp", TCP_HEAD "   0: 00000000:0050 00000000:0000 0A" TAIL4 "26700 1\n");
+    put("9000/net/unix", "Num       RefCount Protocol Flags    Type St Inode Path\n");
+    lnk("net:[4026532400]", "9000/ns/net");
+    const char *src = "{\"docker\":\"4f1c\",\"image\":\"sha256:91ef\"}";
+    struct belay_runtime_opts o = { .proc_root = g_proc, .root = 1, .net_pid = 9000, .source_json = src, .container = true };
+    struct belay_runtime_stats st;
+    REQUIRE(belay_runtime_capture(&o, g_out, &st) == 1);
+    ASSERT_EQ_STR("{\"belay_runtime\":1,\"netns\":4026532400,\"root\":true,\"source\":" "{\"docker\":\"4f1c\",\"image\":\"sha256:91ef\"}" "}\n"
+                  "{\"listener\":\"tcp\",\"proto\":4,\"addr\":\"0.0.0.0\",\"port\":80,\"holders\":["
+                  "{\"exe\":\"/usr/sbin/nginx\",\"cgroup\":\"" CG "/system.slice/web.service\"}]}\n"
+                  "{\"service\":\"" CG "/system.slice/web.service\",\"processes\":1,\"exe\":\"/usr/sbin/nginx\","
+                  "\"started_ns\":999500000000}\n"
+                  "{\"listeners\":1,\"services\":1,\"holders_unknown\":0}\n", slurp(g_out));
+    /* RT-3: an oldest process whose start cannot be read: null, and the line still a line */
+    sh("rm '%s/9010/stat'", g_proc);
+    REQUIRE(belay_runtime_capture(&o, g_out, &st) == 1);
+    ASSERT_TRUE(strstr(slurp(g_out), ",\"started_ns\":null}\n{\"listeners\":1,") != NULL);
+    process(9010, "nginx", "/usr/sbin/nginx", CG "/system.slice/web.service", 99950, "26700");
+    /* the host's network: no listener; the container's services still */
+    lnk("net:[4026531840]", "9000/ns/net2");
+    sh("cd '%s/9000/ns' && mv net2 net", g_proc);
+    REQUIRE(belay_runtime_capture(&o, g_out, &st) == 1);
+    ASSERT_EQ_STR("{\"belay_runtime\":1,\"netns\":\"host\",\"root\":true,\"source\":" "{\"docker\":\"4f1c\",\"image\":\"sha256:91ef\"}" "}\n"
+                  "{\"service\":\"" CG "/system.slice/web.service\",\"processes\":1,\"exe\":\"/usr/sbin/nginx\","
+                  "\"started_ns\":999500000000}\n"
+                  "{\"listeners\":0,\"services\":1,\"holders_unknown\":0}\n", slurp(g_out));
+    /* a first process with no cgroup v2 line: nothing is said of the container */
+    put("9000/cgroup", "1:name=systemd:/x\n");
+    ASSERT_EQ_INT(-1, belay_runtime_capture(&o, g_out, &st));
+}
+
 /* ---- the diff's runtime section (RT-D1 to RT-D5) ---- */
 
 static char g_text[200000];
@@ -506,6 +546,7 @@ int main(void) {
     RUN(not_root_the_holders_are_null_and_counted);
     RUN(no_proc_writes_nothing_and_a_broken_line_is_an_error);
     RUN(bytes_not_utf8_are_base64_and_another_process_net_is_read);
+    RUN(a_container_s_record_is_its_cgroup_s_and_its_namespace_s);
     RUN(the_section_names_what_opened_closed_started_stopped_and_restarted);
     RUN(a_side_without_a_record_or_its_holders_is_incomplete);
     sh("chmod -R u+rwx '%s' 2>/dev/null; rm -rf '%s'", g_dir, g_dir);

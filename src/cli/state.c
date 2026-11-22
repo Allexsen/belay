@@ -891,11 +891,32 @@ int state_excludes_write(const struct state *st, const struct excludes *x) {
     return write_whole(st->dir_fd, "excludes", buf, w, shown);
 }
 
-/* The walker, or for a container the host reader (host-reader.md). */
+/* runtime-v1 RT-12: a container's record, read by the host reader while
+ * the container is the one it inspected. */
+struct docker_rt { const char *path; char *sha256; };
+static int docker_runtime(void *ctx, const struct docker_info *d) {
+    const struct docker_rt *r = ctx;
+    char src[200];
+    docker_source_json(d, src, sizeof src);
+    const struct belay_runtime_opts ro = { .proc_root = docker_proc, .net_pid = d->pid, .source_json = src,
+                                           .root = -1, .container = true };
+    struct belay_runtime_stats rs;
+    const int got = belay_runtime_capture(&ro, r->path, &rs);
+    if (got == 1) memcpy(r->sha256, rs.sha256, sizeof rs.sha256);
+    if (got == 0) {
+        belay_err_set(BELAY_ERR_IO, 0, "--docker: no %s/%ld/net to read the container's runtime record from",
+                      docker_proc, d->pid);
+        return -1;
+    }
+    return got == 1 ? 0 : -1;
+}
+
+/* The walker, or for a container the host reader (host-reader.md); `sys`
+ * not NULL: a container's system capture (watch-system WS-1). */
 static int capture_scope(struct state *st, const char *manifest, struct belay_manifest_opts *o,
-                         struct belay_manifest_stats *s) {
+                         struct belay_manifest_stats *s, const struct docker_system *sys) {
     if (st->scope.docker[0] == '\0') return belay_manifest_write(manifest, st->scope.path, o, s);
-    return docker_capture(st->scope.docker, st->scope.path, st->scope.need_paused, manifest, o, s, stderr);
+    return docker_capture(st->scope.docker, st->scope.path, st->scope.need_paused, manifest, o, s, stderr, sys);
 }
 
 int scope_resolve_docker(const char *name, const char *path, bool need_paused, struct scope *out, FILE *warn) {
@@ -920,6 +941,10 @@ int scope_resolve_docker(const char *name, const char *path, bool need_paused, s
     snprintf(out->docker_id, sizeof out->docker_id, "%s", d.id);
     out->need_paused = need_paused;
     return 0;
+}
+
+int scope_resolve_in(const char *docker, const char *path, struct scope *out) {
+    return docker != NULL ? scope_resolve_docker(docker, path, false, out, NULL) : scope_resolve(path, out);
 }
 
 int state_capture(struct state *st, const struct capture_req *req, struct checkpoint *out) {
@@ -1039,29 +1064,35 @@ int state_capture(struct state *st, const struct capture_req *req, struct checkp
     }
     struct belay_manifest_stats s;
     struct belay_system_roots sys = { 0 };
-    char key[PATH_MAX + 80], lines[PATH_MAX + 160];
+    char key[PATH_MAX + 80], lines[PATH_MAX + 160], rt[PATH_MAX + 160];
     int rc = -1;
+    const bool docker = st->scope.docker[0] != '\0';
+    snprintf(rt, sizeof rt, "%s/runtime.ndjson", dir);
+    struct docker_rt drt = { rt, c.runtime };
+    const struct docker_system dsys = { &sys, docker_runtime, &drt };
+    const struct docker_system *dsp = req->system && docker ? &dsys : NULL;
     if (req->system) {
         /* The roots as the machine is now (WS-6: etc/passwd as it is when the
          * capture starts), and where the state's sealing key is, or will be
          * once a file must be sealed (manifest-v5 V5-R3). */
-        if (st->scope.docker[0] != '\0') {
-            belay_err_set(BELAY_ERR_INVALID, 0, "--system with --docker is not implemented in this version");
-            goto out;
+        if (docker) {
+            /* WS-1: the container's `/`, its roots resolved there by the
+             * host reader, inside docker_capture (dsys) */
+        } else {
+            if (belay_system_roots(st->scope.path, &sys) == -1) goto out;
+            o.roots = sys.roots;
+            o.n_roots = sys.n_roots;
+            o.not_read = sys.not_read;
+            o.n_not_read = sys.n_not_read;
         }
-        if (belay_system_roots(st->scope.path, &sys) == -1) goto out;
         snprintf(key, sizeof key, "%s/sealing.key", st->dir);
-        o.roots = sys.roots;
-        o.n_roots = sys.n_roots;
-        o.not_read = sys.not_read;
-        o.n_not_read = sys.n_not_read;
         o.sealing_key_path = key;
         /* SA-6: the per-line digests of shadow and gshadow, beside the manifest. */
         snprintf(lines, sizeof lines, "%s/shadow.lines", dir);
         o.shadow_lines_path = lines;
     }
     if (state_capture_hook != NULL) state_capture_hook(st->scope.path);
-    if (capture_scope(st, manifest, &o, &s) == -1) goto out;
+    if (capture_scope(st, manifest, &o, &s, dsp) == -1) goto out;
     if (previous != NULL && !s.prefilter && s.prefilter_skipped != NULL) {
         snprintf(c.full_reason, sizeof c.full_reason, "%s", s.prefilter_skipped);
     } else if (previous != NULL && s.prefilter && s.previous_newest_ns != INT64_MIN &&
@@ -1073,7 +1104,11 @@ int state_capture(struct state *st, const struct capture_req *req, struct checkp
                  (long long)s.newest_ctime_ns, (long long)s.previous_newest_ns);
         o.previous = NULL;
         o.full_reason = c.full_reason;
-        if (capture_scope(st, manifest, &o, &s) == -1) goto out;
+        if (dsp != NULL) {                              /* resolved again by the capture */
+            belay_system_roots_free(&sys);
+            c.runtime[0] = '\0';
+        }
+        if (capture_scope(st, manifest, &o, &s, dsp) == -1) goto out;
     } else if (previous != NULL) {
         c.full = false;
         c.trusted = s.trusted;
@@ -1090,15 +1125,15 @@ int state_capture(struct state *st, const struct capture_req *req, struct checkp
     c.sealing = s.sealing;
     memcpy(c.shadow_lines, s.shadow_lines_sha256, sizeof c.shadow_lines);
     c.provisional = s.raced || s.unstable || s.vanished;
-    if (req->system) {
+    if (req->system && !docker) {
         /* runtime-v1.md: what is listening and which services have
          * processes, from the scope's proc (`/proc`; the system root's,
          * a tree shaped like it, under --system-root), beside the manifest.
-         * None where there is no proc file system (macOS). */
-        char proc[PATH_MAX + 8], rt[PATH_MAX + 160];
+         * None where there is no proc file system (macOS). A container's
+         * was read by the host reader (docker_runtime). */
+        char proc[PATH_MAX + 8];
         struct belay_runtime_stats rs;
         snprintf(proc, sizeof proc, "%s/proc", strcmp(st->scope.path, "/") == 0 ? "" : st->scope.path);
-        snprintf(rt, sizeof rt, "%s/runtime.ndjson", dir);
         const struct belay_runtime_opts ro = { .proc_root = proc, .root = -1 };
         const int got = belay_runtime_capture(&ro, rt, &rs);
         if (got == -1) goto out;
@@ -1111,6 +1146,10 @@ int state_capture(struct state *st, const struct capture_req *req, struct checkp
     *out = c;
     rc = 0;
 out:
+    if (rc == -1) {                     /* a capture that failed keeps nothing beside its manifest either (H-C5) */
+        unlinkat(dfd, "runtime.ndjson", 0);
+        unlinkat(dfd, "shadow.lines", 0);
+    }
     belay_system_roots_free(&sys);
     close(dfd);
     return rc;

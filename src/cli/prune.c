@@ -847,13 +847,13 @@ int cmd_prune(int argc, char **argv, FILE *out, FILE *err) {
     if (days < 0 && last < 0) { rc = cli_usage(err, "--keep-days or --keep-last is required"); goto done; }
     struct state st;
     /* The long read, with no lock: nothing is written, and captures go on. */
-    rc = cli_open_scope(scope, docker, false, &st, err);
+    rc = cli_open_scope(scope, docker, false, false, &st, err);
     if (rc) goto done;
     rc = prune(&st, days, last, from, ids, n_ids, watch_only, true, json, !dry, !dry, &m, out, err);
     state_close(&st);
     if (rc || dry || m.upto == 0) goto done;    /* nothing there: no state made for it */
     if (prune_between_passes != NULL) prune_between_passes();
-    rc = cli_open_scope(scope, docker, true, &st, err);
+    rc = cli_open_scope(scope, docker, false, true, &st, err);
     if (rc) goto done;
     rc = prune(&st, days, last, from, ids, n_ids, watch_only, false, json, false, true, &m, out, err);
     state_close(&st);
@@ -891,7 +891,7 @@ int cmd_manifest(int argc, char **argv, FILE *out, FILE *err) {
     if (scope == NULL) return cli_usage(err, "--scope DIR is required");
     if (id == 0) return cli_usage(err, "--id needs a checkpoint id");
     struct state st;
-    int rc = cli_open_scope(scope, docker, false, &st, err);
+    int rc = cli_open_scope(scope, docker, false, false, &st, err);
     if (rc) return rc;
     struct manifest_file mf;
     const int exists = state_checkpoint_exists(&st, id);
