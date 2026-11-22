@@ -13,6 +13,7 @@
 #define I_SYSTEMD  IN(BELAY_INTERP_SYSTEMD)
 #define I_SSHKEYS  IN(BELAY_INTERP_SSHKEYS)
 #define I_TRUST    IN(BELAY_INTERP_TRUST)
+#define I_CONFIG   IN(BELAY_INTERP_CONFIG)
 #define S(n) { n, FT_STRING }
 #define N(n) { n, FT_INT }
 #define B(n) { n, FT_BOOL }
@@ -393,6 +394,34 @@ const struct finding_kind_def FINDING_KINDS[FK_COUNT] = {
         "The same, removed: target, subject and fingerprint by the entries the diff was given and "
         "the after-manifest; absent where they cannot be told.",
         "certificate removed from the trust store: {path}" },
+    [FK_CONFIG_KEY_ADDED] = { "config_key_added", I_CONFIG, LV_EVENT,
+        { S("path"), S("grammar"), L("context"), S("key"), S("value") },
+        "{path}: {context} › {key} added: {value}",
+        "A value of `key` in `context` that the file has after and not before, unless the key has "
+        "one value there on each side (CF-2). grammar: `nginx`, `sshd`, `ini`, `keyvalue` or "
+        "`namevalue`, by the file's path (system-config.md CF-N to CF-L). context: the enclosing "
+        "block headers, outermost first, or the section name, as written; empty at the top level. "
+        "key: as written; `sshd` keywords are compared without regard to ASCII case. value: the "
+        "rest of the directive as written, each run of whitespace made one space (CF-1); of an "
+        "opaque `nginx` block, whose key is its header, the sha256 of the text between its braces. "
+        "The values of a key in a context are a set. A symbolic link is no file of its path: its "
+        "target's file is keyed where it is. The text of one file, never the setting in force." },
+    [FK_CONFIG_KEY_REMOVED] = { "config_key_removed", I_CONFIG, LV_EVENT,
+        { S("path"), S("grammar"), L("context"), S("key"), S("value") },
+        "{path}: {context} › {key} removed: {value}",
+        "The reverse." },
+    [FK_CONFIG_KEY_CHANGED] = { "config_key_changed", I_CONFIG, LV_EVENT,
+        { S("path"), S("grammar"), L("context"), S("key"), S("from"), S("to") },
+        "{path}: {context} › {key} {from} -> {to}",
+        "The key has exactly one value in that context on each side and they differ (CF-2); key "
+        "as written after. A repeated key is never reported as changed." },
+    [FK_CONFIG_NOT_KEYED] = { "config_not_keyed", I_CONFIG, LV_EVENT,
+        { S("path"), S("grammar"), S("why") },
+        "{path}: shown as lines ({why})",
+        "The file's keys are not compared, on a side or both; the text interpreter's line "
+        "findings stand (CF-6). why: `too large` (a side over 1 MiB or of more than 65,536 "
+        "triples: CF-4), else `does not parse` (CF-4), else `a block header is not unique` (two "
+        "blocks at one level, or two sections, with the same header text on a side: CF-3)." },
 };
 
 size_t finding_nfields(enum finding_kind k) {

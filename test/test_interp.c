@@ -179,6 +179,66 @@ TEST(system_interpreters_claim_their_files) {
     ASSERT_EQ_STR("trust", belay_interp_name(BELAY_INTERP_TRUST));
 }
 
+/* system-config.md "Grammars": config's second claim, beside the path's own
+ * interpreter (CF-6). What only config claims is kept up to the size it
+ * keys (CF-4) and sealed as any file is (KEEP_STORE_KEYED); a unit file
+ * keeps systemd's claim. */
+#define CONFIG(path, I, K)                                                   \
+    do {                                                                     \
+        EXPECT(path, I, K);                                                  \
+        ASSERT_TRUE(belay_interp_config_claims(path, strlen(path)));         \
+    } while (0)
+#define NOT_CONFIG(path)                                                     \
+    do {                                                                     \
+        EXPECT(path, BELAY_INTERP_BINARY, BELAY_KEEP_DEFAULT);               \
+        ASSERT_TRUE(!belay_interp_config_claims(path, strlen(path)));        \
+    } while (0)
+TEST(config_claims_its_files_beside_their_interpreter) {
+    const enum belay_interp_id B = BELAY_INTERP_BINARY;
+    const enum belay_keep K = BELAY_KEEP_STORE_KEYED;
+    CONFIG("/etc/nginx/nginx.conf", B, K);
+    CONFIG("/etc/nginx/conf.d/site.conf", B, K);
+    CONFIG("/etc/nginx/sites-available/default", B, K);
+    CONFIG("/etc/nginx/sites-enabled/default", B, K);
+    CONFIG("/etc/nginx/modules-enabled/50-mod-stream.conf", B, K);
+    CONFIG("/etc/nginx/snippets/fastcgi-php.conf", B, K);
+    CONFIG("/etc/ssh/sshd_config", B, K);
+    CONFIG("/etc/ssh/sshd_config.d/50-cloud-init.conf", B, K);
+    CONFIG("/etc/systemd/journald.conf", B, K);
+    CONFIG("/etc/systemd/system.conf.d/limits.conf", B, K);
+    CONFIG("/etc/sysctl.conf", B, K);
+    CONFIG("/etc/sysctl.d/99-site.conf", B, K);
+    CONFIG("/etc/login.defs", B, K);
+    CONFIG("/srv/root/etc/login.defs", B, K);
+    CONFIG("/etc/systemd/system/nginx.service", BELAY_INTERP_SYSTEMD, BELAY_KEEP_STORE);
+    CONFIG("/etc/systemd/system/nginx.service.d/override.conf", BELAY_INTERP_SYSTEMD, BELAY_KEEP_STORE);
+    CONFIG("/usr/lib/systemd/system/probe.timer", BELAY_INTERP_SYSTEMD, BELAY_KEEP_STORE);
+    CONFIG("/lib/systemd/user/x.service.d/a", BELAY_INTERP_SYSTEMD, BELAY_KEEP_STORE);
+    CONFIG("/home/u/.config/systemd/user/probe.service", BELAY_INTERP_SYSTEMD, BELAY_KEEP_STORE);
+    /* Near misses, and what is not keyed by design (CF-X1, CF-X2). */
+    NOT_CONFIG("/etc/nginx/nginx.conf.bak");
+    NOT_CONFIG("/etc/nginx/conf.d/site.conf.bak");
+    NOT_CONFIG("/etc/nginx/conf.d/.conf");
+    NOT_CONFIG("/etc/nginx/sites-enabled/a/b");
+    NOT_CONFIG("/etc/nginx/mime.types");
+    NOT_CONFIG("/etc/ssh/ssh_config");
+    NOT_CONFIG("/etc/ssh/sshd_config.d/notes.txt");
+    NOT_CONFIG("/etc/ssh/sshd_config.bak");
+    NOT_CONFIG("/etc/systemd/a/journald.conf");
+    NOT_CONFIG("/etc/systemd/journald.conf.d/x.txt");
+    NOT_CONFIG("/etc/systemd/.conf.d/x.conf");
+    NOT_CONFIG("/etc/systemd/x/y.conf.d/z.conf");
+    NOT_CONFIG("/etc/sysctl.d/99-site.txt");
+    NOT_CONFIG("/etc/sysctl.d/a/99.conf");
+    NOT_CONFIG("/etc/default/grub");
+    NOT_CONFIG("/etc/environment");
+    NOT_CONFIG("/etc/fstab");
+    NOT_CONFIG("/etc/login.defs.orig");
+    ASSERT_TRUE(!belay_interp_config_claims("/etc/systemd/system/multi-user.target.wants/nginx.service", 57));
+    ASSERT_TRUE(!belay_interp_config_claims("/etc/init.d/nginx", 17));
+    ASSERT_EQ_STR("config", belay_interp_name(BELAY_INTERP_CONFIG));
+}
+
 int main(void) {
     RUN(dpkg_claims_status_and_baseline_databases);
     RUN(dpkg_near_misses_are_not_claimed);
@@ -190,5 +250,6 @@ int main(void) {
     RUN(names_are_stable);
     RUN(text_is_an_unclaimed_path_stored_on_every_side_it_exists_on);
     RUN(system_interpreters_claim_their_files);
+    RUN(config_claims_its_files_beside_their_interpreter);
     return belay_test_report();
 }

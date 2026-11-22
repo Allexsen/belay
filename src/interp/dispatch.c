@@ -1,6 +1,7 @@
 #include "belay/interp.h"
 
 #include "belay/manifest.h"
+#include "config.h"
 
 #include <fnmatch.h>
 #include <string.h>
@@ -87,11 +88,16 @@ static const struct rule rules[] = {
     { "*/usr/local/share/ca-certificates/*", BELAY_INTERP_TRUST, BELAY_KEEP_DEFAULT },
 };
 
-/* diff-events E13. `config` will stand between trust and git. */
+/* diff-events E13. */
 const enum belay_interp_id BELAY_INTERP_ORDER[BELAY_INTERP_ORDER_COUNT] = {
     BELAY_INTERP_TEXT, BELAY_INTERP_PIP, BELAY_INTERP_DPKG, BELAY_INTERP_ACCOUNTS, BELAY_INTERP_SUDOERS,
-    BELAY_INTERP_CRON, BELAY_INTERP_SYSTEMD, BELAY_INTERP_SSHKEYS, BELAY_INTERP_TRUST, BELAY_INTERP_GIT,
+    BELAY_INTERP_CRON, BELAY_INTERP_SYSTEMD, BELAY_INTERP_SSHKEYS, BELAY_INTERP_TRUST, BELAY_INTERP_CONFIG,
+    BELAY_INTERP_GIT,
 };
+
+bool belay_interp_config_claims(const char *abs_path, size_t len) {
+    return config_grammar(abs_path, len) != CONFIG_NONE;
+}
 
 void belay_interp_classify(const char *abs_path, size_t len, struct belay_claim *out) {
     out->interp = BELAY_INTERP_BINARY;
@@ -108,9 +114,13 @@ void belay_interp_classify(const char *abs_path, size_t len, struct belay_claim 
         if (fnmatch(rules[i].pattern, buf, 0) == 0) {
             out->interp = rules[i].interp;
             out->keep = rules[i].keep;
-            return;
+            break;
         }
     }
+    /* config's second claim: what it keys must be kept to be keyed, up to
+     * the size it keys (CF-4); a unit file is already kept, as systemd's. */
+    if (out->keep == BELAY_KEEP_DEFAULT && config_grammar(abs_path, len) != CONFIG_NONE)
+        out->keep = BELAY_KEEP_STORE_KEYED;
 }
 
 enum belay_interp_id belay_interp_dispatch(const struct belay_claim *claim,
@@ -136,6 +146,7 @@ const char *belay_interp_name(enum belay_interp_id id) {
     case BELAY_INTERP_SYSTEMD:  return "systemd";
     case BELAY_INTERP_SSHKEYS:  return "sshkeys";
     case BELAY_INTERP_TRUST:    return "trust";
+    case BELAY_INTERP_CONFIG:   return "config";
     case BELAY_INTERP_COUNT:  break;
     }
     return "unknown";

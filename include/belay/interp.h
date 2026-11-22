@@ -39,13 +39,16 @@ enum belay_interp_id {
     BELAY_INTERP_SYSTEMD,
     BELAY_INTERP_SSHKEYS,
     BELAY_INTERP_TRUST,
+    /* A second claim (system-config.md): config keys a file whose own
+     * interpreter -- text, or systemd for a unit file -- explains it too
+     * (CF-6). It adds events only; the record is the first claim's. */
+    BELAY_INTERP_CONFIG,
     BELAY_INTERP_COUNT
 };
 
 /* diff-events E13: the order of the interpreters' events in a diff, one
- * after another. `config` has no interpreter yet; its place is after trust.
- * BELAY_INTERP_ORDER_COUNT of them. */
-#define BELAY_INTERP_ORDER_COUNT 10
+ * after another; BELAY_INTERP_ORDER_COUNT of them. */
+#define BELAY_INTERP_ORDER_COUNT 11
 extern const enum belay_interp_id BELAY_INTERP_ORDER[BELAY_INTERP_ORDER_COUNT];
 
 /* The keep bound of BELAY_KEEP_STORE_BOUNDED: a reflog is kept, and read in
@@ -58,8 +61,14 @@ enum belay_keep {
     BELAY_KEEP_DEFAULT = 0,     /* store only if under the size threshold and text */
     BELAY_KEEP_HASH,            /* claimed, hash only, never stored */
     BELAY_KEEP_STORE,           /* claimed, always stored whatever its size */
-    BELAY_KEEP_STORE_BOUNDED    /* claimed, stored up to BELAY_KEEP_BOUNDED_MAX, text or not */
+    BELAY_KEEP_STORE_BOUNDED,   /* claimed, stored up to BELAY_KEEP_BOUNDED_MAX, text or not */
+    BELAY_KEEP_STORE_KEYED      /* config's (system-config.md): stored up to BELAY_KEEP_KEYED_MAX,
+                                   text or not, and sealed as any file is (manifest-v5 V5-E5) */
 };
+
+/* system-config.md CF-4: a file over 1 MiB is not keyed (`too large`), so
+ * a copy of more is never needed. */
+#define BELAY_KEEP_KEYED_MAX (1024u * 1024u)
 
 struct belay_claim {
     enum belay_interp_id interp;
@@ -71,6 +80,11 @@ struct belay_claim {
 void belay_interp_classify(const char *abs_path, size_t len, struct belay_claim *out);
 
 const char *belay_interp_name(enum belay_interp_id id);
+
+/* Whether config (system-config.md) keys `abs_path` beside the interpreter
+ * that claims it; classify gives such a path, otherwise unclaimed,
+ * BELAY_KEEP_STORE_KEYED. */
+bool belay_interp_config_claims(const char *abs_path, size_t len);
 
 struct belay_entry;
 

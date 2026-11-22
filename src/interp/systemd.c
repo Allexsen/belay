@@ -22,6 +22,7 @@
  *  only a timer's `OnCalendar=` values are read, as written.
  */
 #include "builtins.h"
+#include "config.h"
 #include "inwords.h"
 #include "stored.h"
 #include "sysev.h"
@@ -533,3 +534,13 @@ static enum belay_interp_result end(void *state, struct belay_events *ev) {
 }
 
 const struct belay_interp INTERP_SYSTEMD = { BELAY_INTERP_SYSTEMD, begin, explain, end, prepare };
+
+/* config's `ini` claim (system-config.md CF-I): a unit file or a drop-in,
+ * as explain names them -- D/<unit>, D/<unit>.d/<file>. */
+bool systemd_unit_file_path(const char *abs, size_t n) {
+    const struct belay_interp_input in = { .path = "", .path_len = 0, .abs_path = abs, .abs_len = n };
+    struct place p;
+    if (!place_of(&in, &p)) return false;
+    if (p.sub == NULL) return unit_name(p.name, p.name_len);
+    return tail_is(p.sub, p.sub_len, ".d") && unit_name(p.sub, p.sub_len - 2);
+}
