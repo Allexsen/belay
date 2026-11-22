@@ -307,6 +307,19 @@ policy-model: $(BIN)
 watch-model: $(BIN)
 	python3 -I -B scripts/watch-model/run.py
 
+# The bound of test/expect/capture-scale.md SC-M2 (test/scale/scale.c): every
+# command on generated manifests of SCALE_ENTRIES entries, its heap limited to
+# 64 MiB. Writes about 1.5 GB under $(BUILD)/scale and takes minutes, so it is
+# not part of `check`; run it after a change to anything that reads a manifest.
+SCALE_BIN	= $(BUILD)/scale/scale
+SCALE_ENTRIES	?= 2000000
+$(SCALE_BIN): test/scale/scale.c $(CORE_OBJ) $(CLI_OBJ)
+	@mkdir -p $(dir $@)
+	$(CC) $(CFLAGS) $(WARN) $(INC) -MMD -MP -o $@ $< $(CORE_OBJ) $(CLI_OBJ)
+.PHONY: scale-test
+scale-test: $(SCALE_BIN) $(BIN)
+	$(SCALE_BIN) $(BIN) $(BUILD)/scale/work $(SCALE_ENTRIES)
+
 bench: $(BENCH_BIN)
 	@echo "built: $(BENCH_BIN)"
 
