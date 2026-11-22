@@ -481,6 +481,17 @@ P71 New with PV2-9 and P-G4. "A matched directory nothing was seen below on a si
     says "also when it is removed (it is then `protected_path_deleted` too)". P68 is SETTLED
     too, by PV2-10 ("every rule that matches it ... in either order").
 
+P77 New with PV2-12 and P-G6. "PV2-9 also holds for a matched directory whose listing was
+    incomplete on a side: its entry there carries `unstable`": under rules that are `no_delete`
+    alone it is unverifiable, on either side, both, and when it is removed (then deleted too),
+    with "the `reasons` PS-M5 gives (`unstable`)" -- the record's `unknown` reasons where its
+    outcome is `unknown` (a directory `unstable` on a side always is), the entry's flags where
+    it is `removed`. "PV2-11 stands": one that was not there at reset is no finding. No capture
+    of this harness is `unstable`: the flag is written into the bundle's manifest or a
+    checkpoint's by hand (`flag_manifest`), its trailer's count kept true.
+    With V5-D5 and V5-A6 the order of reasons ends `writer_open`, `not_read`, `sealed_key`,
+    `class_changed`; no scenario here can give the last three (they need a root).
+
 P75 New with PV2-11 and P-G5. "Under such rules alone, a path that was not there at reset and is
     there after is no finding, whatever its entry carries (`unreadable` included)": read of a
     path whose outcome is `added`, a directory created sealed included -- PV2-9's "a matched
@@ -543,7 +554,8 @@ def not_emitted(source):
 
 ENTRY_FLAGS = ("unverified", "unstable", "unreadable", "raced", "mount", "writer_open")   # V4-D7
 REASON_ORDER = ENTRY_FLAGS[:-1] + ("xattrs_unknown", "iflags_unknown", "not_captured",  # P2
-                                   "listing_incomplete", "writer_open")                # V4-D4
+                                   "listing_incomplete", "writer_open",                # V4-D4
+                                   "not_read", "sealed_key", "class_changed")          # V5-D5, V5-A6
 O9_ORDER = ("unstable", "unverified", "unreadable", "mount")                     # diff-fields O9, P64
 FIELD_ORDER = ("mode", "uid", "gid", "size", "mtime_ns", "ctime_ns", "ino", "dev", "nlink",
                "iflags", "caps", "xattrs", "sha256", "rdev", "link_target")
@@ -2023,7 +2035,8 @@ def protected_flags(spec, recs, B, A, source=None):
             # and `unknown` still is (V4-S2, P50, P69). PV2-9: but a directory nothing was seen
             # below on a side is judged as under any other mode (P68, P71).
             hit_sides = {s for s, e in (("before", b), ("after", a))
-                         if e is not None and e["type"] == "dir" and (e["unreadable"] or e["mount"])}
+                         if e is not None and e["type"] == "dir"
+                         and (e["unreadable"] or e["mount"] or e["unstable"])}         # PV2-9, PV2-12
             if outcome == "added":                                                    # PV2-11, P75
                 hit_sides = set()
             unknown = unknown and (b is None or a is None or bool(hit_sides))
@@ -2613,7 +2626,9 @@ def downgrade_manifest(content, version):
 def flag_manifest(content, flags):
     """The manifest with these entries given these flags, its counts kept true (V4-R3): the
     capture a concurrent writer or a race would have made. `flags`: path -> flag names. Only
-    `raced` and `writer_open`, on an entry with no `stored`: a copy would have to go too."""
+    `raced` and `writer_open`, on an entry with no `stored`: a copy would have to go too; and
+    `unstable` on a directory with no other flag (manifest-v1 rules 10 and 11), whose listing
+    was incomplete (PV2-12)."""
     mh, entries, mt = read_manifest(content)
     out = []
     for o in entries:
@@ -2621,6 +2636,12 @@ def flag_manifest(content, flags):
         if names:
             assert "stored" not in o, "flag_manifest: a stored entry"
             o = dict(o)
+            if "unstable" in names:
+                assert o["type"] == "dir" and not {"unreadable", "mount", "raced", "unstable"} & set(o), o
+                o["unstable"] = True
+                at = {k: i for i, k in enumerate(ENTRY_KEY_ORDER)}              # in the entry's key order
+                o = dict(sorted(o.items(), key=lambda kv: at[{"path_b64": "path"}.get(kv[0], kv[0])]))
+                mt["unstable"] += 1
             for f in ("raced", "writer_open"):
                 if f in names and f not in o:
                     o[f] = True
