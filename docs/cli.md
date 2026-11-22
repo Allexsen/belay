@@ -508,8 +508,23 @@ runtime
 
 **Refused.** `baseline export`, `verify` and a protect spec are not designed for a system watch:
 with `--system`, or for a scope whose latest checkpoint was taken with it, they exit 3. A bundle
-whose manifest has roots is rejected by every reader. `--system` with `--docker` is not implemented
-in this version and is refused (exit 3). `exclude` does not take `--system`.
+whose manifest has roots is rejected by every reader. `exclude` does not take `--system`.
+
+### --system --docker C: a container's `/`
+
+    sudo belay check --system --docker C
+    sudo belay watch start --system --docker C
+
+With `--docker CONTAINER`, `--system` reads the container's `/` from the host, as `--docker` reads
+any scope (above): the same roots, resolved in the container's own tree, never the host's; its homes
+are those of the container's `etc/passwd`. Sealing, the interpreters and the receipt's sections are
+as on a machine. Its runtime record is the container's: the sockets of its first process's network
+namespace, held by the processes of its cgroup (and the cgroups below it), and services only when
+the container has cgroups of its own that are services. A container on the host's network
+(`--network host`) has no listener lines, and the record's `netns` says `host`. The receipt's first
+line names it (`belay receipt  / in the container C (4f1c0e8a9b7d)`), and its kernel record is
+`off: no recorder for a container in this version`. It needs root, as `--docker` does, and
+`--system-root` does not combine with it. `watch` takes `--docker` only with `--system`.
 
 ### watch --system
 
