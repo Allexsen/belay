@@ -366,7 +366,122 @@ struct ctx {
     size_t nown, ri;
     struct pkkey *keys;
     size_t nkeys;
+    /* SY-3b: the links of etc/rc?.d added and removed, counted in one line. */
+    size_t rc_added, rc_removed;
+    /* SY-3a, SY-4: what pass 1 found in systemd's events -- the units the
+     * diff links (by file name), the timers it adds and does not link, the
+     * homes its units are under -- and what the after manifest says of the
+     * last two; sys_ok: it was asked and said. */
+    char **sys_links, **sys_timers, **sys_homes;
+    size_t n_sys_links, n_sys_timers, n_sys_homes;
+    bool *sys_linked;
+    int *sys_linger;
+    bool sys_ok;
 };
+
+/* ---- systemd's events (system-interpreters.md SY-3a, SY-3b, SY-4) ---- */
+
+static const char *base_name(const char *s) {
+    const char *sl = strrchr(s, '/');
+    return sl != NULL ? sl + 1 : s;
+}
+
+/* The home a unit lies under: what precedes `/.config/systemd/user/` in its
+ * path (or in a unit_linked's `unit`, which that directory prefixes). Its
+ * length, or 0 when it is under none. */
+static size_t home_len(const char *s) {
+    const char *at = strstr(s, "/.config/systemd/user/");
+    return at != NULL ? (size_t)(at - s) : 0;
+}
+
+/* The place of the `len` bytes at `s` in a set of at most
+ * RECEIPT_SYSTEM_ASKS strings, added when `add` and not there; -1: not
+ * there, the set full, or no memory (then *oom). */
+static long set_at(char ***v, size_t *n, const char *s, size_t len, bool add, bool *oom) {
+    for (size_t i = 0; i < *n; i++)
+        if (strlen((*v)[i]) == len && memcmp((*v)[i], s, len) == 0) return (long)i;
+    if (!add || *n >= RECEIPT_SYSTEM_ASKS) return -1;
+    if ((*n & (*n + 1)) == 0) {         /* full at 0, 1, 3, 7, ...: doubled */
+        char **q = realloc(*v, (2 * *n + 2) * sizeof *q);
+        if (q == NULL) { *oom = true; return -1; }
+        *v = q;
+    }
+    char *c = malloc(len + 1);
+    if (c == NULL) { *oom = true; return -1; }
+    memcpy(c, s, len);
+    c[len] = '\0';
+    (*v)[*n] = c;
+    return (long)(*n)++;
+}
+
+/* `etc/rc?.d/<name>`: a name directly in a directory `rc` and one character
+ * and `.d`, under the scope's own etc. */
+static bool rc_d_link(const char *path, size_t len) {
+    return len > 10 && memcmp(path, "etc/rc", 6) == 0 && path[6] != '/' && memcmp(path + 7, ".d/", 3) == 0 &&
+           memchr(path + 10, '/', len - 10) == NULL;
+}
+
+/* Pass 1, of one of systemd's events. */
+static void system_collect(struct ctx *x, const struct jval *e, bool *oom) {
+    const char *k = jstr(e, "event");
+    const bool linked = strcmp(k, "unit_linked") == 0, timer = strcmp(k, "timer_file_added") == 0;
+    if (!linked && !timer && strcmp(k, "unit_file_added") != 0) return;
+    const char *s = jstr(e, linked ? "unit" : "path");
+    const char *b = base_name(s);
+    if (linked) set_at(&x->sys_links, &x->n_sys_links, b, strlen(b), true, oom);
+    if (timer) set_at(&x->sys_timers, &x->n_sys_timers, b, strlen(b), true, oom);
+    if (home_len(s)) set_at(&x->sys_homes, &x->n_sys_homes, s, home_len(s), true, oom);
+}
+
+/* After pass 1: the timers the diff itself links need no asking; the rest,
+ * and the homes, are asked of the after manifest, once. */
+static int system_ask(struct ctx *x, const struct receipt_opts *o) {
+    bool oom = false;
+    size_t w = 0;
+    for (size_t i = 0; i < x->n_sys_timers; i++) {
+        char *t = x->sys_timers[i];
+        if (set_at(&x->sys_links, &x->n_sys_links, t, strlen(t), false, &oom) >= 0) free(t);
+        else x->sys_timers[w++] = t;
+    }
+    x->n_sys_timers = w;
+    if (o->system == NULL || (x->n_sys_timers == 0 && x->n_sys_homes == 0)) return 0;
+    x->sys_linked = calloc(x->n_sys_timers + 1, sizeof *x->sys_linked);
+    x->sys_linger = calloc(x->n_sys_homes + 1, sizeof *x->sys_linger);
+    if (x->sys_linked == NULL || x->sys_linger == NULL) {
+        belay_err_set(BELAY_ERR_NOMEM, 0, "receipt: out of memory");
+        return -1;
+    }
+    for (size_t i = 0; i < x->n_sys_homes; i++) x->sys_linger[i] = -1;
+    struct receipt_system q = { (const char *const *)x->sys_timers, x->n_sys_timers, x->sys_linked,
+                                (const char *const *)x->sys_homes, x->n_sys_homes, x->sys_linger };
+    if (o->system(o->system_ctx, &q) == 0) x->sys_ok = true;
+    else belay_err_clear();             /* it cannot say: nothing is said */
+    return 0;
+}
+
+/* The words after one of systemd's events: an rc.local without an execute
+ * bit (SY-3b), a timer nothing links (SY-4), whether a home's user lingers
+ * (SY-3a). */
+static void system_words(struct sb *b, struct ctx *x, const struct jval *e, const char *k) {
+    bool oom = false;
+    if ((strcmp(k, "init_script_added") == 0 || strcmp(k, "init_script_changed") == 0) &&
+        strcmp(jstr(e, "path"), "etc/rc.local") == 0) {
+        const struct jval *ex = jget(e, "executable");
+        if (ex != NULL && ex->t == J_BOOL && !ex->b) sbf(b, " (not executable)");
+    }
+    const bool linked = strcmp(k, "unit_linked") == 0, timer = strcmp(k, "timer_file_added") == 0;
+    if (!x->sys_ok || (!linked && !timer && strcmp(k, "unit_file_added") != 0)) return;
+    const char *s = jstr(e, linked ? "unit" : "path");
+    if (timer) {
+        const char *bn = base_name(s);
+        const long i = set_at(&x->sys_timers, &x->n_sys_timers, bn, strlen(bn), false, &oom);
+        if (i >= 0 && !x->sys_linked[i]) sbf(b, " (not linked into any target)");
+    }
+    if (home_len(s)) {
+        const long i = set_at(&x->sys_homes, &x->n_sys_homes, s, home_len(s), false, &oom);
+        if (i >= 0 && x->sys_linger[i] >= 0) sbf(b, " (lingering: %s)", x->sys_linger[i] ? "yes" : "no");
+    }
+}
 
 /* The package of the diff that owns record `ri`, or NULL. An installed
  * package's files are the after manifest's, a removed one's the before's,
@@ -495,6 +610,14 @@ static int record(const struct jval *r, struct ctx *x, const struct receipt_opts
             owner->count++;
             return 0;
         }
+    }
+    /* SY-3b: a link of etc/rc?.d added or removed is counted, not listed. */
+    if (!o->all && !unknown && !named && have_path && rc_d_link(path, plen) && type != NULL && strcmp(type, "lnk") == 0 &&
+        (strcmp(outcome, "added") == 0 || strcmp(outcome, "removed") == 0)) {
+        free(b.p);
+        if (outcome[0] == 'a') x->rc_added++;
+        else x->rc_removed++;
+        return 0;
     }
     if (gp >= 0) {      /* a repository's bookkeeping: one line, but what git says stays (decision 105) */
         const char *rest = path + gp + 4;
@@ -640,6 +763,7 @@ static int event(const struct jval *e, struct ctx *x, struct lines *ev, const st
     const struct jval *ow = jget(e, "owner");
     const bool no_package = ow != NULL && ow->t == J_NULL;
     if (no_package) sbf(&b, " (in no package)");
+    if (strcmp(jstr(e, "interp"), "systemd") == 0) system_words(&b, x, e, k);
     if (pk != NULL && !o->all) changes_in(&b, pk->count, "its");
     const struct jval *pv = jget(e, "provisional");
     if (pv != NULL && pv->t == J_BOOL && pv->b) sbf(&b, " (provisional: a path it came from is unknown)");
@@ -670,7 +794,7 @@ static int event(const struct jval *e, struct ctx *x, struct lines *ev, const st
  * pass 2 to refuse. */
 struct coll { char **p; size_t *len; bool *dir; size_t n, cap; bool git_events; struct pk *pk; size_t npk, pkcap; };
 
-static int collect(FILE *diff, struct coll *c) {
+static int collect(FILE *diff, struct coll *c, struct ctx *x) {
     char *line = NULL;
     size_t cap = 0;
     ssize_t got;
@@ -683,6 +807,11 @@ static int collect(FILE *diff, struct coll *c) {
             size_t len;
             if (jget(&v, "event") != NULL) {
                 c->git_events |= strcmp(jstr(&v, "interp"), "git") == 0;
+                if (strcmp(jstr(&v, "interp"), "systemd") == 0) {
+                    bool oom = false;
+                    system_collect(x, &v, &oom);
+                    if (oom) rc = -1;
+                }
                 const int kind = strcmp(jstr(&v, "interp"), "dpkg") == 0 ? pk_kind(jstr(&v, "event")) : -1;
                 if (kind >= 0) {                /* a package records may fold into (SD-3) */
                     if (c->npk == c->pkcap) {
@@ -787,7 +916,7 @@ int receipt_render(FILE *diff, FILE *out, const struct receipt_opts *o) {
     int rc = -1;
     const long start = ftell(diff);
     if (start >= 0 && fseek(diff, start, SEEK_SET) == 0) {      /* it can be read twice */
-        if (collect(diff, &col) == -1) goto out;
+        if (collect(diff, &col, &x) == -1) goto out;
         if (fseek(diff, start, SEEK_SET) != 0) {
             belay_err_set(BELAY_ERR_IO, errno, "receipt: cannot read the diff again");
             goto out;
@@ -797,7 +926,7 @@ int receipt_render(FILE *diff, FILE *out, const struct receipt_opts *o) {
         x.pk = col.pk;
         x.npk = col.npk;
         for (size_t i = 0; i < col.npk; i++) x.n_installed += col.pk[i].kind == PK_INSTALLED;
-        if (fold_owners(&x, &col, o) == -1) goto out;
+        if (fold_owners(&x, &col, o) == -1 || system_ask(&x, o) == -1) goto out;
         if (o->classify != NULL && col.n > 0 && (cls = malloc(col.n)) != NULL &&
             o->classify(o->class_ctx, (const char *const *)col.p, col.len, col.dir, col.n, cls) == 0)
             x.cls = cls;
@@ -912,11 +1041,18 @@ int receipt_render(FILE *diff, FILE *out, const struct receipt_opts *o) {
     }
     /* Changes: tracked, untracked (the only ones cut), ignored edits by
      * name, the rest ignored, then .git (2026-11-04). */
-    if (x.tracked.n || x.other.n || x.other.more || x.ignedit.n || x.ignored.n || x.ign.n || x.ignu.n || x.gitvis.n || x.git.n) {
+    if (x.rc_added || x.rc_removed || x.tracked.n || x.other.n || x.other.more || x.ignedit.n || x.ignored.n || x.ign.n || x.ignu.n || x.gitvis.n || x.git.n) {
         fputs("\nchanges\n", out);
         for (size_t i = 0; i < x.tracked.n; i++) fprintf(out, "%s\n", x.tracked.v[i]);
         for (size_t i = 0; i < x.other.n; i++) fprintf(out, "%s\n", x.other.v[i]);
         if (x.other.more) fprintf(out, "  and %zu more (--all shows them)\n", x.other.more);
+        if (x.rc_added || x.rc_removed) {       /* SY-3b: counted in one line */
+            fputs("  etc/rc?.d: ", out);
+            if (x.rc_added) fprintf(out, "%zu link%s added", x.rc_added, x.rc_added == 1 ? "" : "s");
+            if (x.rc_removed && x.rc_added) fprintf(out, ", %zu removed", x.rc_removed);
+            else if (x.rc_removed) fprintf(out, "%zu link%s removed", x.rc_removed, x.rc_removed == 1 ? "" : "s");
+            fputs(" (--all lists them)\n", out);
+        }
         for (size_t i = 0; i < x.ignedit.n; i++) fprintf(out, "%s\n", x.ignedit.v[i]);
         for (size_t i = 0; i < x.ignored.n; i++) fprintf(out, "%s\n", x.ignored.v[i]);
         for (int top = 0; top < 2; top++)          /* directories, then files at the top */
@@ -977,6 +1113,14 @@ out:
         for (size_t i = 0; x.own[side] != NULL && i < x.nown; i++) free(x.own[side][i]);
         free(x.own[side]);
     }
+    for (size_t i = 0; i < x.n_sys_links; i++) free(x.sys_links[i]);
+    for (size_t i = 0; i < x.n_sys_timers; i++) free(x.sys_timers[i]);
+    for (size_t i = 0; i < x.n_sys_homes; i++) free(x.sys_homes[i]);
+    free(x.sys_links);
+    free(x.sys_timers);
+    free(x.sys_homes);
+    free(x.sys_linked);
+    free(x.sys_linger);
     for (size_t i = 0; i < x.nkeys; i++) free(x.keys[i].key);
     free(x.keys);
     for (size_t i = 0; i < col.npk; i++) { free(col.pk[i].package); free(col.pk[i].arch); free(col.pk[i].version); }
