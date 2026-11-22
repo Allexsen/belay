@@ -24,8 +24,11 @@
 #define DELTA_CHAIN_MAX 255
 
 /* A manifest to read: a checkpoint's own file, or a checked rebuild in a
- * private temporary file. */
-struct manifest_file { char path[PATH_MAX + 200]; bool temporary; };
+ * temporary file of the scope's state directory (tmp/ there: capture-scale
+ * SC-M3), held locked until it is released -- a file found there unlocked
+ * is a killed run's, and the next rebuild removes it. `held`: the lock's
+ * descriptor plus one; 0, as an initializer leaves it, is none. */
+struct manifest_file { char path[PATH_MAX + 200]; bool temporary; int held; long skip; };
 
 /* Checkpoint `id`'s manifest as a path to read, rebuilt and checked byte for
  * byte first when it is a delta (ST-4). 0, or -1 with belay_err (CORRUPT: a
@@ -36,7 +39,9 @@ void manifest_release(struct manifest_file *m);
 
 /* As manifest_acquire, for a reader that wants the manifest's header line
  * alone, as `log` does for each checkpoint: a delta holds that line as it is,
- * so nothing is rebuilt. The file holds no more than the header. */
+ * so nothing is rebuilt and nothing written -- the path is then the delta's
+ * own and `skip` where in it the header line starts
+ * (belay_manifest_open_header_at). */
 int  manifest_acquire_header(const struct state *st, long id, struct manifest_file *m);
 
 /* Whether checkpoint `id` is stored as a delta alone: no whole file. */

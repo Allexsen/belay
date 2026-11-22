@@ -262,7 +262,7 @@ int cli_refuse_system(const struct state *st, long id, const char *what, FILE *e
     struct manifest_file mf;
     struct belay_manifest_reader *r = NULL;
     if (manifest_acquire_header(st, id, &mf) == -1) return failed(err);
-    if (belay_manifest_open_header(mf.path, &r) == -1) {
+    if (belay_manifest_open_header_at(mf.path, mf.skip, &r) == -1) {
         manifest_release(&mf);
         return failed(err);
     }
@@ -311,7 +311,7 @@ static void json_checkpoint(FILE *out, const struct state *st, const struct chec
     char src[200] = "null";             /* CK-16: the manifest's source (manifest-v3 V3-2) */
     struct manifest_file mf;
     const bool have = manifest_acquire_header(st, c->id, &mf) == 0;
-    if (have && belay_manifest_open_header(mf.path, &r) == 0) {
+    if (have && belay_manifest_open_header_at(mf.path, mf.skip, &r) == 0) {
         const struct belay_manifest_header *h = belay_manifest_header(r);
         if (h->source_docker[0] != '\0')
             snprintf(src, sizeof src, "{\"docker\":\"%s\",\"image\":\"%s\"}", h->source_docker, h->source_image);
@@ -370,7 +370,7 @@ static void capture_notes(FILE *out, const struct state *st, const struct checkp
     struct belay_manifest_reader *r = NULL;
     struct manifest_file mf;
     const bool have = manifest_acquire_header(st, c->id, &mf) == 0;
-    if (have && belay_manifest_open_header(mf.path, &r) == 0) {
+    if (have && belay_manifest_open_header_at(mf.path, mf.skip, &r) == 0) {
         excluded_notes(out, belay_manifest_header(r), "not recorded");
         belay_manifest_close(r);
         manifest_release(&mf);
