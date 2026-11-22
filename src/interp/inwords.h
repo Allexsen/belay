@@ -14,4 +14,10 @@
  * clock)`. false: the form is not one of SW-1 to SW-6, or does not fit. */
 bool inwords_cron(const char *schedule, size_t n, char *out, size_t cap);
 
+/* The words for a timer's one `OnCalendar=` value, as written (SW-7): `daily`,
+ * `weekly`, `hourly`, `*-*-* HH:MM:00`, or that after a list of weekdays
+ * (`Mon,Thu *-*-* HH:MM:00`), ending ` (by systemd's)`. false: any other
+ * spelling, or it does not fit. */
+bool inwords_timer(const char *value, size_t n, char *out, size_t cap);
+
 #endif

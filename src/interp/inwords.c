@@ -121,3 +121,42 @@ bool inwords_cron(const char *schedule, size_t n, char *out, size_t cap) {
     if (schedule == NULL || out == NULL || !words(schedule, n, buf, sizeof buf)) return false;
     return (size_t)snprintf(out, cap, "%s (by cron's clock)", buf) < cap;
 }
+
+/* ---- timers (SW-7) ---- */
+
+/* `HH:MM:00`, two digits each. */
+static bool clock_hm(const char *s, size_t n, int *h, int *m) {
+    return n == 8 && s[2] == ':' && s[5] == ':' && s[6] == '0' && s[7] == '0' &&
+           num(s, 2, 0, 23, h) && num(s + 3, 2, 0, 59, m);
+}
+
+static bool timer_words(const char *s, size_t n, char *buf, size_t cap) {
+    static const struct { const char *word, *is; } W[] = {
+        { "daily", "at 00:00 every day" }, { "weekly", "at 00:00 on Mon" }, { "hourly", "at minute 0 of every hour" },
+    };
+    for (size_t i = 0; i < sizeof W / sizeof W[0]; i++)
+        if (strlen(W[i].word) == n && memcmp(W[i].word, s, n) == 0) return (size_t)snprintf(buf, cap, "%s", W[i].is) < cap;
+    /* [Day[,Day...] ]*-*-* HH:MM:00, one space between the parts */
+    int h, m;
+    if (n == 14 && memcmp(s, "*-*-* ", 6) == 0 && clock_hm(s + 6, 8, &h, &m))
+        return (size_t)snprintf(buf, cap, "at %02d:%02d every day", h, m) < cap;
+    if (n < 18 || memcmp(s + n - 15, " *-*-* ", 7) != 0 || !clock_hm(s + n - 8, 8, &h, &m)) return false;
+    char days[64];
+    size_t w = 0;
+    for (size_t at = 0, end = n - 15; ; at += 4) {          /* Mon,Thu: as systemd writes them, three letters each */
+        if (end - at < 3 || w + 6 > sizeof days) return false;
+        int d = 0;
+        while (d < 7 && memcmp(s + at, DAY[d], 3) != 0) d++;
+        if (d == 7) return false;
+        w += (size_t)snprintf(days + w, sizeof days - w, "%s%s", w ? ", " : "", DAY[d]);
+        if (at + 3 == end) break;
+        if (s[at + 3] != ',') return false;
+    }
+    return (size_t)snprintf(buf, cap, "at %02d:%02d on %s", h, m, days) < cap;
+}
+
+bool inwords_timer(const char *value, size_t n, char *out, size_t cap) {
+    char buf[160];
+    if (value == NULL || out == NULL || !timer_words(value, n, buf, sizeof buf)) return false;
+    return (size_t)snprintf(out, cap, "%s (by systemd's)", buf) < cap;
+}
