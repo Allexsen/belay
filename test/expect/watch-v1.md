@@ -301,6 +301,7 @@ place. A line with notes only has none. Examples are in the last section.
 | LN-7 | A path is shown as the receipt shows one (belay's escaping, so no control or bidirectional character reaches the line), cut in its middle with `…` past 80 characters. |
 | LN-8 | A line is at most 64 KiB in the record; a flagged path is cut to fit and the cut ones are counted. |
 | LN-9 | Every changed entry of a step is counted in exactly one place of its line. |
+| LN-10 | **A git pull or merge leads the line.** When the step's diff has a `git_commits_added` event without a count for the repository `.git` at the directory's top, and that branch's reflog, as the step's checkpoint keeps it, ends in an entry whose operation's first word is `pull` or `merge`: after LN-2's words, `git WORD: BRANCH moved to ID (fast-forward)`, `(merge)` when the entry's message does not end `: Fast-forward`; WORD that first word, ID the event's `to` cut to seven. Then the flagged and noted as LN-3 and LN-4, after `; `, then ` · N file(s) in the tree`: N the entries neither flagged nor noted outside `.git/`; those under `.git/` are the lead's (LN-9). No commit count: a fast-forward's or a merge's entry gives none, and git's objects are not read. The line is the same whatever else changed in the tree. A history rewrite stays LN-3's flag. In `watch receipt`, a step's entries under `.git/` fold into one line as `belay diff`'s receipt folds them: `git bookkeeping: N changes under .git/`. |
 
 **A summary** (the Claude Code adapter prints it at a Stop, for the steps since the user's last message):
 
@@ -363,6 +364,7 @@ belay: 🔴 .gitmodules added (git submodules); .git/config modified (git config
 belay: 🔴 migrations/0001.py modified (don't-touch); .husky/pre-commit added (git hook manager); .env added (credentials); and 19 more flagged: 19 git hooks and config · 1 more: 1 modified
 belay: 🔴 bin/tool setuid added (mode 0755 -> 4755) (privilege)
 belay: 🔴 feature rewritten by commit (amend): c38c0d4 -> e487650 (history) · 6 more: 2 added, 4 modified
+belay: git pull: main moved to 9c5d2f2 (fast-forward) · 17 files in the tree
 belay: 🔴 could not record in 45 s: capturing
 
 belay: 🔴 1 flagged: .git/hooks/pre-push added (git hook)
