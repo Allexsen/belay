@@ -46,5 +46,6 @@ filesystems | actions/checkout@v5 | setup
 filesystems | install filesystem tools | setup
 filesystems | build | check
 filesystems | btrfs (loopback, with a subvolume inside the scope) | check
+filesystems | the kernel record's fanotify reader (root, an ext4 loopback of its own) | check
 filesystems | FAT (loopback, 2 s timestamps) | check
 filesystems | NFS (loopback export) | check

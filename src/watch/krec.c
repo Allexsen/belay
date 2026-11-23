@@ -195,9 +195,10 @@ int krec_scan(const struct state *st, long long after, long long upto, krec_fn f
     size_t i = 0;
     while (i + 1 < n && seg[i + 1] <= want) i++;
     if (rc == 0 && (n == 0 || seg[i] > want)) rc = 1;
+    /* `at`: the seq the next line must have. It runs on from one segment
+     * into the next, so a segment gone from between two is a seq missing. */
     uint64_t at = n > 0 ? seg[i] : 0;
     for (; rc == 0 && i < n && want <= (uint64_t)upto; i++) {
-        if (seg[i] != at) { rc = 1; break; }            /* a segment between the two is gone */
         FILE *f = segment_open(wfd, seg[i]);
         if (f == NULL) { rc = 1; break; }
         int g;

@@ -1,3 +1,4 @@
 # Tests allowed to skip in the linux-arm64 CI job, one "<binary> <test>" per line.
 # Any other skip, or a test listed here that runs, fails the job (test/belay_test.h).
 # None: unprivileged user namespaces are enabled for this job, so every test runs.
+test_kernel_record the_fanotify_reader_journals_what_the_kernel_sends

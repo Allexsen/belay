@@ -1,3 +1,5 @@
 # Tests allowed to skip in the filesystems CI job, one "<binary> <test>" per line.
 # Any other skip, or a test listed here that runs, fails the job (test/belay_test.h).
-# None: unprivileged user namespaces are enabled for this job, so every test runs.
+# Unprivileged user namespaces are enabled for this job, so every test of its own runs. The
+# kernel record's tests run as root there, for the fanotify reader: the one test of not being root skips.
+test_kernel_record not_root_the_record_is_off

@@ -453,8 +453,63 @@ TEST(prune_removes_the_segments_before_the_oldest_checkpoint) {
     REQUIRE(sys("stop") == 0);
 }
 
+/* K1, K2, K5, K6, K7, K13 with the kernel's own events: the fanotify reader.
+ * Needs root and a filesystem of its own to mark (BELAY_TEST_ROOT, ext4:
+ * the tree and belay's state are both put on it, so the group marks that
+ * filesystem and no other). Run by the `filesystems` CI job. */
+TEST(the_fanotify_reader_journals_what_the_kernel_sends) {
+#ifndef __linux__
+    SKIP("fanotify is Linux's");
+#else
+    if (geteuid() != 0 || getenv("BELAY_TEST_ROOT") == NULL) SKIP("needs root and an ext4 filesystem of its own (BELAY_TEST_ROOT)");
+    fresh();
+    unsetenv("BELAY_TEST_KREC");
+    REQUIRE_MSG(sys("start") == 0, "%s%s", g_out, g_err);
+    REQUIRE_MSG(strstr(g_out, "\nkernel record: on since 20") != NULL, "%s", g_out);
+    ASSERT_TRUE(krec_alive(watch_state(), NULL));
+    ASSERT_EQ_INT(0, belay("log", "--system-root", g_tree, "--json"));
+    ASSERT_TRUE(strstr(g_out, "\"journal_seq\":null") == NULL);         /* K7: the kernel's event for the barrier came */
+    sh("cd '%s' && printf 'x\\n' > etc/conf && printf 'one\\n' > etc/conf && printf 'changed\\n' > etc/other && "
+       "chmod 600 etc/passwd && printf 'n\\n' > etc/new && mv etc/new etc/sub/moved && rm etc/group", g_tree);
+    REQUIRE_MSG(step() == 0, "%s%s", g_out, g_err);
+    ASSERT_FALSE(walked_because("the recorder did not answer"));
+    /* K5: a write carries the object's inode; a create and a rename their directory and names */
+    ASSERT_TRUE(holds("ino=$(ls -di '%s/etc/conf' | awk '{print $1}') && cat \"$w\"/journal.* | grep \"\\\"ino\\\":$ino,\" | grep -q '\"mask\":[0-9]*[02468],' && "
+                      "cat \"$w\"/journal.* | grep -q '\"name\":\"new\"' && cat \"$w\"/journal.* | grep -q '\"to_name\":\"moved\"}' && "
+                      "cat \"$w\"/journal.* | grep -q '\"name\":\"group\"'", g_tree));
+    ASSERT_TRUE(holds("! cat \"$w\"/journal.* | grep -q '\"name\":\"journal\\.'"));     /* K5: the ignore mark */
+    ASSERT_EQ_INT(0, belay("diff", "--system-root", g_tree, "--since", "1", "--to", "2", "--json"));
+    ASSERT_TRUE(strstr(g_out, "\"text\":\"written and now as it was\",\"paths\":[\"etc/conf\"]}\n") != NULL);
+    ASSERT_TRUE(strstr(g_out, "\"paths\":[\"etc/other\"]") == NULL && strstr(g_out, "\"paths\":[\"etc/passwd\"]") == NULL);
+    ASSERT_TRUE(strstr(g_out, "\"touched\":") == NULL);
+    REQUIRE_MSG(sys("stop") == 0, "%s%s", g_out, g_err);
+    ASSERT_TRUE(strstr(g_out, "\n  etc/conf   written and now as it was\n") != NULL);
+    ASSERT_FALSE(krec_alive(watch_state(), NULL));
+    setenv("BELAY_TEST_KREC", g_queue, 1);
+#endif
+}
+
+/* K4: not root and no queue: the record is off and says why; everything else runs. */
+TEST(not_root_the_record_is_off) {
+    if (geteuid() == 0) SKIP("run as root: fanotify_init is not refused");
+    fresh();
+    unsetenv("BELAY_TEST_KREC");
+    REQUIRE_MSG(sys("start") == 0, "%s%s", g_out, g_err);
+    setenv("BELAY_TEST_KREC", g_queue, 1);
+    ASSERT_TRUE(strstr(g_out, "\nkernel record: off: not root: a change put back is not seen\n") != NULL);
+    ASSERT_FALSE(krec_alive(watch_state(), NULL));
+    ASSERT_TRUE(holds("! ls \"$w\" | grep -q '^journal\\.'"));
+    unsetenv("BELAY_TEST_KREC");
+    REQUIRE(step() == 0);
+    ASSERT_TRUE(walked_because("not root"));
+    REQUIRE(sys("stop") == 0);
+    setenv("BELAY_TEST_KREC", g_queue, 1);
+    ASSERT_TRUE(strstr(g_out, "\nput back\n") == NULL);
+}
+
 int main(void) {
-    snprintf(g_dir, sizeof g_dir, "/tmp/belay_krec_%d_%ld", (int)getpid(), (long)time(NULL));
+    const char *base = getenv("BELAY_TEST_ROOT");       /* a filesystem of the test's own, for the root test */
+    snprintf(g_dir, sizeof g_dir, "%s/belay_krec_%d_%ld", base != NULL ? base : "/tmp", (int)getpid(), (long)time(NULL));
     snprintf(g_tree, sizeof g_tree, "%s/tree", g_dir);
     snprintf(g_state, sizeof g_state, "%s/state", g_dir);
     snprintf(g_queue, sizeof g_queue, "%s/queue", g_dir);
@@ -472,6 +527,8 @@ int main(void) {
     RUN(a_file_written_and_put_back_is_touched);
     RUN(touched_is_not_available_where_the_journal_cannot_tell);
     RUN(prune_removes_the_segments_before_the_oldest_checkpoint);
+    RUN(not_root_the_record_is_off);
+    RUN(the_fanotify_reader_journals_what_the_kernel_sends);
     end_recorder();
     sh("chmod -R u+rwx '%s' 2>/dev/null; rm -rf '%s'", g_dir, g_dir);
     free(g_out);
