@@ -259,6 +259,31 @@ TEST(a_step_flags_and_notes_by_the_system_list) {
     ASSERT_TRUE(strstr(g_out, RED) == NULL);
 }
 
+/* WS-L2, WS-R5: a record that says only that a side could not be read --
+ * a file past the hash limit, a file others cannot read, as they were -- is
+ * no change of a step; the receipt counts them on one line. A field that
+ * changed makes it one again. Measured: 51 on every idle step of a 24.04
+ * runner, 98 not root. */
+TEST(a_record_that_says_only_a_side_was_not_read_is_no_change) {
+    fresh();
+    sh("cd '%s' && mkdir -p usr/local/bin etc/x && truncate -s 65M usr/local/bin/big && printf 's\\n' > etc/x/unread && "
+       "chmod 000 etc/x/unread", g_tree);
+    settle();
+    REQUIRE(sys("start") == 0);
+    REQUIRE_MSG(step() == 0, "%s", g_out);
+    ASSERT_EQ_STR("", g_out);
+    REQUIRE_MSG(step() == 0, "%s", g_out);
+    ASSERT_EQ_STR("", g_out);
+    REQUIRE_MSG(sys("receipt") == 0, "%s", g_err);
+    ASSERT_TRUE(strstr(g_out, g_root ? "\n  1 not read on either side, and nothing compared changed (--all lists them)\n"
+                                     : "\n  2 not read on either side, and nothing compared changed (--all lists them)\n") != NULL);
+    ASSERT_TRUE(strstr(g_out, "? usr/local/bin/big") == NULL);
+    sh("cd '%s' && truncate -s 66M usr/local/bin/big", g_tree);
+    REQUIRE(step() == 0);
+    REQUIRE_MSG(strstr(g_out, "belay: outside tool calls: 1 change: usr/local/bin/big modified\n") == g_out, "%s", g_out);
+    REQUIRE(sys("stop") == 0);
+}
+
 /* WS-F17: a file whose events a row flags that no longer interprets is
  * flagged, by the event's text and its first path, not counted; the
  * receipt puts it in its interpreter's section. */
@@ -592,6 +617,7 @@ int main(void) {
     g_root = geteuid() == 0;
     RUN(start_opens_stop_closes_and_a_second_start_is_refused);
     RUN(a_step_flags_and_notes_by_the_system_list);
+    RUN(a_record_that_says_only_a_side_was_not_read_is_no_change);
     RUN(a_file_that_no_longer_interprets_is_flagged);
     RUN(a_sudoers_sshkeys_or_user_unit_that_no_longer_interprets_is_flagged);
     RUN(listeners_and_services_by_their_executables_owner);

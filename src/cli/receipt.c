@@ -385,6 +385,7 @@ struct ctx {
     struct lines s[RS_COUNT], core;
     char **taken, **folded;
     size_t n_taken, cap_taken, n_folded, cap_folded, config_folded;
+    size_t standing;            /* WS-R5: records of WS-L2, counted */
     size_t *meta_folded;
     bool folded_sorted;
 };
@@ -550,6 +551,19 @@ static struct pk *owner_pk(struct ctx *x, size_t ri) {
     return NULL;
 }
 
+bool receipt_standing(const struct jval *r) {
+    if (strcmp(jstr(r, "outcome"), "unknown") != 0) return false;
+    const struct jval *ch = jget(r, "changed"), *u = jget(r, "unknown");
+    if (ch != NULL && (ch->t != J_ARR || ch->n > 0)) return false;
+    if (u == NULL || u->t != J_ARR || u->n == 0) return false;
+    for (size_t i = 0; i < u->n; i++) {
+        const struct jval *k = &u->kids[i];
+        if (k->t != J_STR || (strcmp(k->s, "unverified") != 0 && strcmp(k->s, "unreadable") != 0 && strcmp(k->s, "mount") != 0))
+            return false;
+    }
+    return true;
+}
+
 static int record(const struct jval *r, struct ctx *x, const struct receipt_opts *o) {
     static char path[4096];
     size_t plen = 0;
@@ -564,6 +578,11 @@ static int record(const struct jval *r, struct ctx *x, const struct receipt_opts
     unsigned char c = GC_UNTRACKED;
     if (have_path && gp < 0 && x->cls != NULL) c = x->cls[x->ci++];
     const size_t ri = have_path && gp < 0 ? x->ri++ : (size_t)-1;      /* its place among the paths asked */
+    if (x->sec != NULL && !o->all && receipt_standing(r)) {             /* WS-R5: counted on one line */
+        free(why.p);
+        x->standing++;
+        return 0;
+    }
 
     /* An edit to a git-ignored file -- its text, or its type, not a
      * directory's -- is named, never folded: it is often .env or local
@@ -1067,7 +1086,7 @@ static int sections_out(FILE *out, struct ctx *x, struct sb *crange) {
     if (sc->put_back != NULL && sc->put_back[0] != '\0') fprintf(out, "\nput back\n%s", sc->put_back);
     size_t folded = 0;
     for (size_t i = 0; i < sc->n_meta; i++) folded += x->meta_folded[i];
-    if (sc->roots != NULL || x->core.n || x->other.n || x->other.more || x->rc_added || x->rc_removed || folded) {
+    if (sc->roots != NULL || x->core.n || x->other.n || x->other.more || x->rc_added || x->rc_removed || folded || x->standing) {
         fputs("\nchanges\n", out);
         if (sc->roots != NULL) fprintf(out, "  roots changed: %s\n", sc->roots);     /* WS-10 */
         for (size_t i = 0; i < x->core.n; i++) fprintf(out, "%s\n", x->core.v[i]);
@@ -1086,6 +1105,8 @@ static int sections_out(FILE *out, struct ctx *x, struct sb *crange) {
                 receipt_fputs(out, sc->meta[i]);
                 fprintf(out, ": %zu change%s in packages' files\n", x->meta_folded[i], x->meta_folded[i] == 1 ? "" : "s");
             }
+        if (x->standing)
+            fprintf(out, "  %zu not read on either side, and nothing compared changed (--all lists them)\n", x->standing);
     }
     fputs(sc->tail != NULL ? sc->tail : "", out);
     if (ferror(out)) {

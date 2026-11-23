@@ -699,6 +699,7 @@ static int pass_records(struct sx *x, FILE *in, struct wstep *s) {
             rc = -1;
             break;
         }
+        if (receipt_standing(&v)) { jsonr_free(&v); continue; }                   /* WS-L2: no change */
         s->changes++;
         const char *outcome = jstr(&v, "outcome"), *word = word_of(outcome);
         if (sset_has(&x->taken, path, len)) { jsonr_free(&v); continue; }          /* the event's */
