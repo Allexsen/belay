@@ -10,10 +10,12 @@
 
 #include "belay/diff.h"
 #include "belay/error.h"
+#include "belay/json.h"
 #include "belay/manifest.h"
 #include "cli/cli_internal.h"
 #include "cli/delta.h"
 #include "cli/receipt.h"
+#include "util/jsonr.h"
 #include "watch/krec.h"
 #include "watch/sysflag.h"
 
@@ -150,6 +152,50 @@ int sysreceipt_head(const struct state *st, long cp, const struct wstate *w, str
     return out->bad ? nomem() : 0;
 }
 
+/* ---- put back (WS-R1, kernel-record K13) ---- */
+
+/* The section's lines from the diff's `touched` events: each file written
+ * between the two checkpoints and now as it was, the first LISTED named. */
+static int put_back(const char *diff, struct wsb *out) {
+    FILE *f = fopen(diff, "r");
+    if (f == NULL) {
+        belay_err_set(BELAY_ERR_IO, errno, "cannot read %s", diff);
+        return -1;
+    }
+    char *line = NULL;
+    size_t cap = 0, n = 0;
+    ssize_t got;
+    while ((got = getline(&line, &cap, f)) > 0) {
+        if (strncmp(line, "{\"event\":\"touched\",", 19) != 0) continue;
+        struct jval v;
+        if (jsonr_parse(line, (size_t)got, &v) == -1) continue;
+        const struct jval *ps = jget(&v, "paths"), *pb = jget(&v, "paths_b64");
+        const struct jval *list = ps != NULL ? ps : pb;
+        for (size_t i = 0; list != NULL && list->t == J_ARR && i < list->n; i++) {
+            static char raw[4096];
+            const struct jval *p = &list->kids[i];
+            size_t len = 0;
+            if (p->t != J_STR) continue;
+            if (list == pb) {
+                if (belay_base64_decode(raw, sizeof raw, &len, p->s) != 0) continue;
+            } else if (p->s_len <= sizeof raw) {
+                memcpy(raw, p->s, len = p->s_len);
+            } else continue;
+            if (n++ < LISTED) {
+                char *s = receipt_escaped(raw, len);
+                wsb_f(out, "  %s   written and now as it was\n", s != NULL ? s : "?");
+                out->bad |= s == NULL;
+                free(s);
+            }
+        }
+        jsonr_free(&v);
+    }
+    free(line);
+    fclose(f);
+    if (n > LISTED) wsb_f(out, "  and %zu more\n", n - LISTED);
+    return out->bad ? nomem() : 0;
+}
+
 /* ---- the sections' records ---- */
 
 struct secctx { struct cli_modes *m; char **homes; size_t n_homes; };
@@ -173,7 +219,7 @@ static int section_of(void *ctx, const char *path, size_t len, bool dir) {
 int sysreceipt(const struct state *st, const struct wstate *w, long from, long to, int64_t to_ns, struct wsb *out) {
     struct manifest_file mf_a = { .temporary = false }, mf_b = { .temporary = false };
     struct cli_modes m = { 0 };
-    struct wsb head = { 0 }, tail = { 0 };
+    struct wsb head = { 0 }, tail = { 0 }, back = { 0 };
     char *roots = NULL, *text = NULL, **homes = NULL;
     const char **meta = NULL;
     size_t n_homes = 0, n_meta = 0, len = 0;
@@ -191,12 +237,17 @@ int sysreceipt(const struct state *st, const struct wstate *w, long from, long t
     char ida[65] = "", idb[65] = "";             /* diff-fields ID-1 */
     if (!manifest_event_identity(st, from, ida)) ida[0] = '\0';
     if (!manifest_event_identity(st, to, idb)) idb[0] = '\0';
+    struct krec_touched kt = { 0 };             /* kernel-record K13 */
+    if (krec_touched(st, from, to, &kt) == -1) goto out;
     const struct belay_diff_opts dopts = { .before_identity = ida[0] ? ida : NULL, .after_identity = idb[0] ? idb : NULL,
+                                           .touched_path = kt.available ? kt.path : NULL, .touched_unavailable = !kt.available,
                                            .store_dir = st->store, .shadow_lines_before = la == 1 ? lines_a : NULL,
                                            .shadow_lines_after = lb == 1 ? lines_b : NULL,
                                            .runtime_before = ra == 1 ? rt_a : NULL, .runtime_after = rb == 1 ? rt_b : NULL };
     struct belay_diff_stats ds;
-    if (belay_diff(mf_a.path, mf_b.path, d, &dopts, &ds) == -1) goto out;
+    const int diffed = belay_diff(mf_a.path, mf_b.path, d, &dopts, &ds);
+    krec_touched_done(&kt);
+    if (diffed == -1) goto out;
     if (belay_manifest_open(mf_a.path, &m.side[0].r) == -1 || belay_manifest_open(mf_b.path, &m.side[1].r) == -1) goto out;
     const struct belay_manifest_header *ha = belay_manifest_header(m.side[0].r), *hb = belay_manifest_header(m.side[1].r);
     if (sysflag_roots_changed(ha, hb, &roots) == -1) goto out;
@@ -246,7 +297,8 @@ int sysreceipt(const struct state *st, const struct wstate *w, long from, long t
     for (int sd = 0; sd < 2; sd++) m.side[sd].got = belay_manifest_next(m.side[sd].r, &m.side[sd].e);
     if (head.bad || tail.bad) { nomem(); goto out; }
     struct secctx sx = { &m, homes, n_homes };
-    const struct receipt_sections sec = { head.p, roots, NULL /* put back: step 7 */, tail.p, section_of, &sx, meta, n_meta };
+    if (put_back(d, &back) == -1) goto out;
+    const struct receipt_sections sec = { head.p, roots, back.p, tail.p, section_of, &sx, meta, n_meta };
     struct cli_owners own = { { mf_a.path, mf_b.path }, st->store };
     struct cli_system sys = { mf_b.path, st->store };
     const struct receipt_opts ro = { .from = NULL, .to = NULL, .all = false, .mode = cli_mode_of, .mode_ctx = &m,
@@ -281,6 +333,7 @@ out:
     free(meta);
     free(head.p);
     free(tail.p);
+    free(back.p);
     belay_manifest_close(m.side[0].r);
     belay_manifest_close(m.side[1].r);
     manifest_release(&mf_a);

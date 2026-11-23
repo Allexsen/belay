@@ -301,7 +301,7 @@ TEST(a_checkpoint_keeps_the_runtime_record_of_its_proc) {
                                      "\"text\":\"runtime incomplete: no runtime record before\"}\n"
                                    : "{\"runtime\":\"incomplete\",\"why\":[\"no_record_before\",\"holders_unknown_after\"],"
                                      "\"text\":\"runtime incomplete: no runtime record before; holders not read after\"}\n") != NULL);
-    ASSERT_TRUE(strstr(g_out, ",\"runtime\":1}\n") != NULL);
+    ASSERT_TRUE(strstr(g_out, ",\"runtime\":1,\"touched\":\"not available\"}\n") != NULL /* K13: no journal_seq */);
     /* port 22 closed, 80 opened: the receipt prints the records' texts */
     sh("cd '%s/proc' && printf '  sl  local_address rem_address   st\\n   0: 00000000:0050 00000000:0000 0A 0:0 0:0 0 0 0 9000 1\\n' > net/tcp",
        g_tree);

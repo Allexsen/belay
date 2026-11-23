@@ -272,5 +272,11 @@ const struct line_field_def DIFF_TRAILER_FIELDS[DT_COUNT] = {
     [DT_AFTER_SEALING]      = { "after_sealing", NULL, "int", "The second manifest's, likewise." },
     [DT_RUNTIME]            = { "runtime", NULL, "int",
         "The number of `runtime` records, after the events (test/expect/runtime-v1.md, RT-D1); `0` "
-        "when neither capture has a runtime record. Last." },
+        "when neither capture has a runtime record. The last key of every trailer but one that has `touched`." },
+    [DT_TOUCHED]            = { "touched", NULL, "string",
+        "Present only in a diff of two checkpoints of a system watch for which `touched` events cannot "
+        "be told, and then `not available`: a checkpoint has no `journal_seq`, the two are of different "
+        "watches or recorders, or the journal between them is gone or not whole "
+        "(test/expect/kernel-record.md, K13). Absent otherwise: every other diff, and one whose `touched` "
+        "events, if any, are all there. After `runtime`." },
 };

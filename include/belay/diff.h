@@ -42,6 +42,15 @@ struct belay_diff_opts {
      * the digest of the bytes read, for a manifest whose identity is not
      * one (diff-fields ID-1: an event capture's); NULL: the bytes' digest. */
     const char *before_identity, *after_identity;
+    /* kernel-record K13. `touched_path`: a file of (dev, ino) pairs, two
+     * uint64_t each in this machine's byte order, sorted and unique: the
+     * inodes the journal has a write for between the two checkpoints. A
+     * regular file read on both sides with equal size and sha256 whose
+     * inode is among them gives a `touched` event. `touched_unavailable`:
+     * that cannot be told for this pair, and the trailer says so. Neither:
+     * the diff is not of a system watch's checkpoints, and says nothing. */
+    const char *touched_path;
+    bool touched_unavailable;
 };
 
 /*

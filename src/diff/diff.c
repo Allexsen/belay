@@ -34,6 +34,8 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <stdint.h>
+#include <sys/mman.h>
 #include <sys/stat.h>
 #include <unistd.h>
 
@@ -90,6 +92,12 @@ static void sync_dir_of(const char *path) {
 
 struct run {
     const struct belay_diff_opts *opts;
+    /* kernel-record K13: the inodes written between the two checkpoints,
+     * mapped; and the `touched` events, as lines, at most EVENTS_PER_INTERP */
+    const uint64_t *touched;
+    size_t n_touched, touched_bytes;
+    char *tev;
+    size_t tev_len, tev_cap, tev_n, tev_extra;
     struct belay_manifest_reader *rb, *ra;
     struct belay_entry root[2];     /* [0] before, [1] after: as find_root read them */
     struct diff_ctx ctx;
@@ -302,6 +310,91 @@ static int runtime_units(struct run *x, const char *digest) {
     return 0;
 }
 
+/* ---- touched (kernel-record K13) ---- */
+
+static int touched_open(struct run *x, const char *path) {
+    const int fd = open(path, O_RDONLY | O_CLOEXEC);
+    struct stat s;
+    if (fd == -1 || fstat(fd, &s) == -1 || !S_ISREG(s.st_mode) || s.st_size % 16 != 0) {
+        belay_err_set(BELAY_ERR_IO, errno, "diff: cannot read the written inodes at %s", path);
+        if (fd != -1) close(fd);
+        return -1;
+    }
+    if (s.st_size > 0) {
+        void *m = mmap(NULL, (size_t)s.st_size, PROT_READ, MAP_PRIVATE, fd, 0);
+        if (m == MAP_FAILED) {
+            belay_err_set(BELAY_ERR_IO, errno, "diff: cannot read the written inodes at %s", path);
+            close(fd);
+            return -1;
+        }
+        x->touched = m;
+        x->touched_bytes = (size_t)s.st_size;
+        x->n_touched = (size_t)s.st_size / 16;
+    }
+    close(fd);
+    return 0;
+}
+
+static bool touched_has(const struct run *x, uint64_t dev, uint64_t ino) {
+    for (size_t lo = 0, hi = x->n_touched; lo < hi;) {
+        const size_t mid = lo + (hi - lo) / 2;
+        const uint64_t d = x->touched[2 * mid], i = x->touched[2 * mid + 1];
+        if (d == dev && i == ino) return true;
+        if (d < dev || (d == dev && i < ino)) lo = mid + 1;
+        else hi = mid;
+    }
+    return false;
+}
+
+/* A regular file read on both sides, as it was, whose inode was written. */
+static int touched_pair(struct run *x, const struct belay_entry *b, const struct belay_entry *a) {
+    if (x->n_touched == 0 || b->type != BELAY_T_REG || a->type != BELAY_T_REG || !b->has_hash || !a->has_hash ||
+        b->size != a->size || strcmp(b->sha256_hex, a->sha256_hex) != 0 || !touched_has(x, a->dev, a->ino))
+        return 0;
+    if (x->tev_n == EVENTS_PER_INTERP - 1) {            /* diff-events E5: the last place counts the rest */
+        x->tev_extra++;
+        return 0;
+    }
+    static char body[6 * 4096 + 8];
+    const bool utf8 = belay_utf8_valid(a->path, a->path_len);
+    if ((utf8 ? belay_json_escape(body, sizeof body, a->path, a->path_len)
+              : belay_base64_encode(body, sizeof body, a->path, a->path_len)) == -1)
+        return -1;
+    const size_t need = strlen(body) + 160;
+    if (x->tev_len + need > x->tev_cap) {
+        const size_t cap = (x->tev_cap ? x->tev_cap * 2 : 4096) + need;
+        char *g = realloc(x->tev, cap);
+        if (g == NULL) {
+            belay_err_set(BELAY_ERR_NOMEM, 0, "diff: out of memory");
+            return -1;
+        }
+        x->tev = g;
+        x->tev_cap = cap;
+    }
+    x->tev_len += (size_t)snprintf(x->tev + x->tev_len, x->tev_cap - x->tev_len,
+                                   "{\"event\":\"%s\",\"interp\":\"core\",\"text\":\"%s\",\"%s\":[\"%s\"]}\n",
+                                   FINDING_KINDS[FK_TOUCHED].name, FINDING_KINDS[FK_TOUCHED].text,
+                                   utf8 ? "paths" : "paths_b64", body);
+    x->tev_n++;
+    return 0;
+}
+
+/* The events, after the interpreters' (diff-events E1). */
+static int touched_emit(struct run *x) {
+    if (x->tev_len > 0 && fwrite(x->tev, 1, x->tev_len, x->em.f) != x->tev_len) goto io;
+    if (x->tev_extra > 0) {
+        if (fprintf(x->em.f, "{\"event\":\"and_more\",\"interp\":\"core\",\"n\":%zu,\"text\":\"and %zu more\",\"paths\":[]}\n",
+                    x->tev_extra, x->tev_extra) < 0)
+            goto io;
+        x->tev_n++;
+    }
+    x->em.events += x->tev_n;
+    return 0;
+io:
+    belay_err_set(BELAY_ERR_IO, errno, "diff: write failed");
+    return -1;
+}
+
 static int run_pipeline(struct run *x) {
     const struct belay_manifest_header *hb = belay_manifest_header(x->rb);
     const struct belay_manifest_header *ha = belay_manifest_header(x->ra);
@@ -319,7 +412,7 @@ static int run_pipeline(struct run *x) {
             }
         struct verdict v;
         if (b != NULL && a != NULL) {
-            if (classify_both(&x->ctx, b, a, &v) == -1) return -1;
+            if (classify_both(&x->ctx, b, a, &v) == -1 || touched_pair(x, b, a) == -1) return -1;
         } else {
             const struct belay_entry *e = b != NULL ? b : a;
             const struct belay_manifest_header *lacking = b != NULL ? ha : hb;
@@ -360,10 +453,10 @@ static int run_pipeline(struct run *x) {
     snprintf(ib, sizeof ib, "%s", x->opts != NULL && x->opts->before_identity != NULL ? x->opts->before_identity : sb);
     snprintf(ia, sizeof ia, "%s", x->opts != NULL && x->opts->after_identity != NULL ? x->opts->after_identity : sa);
     const struct belay_manifest_stats tb = *belay_manifest_trailer(x->rb), ta = *belay_manifest_trailer(x->ra);
-    if (lookups(x, sa) == -1 || end_all(x) == -1 || emit_events(&x->em, &x->events) == -1) return -1;
+    if (lookups(x, sa) == -1 || end_all(x) == -1 || emit_events(&x->em, &x->events) == -1 || touched_emit(x) == -1) return -1;
     /* runtime-v1 RT-D1: the runtime section, after the events. */
     if (runtime_units(x, sa) == -1 || rtdiff_write(x->rt, x->em.f, &x->rt_records) == -1) return -1;
-    const struct diff_inputs in = { &tb, &ta, ib, ia, x->rt_records };
+    const struct diff_inputs in = { &tb, &ta, ib, ia, x->rt_records, x->opts != NULL && x->opts->touched_unavailable };
     return emit_trailer(&x->em, &in);
 }
 
@@ -396,6 +489,7 @@ int diff_run(const char *before, const char *after, const char *out_path,
         belay_content_open(opts->store_dir, &x->content) == -1)
         goto done;
     if (opts != NULL && rtdiff_open(opts->runtime_before, opts->runtime_after, &x->rt) == -1) goto done;
+    if (opts != NULL && opts->touched_path != NULL && !opts->touched_unavailable && touched_open(x, opts->touched_path) == -1) goto done;
     if (belay_manifest_open(before, &x->rb) == -1 || belay_manifest_open(after, &x->ra) == -1 ||
         same_scope(x) == -1 || find_root(x->rb, &x->root[0]) == -1 ||
         find_root(x->ra, &x->root[1]) == -1)
@@ -470,6 +564,8 @@ done:
     events_free(&x->events);
     lookup_free(&x->lookup);
     free(x->scratch);
+    free(x->tev);
+    if (x->touched != NULL) munmap((void *)(uintptr_t)x->touched, x->touched_bytes);
     rtdiff_free(x->rt);
     if (x->out != NULL) fclose(x->out);
     if (tmp_live) unlink(x->tmp);

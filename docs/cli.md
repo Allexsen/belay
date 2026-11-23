@@ -573,16 +573,39 @@ needs a marker.
   `walking (not root): not finished in 45 s; what changed will be in the next line` and exits 0.
   A step while it runs prints `walk in progress since 14:03 (not root)`. The next step prints the
   walk's line first, `since` the checkpoint before it, then its own; each change is said once.
-  A walk whose process died is said (`the last walk did not finish`) and taken again. Until the
-  kernel record (a later version), every capture of a system watch is a walk.
+  A walk whose process died is said (`the last walk did not finish`) and taken again. In this
+  version every capture of a system watch is a walk, and the reason in the line is the rule that
+  made it one (`not root`, `no kernel record`, `the kernel dropped events`, `the mounts changed`,
+  `an event did not resolve`, `the recorder did not answer`, `the recorder was restarted`,
+  `the end state rests on a walk`, or `no capture from events in this version`).
 - **receipt** and **stop** take a walk with no time limit (a line on standard error every 10 s
   while they wait) and print the receipt in sections, each only when it has something:
   `could not read` (and, not root, what that leaves out), `kernel record`, `end state`, then
   `installed`, `services`, `running`, `listening`, `user`, `cron`, `sudo`, `ssh`, `setuid`,
   `secret`, `trust`, `firewall`, `init`, `config`, `changes` (up to 20, then a count, and per
   `usr`-like root the records folded into packages), `not compared`, `not read`. A config event of
-  a file of a package installed here is counted in `config`, not listed. In this version the kernel
-  record is always off: `kernel record: off: not root: a change put back is not seen`.
+  a file of a package installed here is counted in `config`, not listed.
+- **The kernel record.** As root on Linux, `watch start --system` starts one recorder process for
+  the watch, which `watch stop` ends: a fanotify group on every ext4 filesystem under the roots,
+  writing each event to a journal in belay's state. Each capture takes a barrier in it. The
+  receipt's line is `kernel record: on since <time>, whole`, with `; walked every time: <path>
+  (<type>)` for a filesystem under the roots that is not ext4, `; inode flags as of the last walk`
+  on a kernel that sends no event for `chattr`, or `on since <time>, with a gap from <time> to
+  <time> (the recorder was not running)`. Not root, or where the kernel refuses:
+  `kernel record: off: <reason>: a change put back is not seen`, and everything else is as without
+  it. A container's (`--docker`) is off in this version.
+- **put back.** Under a kernel record, a file that was written between two checkpoints and is, by
+  size and sha256, as it was is a `touched` event of the diff (`written and now as it was`) and a
+  line of the receipt's `put back` section. Events are not writes: there is no count. Only for
+  files belay reads, on ext4. When the journal cannot tell (a checkpoint without a barrier, two
+  recorders, events the kernel dropped, a segment pruned) the diff's trailer says
+  `"touched":"not available"` and the section is not there.
+- **What the kernel record does not see**: a write through a mapping while the mapping or its
+  descriptor lives; a file held only by the kernel (a loop device's backing file); a change made
+  beneath the filesystem (the block device, a snapshot rolled back), seen by the next walk and
+  only by its stat; anything before `watch start` or while no recorder ran; who made a change.
+  A root process on the machine can stop the recorder or edit the journal: the on-machine record
+  is of a system that is not fighting it.
 - **patterns** prints the roots as the machine is now, with their classes and the entries of the
   newest checkpoint under each, the directories not read, the homes of `etc/passwd` left out and
   why (`/nonexistent: not there`, `/run/sshd: under run, not read`), then the flag list.

@@ -195,10 +195,11 @@ int krec_scan(const struct state *st, long long after, long long upto, krec_fn f
     size_t i = 0;
     while (i + 1 < n && seg[i + 1] <= want) i++;
     if (rc == 0 && (n == 0 || seg[i] > want)) rc = 1;
+    uint64_t at = n > 0 ? seg[i] : 0;
     for (; rc == 0 && i < n && want <= (uint64_t)upto; i++) {
+        if (seg[i] != at) { rc = 1; break; }            /* a segment between the two is gone */
         FILE *f = segment_open(wfd, seg[i]);
         if (f == NULL) { rc = 1; break; }
-        uint64_t at = seg[i];
         int g;
         while ((g = next_line(f, e)) == 1) {
             if (e->seq != at) { g = -1; break; }        /* every seq, once, in order */
@@ -635,4 +636,137 @@ done:
         return 1;
     }
     return 0;
+}
+
+/* ---- touched ---- */
+
+#define TOUCHED_BUF ((size_t)1 << 18)       /* pairs held before they go to the file: 4 MiB */
+
+struct tset {
+    uint64_t *buf;              /* TOUCHED_BUF pairs */
+    size_t n;
+    int tfd;                    /* the state's tmp/ */
+    char name[64], next[64];    /* the file, and the one a merge writes */
+    bool bad;                   /* an overflow, or another recorder's start, in the interval */
+    bool failed;
+};
+
+static int pair_cmp(const void *a, const void *b) {
+    const uint64_t *x = a, *y = b;
+    return x[0] != y[0] ? (x[0] > y[0]) - (x[0] < y[0]) : (x[1] > y[1]) - (x[1] < y[1]);
+}
+
+/* What is held, sorted and each once, merged into the file. */
+static int tset_spill(struct tset *t) {
+    if (t->n == 0) return 0;
+    qsort(t->buf, t->n, 16, pair_cmp);
+    size_t u = 0;
+    for (size_t i = 0; i < t->n; i++)
+        if (u == 0 || pair_cmp(t->buf + 2 * (u - 1), t->buf + 2 * i) != 0) {
+            t->buf[2 * u] = t->buf[2 * i];
+            t->buf[2 * u + 1] = t->buf[2 * i + 1];
+            u++;
+        }
+    const int in = openat(t->tfd, t->name, O_RDONLY | O_NOFOLLOW | O_CLOEXEC);
+    const int out = openat(t->tfd, t->next, O_WRONLY | O_CREAT | O_TRUNC | O_NOFOLLOW | O_CLOEXEC, 0600);
+    FILE *fi = in == -1 ? NULL : fdopen(in, "rb"), *fo = out == -1 ? NULL : fdopen(out, "wb");
+    int rc = fi != NULL && fo != NULL ? 0 : -1;
+    uint64_t have[2];
+    bool more = rc == 0 && fread(have, 16, 1, fi) == 1;
+    size_t i = 0;
+    while (rc == 0 && (more || i < u)) {
+        const int c = !more ? 1 : i == u ? -1 : pair_cmp(have, t->buf + 2 * i);
+        const uint64_t *w = c <= 0 ? have : t->buf + 2 * i;
+        if (fwrite(w, 16, 1, fo) != 1) rc = -1;
+        if (c <= 0) more = fread(have, 16, 1, fi) == 1;
+        if (c >= 0) i++;
+    }
+    if (fi != NULL) fclose(fi); else if (in != -1) close(in);
+    if (fo != NULL && fclose(fo) != 0) rc = -1;
+    if (fo == NULL && out != -1) close(out);
+    if (rc == 0 && renameat(t->tfd, t->next, t->tfd, t->name) == -1) rc = -1;
+    t->n = 0;
+    return rc;
+}
+
+static int tset_event(void *ctx, const struct kev *e) {
+    struct tset *t = ctx;
+    t->bad |= e->kind == KEV_OVERFLOW || e->kind == KEV_START;
+    if (e->kind != KEV_EVENT || !(e->mask & KR_MODIFY) || !e->has_ino) return 0;
+    if (t->n == TOUCHED_BUF && tset_spill(t) == -1) {
+        t->failed = true;
+        return -1;
+    }
+    t->buf[2 * t->n] = e->dev;
+    t->buf[2 * t->n + 1] = e->ino;
+    t->n++;
+    return 0;
+}
+
+void krec_touched_done(struct krec_touched *t) {
+    if (t->fd > 0) {
+        unlink(t->path);
+        close(t->fd - 1);
+    }
+    t->fd = 0;
+    t->available = false;
+}
+
+int krec_touched(const struct state *st, long from, long to, struct krec_touched *out) {
+    memset(out, 0, sizeof *out);
+    struct checkpoint *list = NULL;
+    size_t n = 0;
+    if (state_list(st, &list, &n) == -1) return -1;
+    const struct checkpoint *a = NULL, *b = NULL;
+    for (size_t i = 0; i < n; i++) {
+        if (list[i].id == from) a = &list[i];
+        if (list[i].id == to) b = &list[i];
+    }
+    long long sa = 0, sb = 0;
+    if (a != NULL && b != NULL && a->journal_seq > 0 && b->journal_seq >= a->journal_seq &&
+        strcmp(a->recorder, b->recorder) == 0) {
+        sa = a->journal_seq;
+        sb = b->journal_seq;
+    }
+    free(list);
+    if (sa == 0) return 0;
+    static unsigned serial;
+    struct tset t = { 0 };
+    char tmp[sizeof st->dir + 8];
+    snprintf(tmp, sizeof tmp, "%s/tmp", st->dir);
+    if (mkdir(tmp, 0700) == -1 && errno != EEXIST) {
+        belay_err_set(BELAY_ERR_IO, errno, "cannot create %s", tmp);
+        return -1;
+    }
+    t.tfd = open(tmp, O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC);
+    t.buf = malloc(TOUCHED_BUF * 16);
+    snprintf(t.name, sizeof t.name, "%ld.touched.%u", (long)getpid(), serial);
+    snprintf(t.next, sizeof t.next, "%ld.touched.%u.next", (long)getpid(), serial++);
+    /* held locked: a file found there unlocked is a killed run's (capture-scale SC-M3) */
+    const int fd = t.tfd == -1 ? -1 : openat(t.tfd, t.name, O_RDWR | O_CREAT | O_TRUNC | O_NOFOLLOW | O_CLOEXEC, 0600);
+    int rc = -1;
+    if (t.buf == NULL || fd == -1 || flock(fd, LOCK_EX | LOCK_NB) == -1) {
+        belay_err_set(t.buf == NULL ? BELAY_ERR_NOMEM : BELAY_ERR_IO, errno, "cannot write a temporary file in %s", tmp);
+        goto out;
+    }
+    const int got = krec_scan(st, sa, sb, tset_event, &t);
+    if (got == -1 || (got == 0 && !t.bad && tset_spill(&t) == -1)) {
+        if (got != -1 || t.failed) belay_err_set(BELAY_ERR_IO, errno, "cannot write a temporary file in %s", tmp);
+        goto out;
+    }
+    rc = 0;
+    if (got == 0 && !t.bad) {
+        out->available = true;
+        out->fd = fd + 1;
+        snprintf(out->path, sizeof out->path, "%s/%s", tmp, t.name);
+    }
+out:
+    if (t.tfd != -1) {
+        unlinkat(t.tfd, t.next, 0);
+        if (!out->available) unlinkat(t.tfd, t.name, 0);
+        close(t.tfd);
+    }
+    if (fd != -1 && !out->available) close(fd);
+    free(t.buf);
+    return rc;
 }

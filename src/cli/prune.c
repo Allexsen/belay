@@ -27,6 +27,7 @@
 #include <time.h>
 #include <unistd.h>
 
+#include "watch/krec.h"
 #include "watch/ledger.h"
 #include "belay/error.h"
 #include "belay/manifest.h"
@@ -693,6 +694,15 @@ static int prune(struct state *st, long days, long last, long from, const long *
             if (p.goes[i] && remove_checkpoint(st, list[i].id) == -1) { rc = cli_failed(err); goto out; }
         for (size_t i = 0; i < p.n_stale; i++)
             if (remove_checkpoint(st, p.stale[i]) == -1) { rc = cli_failed(err); goto out; }
+        {
+            /* kernel-record K5: the journal's segments older than the oldest
+             * checkpoint that has a barrier in it */
+            long long oldest = -1;
+            for (size_t i = 0; i < n; i++)
+                if (!p.goes[i] && list[i].journal_seq > 0 && (oldest == -1 || list[i].journal_seq < oldest))
+                    oldest = list[i].journal_seq;
+            if (oldest > 0) krec_prune(st, oldest);
+        }
         uint64_t counted = 0;
         for (size_t i = 0; i < n; i++)
             if (!p.goes[i] && orphan_diffs(st, list[i].id, list, p.goes, n, true, &counted) == -1) { rc = cli_failed(err); goto out; }

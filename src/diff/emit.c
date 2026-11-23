@@ -325,6 +325,9 @@ int emit_trailer(struct emitter *em, const struct diff_inputs *in) {
            DIFF_TRAILER_FIELDS[DT_AFTER_SEALING].name, in->after->sealing) == -1)
         return -1;
     /* runtime-v1 RT-D1: the runtime section's records, after those. */
-    if (ap(&b, ",\"%s\":%zu}", DIFF_TRAILER_FIELDS[DT_RUNTIME].name, in->runtime) == -1) return -1;
+    if (ap(&b, ",\"%s\":%zu", DIFF_TRAILER_FIELDS[DT_RUNTIME].name, in->runtime) == -1) return -1;
+    /* kernel-record K13: only when it cannot be told. */
+    if (in->touched_unavailable && ap(&b, ",\"%s\":\"not available\"", DIFF_TRAILER_FIELDS[DT_TOUCHED].name) == -1) return -1;
+    if (ap(&b, "}") == -1) return -1;
     return put_line(em, &b);
 }

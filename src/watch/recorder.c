@@ -585,6 +585,7 @@ void recorder_run(const struct recorder_cfg *c) {
         }
         char first[16] = "";
         if (pread(r.fx, first, sizeof first - 1, 0) > 0 && strncmp(first, "iflags false\n", 13) == 0) r.iflags_events = false;
+        lseek(r.fx, 0, SEEK_END);       /* what was queued before it started is not its to see (K17) */
         /* the filesystems, from a table the test may put beside the queue */
         char table[PATH_MAX + 16], why[160];
         struct krec_plan *pl = malloc(sizeof *pl);

@@ -119,7 +119,8 @@ is none.
 | `after_unguarded` | int | The second manifest's `unguarded`. |
 | `before_sealing` | int | The first manifest's directories carrying `unreadable`, `mount` or (manifest v5) `not_read`, counted from its entries: nothing below them was looked at (test/expect/diff-fields.md, "The trailer"). |
 | `after_sealing` | int | The second manifest's, likewise. |
-| `runtime` | int | The number of `runtime` records, after the events (test/expect/runtime-v1.md, RT-D1); `0` when neither capture has a runtime record. Last. |
+| `runtime` | int | The number of `runtime` records, after the events (test/expect/runtime-v1.md, RT-D1); `0` when neither capture has a runtime record. The last key of every trailer but one that has `touched`. |
+| `touched` | string | Present only in a diff of two checkpoints of a system watch for which `touched` events cannot be told, and then `not available`: a checkpoint has no `journal_seq`, the two are of different watches or recorders, or the journal between them is gone or not whole (test/expect/kernel-record.md, K13). Absent otherwise: every other diff, and one whose `touched` events, if any, are all there. After `runtime`. |
 <!-- END GENERATED: diff-trailer -->
 
 ## Outcomes
@@ -494,6 +495,7 @@ know. Removing a kind or changing a field's meaning is a new diff version.
 | `config_key_removed` | config | event | path: string, grammar: string, context: list, key: string, value: string | `{path}: {context} › {key} removed: {value}` | The reverse. |
 | `config_key_changed` | config | event | path: string, grammar: string, context: list, key: string, from: string, to: string | `{path}: {context} › {key} {from} -> {to}` | The key has exactly one value in that context on each side and they differ (CF-2); key as written after. A repeated key is never reported as changed. |
 | `config_not_keyed` | config | event | path: string, grammar: string, why: string | `{path}: shown as lines ({why})` | The file's keys are not compared, on a side or both; the text interpreter's line findings stand (CF-6). why: `too large` (a side over 1 MiB or of more than 65,536 triples: CF-4), else `does not parse` (CF-4), else `a block header is not unique` (two blocks at one level, or two sections, with the same header text on a side: CF-3). |
+| `touched` | core | event | -- | `written and now as it was` | A regular file read on both sides, its size and sha256 equal, whose inode the kernel record's journal has a write for between the two checkpoints (kernel-record K13). Only in a diff of two checkpoints of one system watch, taken under one recorder; no count of writes. |
 <!-- END GENERATED: diff-findings -->
 
 ### What each interpreter reports

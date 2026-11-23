@@ -359,6 +359,100 @@ TEST(a_journal_that_is_not_the_recorder_s_is_not_read_as_one) {
     ASSERT_EQ_INT(0, krec_scan(st, 0, 2, NULL, NULL));                          /* what is whole still reads */
 }
 
+/* K13, WS-R1: a file written between two checkpoints and now as it was is
+ * `touched`: an event of the diff, and a line of the receipt's `put back`.
+ * Not one that changed, not one only its attributes were touched on, not
+ * one nothing wrote to; a file replaced by an equal one is. */
+TEST(a_file_written_and_put_back_is_touched) {
+    fresh();
+    REQUIRE(sys("start") == 0);
+    /* conf: written twice, as it was at the end. other: written and different.
+     * passwd: an attribute event only. sub: untouched. group: replaced by an equal file.
+     * tool: under a root whose files are not read (a `meta` file): never. */
+    sh("cd '%s' && printf 'x\\n' > etc/conf && printf 'one\\n' > etc/conf && printf 'changed\\n' > etc/other && "
+       "printf 'root:x:0:\\n' > etc/group.new && mv etc/group.new etc/group && printf 'y\\n' > usr/bin/tool && printf 'tool\\n' > usr/bin/tool", g_tree);
+    queue("M etc/conf\nMW etc/conf\nM etc/other\nA etc/passwd\n+ etc/group\nM etc/group\nM usr/bin/tool\n");
+    REQUIRE_MSG(step() == 0, "%s%s", g_out, g_err);
+    ASSERT_EQ_INT(0, belay("diff", "--system-root", g_tree, "--since", "1", "--to", "2", "--json"));
+    ASSERT_TRUE(strstr(g_out, "{\"event\":\"touched\",\"interp\":\"core\",\"text\":\"written and now as it was\",\"paths\":[\"etc/conf\"]}\n") != NULL);
+    ASSERT_TRUE(strstr(g_out, "\"text\":\"written and now as it was\",\"paths\":[\"etc/group\"]}\n") != NULL);
+    ASSERT_TRUE(strstr(g_out, "\"paths\":[\"etc/other\"]") == NULL && strstr(g_out, "\"paths\":[\"etc/passwd\"]") == NULL &&
+                strstr(g_out, "\"paths\":[\"usr/bin/tool\"]") == NULL);
+    ASSERT_TRUE(strstr(g_out, "\"touched\":") == NULL);                  /* the trailer speaks only when it cannot tell */
+    ASSERT_TRUE(strstr(g_out, "\"events\":2,") != NULL);
+    REQUIRE_MSG(sys("stop") == 0, "%s%s", g_out, g_err);
+    const char *pb = strstr(g_out, "\nput back\n");
+    REQUIRE_MSG(pb != NULL, "%s", g_out);
+    ASSERT_TRUE(strstr(pb, "\n  etc/conf   written and now as it was\n") != NULL);
+    ASSERT_TRUE(strstr(pb, "\n  etc/group   written and now as it was\n") != NULL);
+    ASSERT_TRUE(strstr(pb, "etc/other   written") == NULL);
+    const char *changes = strstr(g_out, "\nchanges\n");
+    ASSERT_TRUE(changes == NULL || pb < changes);                       /* WS-R1's order */
+}
+
+/* K13: `touched` is said only where it can be told. A checkpoint without a
+ * journal_seq, checkpoints of two recorders, a journal that lost events or
+ * a segment: the trailer says `not available` and no event is given. A diff
+ * outside a system watch says nothing of it. */
+TEST(touched_is_not_available_where_the_journal_cannot_tell) {
+    fresh();
+    REQUIRE(sys("start") == 0);                                         /* 1 */
+    sh("cd '%s' && printf 'x\\n' > etc/conf && printf 'one\\n' > etc/conf", g_tree);
+    queue("M etc/conf\noverflow\n");
+    REQUIRE(step() == 0);                                               /* 2: the kernel dropped events */
+    ASSERT_EQ_INT(0, belay("diff", "--system-root", g_tree, "--since", "1", "--to", "2", "--json"));
+    ASSERT_TRUE(strstr(g_out, "\"runtime\":0,\"touched\":\"not available\"}\n") != NULL || strstr(g_out, ",\"touched\":\"not available\"}\n") != NULL);
+    ASSERT_TRUE(strstr(g_out, "\"event\":\"touched\"") == NULL);
+    queue("M etc/conf\n");
+    REQUIRE(step() == 0);                                               /* 3 */
+    ASSERT_EQ_INT(0, belay("diff", "--system-root", g_tree, "--since", "2", "--to", "3", "--json"));
+    ASSERT_TRUE(strstr(g_out, "\"paths\":[\"etc/conf\"]") != NULL && strstr(g_out, "\"touched\":") == NULL);
+    krec_stop(watch_state());                                           /* another recorder from here */
+    queue("M etc/conf\n");
+    REQUIRE(step() == 0);                                               /* 4 */
+    ASSERT_EQ_INT(0, belay("diff", "--system-root", g_tree, "--since", "3", "--to", "4", "--json"));
+    ASSERT_TRUE(strstr(g_out, ",\"touched\":\"not available\"}\n") != NULL && strstr(g_out, "\"event\":\"touched\"") == NULL);
+    queue("M etc/conf\n");
+    REQUIRE(step() == 0);                                               /* 5 */
+    queue("M etc/conf\n");
+    REQUIRE(step() == 0);                                               /* 6 */
+    ASSERT_EQ_INT(0, belay("diff", "--system-root", g_tree, "--since", "4", "--to", "6", "--json"));
+    REQUIRE_MSG(strstr(g_out, "\"paths\":[\"etc/conf\"]") != NULL, "%s", g_out);
+    /* the segment between 4 and 5 gone */
+    ASSERT_TRUE(holds("f=$(ls \"$w\" | grep '^journal\\.' | sort -t. -k2 -n | tail -3 | head -1) && rm \"$w/$f\""));
+    ASSERT_EQ_INT(0, belay("diff", "--system-root", g_tree, "--since", "4", "--to", "6", "--json"));
+    ASSERT_TRUE(strstr(g_out, ",\"touched\":\"not available\"}\n") != NULL && strstr(g_out, "\"event\":\"touched\"") == NULL);
+    REQUIRE(sys("stop") == 0);
+    ASSERT_TRUE(strstr(g_out, "\nput back\n") == NULL);
+    /* a scope that is no system watch's: the key is not there */
+    char plain[500];
+    snprintf(plain, sizeof plain, "%s/plain", g_dir);
+    sh("rm -rf '%s' && mkdir -p '%s' && printf 'a\\n' > '%s/f'", plain, plain, plain);
+    ASSERT_EQ_INT(0, belay("check", "--scope", plain));
+    ASSERT_EQ_INT(0, belay("mark", "--scope", plain));
+    ASSERT_EQ_INT(0, belay("diff", "--scope", plain, "--since", "1", "--to", "2", "--json"));
+    ASSERT_TRUE(strstr(g_out, "\"touched\"") == NULL && strstr(g_out, "\"belay_diff_end\"") != NULL);
+}
+
+/* K5: prune removes the segments older than the oldest checkpoint left, and
+ * `touched` between the checkpoints that stay is still told. */
+TEST(prune_removes_the_segments_before_the_oldest_checkpoint) {
+    fresh();
+    REQUIRE(sys("start") == 0);
+    for (int i = 0; i < 4; i++) {
+        sh("cd '%s' && printf 'x\\n' > etc/conf && printf 'one\\n' > etc/conf && printf '%d\\n' > etc/other", g_tree, i);
+        queue("M etc/conf\nM etc/other\n");
+        REQUIRE(step() == 0);
+    }
+    ASSERT_TRUE(holds("[ -f \"$w/journal.1\" ] && [ \"$(ls \"$w\" | grep -c '^journal\\.')\" = 6 ]"));
+    ASSERT_EQ_INT(0, belay("prune", "--system-root", g_tree, "--keep-last", "2"));
+    ASSERT_TRUE(holds("[ ! -f \"$w/journal.1\" ] && [ \"$(ls \"$w\" | grep -c '^journal\\.')\" = 2 ]"));
+    ASSERT_EQ_INT(0, belay("diff", "--system-root", g_tree, "--since", "4", "--to", "5", "--json"));
+    ASSERT_TRUE(strstr(g_out, "\"paths\":[\"etc/conf\"]") != NULL && strstr(g_out, "\"touched\":") == NULL);
+    REQUIRE(step() == 0);                               /* and the recorder goes on in its own segment */
+    REQUIRE(sys("stop") == 0);
+}
+
 int main(void) {
     snprintf(g_dir, sizeof g_dir, "/tmp/belay_krec_%d_%ld", (int)getpid(), (long)time(NULL));
     snprintf(g_tree, sizeof g_tree, "%s/tree", g_dir);
@@ -375,6 +469,9 @@ int main(void) {
     RUN(a_recorder_that_went_is_a_gap);
     RUN(the_line_names_what_is_walked_every_time_and_what_is_off);
     RUN(a_journal_that_is_not_the_recorder_s_is_not_read_as_one);
+    RUN(a_file_written_and_put_back_is_touched);
+    RUN(touched_is_not_available_where_the_journal_cannot_tell);
+    RUN(prune_removes_the_segments_before_the_oldest_checkpoint);
     end_recorder();
     sh("chmod -R u+rwx '%s' 2>/dev/null; rm -rf '%s'", g_dir, g_dir);
     free(g_out);

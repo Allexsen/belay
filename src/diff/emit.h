@@ -46,6 +46,7 @@ struct diff_inputs {
     const struct belay_manifest_stats *before, *after;
     const char *before_sha256, *after_sha256;
     size_t runtime;             /* the runtime section's records (runtime-v1 RT-D1) */
+    bool touched_unavailable;   /* kernel-record K13: the trailer's `touched` */
 };
 
 /* The trailer: the counts, then the inputs. Sets em->provisional. */

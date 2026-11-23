@@ -1,4 +1,5 @@
 #define _GNU_SOURCE
+#include "watch/krec.h"
 #include "interp/lookup_internal.h"
 #include "cli.h"
 #include "cli_internal.h"
@@ -854,12 +855,18 @@ static int cmd_diff(const struct opts *o, FILE *out, FILE *err) {
     char ida[65] = "", idb[65] = "";             /* diff-fields ID-1 */
     if (!manifest_event_identity(&st, from, ida)) ida[0] = '\0';
     if (!manifest_event_identity(&st, to, idb)) idb[0] = '\0';
+    struct krec_touched kt = { 0 };             /* kernel-record K13: a system watch's checkpoints */
+    if (o->system && krec_touched(&st, from, to, &kt) == -1) { rc = failed(err); goto done; }
     const struct belay_diff_opts dopts = { .before_identity = ida[0] ? ida : NULL, .after_identity = idb[0] ? idb : NULL,
+                                           .touched_path = kt.available ? kt.path : NULL,
+                                           .touched_unavailable = o->system && !kt.available,
                                            .store_dir = st.store, .shadow_lines_before = la == 1 ? lines_a : NULL,
                                            .shadow_lines_after = lb == 1 ? lines_b : NULL,
                                            .runtime_before = ra == 1 ? rt_a : NULL, .runtime_after = rb == 1 ? rt_b : NULL };
     struct belay_diff_stats ds;
-    if (belay_diff(a, b, d, &dopts, &ds) == -1) { rc = failed(err); goto done; }
+    const int diffed = belay_diff(a, b, d, &dopts, &ds);
+    krec_touched_done(&kt);
+    if (diffed == -1) { rc = failed(err); goto done; }
     in = fopen(d, "r");
     if (work[0] != '\0') unlink(d);             /* read from the open stream; nothing left behind */
     if (in == NULL) {

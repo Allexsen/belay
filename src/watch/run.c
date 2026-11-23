@@ -749,13 +749,19 @@ static int do_step(struct wctx *x, const struct wop *op, bool late) {
         char ida[65] = "", idb[65] = "";             /* diff-fields ID-1 */
         if (!manifest_event_identity(&x->st, cursor, ida)) ida[0] = '\0';
         if (!manifest_event_identity(&x->st, c.id, idb)) idb[0] = '\0';
+        struct krec_touched kt = { 0 };         /* kernel-record K13 */
+        if (q->system && krec_touched(&x->st, cursor, c.id, &kt) == -1) goto out;
         const struct belay_diff_opts dopts = { .before_identity = ida[0] ? ida : NULL, .after_identity = idb[0] ? idb : NULL,
+                                               .touched_path = kt.available ? kt.path : NULL,
+                                               .touched_unavailable = q->system && !kt.available,
                                                .store_dir = x->st.store, .shadow_lines_before = la == 1 ? lines_a : NULL,
                                                .shadow_lines_after = lb == 1 ? lines_b : NULL,
                                                .runtime_before = ra == 1 ? rt_a : NULL,
                                                .runtime_after = rb == 1 ? rt_b : NULL };
         struct belay_diff_stats ds;
-        if (belay_diff(mf_a.path, mf_b.path, d, &dopts, &ds) == -1) goto out;
+        const int diffed = belay_diff(mf_a.path, mf_b.path, d, &dopts, &ds);
+        krec_touched_done(&kt);
+        if (diffed == -1) goto out;
         stage(x, "matching");
         struct cli_modes m = { 0 };
         struct flagctx fx = { .lists = { have_old ? &old : NULL, have_fresh ? &fresh : NULL }, .mode = cli_mode_of, .mode_ctx = &m };

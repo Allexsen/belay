@@ -26,6 +26,7 @@
 #ifndef BELAY_WATCH_KREC_H
 #define BELAY_WATCH_KREC_H
 
+#include <limits.h>
 #include <stdbool.h>
 #include <stddef.h>
 #include <stdint.h>
@@ -114,6 +115,25 @@ int krec_barrier(const struct state *st, int wait_ms, long long *seq, int64_t *c
  * belay_err, or when `fn` returned -1. */
 typedef int (*krec_fn)(void *ctx, const struct kev *e);
 int krec_scan(const struct state *st, long long after, long long upto, krec_fn fn, void *ctx);
+
+/*
+ *  `touched` (K13): the inodes the journal has a write (FAN_MODIFY) for
+ *  between the barriers of checkpoints `from` and `to`, as a file of
+ *  (dev, ino) pairs, two uint64_t each, sorted and unique, in the state's
+ *  tmp/ and held locked until krec_touched_done. Built in bounded memory
+ *  (capture-scale SC-M2). `available` false, and no file, when it cannot
+ *  be told: a checkpoint has no journal_seq, they are of different
+ *  recorders (so of different watches, or the recorder was not one process
+ *  over the interval), the journal between them is gone, not whole, or
+ *  says the kernel dropped events. 0; -1 with belay_err.
+ */
+struct krec_touched {
+    bool available;
+    char path[PATH_MAX + 200];
+    int fd;                     /* the lock's descriptor plus one; 0: none */
+};
+int  krec_touched(const struct state *st, long from, long to, struct krec_touched *t);
+void krec_touched_done(struct krec_touched *t);
 
 /* ---- the recorder process (recorder.c) ---- */
 

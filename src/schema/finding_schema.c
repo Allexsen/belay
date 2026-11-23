@@ -34,6 +34,10 @@ const struct finding_kind_def FINDING_KINDS[FK_COUNT] = {
     [FK_AND_MORE] = { "and_more", IN_CORE, LV_PATH | LV_EVENT, { N("n") }, "and {n} more",
         "In the last place of a record past 4,096 findings, or of an interpreter's events past "
         "65,536: the findings or events from that place on, counted." },
+    [FK_TOUCHED] = { "touched", IN_CORE, LV_EVENT, { { 0 } }, "written and now as it was",
+        "A regular file read on both sides, its size and sha256 equal, whose inode the kernel record's "
+        "journal has a write for between the two checkpoints (kernel-record K13). Only in a diff of "
+        "two checkpoints of one system watch, taken under one recorder; no count of writes." },
     [FK_CONTENT_UNAVAILABLE] = { "content_unavailable", I_TEXT | I_PIP | I_DPKG | I_GIT,
         LV_PATH | LV_EVENT, { S("reason"), S("side") }, "content unavailable ({side}): {reason}",
         "The stored copy of a claimed path, on a side where it exists, cannot be read: reason "
