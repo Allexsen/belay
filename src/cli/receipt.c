@@ -703,7 +703,8 @@ static int record(const struct jval *r, struct ctx *x, const struct receipt_opts
                         break;
                     }
                 }
-                if (owner->kind != PK_REMOVED && memchr(path, '\0', plen) == NULL &&
+                /* WS-R5: its config events fold only when the package added the file here */
+                if (owner->kind != PK_REMOVED && strcmp(outcome, "added") == 0 && memchr(path, '\0', plen) == NULL &&
                     str_add(&x->folded, &x->n_folded, &x->cap_folded, path, plen) == -1) {
                     belay_err_set(BELAY_ERR_NOMEM, 0, "receipt: out of memory");
                     return -1;

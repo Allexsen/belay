@@ -441,8 +441,13 @@ TEST(patterns_lists_the_roots_the_homes_left_out_and_the_list) {
  * config's own folding of a package installed here. */
 TEST(the_receipt_is_in_sections_in_order) {
     fresh();
-    sh("cd '%s' && printf '' > etc/.pwd.lock && chmod 600 etc/.pwd.lock", g_tree);
+    sh("cd '%s' && printf '' > etc/.pwd.lock && chmod 600 etc/.pwd.lock && mkdir -p etc/sysctl.d && "
+       "printf 'kernel.t = 1\\n' > etc/sysctl.d/10-tool.conf && "
+       "printf '/.\\n/usr\\n/usr/bin\\n/usr/bin/tool\\n/usr/lib/systemd/system/tool.service\\n/etc\\n/etc/sysctl.d\\n"
+       "/etc/sysctl.d/10-tool.conf\\n' > var/lib/dpkg/info/tool.list", g_tree);
     REQUIRE(sys("start") == 0);
+    /* a user's edit of a package's file there before, the package upgraded after: listed, never folded */
+    sh("cd '%s' && printf 'kernel.t = 4\\n' > etc/sysctl.d/10-tool.conf", g_tree);
     sh("cd '%s' && touch -d 2001-01-01 etc/.pwd.lock && printf 'u ALL=(ALL) ALL\\n' > etc/sudoers.d/90-u && chmod 440 etc/sudoers.d/90-u && "
        "printf 'v:x:1001:1001::/nonexistent:/bin/sh\\n' >> etc/passwd && "
        "printf '* * * * * root /bin/x\\n' > etc/cron.d/x && "
@@ -455,7 +460,7 @@ TEST(the_receipt_is_in_sections_in_order) {
        "mkdir -p etc/systemd/system && "
        "printf '[Unit]\\nDescription=x\\n' > etc/systemd/system/x.service && printf 'z\\n' > etc/motd && "
        "mkdir -p etc/sysctl.d && printf 'kernel.a = 1\\n' > etc/sysctl.d/99-new.conf && printf 'n\\n' > usr/bin/new && "
-       "printf 'Package: tool\\nStatus: install ok installed\\nArchitecture: amd64\\nVersion: 1.0\\n\\n"
+       "printf 'Package: tool\\nStatus: install ok installed\\nArchitecture: amd64\\nVersion: 1.1\\n\\n"
        "Package: new\\nStatus: install ok installed\\nArchitecture: amd64\\nVersion: 2\\n\\n' > var/lib/dpkg/status && "
        "printf '/.\\n/usr\\n/usr/bin\\n/usr/bin/new\\n/etc\\n/etc/sysctl.d\\n/etc/sysctl.d/99-new.conf\\n' > var/lib/dpkg/info/new.list",
        g_tree);
@@ -475,6 +480,7 @@ TEST(the_receipt_is_in_sections_in_order) {
     ASSERT_TRUE(strstr(g_out, ".pwd.lock") != NULL && strstr(g_out, ".pwd.lock") > strstr(g_out, "\nchanges\n"));   /* F12: metadata alone */
     ASSERT_TRUE(strstr(g_out, "PrivateKey") == NULL);
     ASSERT_TRUE(strstr(g_out, "\nconfig\n  etc/sysctl.conf: \xe2\x80\xba net.ipv4.ip_forward added: 1\n"
+                              "  etc/sysctl.d/10-tool.conf: \xe2\x80\xba kernel.t 1 -> 4\n"
                               "  etc/systemd/system/x.service: Unit \xe2\x80\xba Description added: x\n"
                               "  and 1 other in files of packages installed here\n") != NULL);
     ASSERT_TRUE(strstr(g_out, "99-new.conf") == NULL);
