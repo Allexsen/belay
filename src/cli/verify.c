@@ -183,7 +183,7 @@ int cmd_baseline(int argc, char **argv, FILE *out, FILE *err) {
     }
     if (protect != NULL && (rc = exclusions_cover(&st, &spec, err)) != 0) goto done;
 
-    const struct capture_req req = { "check", false, false, 0, protect != NULL ? PROTECT_HASH_MAX_BYTES : 0, false, false, false, false };
+    const struct capture_req req = { "check", false, false, 0, protect != NULL ? PROTECT_HASH_MAX_BYTES : 0, false, false, false, false, 0, NULL };
     struct checkpoint c;
     char manifest[PATH_MAX + 160], sha[65];
     if (state_capture(&st, &req, &c) == -1) { rc = cli_failed(err); goto done; }
@@ -433,7 +433,7 @@ int cmd_verify(int argc, char **argv, FILE *out, FILE *err) {
         if ((rc = bundle_excludes(after, &ignored, protect != NULL ? &spec : NULL, err)) != 0) goto done;
     } else {
         const struct capture_req req = { "check", false, false, 0, bd.meta.hash_max_bytes, false, false, false,
-                                         true };            /* its own state, removed when it is done: no index */
+                                         true, 0, NULL };            /* its own state, removed when it is done: no index */
         struct checkpoint c;
         if (state_capture(&st, &req, &c) == -1) { rc = cli_failed(err); goto done; }
         state_manifest(&st, c.id, after, sizeof after);

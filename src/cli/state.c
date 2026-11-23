@@ -642,6 +642,10 @@ static int read_meta(const struct state *st, const char *name, long id, struct c
         }
         memcpy(k ? c->runtime : c->shadow_lines, d256->s, 65);
     }
+    c->journal_seq = jint(&v, "journal_seq", 0);
+    if (c->journal_seq < 0) c->journal_seq = 0;
+    snprintf(c->recorder, sizeof c->recorder, "%s", jstr(&v, "recorder"));
+    if (strspn(c->recorder, "0123456789abcdef") != 16) c->journal_seq = 0, c->recorder[0] = '\0';
     const struct jval *sf = jget(&v, "since_full");
     c->has_since_full = sf != NULL && sf->t == J_NUM;
     c->since_full = c->has_since_full ? (long)sf->i : 0;
@@ -801,7 +805,8 @@ static int write_meta(const struct state *st, int dfd, const struct checkpoint *
     if (state_json_member(scope, sizeof scope, "scope", st->scope.path) == -1 ||
         belay_json_escape(why, sizeof why, c->full_reason, strlen(c->full_reason)) == -1)
         return -1;
-    char since[40] = "", unread[96] = "", lines[100] = "", rt[100] = "";
+    char since[40] = "", unread[96] = "", lines[100] = "", rt[100] = "", jr[96] = "";
+    if (c->journal_seq > 0) snprintf(jr, sizeof jr, ",\"journal_seq\":%lld,\"recorder\":\"%s\"", c->journal_seq, c->recorder);
     if (c->has_since_full) snprintf(since, sizeof since, ",\"since_full\":%ld", c->since_full);
     if (c->shadow_lines[0] != '\0') snprintf(lines, sizeof lines, ",\"shadow_lines_sha256\":\"%s\"", c->shadow_lines);
     if (c->runtime[0] != '\0') snprintf(rt, sizeof rt, ",\"runtime_sha256\":\"%s\"", c->runtime);
@@ -811,13 +816,13 @@ static int write_meta(const struct state *st, int dfd, const struct checkpoint *
     const int n = snprintf(buf, sizeof buf,
             "{\"id\":%ld,\"kind\":\"%s\",\"created_ns\":%lld,%s,\"entries\":%llu,"
             "\"raced\":%llu,\"unstable\":%llu,\"vanished\":%llu,\"provisional\":%s,\"excluded\":%llu,"
-            "\"prefilter\":{\"used\":%s,\"reference\":\"%s\",\"trusted\":%llu,\"racy\":%llu,\"full_reason\":\"%s\"}%s%s%s%s%s%s}\n",
+            "\"prefilter\":{\"used\":%s,\"reference\":\"%s\",\"trusted\":%llu,\"racy\":%llu,\"full_reason\":\"%s\"}%s%s%s%s%s%s%s}\n",
             c->id, c->kind, (long long)c->created_ns, scope, (unsigned long long)c->entries,
             (unsigned long long)c->raced, (unsigned long long)c->unstable, (unsigned long long)c->vanished,
             c->provisional ? "true" : "false", (unsigned long long)c->excluded,
             c->full ? "false" : "true", state_reference(c), (unsigned long long)c->trusted,
             (unsigned long long)c->racy, why, since, c->kept ? ",\"kept\":true" : "",
-            c->watch ? ",\"watch\":true" : "", unread, lines, rt);
+            c->watch ? ",\"watch\":true" : "", unread, lines, rt, jr);
     if (n < 0 || (size_t)n >= sizeof buf) {
         belay_err_set(BELAY_ERR_RANGE, 0, "%s: too large", shown);
         return -1;
@@ -1141,6 +1146,10 @@ int state_capture(struct state *st, const struct capture_req *req, struct checkp
     }
     c.has_since_full = true;
     c.since_full = c.full ? 0 : since_full + 1;
+    if (req->journal_seq > 0 && req->recorder != NULL && strlen(req->recorder) == 16) {
+        c.journal_seq = req->journal_seq;
+        memcpy(c.recorder, req->recorder, 17);
+    }
     if (write_meta(st, dfd, &c) == -1) goto out;
     manifest_store_delta(st, prev_id, id);
     *out = c;

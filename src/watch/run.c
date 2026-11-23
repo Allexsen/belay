@@ -1,4 +1,5 @@
 #define _GNU_SOURCE
+#include "watch/krec.h"
 #include "watch/run.h"
 
 #include <errno.h>
@@ -34,6 +35,9 @@ int64_t (*watch_clock)(void) = NULL;
 long watch_second_ms = WATCH_SECOND_S * 1000;
 bool watch_withhold_go = false;
 long watch_progress_ms = 10000;
+
+/* K7: how long a capture waits for the recorder to journal its barrier. */
+int watch_barrier_wait_ms = 5000;
 
 static int64_t now_ns(void) {
     if (watch_clock != NULL) return watch_clock();
@@ -525,6 +529,112 @@ static int park(struct wctx *x, const struct wstate *before, const struct checkp
     return ledger_append(&x->l, "walked", x->q->session, x->now, "", NULL);
 }
 
+/* ---- the kernel record at a capture (kernel-record K7, K10, K12, K17) ---- */
+
+struct kscan { bool overflow, mounts, unresolved, restarted; };
+
+static int kscan_event(void *ctx, const struct kev *e) {
+    struct kscan *k = ctx;
+    k->overflow |= e->kind == KEV_OVERFLOW;
+    k->mounts |= e->kind == KEV_MOUNTS;
+    k->restarted |= e->kind == KEV_START;
+    /* K10: an event whose object did not resolve, and whose directory did not either */
+    k->unresolved |= e->kind == KEV_EVENT && !e->has_ino && !(e->named && e->has_dir);
+    return 0;
+}
+
+static int start_recorder(struct wctx *x, struct krec_status *k) {
+    struct belay_system_roots sys = { 0 };
+    if (belay_system_roots(x->st.scope.path, &sys) == -1) return -1;
+    const char **roots = calloc(sys.n_roots + 1, sizeof *roots);
+    int rc = roots == NULL ? nomem() : 0;
+    for (size_t i = 0; rc == 0 && i < sys.n_roots; i++) roots[i] = sys.roots[i].path;
+    if (rc == 0) rc = krec_start(&x->st, roots, sys.n_roots, k);
+    free(roots);
+    belay_system_roots_free(&sys);
+    return rc;
+}
+
+/* Before a system watch's capture looks at anything: the recorder is started
+ * (`watch start`) or found, the barrier taken, and why this capture is a
+ * walk said in `reason`. *seq: the barrier's, 0 when there is none. */
+static int kernel_record_before(struct wctx *x, struct krec_status *ks, bool *have_ks, char reason[64], long long *seq) {
+    *seq = 0;
+    *have_ks = false;
+    memset(ks, 0, sizeof *ks);
+    if (x->st.scope.docker[0] != '\0') {         /* K20, K21: not in this version (the receipt says so) */
+        snprintf(reason, 64, "%s", geteuid() == 0 ? "no kernel record" : "not root");
+        return 0;
+    }
+    bool fresh = false;
+    if (x->starting) {                          /* WS-2, K1: a new watch, a new journal */
+        krec_stop(&x->st);
+        krec_forget(&x->st);
+        if (start_recorder(x, ks) == -1) return -1;
+        ks->since_ns = x->now;
+        fresh = true;
+    } else {
+        const int got = krec_status_read(&x->st, ks);
+        if (got == -1) return -1;
+        if (got == 1) {                         /* a watch begun before there was a recorder */
+            snprintf(reason, 64, "%s", geteuid() == 0 ? "no kernel record" : "not root");
+            return 0;
+        }
+        char id[17];
+        if (ks->on && (!krec_alive(&x->st, id) || strcmp(id, ks->recorder) != 0)) {
+            /* K17: no recorder ran for a while. One is started again; the
+             * gap is said in the receipt, and this capture is a walk. */
+            struct krec_status again;
+            if (start_recorder(x, &again) == -1) return -1;
+            if (!ks->gap) ks->gap_from_ns = ks->last_ns != 0 ? ks->last_ns : ks->since_ns;
+            ks->gap = true;
+            ks->gap_to_ns = x->now;
+            snprintf(ks->gap_why, sizeof ks->gap_why, "the recorder was not running");
+            ks->last_seq = 0;
+            if (again.on) {
+                memcpy(ks->recorder, again.recorder, sizeof ks->recorder);
+                ks->iflags_events = again.iflags_events;
+                snprintf(ks->walked, sizeof ks->walked, "%s", again.walked);
+            } else {
+                ks->on = false;
+                snprintf(ks->off_why, sizeof ks->off_why, "%s", again.off_why);
+            }
+            fresh = true;
+        }
+    }
+    *have_ks = true;
+    if (!ks->on) {
+        snprintf(reason, 64, "%s", strcmp(ks->off_why, "not root") == 0 ? "not root" : "no kernel record");
+        return 0;
+    }
+    int64_t ctime_ns;
+    const int b = krec_barrier(&x->st, watch_barrier_wait_ms, seq, &ctime_ns);
+    if (b == -1) return -1;
+    if (b == 1) {                               /* K7 */
+        *seq = 0;
+        snprintf(reason, 64, "the recorder did not answer");
+        return 0;
+    }
+    struct kscan sc = { 0 };
+    if (fresh) {
+        snprintf(reason, 64, "%s", x->starting ? "the first capture of the watch" : "the recorder was restarted");
+    } else if (x->troubles_only) {              /* K12: receipt and stop */
+        snprintf(reason, 64, "the end state rests on a walk");
+    } else if (ks->last_seq == 0) {
+        snprintf(reason, 64, "the previous capture had no barrier");
+    } else {
+        const int s = krec_scan(&x->st, ks->last_seq, *seq, kscan_event, &sc);
+        if (s == -1) return -1;
+        snprintf(reason, 64, "%s", s == 1 ? "the journal cannot be read"
+                                 : sc.restarted ? "the recorder was restarted"
+                                 : sc.overflow ? "the kernel dropped events"
+                                 : sc.mounts ? "the mounts changed"
+                                 : sc.unresolved ? "an event did not resolve"
+                                 : "no capture from events in this version");
+    }
+    return 0;
+}
+
 static int do_step(struct wctx *x, const struct wop *op, bool late) {
     const struct wreq *q = x->q;
     struct wstate *st = &x->l.st;
@@ -566,8 +676,10 @@ static int do_step(struct wctx *x, const struct wop *op, bool late) {
         have = have && state_check_manifest(&x->st, cursor) == 0;
         belay_err_clear();
     }
-    const struct capture_req req = { "mark", true, false, 50, 0, false, true, q->system, false };
+    struct capture_req req = { "mark", true, false, 50, 0, false, true, q->system, false, 0, NULL };
     struct checkpoint c = { 0 };
+    static struct krec_status ks;
+    bool have_ks = false;
     static struct wstate before;
     before = *st;
     if (late) {                         /* WS-3a: the walk an earlier step left, reported now */
@@ -575,18 +687,26 @@ static int do_step(struct wctx *x, const struct wop *op, bool late) {
         c.created_ns = st->pending_ns;
         s->since_ns = st->cursor_ns;
     } else if (q->system) {
+        /* K7: the barrier first, under the lock, before the capture looks at anything */
+        char words[96], reason[64];
+        if (kernel_record_before(x, &ks, &have_ks, reason, &req.journal_seq) == -1) return -1;
+        req.recorder = ks.recorder;
         /* WS-3a: a walk, under the lock, said in the record before it begins */
-        char words[96];
-        snprintf(words, sizeof words, "walking (%s)", watch_walk_reason());
+        snprintf(words, sizeof words, "walking (%s)", reason);
         x->walked = true;
         x->walk_began = now_ns();
         st->walk_ns = x->walk_began;
-        snprintf(st->walk_reason, sizeof st->walk_reason, "%s", watch_walk_reason());
+        snprintf(st->walk_reason, sizeof st->walk_reason, "%s", reason);
         if (ledger_append(&x->l, "walk", q->session, x->now, "", NULL) == -1) return -1;
         x->stage = "walking";
         msg(x->to_sup, 'S', words, strlen(words));
         if (watch_stage_hook != NULL) watch_stage_hook("walking");
         if (state_capture(&x->st, &req, &c) == -1) return -1;
+        if (have_ks) {                  /* what the next capture's interval starts from */
+            ks.last_seq = req.journal_seq;
+            ks.last_ns = c.created_ns;
+            if (krec_status_write(&x->st, &ks) == -1) return -1;
+        }
         st->walk_ns = 0;
         st->walk_reason[0] = '\0';
         if (supervisor_gone(x)) {
@@ -971,7 +1091,7 @@ static int work(struct wctx *x) {
                 x->status = 3;
                 return 0;
             }
-            x->starting = true;     /* step 7: the recorder starts here, when it can (kernel-record K1) */
+            x->starting = true;     /* its step starts the recorder, when it can (kernel-record K1) */
             break;
         case WOP_RECEIPT: {                     /* WS-R, after the step that is its end state (K12) */
             struct wstate *snap = x->n_pend > 0 ? &x->pend[x->n_pend - 1].snap : st;
@@ -988,7 +1108,8 @@ static int work(struct wctx *x) {
                 if (snap->cursor == 0) belay_err_set(BELAY_ERR_IO, 0, "no checkpoint to end the receipt with");
                 return -1;
             }
-            if (op->how == 1) {                 /* stop: the watch ends; step 7: and its recorder (K1) */
+            if (op->how == 1) {                 /* stop: the watch ends, and its recorder (K1) */
+                krec_stop(&x->st);
                 snap->sys_started_ns = 0;
                 snap->sys_start = 0;
                 if (snap != st) { st->sys_started_ns = 0; st->sys_start = 0; }

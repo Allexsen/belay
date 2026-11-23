@@ -14,6 +14,7 @@
 #include "cli/cli_internal.h"
 #include "cli/delta.h"
 #include "cli/receipt.h"
+#include "watch/krec.h"
 #include "watch/sysflag.h"
 
 #define LISTED 20
@@ -22,16 +23,25 @@
 
 /* ---- the kernel record: STEP 7 SETS THIS ---- */
 
-void watch_kernel_record(const struct wstate *w, struct wkrec *k) {
-    (void)w;            /* step 7: the recorder's state is kept with the watch's */
+void watch_kernel_record(const struct state *st, struct wkrec *k) {
+    static struct krec_status s;
     memset(k, 0, sizeof *k);
     k->iflags_events = true;
-    snprintf(k->off_why, sizeof k->off_why, "%s", geteuid() == 0 ? "no recorder in this version" : "not root");
-}
-
-const char *watch_walk_reason(void) {
-    /* step 7: why this capture cannot be one of the journal's */
-    return geteuid() == 0 ? "no kernel record" : "not root";
+    const int got = krec_status_read(st, &s);
+    belay_err_clear();
+    if (got != 0) {             /* a watch started before there was a recorder, or a state that does not read */
+        snprintf(k->off_why, sizeof k->off_why, "%s", geteuid() == 0 ? "the watch was started without one" : "not root");
+        return;
+    }
+    k->on = s.on;
+    k->since_ns = s.since_ns;
+    k->gap = s.gap;
+    k->gap_from_ns = s.gap_from_ns;
+    k->gap_to_ns = s.gap_to_ns;
+    k->iflags_events = s.iflags_events;
+    snprintf(k->gap_why, sizeof k->gap_why, "%s", s.gap_why);
+    snprintf(k->off_why, sizeof k->off_why, "%s", s.off_why);
+    snprintf(k->walked, sizeof k->walked, "%s", s.walked);
 }
 
 static void iso(int64_t ns, char out[32]) {
@@ -101,7 +111,7 @@ int sysreceipt_head(const struct state *st, long cp, const struct wstate *w, str
     else if (n > LISTED) wsb_f(out, ", and %zu more", n - LISTED);
     wsb_f(out, "\n");
     struct wkrec k;
-    watch_kernel_record(w, &k);
+    watch_kernel_record(st, &k);
     if (st->scope.docker[0] != '\0' && !k.on)        /* WS-R3: kernel-record K20, K21 are not built yet */
         snprintf(k.off_why, sizeof k.off_why, "%s", DOCKER_NO_RECORD);
     if (geteuid() != 0) {               /* WS-R2: each part only when it is true of this run */

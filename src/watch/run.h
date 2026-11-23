@@ -63,6 +63,9 @@ bool watch_too_wide(const char *resolved);
  * "committing" before it asks, "writing the record" after the answer), so a test can
  * stall or kill it there. */
 extern void (*watch_stage_hook)(const char *stage);
+/* kernel-record K7: how long a capture waits for the recorder to journal its
+ * barrier, in milliseconds (5000). A variable so that a test need not wait. */
+extern int watch_barrier_wait_ms;
 /* Test hooks: the clock a step reads (NULL: the system's), and the second
  * limit in milliseconds past the deadline. */
 extern int64_t (*watch_clock)(void);

@@ -27,8 +27,7 @@ struct wkrec {
     char walked[512];                   /* "; walked every time: boot (vfat)", or "" (kernel-record K2a) */
     bool iflags_events;                 /* false: "; inode flags as of the last walk" */
 };
-void watch_kernel_record(const struct wstate *w, struct wkrec *k);
-const char *watch_walk_reason(void);
+void watch_kernel_record(const struct state *st, struct wkrec *k);
 
 /* The receipt's opening lines for checkpoint `cp`: `could not read` (with
  * the `not root:` line under it when it is true) and `kernel record`. */

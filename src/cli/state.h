@@ -120,6 +120,9 @@ struct checkpoint {
                                    checkpoint-v3 C3-6b); "": it has none */
     char runtime[65];           /* the sha256 of its `runtime.ndjson` (runtime-v1.md,
                                    checkpoint-v3 C3-6); "": it has none */
+    long long journal_seq;      /* the kernel record's seq of its barrier (kernel-record K7,
+                                   checkpoint-v3 C3-6a); 0: not taken under one */
+    char recorder[17];          /* the recorder that journaled it; "": none */
     bool has_since_full;        /* meta.json says since_full (older ones don't) */
     long since_full;            /* marks since the last full one: pruning can't reset it */
 };
@@ -189,6 +192,8 @@ struct capture_req {
                                    (watch-system.md WS-6 to WS-9), resolved at every capture */
     bool no_index;              /* no capture follows this one in this state (verify's own):
                                    the index of its manifest is not written */
+    long long journal_seq;      /* a system watch's: its barrier in the kernel record (K7); 0: none */
+    const char *recorder;       /* and the recorder that journaled it */
 };
 
 /* The state root's path relative to the scope, when its resolved path is

@@ -338,7 +338,8 @@ static void json_checkpoint(FILE *out, const struct state *st, const struct chec
      * did, without the seven keys (C3-8). No capture is from events yet, and
      * none has a kernel record: `walk`, 0 and a null; a system watch's has a
      * runtime record and may have a per-line digest file. */
-    char unread[96] = "", lines[80] = "null", rt[80] = "null";
+    char unread[96] = "", lines[80] = "null", rt[80] = "null", jseq[32] = "null";
+    if (c->journal_seq > 0) snprintf(jseq, sizeof jseq, "%lld", c->journal_seq);
     if (c->shadow_lines[0] != '\0') snprintf(lines, sizeof lines, "\"%s\"", c->shadow_lines);
     if (c->runtime[0] != '\0') snprintf(rt, sizeof rt, "\"%s\"", c->runtime);
     if (c->counts_unread)
@@ -347,7 +348,7 @@ static void json_checkpoint(FILE *out, const struct state *st, const struct chec
     fprintf(out, "{\"id\":%ld,\"kind\":\"%s\",\"created_ns\":%lld,%s,%s,"
                  "\"entries\":%llu,\"raced\":%llu,\"unstable\":%llu,\"vanished\":%llu,%s\"provisional\":%s,"
                  "\"excluded\":%llu,\"excluded_paths\":%s,\"prefilter\":{\"used\":%s,\"reference\":\"%s\",\"trusted\":%llu,"
-                 "\"racy\":%llu,\"full_reason\":\"%s\"},%s\"source\":%s,\"stored\":\"%s\",\"kept\":%s%s%s%s%s}\n",
+                 "\"racy\":%llu,\"full_reason\":\"%s\"},%s\"source\":%s,\"stored\":\"%s\",\"kept\":%s%s%s%s%s%s%s}\n",
             c->id, c->kind, (long long)c->created_ns, esc, mesc, (unsigned long long)c->entries,
             (unsigned long long)c->raced, (unsigned long long)c->unstable, (unsigned long long)c->vanished,
             unread, c->provisional ? "true" : "false", (unsigned long long)c->excluded, xs, c->full ? "false" : "true",
@@ -355,7 +356,8 @@ static void json_checkpoint(FILE *out, const struct state *st, const struct chec
             c->counts_unread ? "\"basis\":\"walk\",\"carried\":0," : "", src,
             delta ? "delta" : "whole", c->kept ? "true" : "false",
             c->counts_unread ? ",\"runtime_sha256\":" : "", c->counts_unread ? rt : "",
-            c->counts_unread ? ",\"journal_seq\":null,\"shadow_lines_sha256\":" : "", c->counts_unread ? lines : "");
+            c->counts_unread ? ",\"journal_seq\":" : "", c->counts_unread ? jseq : "",
+            c->counts_unread ? ",\"shadow_lines_sha256\":" : "", c->counts_unread ? lines : "");
 }
 
 /* What a manifest's header says was not walked, one line each (Q6;
@@ -557,7 +559,7 @@ static int cmd_capture(const struct opts *o, const char *kind, FILE *out, FILE *
         state_close(&st);
         return rc;
     }
-    const struct capture_req req = { kind, strcmp(kind, "mark") == 0, o->full, o->full_every, 0, o->keep, false, o->system, false };
+    const struct capture_req req = { kind, strcmp(kind, "mark") == 0, o->full, o->full_every, 0, o->keep, false, o->system, false, 0, NULL };
     struct checkpoint c;
     if (state_capture(&st, &req, &c) == -1) {
         rc = failed(err);
@@ -812,7 +814,7 @@ static int cmd_diff(const struct opts *o, FILE *out, FILE *err) {
     }
     if (to == 0) {
         /* Q3: the capture is kept as a checkpoint, prefiltered as a mark. */
-        const struct capture_req req = { "diff", true, false, o->full_every, 0, false, false, o->system, false };
+        const struct capture_req req = { "diff", true, false, o->full_every, 0, false, false, o->system, false, 0, NULL };
         if (state_capture(&st, &req, &now) == -1) { rc = failed(err); goto done; }
         to = now.id;
         snprintf(label_b, sizeof label_b, "now (checkpoint %ld)", to);
