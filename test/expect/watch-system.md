@@ -18,6 +18,7 @@ says only what differs with `--system`.
 
 | id | rule |
 |---|---|
+| WS-0 | **Experimental.** One line, the same text everywhere: `experimental: the system watch is new, slow on large machines, and its output may change`. `belay help` and `belay help watch` give it where `--system` is described, `docs/cli.md` at the head of its system watch section; `watch start --system` prints it first, on standard error; `watch receipt --system` and `watch stop --system` give it as the receipt's first line. |
 | WS-1 | `--system` takes the place of `--scope` on `watch start\|step\|receipt\|stop\|summary\|patterns` and on `check`, `mark`, `diff`, `log`, `manifest`, `prune`: the scope is `/`, read by the roots below. `--scope /` without it stays refused (`not watching /: too wide`). With `--docker C` the scope is the container's `/`. |
 | WS-2 | `watch start` takes the first capture, starts the recorder when it can (kernel-record.md), and prints the two opening lines of the receipt. `watch stop` prints the receipt and ends the recorder. A second `start` on a running watch is refused. |
 | WS-3 | watch-v1's time limit (TM-1, 45 s) holds for `step`. `start`, `receipt` and `stop` have none and print one progress line to standard error every 10 s. |
