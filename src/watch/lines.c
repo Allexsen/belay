@@ -131,13 +131,18 @@ static void named(struct wsb *out, const struct wstep *steps, size_t n, bool fla
     more(out, "noted", rest_n);
 }
 
-static void counts(struct wsb *out, const struct wstep *s, uint64_t u) {
+/* LN-6's counts, without the directory */
+static void by_outcome(struct wsb *out, const uint64_t c[WATCH_OUTCOMES]) {
     bool first = true;
     for (int i = 0; i < WATCH_OUTCOMES; i++) {
-        if (s->counts[i] == 0) continue;
-        wsb_f(out, "%s%llu %s", first ? "" : ", ", (unsigned long long)s->counts[i], watch_outcome_word[i]);
+        if (c[i] == 0) continue;
+        wsb_f(out, "%s%llu %s", first ? "" : ", ", (unsigned long long)c[i], watch_outcome_word[i]);
         first = false;
     }
+}
+
+static void counts(struct wsb *out, const struct wstep *s, uint64_t u) {
+    by_outcome(out, s->counts);
     if (u > 3 && s->under != NULL && s->n_under * 2 > u)
         wsb_f(out, " (%llu under %s/)", (unsigned long long)s->n_under, s->under);
 }
@@ -170,7 +175,10 @@ void lines_step(struct wsb *out, const struct wstep *s) {
                 wsb_f(out, "; ");
                 named(out, s, 1, true, true, false, &nf, &nn);
             }
-            wsb_f(out, DOT "%llu file%s in the tree", (unsigned long long)s->tree, s->tree == 1 ? "" : "s");
+            uint64_t t = 0;
+            for (int i = 0; i < WATCH_OUTCOMES; i++) t += s->tree[i];
+            wsb_f(out, DOT "%llu change%s in the tree%s", (unsigned long long)t, t == 1 ? "" : "s", t ? ": " : "");
+            by_outcome(out, s->tree);
         } else if (any) {
             named(out, s, 1, true, true, false, &nf, &nn);
             if (s->by_installed > 0)                /* WS-N5 */

@@ -458,7 +458,7 @@ static int match_diff(struct wctx *x, const char *d, struct flagctx *fx, struct 
                     rc = nomem();
                 } else if (r == 0) {
                     s->counts[watch_outcome_index(word)]++;
-                    if (!(len >= 4 && memcmp(path, ".git", 4) == 0 && (len == 4 || path[4] == '/'))) s->tree++;
+                    if (!(len >= 4 && memcmp(path, ".git", 4) == 0 && (len == 4 || path[4] == '/'))) s->tree[watch_outcome_index(word)]++;
                     if (unflagged < 3) {                    /* named when three or fewer (LN-5) */
                         char *shown = flag_shown(path, len);
                         const size_t nc = (shown != NULL ? strlen(shown) : 0) + 24;
