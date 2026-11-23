@@ -24,7 +24,11 @@ Tested against 2,115 published agent runs: [results](bench/replay/RESULTS.md).
   state directory.
 - Interpreters that explain changes to pip installs, dpkg's package database, git refs, hooks,
   reflogs (kept and read in full up to 16 MiB each) and small text files
-  ([docs/spec/diff-v1.md](docs/spec/diff-v1.md)).
+  ([docs/spec/diff-v1.md](docs/spec/diff-v1.md)). Added recently: users and groups
+  (`etc/passwd`, `etc/group`), sudoers, cron, systemd units and timers, ssh `authorized_keys`, the
+  trust store (`etc/ssl/certs`), and the keys of nginx, sshd and ini-style configuration files
+  ([docs/cli.md](docs/cli.md#--system-a-whole-machine-by-its-roots)). They recognise the files by
+  their paths, in any scope; `--system` is what reads them on a whole machine.
 - `belay baseline export` and `belay verify`: a checkpoint kept as a bundle, and a directory compared
   with it and judged against a protect spec.
 - `--docker`: a container's layers read from the host.
@@ -32,13 +36,20 @@ Tested against 2,115 published agent runs: [results](bench/replay/RESULTS.md).
   anything in a sensitive place first ([docs/cli.md](docs/cli.md#watch-a-running-record-of-a-directory),
   pinned in [test/expect/watch-v1.md](test/expect/watch-v1.md)); and a
   [Claude Code plugin](claude-plugin/README.md) around it.
+- `belay watch --system`, **experimental**: the same running record for a whole machine's `/`,
+  read by a list of roots. `watch start --system` takes the first capture, `watch step --system`
+  prints a step's line, and `watch receipt --system` and `watch stop --system` print the receipt in
+  sections (installed, services, user, cron, sudo, ...). It is new, slow on large machines, and its
+  output may change ([docs/cli.md](docs/cli.md#watch---system), pinned in
+  [test/expect/watch-system.md](test/expect/watch-system.md)).
 - pybelay, Python bindings around the binary, with a reward helper and an
   [Inspect integration](python/README.md#using-belay-with-inspect). The integration runs belay inside
   the sample's sandbox, or with `where="host"` on the eval's machine, reading the sample's Docker
   container from outside; that mode needs root for belay.
-- The manifest format, version 4 ([test/expect/manifest-v4.md](test/expect/manifest-v4.md), built on
-  [version 2](docs/spec/manifest-v2.md) and [version 1](docs/spec/manifest-v1.md), all of which belay
-  still reads) and the diff format (diff.v1, a draft).
+- The manifest format, version 5 ([test/expect/manifest-v5.md](test/expect/manifest-v5.md), built on
+  [version 4](test/expect/manifest-v4.md), [version 2](docs/spec/manifest-v2.md) and
+  [version 1](docs/spec/manifest-v1.md); belay still reads versions 1 to 4) and the diff format
+  (diff.v1, a draft).
 - Tests on Linux (x86_64, arm64), on macOS, and inside a Docker container as an unprivileged user,
   in CI on every change.
 
