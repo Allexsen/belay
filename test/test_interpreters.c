@@ -645,6 +645,54 @@ TEST(git_events_say_how_a_branch_moved_only_by_a_reflog_that_agrees) {
     r_free(&r);
 }
 
+/* The operation as git writes it (git 2.43.0, probed): a merge whose
+ * arguments name a branch `rebase-fix` or say `--no-rebase` rebases nothing,
+ * a commit's subject is the author's, a pull under `pull.rebase` or `-r`
+ * rebases though no word says so (E12). */
+TEST(git_events_read_the_operation_not_a_word_of_its_arguments) {
+    struct run r;
+    r_begin(&r, BELAY_INTERP_GIT, true);
+    const struct belay_entry a = file(put(OA "\n"), 0), b = file(put(OB "\n"), 0);
+    static const char *const ops[][2] = {
+        { "m1", "merge rebase-fix: Merge made by the 'ort' strategy." },
+        { "m2", "pull --no-rebase origin reset-branch: Merge made by the 'ort' strategy." },
+        { "m3", "pull --rebase origin main: Fast-forward" },
+        { "m4", "commit: fix: forced-update" },
+        { "r1", "pull origin main (finish): refs/heads/r1 onto " OB },
+        { "r2", "pull -r (finish): refs/heads/r2 onto " OB },
+        { "r3", "rebase -i (finish): refs/heads/r3 onto " OB },
+        { "r4", "update by push: forced-update" },
+        { "x1", "checkout: moving from main to Fast-forward" },
+    };
+    for (size_t i = 0; i < sizeof ops / sizeof ops[0]; i++) {
+        char l[512], ref[64], log[64];
+        snprintf(l, sizeof l, OA " " OB WHO "%s\n", ops[i][1]);
+        const struct belay_entry e = file(put(l), 0);
+        snprintf(ref, sizeof ref, "/s/.git/refs/heads/%s", ops[i][0]);
+        snprintf(log, sizeof log, "/s/.git/logs/refs/heads/%s", ops[i][0]);
+        r_path(&r, ref, &a, &b, "modified");
+        r_path(&r, log, NULL, &e, "added");
+    }
+#define ADDED(n) GEV("git_commits_added", "\"repo\":\".git\",\"branch\":\"" n "\",\"to\":\"" OB "\"", \
+                     "commits added to " n ", now at " OB) \
+                 ",\"paths\":[\".git/logs/refs/heads/" n "\",\".git/refs/heads/" n "\"]}\n"
+#define REWRITTEN(n, how) GEV("git_history_rewritten", "\"repo\":\".git\",\"branch\":\"" n "\",\"how\":\"" how \
+                              "\",\"from\":\"" OA "\",\"to\":\"" OB "\"", n " rewritten by " how ": " OA " -> " OB) \
+                          ",\"paths\":[\".git/logs/refs/heads/" n "\",\".git/refs/heads/" n "\"]}\n"
+    ASSERT_EQ_STR(
+        ADDED("m1") ADDED("m2") ADDED("m3")
+        GEV("git_commits_added", "\"repo\":\".git\",\"branch\":\"m4\",\"count\":1,\"to\":\"" OB "\"",
+            "commits added to m4: 1, now at " OB) ",\"paths\":[\".git/logs/refs/heads/m4\",\".git/refs/heads/m4\"]}\n"
+        REWRITTEN("r1", "pull origin main (finish)") REWRITTEN("r2", "pull -r (finish)")
+        REWRITTEN("r3", "rebase -i (finish)") REWRITTEN("r4", "update by push")
+        GEV("git_branch_moved", "\"repo\":\".git\",\"branch\":\"x1\",\"from\":\"" OA "\",\"to\":\"" OB "\"", "x1 " OA " -> " OB)
+            ",\"paths\":[\".git/refs/heads/x1\"]}\n",
+        r_end(&r));
+#undef ADDED
+#undef REWRITTEN
+    r_free(&r);
+}
+
 /* A rename: the new branch's reflog says so and the old one went at the
  * same commit -- one event, not a creation and a deletion. A commit on a
  * packed branch (its loose ref reappears) is commits added, by its reflog;
@@ -1559,6 +1607,7 @@ int main(void) {
     RUN(git_reflog_entries_appended_and_the_moves_that_are_not_commits);
     RUN(git_events_create_delete_commit_and_switch);
     RUN(git_events_say_how_a_branch_moved_only_by_a_reflog_that_agrees);
+    RUN(git_events_read_the_operation_not_a_word_of_its_arguments);
     RUN(git_events_rename_and_packed_branches);
     RUN(git_events_from_an_unknown_ref_are_provisional);
     RUN(git_a_symbolic_loose_branch_is_an_alias_with_no_event_of_its_own);

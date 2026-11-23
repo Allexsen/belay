@@ -396,11 +396,6 @@ static int gs_cmp(struct gs a, struct gs b) {
     const int c = memcmp(a.s, b.s, a.n < b.n ? a.n : b.n);
     return c ? c : (a.n > b.n) - (a.n < b.n);
 }
-static bool has(struct gs a, const char *w) {
-    const size_t wl = strlen(w);
-    for (size_t i = 0; i + wl <= a.n; i++) if (memcmp(a.s + i, w, wl) == 0) return true;
-    return false;
-}
 static bool starts(struct gs a, const char *w) { return a.n >= strlen(w) && memcmp(a.s, w, strlen(w)) == 0; }
 static bool is_op(struct gs a, const char *w) { return a.n == strlen(w) && memcmp(a.s, w, a.n) == 0; }
 static bool zeros(struct gs a) {
@@ -676,6 +671,35 @@ static void add_path(struct gev *e, const struct gfact *x) {
 
 /* How the reflog says a branch moved from b to a, when its entries of this
  * diff lead from one to the other: rewritten, commits added, or not said. */
+/* A reflog entry's operation and message as git writes them (E12; git
+ * 2.43.0 probed): a word of a merge's arguments (`pull --no-rebase`, `merge
+ * rebase-fix`) or of a commit's subject is no operation. */
+static bool word1(struct gs op, const char *w) {
+    const size_t wl = strlen(w);
+    return op.n >= wl && memcmp(op.s, w, wl) == 0 && (op.n == wl || op.s[wl] == ' ');
+}
+static bool ends(struct gs a, const char *w) {
+    const size_t wl = strlen(w);
+    return a.n >= wl && memcmp(a.s + a.n - wl, w, wl) == 0;
+}
+static bool commit_op(struct gs op) {
+    return is_op(op, "commit") || is_op(op, "commit (merge)") || is_op(op, "cherry-pick") ||
+           is_op(op, "revert") || is_op(op, "am");
+}
+/* `rebase ...`, or a pull whose last word is a rebase step: `pull --rebase
+ * (finish)`, `pull -r (finish)`, `pull (finish)` under pull.rebase */
+static bool rebases(struct gs op) {
+    if (word1(op, "rebase")) return true;
+    if (!word1(op, "pull") || op.n == 0 || op.s[op.n - 1] != ')') return false;
+    size_t i = op.n;
+    while (i > 0 && op.s[i - 1] != ' ') i--;
+    return op.s[i] == '(';
+}
+static bool rewrites(const struct gentry *x) {
+    return is_op(x->op, "reset") || is_op(x->op, "commit (amend)") || rebases(x->op) ||
+           starts(x->msg, "branch: Reset to") || (ends(x->msg, ": forced-update") && !commit_op(x->op));
+}
+
 static void classify(struct git *g, struct gev *e, const struct gfact *lg, struct gs b, struct gs a) {
     e->kind = FK_GIT_BRANCH_MOVED;
     e->a = b; e->b = a;
@@ -686,11 +710,9 @@ static void classify(struct git *g, struct gev *e, const struct gfact *lg, struc
     bool rewrite = false, adds = true, counted = true;
     for (size_t i = 0; i < lg->ne; i++) {
         const struct gentry *x = &lg->e[i];
-        const bool rw = is_op(x->op, "reset") || is_op(x->op, "commit (amend)") || has(x->op, "rebase") ||
-                        starts(x->msg, "branch: Reset to") || has(x->msg, "forced-update");
-        const bool one = is_op(x->op, "commit") || is_op(x->op, "commit (merge)") || is_op(x->op, "cherry-pick") ||
-                         is_op(x->op, "revert") || is_op(x->op, "am");
-        const bool many = has(x->msg, "Fast-forward") || starts(x->op, "merge") || starts(x->op, "pull");
+        const bool rw = rewrites(x);
+        const bool one = commit_op(x->op);
+        const bool many = ends(x->msg, ": Fast-forward") || word1(x->op, "merge") || word1(x->op, "pull");
         rewrite |= rw;
         adds &= one || many;
         counted &= one;
@@ -701,14 +723,11 @@ static void classify(struct git *g, struct gev *e, const struct gfact *lg, struc
         size_t w = 0;
         for (size_t i = 0; i < lg->ne; i++) {
             const struct gentry *x = &lg->e[i];
-            if (!(is_op(x->op, "reset") || is_op(x->op, "commit (amend)") || has(x->op, "rebase") ||
-                  starts(x->msg, "branch: Reset to") || has(x->msg, "forced-update")))
-                continue;
+            if (!rewrites(x)) continue;
             bool seen = false;
             for (size_t j = 0; j < i && !seen; j++) {
                 const struct gentry *y = &lg->e[j];
-                seen = gs_eq(y->op, x->op) && (is_op(y->op, "reset") || is_op(y->op, "commit (amend)") ||
-                       has(y->op, "rebase") || starts(y->msg, "branch: Reset to") || has(y->msg, "forced-update"));
+                seen = gs_eq(y->op, x->op) && rewrites(y);
             }
             if (seen) continue;
             if (w && w + 2 < sizeof how) { memcpy(how + w, ", ", 2); w += 2; }
