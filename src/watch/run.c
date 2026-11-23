@@ -16,6 +16,7 @@
 #include "belay/diff.h"
 #include "belay/error.h"
 #include "belay/hash.h"
+#include "belay/json.h"
 #include "belay/manifest.h"
 #include "cli/cli.h"
 #include "cli/cli_internal.h"
@@ -365,8 +366,10 @@ static int nomem(void) {
 struct gitlead { char branch[GIT_NAME_MAX + 1], to[65]; bool have; };
 
 /* The paths a flag row or a flagged event names: listed in the receipt
- * even under .git/ (LN-10). Sorted before the receipt is made. */
-struct named { char **p; size_t n, cap; };
+ * even under .git/ (LN-10), as bytes. Sorted before the receipt is made.
+ * unmatched: a flagged event named a path that could not be read back (or
+ * cut its list), so nothing under .git/ folds. */
+struct named { char **p; size_t n, cap; bool unmatched; };
 
 static int named_add(struct named *v, const char *s, size_t len) {
     if (v->n == v->cap) {
@@ -441,9 +444,17 @@ static int match_diff(struct wctx *x, const char *d, struct flagctx *fx, struct 
             }
             const int r = flag_event(&v, &f);
             if (r == -1 || (r == 1 && add_flag(s, &f) == -1)) { free(r == 1 ? f.text : NULL); rc = nomem(); }
-            const struct jval *ps = jget(&v, "paths");
+            const struct jval *ps = jget(&v, "paths"), *pb = ps == NULL ? jget(&v, "paths_b64") : NULL;
+            if (r == 1 && (jget(&v, "paths_truncated") != NULL || (pb != NULL && pb->t != J_ARR))) nm->unmatched = true;
             for (size_t i = 0; r == 1 && rc == 0 && ps != NULL && ps->t == J_ARR && i < ps->n; i++)
                 if (ps->kids[i].t == J_STR && named_add(nm, ps->kids[i].s, ps->kids[i].s_len) == -1) rc = nomem();
+            for (size_t i = 0, len; r == 1 && rc == 0 && pb != NULL && pb->t == J_ARR && i < pb->n; i++) {
+                if (pb->kids[i].t != J_STR || belay_base64_decode(path, sizeof path - 1, &len, pb->kids[i].s) == -1 ||
+                    memchr(path, '\0', len) != NULL) {
+                    belay_err_clear();
+                    nm->unmatched = true;                               /* LN-10: then nothing folds */
+                } else if (named_add(nm, path, len) == -1) rc = nomem();
+            }
         } else if (jget(&v, "outcome") != NULL) {
             size_t len;
             const char *word;
@@ -568,7 +579,7 @@ static int render_section(struct wctx *x, const struct wstep *s, const char *a, 
     const struct receipt_opts ro = { la, lb, true, cli_mode_of, &m, x->st.scope.docker[0] || x->q->system ? NULL : cli_classify,
                                      x->st.scope.path, NULL, NULL, NULL,     /* --all: nothing folds, no owner asked */
                                      NULL, NULL,    /* nor the after manifest about timers and lingering */
-                                     NULL, !x->q->system,       /* .git/ in one line (LN-10) */
+                                     NULL, !x->q->system && !nm->unmatched,     /* .git/ in one line (LN-10) */
                                      nm->p, nm->n };            /* but what the line names */
     if (receipt_render(in, mem, &ro) == -1) goto out;
     cli_not_compared(mem, belay_manifest_header(m.side[0].r), belay_manifest_header(m.side[1].r), NULL);
