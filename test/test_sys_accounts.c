@@ -205,8 +205,8 @@ TEST(an_empty_password_field_is_said_only_without_a_shadow) {
     ASSERT_EQ_STR("", t_events(1, 3));
 }
 
-#define GM(n, a, r, ta, tr) EV("group_members_changed", "\"name\":\"" n "\",\"added\":[" a "],\"removed\":[" r "]", \
-                               "group " n ": added " ta "; removed " tr, "etc/group")
+#define GM(n, a, r, text) EV("group_members_changed", "\"name\":\"" n "\",\"added\":[" a "],\"removed\":[" r "]", \
+                              "group " n ": " text, "etc/group")
 
 /* The fourth field as a set: order and repeats say nothing; the lists are
  * sorted bytewise and joined by ", " in the text. */
@@ -216,11 +216,11 @@ TEST(group_members_are_compared_as_a_set) {
     REQUIRE(t_snap(1) == 0);
     t_file("etc/group", "root:x:0:\nsudo:x:27:ubuntu,siteuser\nadm:x:4:zed,ubuntu,alice\ndocker:x:998:a,b,a,\n", 0644);
     REQUIRE(t_snap(2) == 0);
-    ASSERT_EQ_STR(GM("sudo", "\"siteuser\"", "", "siteuser", "")
-                  GM("adm", "\"alice\",\"zed\"", "\"syslog\"", "alice, zed", "syslog"),
+    ASSERT_EQ_STR(GM("sudo", "\"siteuser\"", "", "added siteuser")          /* a side with none is left out */
+                  GM("adm", "\"alice\",\"zed\"", "\"syslog\"", "added alice, zed; removed syslog"),
                   t_events(1, 2));
-    ASSERT_EQ_STR(GM("sudo", "", "\"siteuser\"", "", "siteuser")
-                  GM("adm", "\"syslog\"", "\"alice\",\"zed\"", "syslog", "alice, zed"),
+    ASSERT_EQ_STR(GM("sudo", "", "\"siteuser\"", "removed siteuser")
+                  GM("adm", "\"syslog\"", "\"alice\",\"zed\"", "added syslog; removed alice, zed"),
                   t_events(2, 1));
 }
 
@@ -234,7 +234,7 @@ TEST(a_group_whose_gid_or_password_field_differs_is_removed_and_added) {
     REQUIRE(t_snap(2) == 0);
     ASSERT_EQ_STR(EV("group_removed", "\"name\":\"site\",\"gid\":1002", "group site removed (gid 1002)", "etc/group")
                   EV("group_added", "\"name\":\"ops\",\"gid\":50", "group ops added (gid 50)", "etc/group")
-                  GM("ops", "\"b\"", "", "b", "")
+                  GM("ops", "\"b\"", "", "added b")
                   EV("group_removed", "\"name\":\"ops\",\"gid\":50", "group ops removed (gid 50)", "etc/group")
                   EV("group_added", "\"name\":\"site\",\"gid\":2002", "group site added (gid 2002)", "etc/group"),
                   t_events(1, 2));
@@ -408,7 +408,7 @@ TEST(an_unknown_outcome_gives_provisional_events) {
     const struct belay_entry ga = t_entry("etc/group", BELAY_T_REG, 0644, t_put("g:x:1:m\nnew:x:3:\n"));
     ASSERT_EQ_STR("", tr_path(&r, "etc/group", &gb, &ga, "unknown"));
     ASSERT_EQ_STR("", tr_path(&r, "etc/passwd", &b2, &a2, "unknown"));
-    ASSERT_EQ_STR(PROV("group_members_changed", "\"name\":\"g\",\"added\":[\"m\"],\"removed\":[]", "group g: added m; removed ", "etc/group")
+    ASSERT_EQ_STR(PROV("group_members_changed", "\"name\":\"g\",\"added\":[\"m\"],\"removed\":[]", "group g: added m", "etc/group")
                   PROV("group_removed", "\"name\":\"old\",\"gid\":2", "group old removed (gid 2)", "etc/group")
                   PROV("group_added", "\"name\":\"new\",\"gid\":3", "group new added (gid 3)", "etc/group")
                   PROV("user_changed", "\"name\":\"a\",\"field\":\"shell\",\"from\":\"/bin/sh\",\"to\":\"/bin/zsh\"",
@@ -506,7 +506,7 @@ TEST(hostile_files_are_read_within_bounds) {
     ASSERT_EQ_STR("", tr_path(&r, "etc/group", &gb, &ga, "modified"));
     /* big: a list past 256 elements is an invalid event (E9); commas: no name is a member. */
     ASSERT_EQ_STR("{\"event\":\"invalid_finding\",\"interp\":\"accounts\",\"text\":\"invalid finding\",\"paths\":[\"etc/group\"]}\n"
-                  GM("commas", "", "\"x\"", "", "x"),
+                  GM("commas", "", "\"x\"", "removed x"),
                   tr_end(&r, NULL, 0));
     tr_free(&r);
 }

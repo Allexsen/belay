@@ -85,6 +85,23 @@ static bool valid(int kind, int interp, unsigned level, const struct belay_fv *v
         snprintf(name, sizeof name, "{%s}", d->field[k].name);
         if (v[k].absent && strstr(d->text, name) != NULL) tmpl = d->text_partial;
     }
+    /* An empty list leaves out its part, from after `: ` or `; ` to the next
+     * `; ` or the end, with one `; ` (`group sudo: added evil`). */
+    char kept[FINDING_STRING_MAX + 1];
+    if (strstr(tmpl, "; ") != NULL && strlen(tmpl) < sizeof kept) {
+        memcpy(kept, tmpl, strlen(tmpl) + 1);
+        for (size_t k = 0; k < n; k++) {
+            char name[64];
+            snprintf(name, sizeof name, "{%s}", d->field[k].name);
+            char *f = d->field[k].type == FT_LIST && !v[k].absent && v[k].nlist == 0 ? strstr(kept, name) : NULL;
+            if (f == NULL) continue;
+            char *s = f, *e = strstr(f, "; ");
+            while (s > kept && !((s[-1] == ' ') && s - 1 > kept && (s[-2] == ';' || s[-2] == ':'))) s--;
+            if (e != NULL) memmove(s, e + 2, strlen(e + 2) + 1);                    /* and the `; ` after it */
+            else if (s - kept >= 2 && s[-2] == ';') s[-2] = '\0';                    /* the last: the `; ` before it */
+        }
+        tmpl = kept;
+    }
     size_t w = 0;
     for (const char *t = tmpl; *t; ) {
         const char *open = strchr(t, '{');
