@@ -311,11 +311,20 @@ static bool open_in_editor(const char *file) {
     return false;
 }
 
-/* TL-14's line, without its newline: a directory too wide to watch */
+/* TL-14b's line, without its newline: a directory too wide to watch, the
+ * home directory said as such (no path under it is too wide: TL-14) */
 static void too_wide(struct wsb *w, const char *path) {
-    char *shown = flag_shown(path, strlen(path));
-    wsb_f(w, "belay: " RED " not watching %s: too wide", shown != NULL ? shown : "this directory");
+    const char *home = getenv("HOME");
+    char real[PATH_MAX];
+    char *shown = NULL;
+    if (home != NULL && home[0] == '/' && realpath(home, real) != NULL && strcmp(real, path) == 0)
+        wsb_f(w, "belay: " RED " not watching ~ (your home directory): too wide");
+    else if ((shown = flag_shown(path, strlen(path))) != NULL)
+        wsb_f(w, "belay: " RED " not watching %s: too wide", shown);
+    else
+        wsb_f(w, "belay: " RED " not watching this directory: too wide");
     free(shown);
+    wsb_f(w, ". Start Claude Code in a project directory to record it.");
 }
 
 static void receipt_event(const char *scope, FILE *out) {

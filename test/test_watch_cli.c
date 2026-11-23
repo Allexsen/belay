@@ -1158,8 +1158,10 @@ TEST(the_hook_always_exits_0_and_never_stays_silent_about_a_failure) {
     /* too wide is said at a session's start, and nowhere else (TL-14) */
     char *old = getenv("HOME") != NULL ? strdup(getenv("HOME")) : NULL;
     setenv("HOME", g_scope, 1);
-    HAS(hook("start", "{" S1 ",\"source\":\"startup\"}"), "{\"systemMessage\":\"belay: " RED " not watching ");
-    HAS(hook("start", "{" S1 ",\"source\":\"resume\"}"), ": too wide\"}\n");
+    /* the home directory said as such, with what to do (TL-14b) */
+    ASSERT_EQ_STR("{\"systemMessage\":\"belay: " RED " not watching ~ (your home directory): too wide. Start Claude Code in a project directory to record it.\"}\n",
+                  hook("start", "{" S1 ",\"source\":\"startup\"}"));
+    HAS(hook("start", "{" S1 ",\"source\":\"resume\"}"), ": too wide. Start Claude Code in a project directory");
     ASSERT_EQ_STR("", hook("pre", "{" S1 ",\"tool_use_id\":\"t\"}"));
     ASSERT_EQ_STR("", hook("stop", "{" S1 "}"));
     if (old != NULL) setenv("HOME", old, 1); else unsetenv("HOME");
@@ -1178,8 +1180,7 @@ TEST(the_receipt_command_is_answered_by_the_hook_and_no_other_command_is) {
     char *old = getenv("HOME") != NULL ? strdup(getenv("HOME")) : NULL;
     setenv("HOME", g_scope, 1);
     const char *wide = hook("receipt", "{" S1 ",\"command_name\":\"belay:receipt\"}");
-    HAS(wide, "{\"decision\":\"block\",\"reason\":\"belay: " RED " not watching ");
-    HAS(wide, ": too wide");
+    HAS(wide, "{\"decision\":\"block\",\"reason\":\"belay: " RED " not watching ~ (your home directory): too wide. Start Claude Code in a project directory to record it.\",");
     if (old != NULL) setenv("HOME", old, 1); else unsetenv("HOME");
     free(old);
     hook("start", "{" S1 ",\"source\":\"startup\"}");
