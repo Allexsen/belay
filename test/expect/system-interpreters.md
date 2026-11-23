@@ -79,7 +79,8 @@ Claims `etc/crontab`, `etc/cron.d/*`, `var/spool/cron/crontabs/*` (kept, though 
 | kind | fields | text | when |
 |---|---|---|---|
 | `cron_job_added`, `cron_job_removed` | path, schedule, user, command, env, owner, in_words | `cron job {added} in {path}: {schedule} {user} {command}` | a line that is a job (SC-1) |
-| `cron_env_changed` | path, name, from, to | `{path}: {name} {from} -> {to}` | a `NAME=value` line added, removed or changed |
+| `cron_env_changed` | path, name, from, to | `{path}: {name} {from} -> {to}` | one `NAME=value` line of a name on each side, its value changed |
+| `cron_env_added`, `cron_env_removed` | path, name, value | `{path}: {name} {added}: {value}` | otherwise a `NAME=value` line added or removed (measured: `SHELL  -> /bin/sh` read as a change) |
 | `cron_script_added`, `_removed`, `_changed` | path, owner | `{path} {added}` | a file of the four directories; never read for meaning |
 | `cron_file_not_run` | path, why | `{path}: cron does not run a file like this ({why})` | SC-3, SC-4 |
 
