@@ -199,8 +199,10 @@ grep -q "^kernel record: off: no recorder for a container in this version: a cha
 docker exec "$W" sh -c 'mkdir -p /etc/sudoers.d && echo "%wheel ALL=(ALL) NOPASSWD: ALL" > /etc/sudoers.d/w'
 B watch step --system --docker "$W" --session e2e > "$T/wstep" || fail "watch step --system --docker"
 B watch stop --system --docker "$W" > "$T/wstop" || fail "watch stop --system --docker"
-head -1 "$T/wstop" | grep -q "^belay receipt  / in the container $W (${W%"${W#????????????}"})$" \
-    || fail "the receipt does not name the container: $(head -1 "$T/wstop")"
+head -1 "$T/wstop" | grep -q "^experimental: the system watch is new" \
+    || fail "the receipt does not open with the experimental line (WS-0): $(head -1 "$T/wstop")"
+sed -n 2p "$T/wstop" | grep -q "^belay receipt  / in the container $W (${W%"${W#????????????}"})$" \
+    || fail "the receipt does not name the container: $(sed -n 2p "$T/wstop")"
 grep -q "etc/sudoers.d/w" "$T/wstop" || fail "the container's sudo rule is not in its receipt"
 N=$(docker run -d --network host belay-hr-e2e sleep 600); CS="$CS $N"
 touch "$T/before-n"
