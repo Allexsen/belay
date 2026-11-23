@@ -66,9 +66,9 @@ TEST(crontab_jobs_added_and_removed_are_events_with_the_env_above_them) {
     REQUIRE(t_snap(4) == 0);
     const char *ev = t_events(3, 4);
     ASSERT_EQ_INT(4, count(ev, "{\"event\":\"cron_job_removed\""));
-    ASSERT_EQ_INT(2, count(ev, "{\"event\":\"cron_env_changed\""));
+    ASSERT_EQ_INT(2, count(ev, "{\"event\":\"cron_env_removed\""));
     ASSERT_EQ_INT(6, count(ev, "\n"));
-    ASSERT_TRUE(strstr(ev, "\"name\":\"SHELL\",\"from\":\"/bin/sh\",\"to\":\"\",") != NULL);
+    ASSERT_TRUE(strstr(ev, "\"name\":\"SHELL\",\"value\":\"/bin/sh\",") != NULL);
 }
 
 /* SC-1, SI-5: cron.d has the user field, a spool file's user is its name;
@@ -102,8 +102,8 @@ TEST(cron_d_and_spool_jobs_carry_user_owner_and_words) {
         "\"env\":[],\"owner\":\"e2fsprogs\",\"in_words\":\"at 03:10 every day (by cron's clock)\","
         "\"text\":\"cron job added in etc/cron.d/e2scrub_all: 10 3 * * * root test -e /run/systemd/system || "
         "SERVICE_MODE=1 /sbin/e2scrub_all -A -r\",\"paths\":[\"etc/cron.d/e2scrub_all\"]}\n"
-        "{\"event\":\"cron_env_changed\",\"interp\":\"cron\",\"path\":\"etc/cron.d/site\",\"name\":\"MAILTO\","
-        "\"from\":\"\",\"to\":\"ops@example.org\",\"text\":\"etc/cron.d/site: MAILTO  -> ops@example.org\","
+        "{\"event\":\"cron_env_added\",\"interp\":\"cron\",\"path\":\"etc/cron.d/site\",\"name\":\"MAILTO\","
+        "\"value\":\"ops@example.org\",\"text\":\"etc/cron.d/site: MAILTO added: ops@example.org\","
         "\"paths\":[\"etc/cron.d/site\"]}\n"
         "{\"event\":\"cron_job_added\",\"interp\":\"cron\",\"path\":\"etc/cron.d/site\",\"schedule\":\"@daily\","
         "\"user\":\"www-data\",\"command\":\"/srv/site/rotate.sh\",\"env\":[\"MAILTO=ops@example.org\"],\"owner\":null,"
@@ -118,7 +118,7 @@ TEST(cron_d_and_spool_jobs_carry_user_owner_and_words) {
 }
 
 /* cron_env_changed: one line of a name on each side, changed; otherwise the
- * lines added and removed. A job is not reported again because the lines
+ * lines added and removed, cron_env_added and cron_env_removed. A job is not reported again because the lines
  * above it changed; and a file that sets TZ or CRON_TZ gives no words. */
 TEST(env_lines_are_changed_added_or_removed_and_do_not_move_jobs) {
     t_reset();
@@ -132,17 +132,17 @@ TEST(env_lines_are_changed_added_or_removed_and_do_not_move_jobs) {
         "{\"event\":\"cron_env_changed\",\"interp\":\"cron\",\"path\":\"etc/cron.d/x\",\"name\":\"PATH\","
         "\"from\":\"/usr/bin\",\"to\":\"/usr/local/bin:/usr/bin\","
         "\"text\":\"etc/cron.d/x: PATH /usr/bin -> /usr/local/bin:/usr/bin\",\"paths\":[\"etc/cron.d/x\"]}\n"
-        "{\"event\":\"cron_env_changed\",\"interp\":\"cron\",\"path\":\"etc/cron.d/x\",\"name\":\"MAILTO\","
-        "\"from\":\"\\\"a\\\"\",\"to\":\"\",\"text\":\"etc/cron.d/x: MAILTO \\\"a\\\" -> \",\"paths\":[\"etc/cron.d/x\"]}\n"
-        "{\"event\":\"cron_env_changed\",\"interp\":\"cron\",\"path\":\"etc/cron.d/x\",\"name\":\"TZ\","
-        "\"from\":\"\",\"to\":\"UTC\",\"text\":\"etc/cron.d/x: TZ  -> UTC\",\"paths\":[\"etc/cron.d/x\"]}\n"
+        "{\"event\":\"cron_env_removed\",\"interp\":\"cron\",\"path\":\"etc/cron.d/x\",\"name\":\"MAILTO\","
+        "\"value\":\"\\\"a\\\"\",\"text\":\"etc/cron.d/x: MAILTO removed: \\\"a\\\"\",\"paths\":[\"etc/cron.d/x\"]}\n"
+        "{\"event\":\"cron_env_added\",\"interp\":\"cron\",\"path\":\"etc/cron.d/x\",\"name\":\"TZ\","
+        "\"value\":\"UTC\",\"text\":\"etc/cron.d/x: TZ added: UTC\",\"paths\":[\"etc/cron.d/x\"]}\n"
         "{\"event\":\"cron_job_added\",\"interp\":\"cron\",\"path\":\"etc/cron.d/x\",\"schedule\":\"15 2 * * *\","
         "\"user\":\"root\",\"command\":\"false\",\"env\":[\"PATH=/usr/local/bin:/usr/bin\"],"
         "\"text\":\"cron job added in etc/cron.d/x: 15 2 * * * root false\",\"paths\":[\"etc/cron.d/x\"]}\n"
-        "{\"event\":\"cron_env_changed\",\"interp\":\"cron\",\"path\":\"etc/cron.d/y\",\"name\":\"A\","
-        "\"from\":\"1\",\"to\":\"\",\"text\":\"etc/cron.d/y: A 1 -> \",\"paths\":[\"etc/cron.d/y\"]}\n"
-        "{\"event\":\"cron_env_changed\",\"interp\":\"cron\",\"path\":\"etc/cron.d/y\",\"name\":\"A\","
-        "\"from\":\"\",\"to\":\"3\",\"text\":\"etc/cron.d/y: A  -> 3\",\"paths\":[\"etc/cron.d/y\"]}\n",
+        "{\"event\":\"cron_env_removed\",\"interp\":\"cron\",\"path\":\"etc/cron.d/y\",\"name\":\"A\","
+        "\"value\":\"1\",\"text\":\"etc/cron.d/y: A removed: 1\",\"paths\":[\"etc/cron.d/y\"]}\n"
+        "{\"event\":\"cron_env_added\",\"interp\":\"cron\",\"path\":\"etc/cron.d/y\",\"name\":\"A\","
+        "\"value\":\"3\",\"text\":\"etc/cron.d/y: A added: 3\",\"paths\":[\"etc/cron.d/y\"]}\n",
         t_events(1, 2));
     /* env: the last of each name above the job, in the file's order. */
     t_file("etc/cron.d/x", "MAILTO=a\nSHELL=/bin/sh\nOTHER=1\nMAILTO=b\nCRON_TZ=UTC\n  PATH = /bin \n5 5 * * * root x\n"
