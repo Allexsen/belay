@@ -110,8 +110,6 @@ size_t prev_count(const struct prev_index *p);
 const struct prev_rec *prev_at(const struct prev_index *p, size_t i);
 /* r's path (not NUL-terminated within its length; a NUL follows it). */
 const char *prev_path(const struct prev_index *p, const struct prev_rec *r);
-/* The whole entry, as the manifest's line had it. */
-void prev_entry(const struct prev_index *p, const struct prev_rec *r, struct belay_entry *e);
 
 /* r's sha256 as 64 lowercase hex digits. */
 void prev_hex(const struct prev_rec *r, char out[65]);

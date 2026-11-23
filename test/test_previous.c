@@ -109,18 +109,20 @@ TEST(the_index_holds_every_entry_as_the_manifest_has_it) {
         ASSERT_TRUE(info.built);
         struct belay_manifest_reader *rd = NULL;
         REQUIRE(belay_manifest_open(g_m1, &rd) == 0);
-        static struct belay_entry e, back;
-        static char want[70000], got[70000];
+        static struct belay_entry e;
         size_t n = 0, types = 0;
         uint64_t last_off = 0;
         int g;
         while ((g = belay_manifest_next(rd, &e)) == 1) {
             const struct prev_rec *r = prev_find_path(p, e.path, e.path_len);
             if (r == NULL) { BELAY_FAIL("no record for %s", e.path); continue; }
-            prev_entry(p, r, &back);
-            size_t wl, gl;
-            REQUIRE(entry_serialize(&e, want, sizeof want, &wl) == 0 && entry_serialize(&back, got, sizeof got, &gl) == 0);
-            if (wl != gl || memcmp(want, got, wl) != 0) BELAY_FAIL("%s reads back as %.*s", e.path, (int)gl, got);
+            char hex[65];
+            prev_hex(r, hex);
+            if (r->path_len != e.path_len || memcmp(prev_path(p, r), e.path, e.path_len) != 0 || r->type != (uint16_t)e.type ||
+                r->mode != e.mode || r->uid != e.uid || r->gid != e.gid || r->size != e.size || r->mtime_ns != e.mtime_ns ||
+                r->ctime_ns != e.ctime_ns || r->ino != e.ino || r->dev != e.dev || r->nlink != e.nlink ||
+                (e.has_hash && strcmp(hex, e.sha256_hex) != 0))
+                BELAY_FAIL("%s is not read back as the manifest has it", e.path);
             if (r->seq != n) BELAY_FAIL("%s is entry %zu, its record says %llu", e.path, n, (unsigned long long)r->seq);
             if (n > 0 && r->path_off <= last_off) BELAY_FAIL("the path of %s does not follow the one before it", e.path);
             last_off = r->path_off;
