@@ -900,6 +900,67 @@ TEST(a_flagged_change_under_git_is_listed_in_the_receipt) {
     free(old);
 }
 
+/* A flagged event put into the step's diff before it is matched: how a
+ * flagged event can name a path that is not UTF-8 (git's own events cannot,
+ * yet: their branch is UTF-8). */
+static const char *g_inject;
+static void inject_event(const char *stage) {
+    if (strcmp(stage, "matching") != 0) return;
+    sh("f=$(ls -t '%s'/scopes/*/checkpoints/*/diff-from-*.ndjson | head -1) && "
+       "{ head -1 \"$f\" && printf '%%s\\n' '%s' && tail -n +2 \"$f\"; } > \"$f.t\" && mv \"$f.t\" \"$f\"", g_state, g_inject);
+}
+
+/* LN-10: a flagged path that is not UTF-8 is matched as bytes; one that
+ * cannot be matched at all folds nothing under .git/. */
+TEST(a_flagged_change_under_git_not_utf8_is_listed_in_the_receipt) {
+    fresh();
+    char *old = getenv("HOME") != NULL ? strdup(getenv("HOME")) : NULL;
+    char home[500], bad[700];
+    snprintf(home, sizeof home, "%s/home", g_dir);
+    sh("rm -rf '%s' && mkdir -p '%s'", home, home);
+    setenv("HOME", home, 1);
+    setenv("GIT_CONFIG_NOSYSTEM", "1", 1);
+#define G "git -c user.name=t -c user.email=t@t -c commit.gpgSign=false -c init.defaultBranch=main"
+#define EV "{\"event\":\"git_history_rewritten\",\"interp\":\"git\",\"repo\":\".git\",\"branch\":\"main\"," \
+           "\"text\":\"main rewritten by commit (amend)\",\"paths_b64\":[\"%s\"]}"
+    sh("cd '%s' && " G " init -q && printf '1\\n' > a && " G " add -A && " G " commit -qm seed", g_scope);
+    ASSERT_EQ_INT(0, step("s1", "--first-ok", NULL));
+    snprintf(bad, sizeof bad, "%s/.git/hooks/pre-commit\xff", g_scope);
+    int fd = open(bad, O_WRONLY | O_CREAT | O_EXCL, 0755);
+    if (fd == -1) SKIP("this filesystem refuses a name that is not UTF-8");
+    close(fd);
+    snprintf(bad, sizeof bad, "%s/.git/x\xff", g_scope);            /* no row flags it: the event does */
+    if ((fd = open(bad, O_WRONLY | O_CREAT | O_EXCL, 0644)) != -1) close(fd);
+    sh("cd '%s' && printf '2\\n' >> a && " G " add -A", g_scope);
+    char ev[300];
+    snprintf(ev, sizeof ev, EV, "LmdpdC94/w==");                     /* .git/x\xff */
+    g_inject = ev;
+    watch_stage_hook = inject_event;
+    ASSERT_EQ_INT(0, step("s1", NULL));
+    HAS(g_out, ".git/hooks/pre-commit\\xff added (git hook)");
+    HAS(g_out, "(history)");
+    snprintf(ev, sizeof ev, EV, "*");                                /* a path that cannot be read */
+    sh("cd '%s' && printf '3\\n' >> a && " G " add -A && : > .git/y", g_scope);
+    ASSERT_EQ_INT(0, step("s1", NULL));
+    watch_stage_hook = NULL;
+    HAS(g_out, "(history)");
+    belay("watch", "receipt", "--scope", g_scope, NULL);
+    const char *second = g_out != NULL ? strstr(g_out, "\n==== ") : NULL;
+    second = second != NULL ? strstr(second + 1, "\n==== ") : NULL;      /* newest first */
+    REQUIRE(second != NULL);
+    HAS(second, "\n  A .git/hooks/pre-commit\\xff");
+    HAS(second, "\n  A .git/x\\xff");
+    HAS(second, "\n  git bookkeeping: ");                              /* the index, the objects */
+    const char *fold = strstr(g_out, "\n  git bookkeeping: ");
+    ASSERT_TRUE(fold == second + 0 || fold > second);                            /* the newest folds nothing */
+    HAS(g_out, "\n  A .git/y\n");
+#undef EV
+#undef G
+    unsetenv("GIT_CONFIG_NOSYSTEM");
+    if (old != NULL) setenv("HOME", old, 1); else unsetenv("HOME");
+    free(old);
+}
+
 TEST(patterns_shows_the_lists_in_force_and_what_each_matches) {
     fresh();
     sh("printf 'src\\nnothing-here\\n' > '%s/.belay-donttouch' && echo k > '%s/.env'", g_scope, g_scope);
@@ -1356,6 +1417,7 @@ int main(void) {
     RUN(the_receipt_is_every_step_newest_first);
     RUN(a_git_pull_leads_the_line_and_the_receipt_folds_git);
     RUN(a_flagged_change_under_git_is_listed_in_the_receipt);
+    RUN(a_flagged_change_under_git_not_utf8_is_listed_in_the_receipt);
     RUN(patterns_shows_the_lists_in_force_and_what_each_matches);
     RUN(a_change_of_what_is_read_is_flagged_and_what_is_not_read_is_said_once);
     RUN(too_wide_a_directory_is_refused);
