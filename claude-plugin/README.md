@@ -93,8 +93,8 @@ Flagging decides only what leads a line. Nothing is hidden by not being flagged.
 ## The full receipt
 
 `/belay:receipt` shows every change of every step, newest first, each step as `belay diff --all`
-prints it: nothing folded, nothing filtered, git-ignored files and `.git` included. Nothing is sent
-to the model.
+prints it: nothing filtered, git-ignored files included, and `.git` folded into one line
+(`git bookkeeping: 50 changes under .git/`). Nothing is sent to the model.
 
 - **In the VS Code extension** it opens as an editor tab. The first time in a workspace, VS Code
   asks "Do you want to allow untrusted files in this workspace?", because the file is outside it.

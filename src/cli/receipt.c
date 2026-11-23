@@ -732,7 +732,7 @@ static int record(const struct jval *r, struct ctx *x, const struct receipt_opts
         const size_t rl = plen - (size_t)gp - 4;
         const bool hooks = (rl >= 6 && memcmp(rest, "/hooks", 6) == 0 && (rl == 6 || rest[6] == '/'));
         const struct jval *f = jget(r, "findings");
-        if (o->all || unknown || named || hooks || !(x->git_events || !any_git(f) || only_in_place(f)))
+        if ((o->all && !o->fold_git) || unknown || named || hooks || !(x->git_events || !any_git(f) || only_in_place(f)))
             return keep(&x->gitvis, b.p, false, o->all);
         free(b.p);
         struct tally *t = tally(&x->git, path, (size_t)gp);

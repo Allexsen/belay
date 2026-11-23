@@ -43,6 +43,7 @@ void wstep_free(struct wstep *s) {
     free(s->flags);
     for (size_t i = 0; i < s->n_names; i++) free(s->names[i]);
     free(s->under);
+    free(s->git);
     for (size_t i = 0; i < s->n_trouble; i++) free(s->trouble[i]);
     free(s->trouble);
     free(s->roots);
@@ -152,7 +153,7 @@ void lines_step(struct wsb *out, const struct wstep *s) {
     }
     for (int k = 0; k < WK_COUNT; k++) red |= s->cut_flag[k] > 0;
     for (int k = 0; k < WK_COUNT; k++) any |= s->cut_flag[k] > 0 || s->cut_note[k] > 0;
-    if (any || u > 0 || s->roots != NULL) {                                 /* LN-1 */
+    if (any || u > 0 || s->roots != NULL || s->git != NULL) {               /* LN-1 */
         wsb_f(out, "belay: %s", red ? RED " " : "");
         if (s->since_ns != 0) {                     /* reported late (watch-system WS-3a) */
             char at[8];
@@ -163,7 +164,14 @@ void lines_step(struct wsb *out, const struct wstep *s) {
             wsb_f(out, "since %s: ", at);
         }
         wsb_f(out, "%s", s->n_calls == 0 ? "outside tool calls: " : "");
-        if (any) {
+        if (s->git != NULL) {                       /* LN-10: the pull, what it flags, the tree */
+            wsb_f(out, "%s", s->git);
+            if (any) {
+                wsb_f(out, "; ");
+                named(out, s, 1, true, true, false, &nf, &nn);
+            }
+            wsb_f(out, DOT "%llu file%s in the tree", (unsigned long long)s->tree, s->tree == 1 ? "" : "s");
+        } else if (any) {
             named(out, s, 1, true, true, false, &nf, &nn);
             if (s->by_installed > 0)                /* WS-N5 */
                 wsb_f(out, "%sand %llu other%s by packages installed here", nf + nn > 0 ? "; " : "",

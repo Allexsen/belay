@@ -208,6 +208,10 @@ commands.
   red circle: a modified `.git/config`, and the permissions file Claude Code writes itself. The
   rest is counted, and named when there are three or fewer. Nothing is left out for not being
   flagged: every changed entry is counted in its step's line and listed in the receipt.
+  A `git pull` or `git merge` that added commits to a branch leads the line, with the work tree
+  counted apart from `.git/`: `belay: git pull: main moved to 9c5d2f2 (fast-forward) · 17 files in
+  the tree` (`(merge)` for a merge). The commits are not counted: that needs git's objects, which
+  belay does not read.
 - A step's changes belong to the *calls* open while it ran. `--begin ID` opens one after the step,
   `--finish ID` closes one; with none open the line says `outside tool calls`. **close** closes
   calls that will never finish, without a capture.
@@ -215,7 +219,8 @@ commands.
   and how many entries changed in the steps since it. The total is the sum of the steps' counts: a
   file changed in five steps is five.
 - **receipt** prints every change of every step, newest first, each step as `belay diff --all`
-  shows it. `--path` writes it to a file in the state directory and prints the file's path.
+  shows it, except that `.git/` folds into one line as `belay diff` folds it (`git bookkeeping: 50
+  changes under .git/`). `--path` writes it to a file in the state directory and prints the file's path.
 - **patterns** prints the lists in force and how many current entries each pattern matches;
   `--entries` prints each entry a list covers.
 

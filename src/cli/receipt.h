@@ -116,6 +116,7 @@ struct receipt_opts {
     receipt_system_fn system;   /* NULL, or -1 from it: `not linked into any target` and `lingering` are not said */
     void *system_ctx;
     const struct receipt_sections *sections;    /* NULL: a diff's receipt, as before */
+    bool fold_git;              /* with `all`: .git/ folds all the same, as without it (watch-v1 LN-10) */
 };
 
 /* Reads diff.v1 from `diff`, writes the receipt to `out`. 0; -1 with
