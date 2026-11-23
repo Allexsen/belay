@@ -577,7 +577,7 @@ static const char *events_with_lines(int a, int b) {
 
 #define PE(what, file, name) \
     "{\"event\":\"password_entry_" what "\",\"interp\":\"accounts\",\"file\":\"" file "\",\"name\":\"" name "\"," \
-    "\"text\":\"password database: entry " what " for " name "\",\"paths\":[\"" file "\"]}\n"
+    "\"text\":\"" file ": password entry " what " for " name "\",\"paths\":[\"" file "\"]}\n"
 
 #define SH_ROOT1 "root:$y$j9T$MARKERONE$MARKERHASHONE:19000:0:99999:7:::"
 #define SH_ROOT2 "root:$y$j9T$MARKERTWO$MARKERHASHTWO:19500:0:99999:7:::"
