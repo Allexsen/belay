@@ -335,6 +335,7 @@ lasts.
 | TL-12 | No ledger line parses | `the record was interrupted: nothing before HH:MM is accounted for` |
 | TL-13 | A step's section of the receipt is missing or fails its digest | in the receipt, in that step's place: `this step's section is missing` |
 | TL-14 | The directory is `/`, `$HOME`, or one `$HOME` is inside | at a session's start only: `not watching DIR: too wide` |
+| TL-14a | `/belay:receipt` asked in a directory of TL-14 | the answer is TL-14's line, not that there is no receipt yet: the directory is not watched |
 | TL-15 | Calls or markers older than a day were dropped | `N calls of a session that ended without saying so were closed` |
 | TL-16 | What an event did after its step was written failed (its marker's line, its summary) | after the step's own line: `this step is recorded; what came after it failed: ` and belay's message. The step is not said to be lost, and the next step does not record it again |
 
