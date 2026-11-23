@@ -25,6 +25,7 @@
 #define W_KILL_MAX 16
 #define W_TOLD_MAX 32
 #define W_LATE_MAX 16
+#define W_LATE_SHOWN 3          /* WS-3c: the receipt names three, then counts */
 
 struct wcall { char id[WATCH_ID_MAX + 1], session[WATCH_ID_MAX + 1], agent[WATCH_ID_MAX + 1]; int64_t ns; };
 /* ns: when the marker was set; seen_ns: when its session last fired (TM-4) */

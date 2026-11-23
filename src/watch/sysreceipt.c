@@ -132,8 +132,8 @@ int sysreceipt_head(const struct state *st, long cp, const struct wstate *w, str
     if (k.on && !k.iflags_events) wsb_f(out, "; inode flags as of the last walk");
     if (w->n_late > 0) {                /* WS-3c */
         wsb_f(out, "; %zu step%s reported late (walk%s of ", w->n_late, w->n_late == 1 ? "" : "s", w->n_late == 1 ? "" : "s");
-        for (size_t i = 0; i < w->n_late && i < W_LATE_MAX; i++) wsb_f(out, "%s%ld s", i ? ", " : "", w->late[i]);
-        if (w->n_late > W_LATE_MAX) wsb_f(out, " and %zu more", w->n_late - W_LATE_MAX);
+        for (size_t i = 0; i < w->n_late && i < W_LATE_SHOWN; i++) wsb_f(out, "%s%ld s", i ? ", " : "", w->late[i]);
+        if (w->n_late > W_LATE_SHOWN) wsb_f(out, " and %zu more", w->n_late - W_LATE_SHOWN);
         wsb_f(out, ")");
     }
     wsb_f(out, "\n");
