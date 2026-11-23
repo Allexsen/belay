@@ -132,7 +132,9 @@ Added with the kinds of system-interpreters.md, whose fields need them (its SI-4
 `owner` a package name or `null`; its lists: `tags`, `env`, `options`). The rules of "The object" hold, and:
 
 - A `list` field is a JSON array of strings, at most 256 of them, each as a `string` field is. In `text`
-  its elements are joined by `, `.
+  its elements are joined by `, `. An empty list leaves out the part of the template that names it,
+  from after `: ` or `; ` to the next `; ` or the end, with one `; ` (`group sudo: added evil`,
+  `group sudo: removed bob`; never `added evil; removed `).
 - A type ending in `/null` (`string/null`, `int/null`) is that type or JSON `null`: `null` says the
   lookup the field rests on answered "none" (in no package) or could not be made (`uid_min`). No
   template names such a field. `string/null?` may also be absent: nothing is known.
