@@ -1207,7 +1207,7 @@ TEST(the_hook_always_exits_0_and_never_stays_silent_about_a_failure) {
     ASSERT_EQ_INT(0, belay("hook", "claude-code", NULL));
     ASSERT_EQ_INT(0, belay("hook", "some-other-agent", "start", NULL));
     ASSERT_EQ_INT(0, belay("hook", "claude-code", "bogus", "--scope", NULL));
-    /* too wide is said at a session's start, and nowhere else (TL-14) */
+    /* too wide is said at a session's start, and at each Stop after it (TL-14, TL-14b) */
     char *old = getenv("HOME") != NULL ? strdup(getenv("HOME")) : NULL;
     setenv("HOME", g_scope, 1);
     /* the home directory said as such, with what to do (TL-14b) */
@@ -1215,7 +1215,14 @@ TEST(the_hook_always_exits_0_and_never_stays_silent_about_a_failure) {
                   hook("start", "{" S1 ",\"source\":\"startup\"}"));
     HAS(hook("start", "{" S1 ",\"source\":\"resume\"}"), ": too wide. Start Claude Code in a project directory");
     ASSERT_EQ_STR("", hook("pre", "{" S1 ",\"tool_use_id\":\"t\"}"));
-    ASSERT_EQ_STR("", hook("stop", "{" S1 "}"));
+    ASSERT_EQ_STR("{\"systemMessage\":\"belay: not recording: ~ is too wide\"}\n", hook("stop", "{" S1 "}"));
+    ASSERT_EQ_STR("{\"systemMessage\":\"belay: not recording: ~ is too wide\"}\n", hook("stop", "{" S1 "}"));
+    char inside[500];                                                   /* $HOME inside it: the path */
+    snprintf(inside, sizeof inside, "%s/src", g_scope);
+    setenv("HOME", inside, 1);
+    char want[700];
+    snprintf(want, sizeof want, "{\"systemMessage\":\"belay: not recording: %s is too wide\"}\n", g_scope);
+    ASSERT_EQ_STR(want, hook("stop", "{" S1 "}"));
     if (old != NULL) setenv("HOME", old, 1); else unsetenv("HOME");
     free(old);
     /* a session that is not starting begins with the flagged first-step line */

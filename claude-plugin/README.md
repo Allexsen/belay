@@ -125,7 +125,8 @@ made with `belay mark` or `belay check` is never removed by the plugin, whatever
   useful thing you can report: [open an issue](https://github.com/Allexsen/belay/issues) with it.
 - It watches the project directory only. `~/.ssh`, `~/.gitconfig`, your shell's startup files and
   everything else outside it are not seen, and neither are network effects. `$HOME` and `/` are
-  refused.
+  refused: the session's start says so, and every turn's end says `belay: not recording: ~ is too
+  wide`.
 - A change made and undone between two lines is not seen.
 - Tool calls that run in parallel share lines: the first to finish shows what all of them had done
   by then. What a background command writes after its call has finished is counted, but not under
