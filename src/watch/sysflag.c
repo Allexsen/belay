@@ -71,7 +71,7 @@ const char *const sysflag_event_rows[][2] = {
     { "WS-F13", "listener_opened below port 1024 held by an executable in no package" },
     { "WS-F14", "trust_anchor_added in no package" },
     { "WS-F16", "a unit event under a home's .config/systemd/user" },
-    { "WS-F17", "could_not_interpret of accounts, sudoers, sshkeys, of config on a file of grammar sshd, or on a unit under a home's .config/systemd/user" },
+    { "WS-F17", "could_not_interpret or invalid_finding of accounts, sudoers, sshkeys, of config on a file of grammar sshd, or on a unit under a home's .config/systemd/user" },
     { "WS-N1", "noted: user_added, group_added, password_entry_added, other group_members_changed" },
     { "WS-N2", "noted: cron_job_added, cron_script_added, timer_file_added, unit_linked, unit_file_added, unit_masked, init_script_added, init_script_changed, trust_anchor_added in a package" },
     { "WS-N3", "noted: service_started, service_stopped, service_restarted, other listener_opened, listener_closed" },
@@ -451,7 +451,7 @@ static bool sshd_file(const struct sx *x, const char *path, size_t len) {
     return config_grammar(abs, len + 1) == CONFIG_SSHD;
 }
 
-/* WS-F17: a could_not_interpret on a file whose events WS-F1, F2, F3, F6,
+/* WS-F17: a could_not_interpret (or an invalid_finding) on a file whose events WS-F1, F2, F3, F6,
  * F16 flag. */
 static int not_interpreted(const struct sx *x, const struct jval *e, const char *interp, enum wkind *kind) {
     const struct jval *ps = jget(e, "paths");           /* of files not read either side, as they were: none */
@@ -483,7 +483,7 @@ static char *not_interpreted_text(const struct jval *e) {
 static int event_class(const struct sx *x, const struct jval *e, enum wkind *kind, bool *own) {
     const char *k = jstr(e, "event"), *interp = jstr(e, "interp");
     *own = false;
-    if (!strcmp(k, "could_not_interpret")) return not_interpreted(x, e, interp, kind);
+    if (!strcmp(k, "could_not_interpret") || !strcmp(k, "invalid_finding")) return not_interpreted(x, e, interp, kind);
     const bool config = strcmp(interp, "config") == 0 && strncmp(k, "config_", 7) == 0;
     /* WS-F16: a unit event under a home's user units */
     static const char *const UNIT_EV[] = { "unit_file_added", "unit_file_changed", "timer_file_added", "unit_linked" };
@@ -603,7 +603,8 @@ static int pass_events(struct sx *x, FILE *in, struct wstep *s) {
             if (c != SF_NONE && taken_add(x, &v) == -1) rc = -1;
             else if (c == SF_BYINST) s->by_installed++;
             else if (c == SF_FLAG || c == SF_NOTE) {
-                const bool cni = strcmp(jstr(&v, "event"), "could_not_interpret") == 0;     /* F17 */
+                const bool cni = strcmp(jstr(&v, "event"), "could_not_interpret") == 0 ||   /* F17 */
+                                 strcmp(jstr(&v, "event"), "invalid_finding") == 0;
                 char *t = cni ? not_interpreted_text(&v) : NULL;
                 if (cni && t == NULL) rc = nomem();
                 else if (say(&f, kind, c == SF_NOTE, own, cni ? t : jstr(&v, "text"), own ? NULL : wkind_name(kind)) == -1 ||

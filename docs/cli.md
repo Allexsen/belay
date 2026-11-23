@@ -564,7 +564,8 @@ needs a marker.
   others cannot read outside `root` and the homes (named, never its content), a listener below
   port 1024 whose program no package owns, a unit added under a home's own unit directory, and
   any of the accounts, sudoers, key, sshd or home unit files that can no longer be interpreted
-  (`could not interpret: etc/sudoers (sudo)`) are flagged 🔴, unless the file could be read at
+  (`could not interpret: etc/sudoers (sudo)`), or whose event is replaced by an invalid finding
+  (`invalid finding: etc/passwd (accounts)`), are flagged 🔴, unless the file could be read at
   neither checkpoint and nothing compared changed. New users and groups, cron jobs, timers, units, init scripts, packages, services and
   listeners are named without a circle; one whose file no package owns has a line of its own
   ending `, in no package`, and those of a package installed in the same step are counted (`and 6
