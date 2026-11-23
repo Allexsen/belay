@@ -320,6 +320,12 @@ TEST(a_file_that_no_longer_interprets_is_flagged) {
     sh("cd '%s' && printf 'Port 22\\0x\\n' > etc/ssh/sshd_config", g_tree);
     REQUIRE(step() == 0);
     ASSERT_TRUE(strstr(g_out, "belay: " RED " outside tool calls: could not interpret: etc/ssh/sshd_config (ssh)") == g_out);
+    /* review S3: an invalid_finding in place of the event, a uid-0 user whose name is not UTF-8, likewise */
+    sh("cd '%s' && grep -v '^+bad' etc/passwd > p && cat p > etc/passwd && rm p", g_tree);
+    REQUIRE(step() == 0);
+    sh("cd '%s' && printf 'r\\377:x:0:0::/root:/bin/sh\\n' >> etc/passwd", g_tree);
+    REQUIRE(step() == 0);
+    ASSERT_TRUE(strstr(g_out, "belay: " RED " outside tool calls: invalid finding: etc/passwd (accounts)") == g_out);
     /* the receipt */
     fresh();
     sh("cd '%s' && mkdir -p etc/ssh && printf 'Port 22\\n' > etc/ssh/sshd_config", g_tree);
