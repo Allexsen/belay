@@ -554,13 +554,14 @@ needs a marker.
   others cannot read outside `root` and the homes (named, never its content), a listener below
   port 1024 whose program no package owns, a unit added under a home's own unit directory, and
   any of the accounts, sudoers, key, sshd or home unit files that can no longer be interpreted
-  (`could not interpret: etc/sudoers (sudo)`) are flagged 🔴. New users and groups, cron jobs, timers, units, init scripts, packages, services and
+  (`could not interpret: etc/sudoers (sudo)`) are flagged 🔴, unless the file could be read at
+  neither checkpoint and nothing compared changed. New users and groups, cron jobs, timers, units, init scripts, packages, services and
   listeners are named without a circle; one whose file no package owns has a line of its own
   ending `, in no package`, and those of a package installed in the same step are counted (`and 6
   others by packages installed here`). The files of the step's packages under `usr`, `var`, `opt`,
   `srv`, `boot`, and anything under `var` no event names, are only counted: a step with nothing
   else says `12 entries changed under usr, var`. A file past the hash limit or one belay cannot
-  read, whose size, times and owner are as they were, is no change: a step with only those says
+  read, whose size, mtime, mode and owner are as they were, is no change: a step with only those says
   nothing. When the roots differ from the step before (a home added), the line ends
   `roots changed: +home/v/.ssh, ...`.
 
