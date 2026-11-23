@@ -1174,6 +1174,14 @@ TEST(the_receipt_command_is_answered_by_the_hook_and_no_other_command_is) {
     ASSERT_EQ_STR("{\"decision\":\"block\",\"reason\":\"belay has no receipt for this directory yet: nothing has changed in it.\","
                   "\"hookSpecificOutput\":{\"hookEventName\":\"UserPromptExpansion\",\"suppressOriginalPrompt\":true}}\n",
                   hook("receipt", "{" S1 ",\"command_name\":\"belay:receipt\"}"));
+    /* a directory too wide is not watched: said so, not that nothing changed (TL-14a) */
+    char *old = getenv("HOME") != NULL ? strdup(getenv("HOME")) : NULL;
+    setenv("HOME", g_scope, 1);
+    const char *wide = hook("receipt", "{" S1 ",\"command_name\":\"belay:receipt\"}");
+    HAS(wide, "{\"decision\":\"block\",\"reason\":\"belay: " RED " not watching ");
+    HAS(wide, ": too wide");
+    if (old != NULL) setenv("HOME", old, 1); else unsetenv("HOME");
+    free(old);
     hook("start", "{" S1 ",\"source\":\"startup\"}");
     sh("echo r > '%s/r.txt'", g_scope);
     hook("stop", "{" S1 "}");

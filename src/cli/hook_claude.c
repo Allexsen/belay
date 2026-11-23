@@ -311,12 +311,22 @@ static bool open_in_editor(const char *file) {
     return false;
 }
 
+/* TL-14's line, without its newline: a directory too wide to watch */
+static void too_wide(struct wsb *w, const char *path) {
+    char *shown = flag_shown(path, strlen(path));
+    wsb_f(w, "belay: " RED " not watching %s: too wide", shown != NULL ? shown : "this directory");
+    free(shown);
+}
+
 static void receipt_event(const char *scope, FILE *out) {
     struct wsb text = { 0 }, r = { 0 };
     size_t n_steps = 0;
     char file[PATH_MAX + 120];
     const char *entry = getenv("CLAUDE_CODE_ENTRYPOINT");
-    if (watch_receipt(scope, &text, &n_steps) == -1 || text.bad) {
+    struct scope sc;
+    if (scope_resolve(scope, &sc) == 0 && watch_too_wide(sc.path)) {
+        too_wide(&r, sc.path);                  /* not watched, so no receipt: said so (TL-14a) */
+    } else if (watch_receipt(scope, &text, &n_steps) == -1 || text.bad) {
         belay_err_clear();
         wsb_f(&r, "belay could not read its record of this directory.");
     } else if (n_steps == 0) {
@@ -388,13 +398,12 @@ int hook_claude(const char *event, const char *scope_arg, FILE *in, FILE *out) {
         reply_message(out, "belay: " RED " could not record: the hook's input names no session or directory");
         goto done;
     }
-    /* too wide a directory is said at a session's start, and nowhere else (TL-14) */
+    /* too wide a directory is said at a session's start and by /belay:receipt (TL-14, TL-14a) */
     struct scope sc;
     if (scope_resolve(scope, &sc) == 0 && watch_too_wide(sc.path)) {
         if (!strcmp(event, "start")) {
-            char *shown = flag_shown(sc.path, strlen(sc.path));
-            wsb_f(&lines, "belay: " RED " not watching %s: too wide\n", shown != NULL ? shown : "this directory");
-            free(shown);
+            too_wide(&lines, sc.path);
+            wsb_f(&lines, "\n");
             reply_message(out, lines.bad || lines.p == NULL ? "" : lines.p);
         }
         goto done;
