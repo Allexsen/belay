@@ -42,6 +42,8 @@ full URL goes straight to HTTPS:
 Every line starts `belay:`. When something is flagged, a 🔴 comes right after it, always in the
 same place.
 
+- **When a session starts, one line** naming the directory it records: `belay: recording
+  ~/code/webapp`.
 - **After a tool call that changed something, one line.** What is flagged comes first, with why;
   the rest is counted, and named when there are three or fewer.
 - **`belay: outside tool calls:`** the same line, for what changed between calls: a background

@@ -1134,7 +1134,12 @@ TEST(a_list_file_no_remaining_line_names_is_removed_and_the_one_in_force_never) 
 TEST(the_claude_code_hook_maps_its_events_to_steps_calls_and_a_summary) {
     fresh();
     unsetenv("CLAUDE_CODE_ENTRYPOINT");
-    ASSERT_EQ_STR("", hook("start", "{" S1 ",\"source\":\"startup\"}"));
+    /* a start says what it records, the home directory as ~ (LN-11) */
+    char *home = getenv("HOME") != NULL ? strdup(getenv("HOME")) : NULL;
+    setenv("HOME", g_dir, 1);
+    ASSERT_EQ_STR("{\"systemMessage\":\"belay: recording ~/proj\"}\n", hook("start", "{" S1 ",\"source\":\"startup\"}"));
+    if (home != NULL) setenv("HOME", home, 1); else unsetenv("HOME");
+    free(home);
     ASSERT_EQ_STR("", hook("prompt", "{" S1 ",\"prompt\":\"do it\"}"));
     ASSERT_EQ_STR("", hook("pre", "{" S1 ",\"tool_name\":\"Bash\",\"tool_input\":{\"a\":{\"b\":{\"c\":{\"d\":{\"e\":{\"f\":{\"g\":{\"h\":"
                                   "{\"i\":[1,{\"x\":\"}]\\\\\\\"\"}]}}}}}}}}},\"tool_use_id\":\"toolu_1\"}"));
