@@ -43,7 +43,7 @@ Claims `etc/passwd`, `etc/group`. Receives, from the capture, the per-line diges
 | `user_password_in_passwd` | name | `user {name}: a password is set in passwd itself` | the second field after is none of `x`, `*`, `!`, empty-with-shadow; its value is never copied |
 | `group_added`, `group_removed` | name, gid | `group {name} added (gid {gid})` | by name |
 | `group_members_changed` | name, added, removed | `group {name}: added {added}; removed {removed}` | the fourth field as a set |
-| `password_entry_added`, `_removed`, `_changed` | file, name | `password database: entry {added} for {name}` | a line of `shadow` or `gshadow`, by its first field, whose keyed digest appeared, went or differs |
+| `password_entry_added`, `_removed`, `_changed` | file, name | `{file}: password entry {added} for {name}` | a line of `shadow` or `gshadow`, by its first field, whose keyed digest appeared, went or differs |
 
 | id | rule | how established |
 |---|---|---|
