@@ -248,9 +248,15 @@ const struct finding_kind_def FINDING_KINDS[FK_COUNT] = {
     [FK_CRON_ENV_CHANGED] = { "cron_env_changed", I_CRON, LV_EVENT,
         { S("path"), S("name"), S("from"), S("to") },
         "{path}: {name} {from} -> {to}",
-        "A `NAME=value` line added, removed or changed: a name with one such line on each side "
-        "whose values differ is one event; otherwise one event per line added (from empty) and "
-        "per line removed (to empty)." },
+        "A name with one `NAME=value` line on each side whose values differ." },
+    [FK_CRON_ENV_ADDED] = { "cron_env_added", I_CRON, LV_EVENT,
+        { S("path"), S("name"), S("value") },
+        "{path}: {name} added: {value}",
+        "Otherwise each `NAME=value` line the file has after and not before." },
+    [FK_CRON_ENV_REMOVED] = { "cron_env_removed", I_CRON, LV_EVENT,
+        { S("path"), S("name"), S("value") },
+        "{path}: {name} removed: {value}",
+        "The reverse." },
     [FK_CRON_SCRIPT_ADDED] = { "cron_script_added", I_CRON, LV_EVENT,
         { S("path"), SNO("owner") },
         "{path} added",

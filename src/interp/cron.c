@@ -14,7 +14,7 @@
  *  line that is none of these makes its file could_not_interpret (SI-2).
  *  Jobs are compared as multisets of (schedule, user, command), so a job
  *  moved in its file, or one whose environment lines changed, is no event;
- *  the lines changed are cron_env_changed.
+ *  the lines changed are cron_env_changed, cron_env_added and cron_env_removed.
  */
 #include "builtins.h"
 #include "inwords.h"
@@ -261,12 +261,19 @@ static void job_event(struct cron *c, const struct belay_interp_input *in, const
 static void env_event(struct cron *c, const struct belay_interp_input *in, const struct envl *from,
                       const struct envl *to) {
     const struct envl *k = to != NULL ? to : from;
-    const struct belay_fv v[] = {
-        { .s = in->path, .len = in->path_len }, { .s = k->name.s, .len = k->name.n },
-        { .s = from ? from->val.s : "", .len = from ? from->val.n : 0 }, { .s = to ? to->val.s : "", .len = to ? to->val.n : 0 },
+    if (from != NULL && to != NULL) {
+        const struct belay_fv v[] = {
+            { .s = in->path, .len = in->path_len }, { .s = k->name.s, .len = k->name.n },
+            { .s = from->val.s, .len = from->val.n }, { .s = to->val.s, .len = to->val.n },
+        };
+        sysevs_add(c->s, FK_CRON_ENV_CHANGED, in->path, in->path_len, k->line, SYS_ADDED, sys_prov(in), v, 4);
+        return;
+    }
+    const struct belay_fv v[] = {   /* one side: said as config says a key (cron_env_added, _removed) */
+        { .s = in->path, .len = in->path_len }, { .s = k->name.s, .len = k->name.n }, { .s = k->val.s, .len = k->val.n },
     };
-    sysevs_add(c->s, FK_CRON_ENV_CHANGED, in->path, in->path_len, k->line, to != NULL ? SYS_ADDED : SYS_REMOVED,
-               sys_prov(in), v, 4);
+    sysevs_add(c->s, to != NULL ? FK_CRON_ENV_ADDED : FK_CRON_ENV_REMOVED, in->path, in->path_len, k->line,
+               to != NULL ? SYS_ADDED : SYS_REMOVED, sys_prov(in), v, 3);
 }
 
 static int name_cmp(const struct envl *x, const struct envl *y) {
