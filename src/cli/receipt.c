@@ -651,7 +651,8 @@ static int record(const struct jval *r, struct ctx *x, const struct receipt_opts
      * reliably: each is named on its own line (S7 2026-10-31, row 73). */
     const bool is_priv = why.n != 0, unknown = strcmp(outcome, "unknown") == 0;
     if (is_priv) return keep(&x->priv, b.p, false, o->all);
-    const int sec = x->sec != NULL && x->sec->section != NULL && have_path ? x->sec->section(x->sec->section_ctx, path, plen, is_dir) : -1;
+    int sec = x->sec != NULL && x->sec->section != NULL && have_path ? x->sec->section(x->sec->section_ctx, path, plen, is_dir) : -1;
+    if (sec == RS_SECRET && strcmp(outcome, "metadata_only") == 0) sec = -1;   /* WS-F12: its metadata alone is a change */
     if (sec == RS_SECRET) {             /* WS-F12: said without content */
         free(b.p);
         struct sb t = { 0 };

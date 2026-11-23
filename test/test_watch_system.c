@@ -184,6 +184,13 @@ TEST(a_step_flags_and_notes_by_the_system_list) {
     REQUIRE(step() == 0);
     ASSERT_TRUE(strstr(g_out, "etc/wireguard/wg0.conf added (secret)") != NULL);
     ASSERT_TRUE(strstr(g_out, "PrivateKey") == NULL);
+    /* F12: its metadata alone is counted (dpkg's lock files, after every apt-get); its content, flagged */
+    sh("cd '%s' && touch -d 2001-01-01 etc/wireguard/wg0.conf", g_tree);
+    REQUIRE(step() == 0);
+    ASSERT_EQ_STR("belay: outside tool calls: 1 change: etc/wireguard/wg0.conf metadata changed\n", g_out);
+    sh("cd '%s' && printf 'PrivateKey = y\\n' > etc/wireguard/wg0.conf", g_tree);
+    REQUIRE(step() == 0);
+    ASSERT_TRUE(strstr(g_out, "belay: " RED " ") == g_out && strstr(g_out, "etc/wireguard/wg0.conf changed (secret)") != NULL);
     sh("cd '%s' && printf 'h\\n' > root/.bash_history", g_tree);
     REQUIRE(step() == 0);
     ASSERT_EQ_STR("belay: outside tool calls: 1 change: root/.bash_history added\n", g_out);
@@ -391,8 +398,9 @@ TEST(patterns_lists_the_roots_the_homes_left_out_and_the_list) {
  * config's own folding of a package installed here. */
 TEST(the_receipt_is_in_sections_in_order) {
     fresh();
+    sh("cd '%s' && printf '' > etc/.pwd.lock && chmod 600 etc/.pwd.lock", g_tree);
     REQUIRE(sys("start") == 0);
-    sh("cd '%s' && printf 'u ALL=(ALL) ALL\\n' > etc/sudoers.d/90-u && chmod 440 etc/sudoers.d/90-u && "
+    sh("cd '%s' && touch -d 2001-01-01 etc/.pwd.lock && printf 'u ALL=(ALL) ALL\\n' > etc/sudoers.d/90-u && chmod 440 etc/sudoers.d/90-u && "
        "printf 'v:x:1001:1001::/nonexistent:/bin/sh\\n' >> etc/passwd && "
        "printf '* * * * * root /bin/x\\n' > etc/cron.d/x && "
        "printf 'ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIOMqqnkVzrm0SdG6UOoqKLsabgH5C9okWi0dh2l9GKJl k\\n' > home/u/.ssh/authorized_keys && "
@@ -421,6 +429,7 @@ TEST(the_receipt_is_in_sections_in_order) {
     }
     ASSERT_TRUE(strstr(g_out, "\nsudo\n  sudo rule added in etc/sudoers.d/90-u: u ALL=(ALL) ALL\n") != NULL);   /* WS-R6 */
     ASSERT_TRUE(strstr(g_out, "\nsecret\n  etc/wireguard/wg0.conf added\n") != NULL);
+    ASSERT_TRUE(strstr(g_out, ".pwd.lock") != NULL && strstr(g_out, ".pwd.lock") > strstr(g_out, "\nchanges\n"));   /* F12: metadata alone */
     ASSERT_TRUE(strstr(g_out, "PrivateKey") == NULL);
     ASSERT_TRUE(strstr(g_out, "\nconfig\n  etc/sysctl.conf: \xe2\x80\xba net.ipv4.ip_forward added: 1\n"
                               "  etc/systemd/system/x.service: Unit \xe2\x80\xba Description added: x\n"
