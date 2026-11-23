@@ -598,6 +598,12 @@ TEST(a_slow_match_after_the_walk_is_the_workers_and_never_stops_the_watch) {
     /* WS-3c: each from its walk's start to its record, never 0 s; three, then a count */
     const char *late = strstr(g_out, "; 5 steps reported late (walks of ");
     ASSERT_TRUE(late != NULL && strstr(late, " and 2 more)\n") != NULL && strstr(late, " 0 s") == NULL);
+    if (late != NULL) {                                         /* three, by two commas */
+        const char *end = strchr(late, '\n');
+        size_t commas = 0;
+        for (const char *c = late + 2; c < end; c++) commas += *c == ',';
+        ASSERT_EQ_INT(2, (int)commas);
+    }
     for (int i = 0; i < 5; i++) {
         char f[16];
         snprintf(f, sizeof f, "etc/f%d", i);
