@@ -55,6 +55,13 @@ int watch_run(const struct wreq *q, struct wsb *out);
  * without the lock; nothing is written. 0, or -1 with belay_err. */
 int watch_summary(const struct wreq *q, const char *name, struct wsb *out);
 
+/* LN-10a: a project step's section as `watch receipt --all` prints it, rendered
+ * again from the step's diff with nothing under .git/ folded. 0 (*text
+ * malloc'd); 1 when the step's diff or a checkpoint is no longer kept; -1
+ * with belay_err. */
+struct state;
+int watch_section_all(struct state *st, const struct wstep *s, char **text, size_t *len);
+
 /* Whether a resolved directory is too wide to watch (TL-14): "/", $HOME,
  * or one $HOME is inside. */
 bool watch_too_wide(const char *resolved);

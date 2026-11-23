@@ -41,7 +41,7 @@ static int step_line(void *ctx, const struct jval *line, const char *type) {
     return 0;
 }
 
-int watch_receipt(const char *scope, struct wsb *out, size_t *n_steps) {
+int watch_receipt(const char *scope, bool all, struct wsb *out, size_t *n_steps) {
     struct scope sc;
     struct state st;
     struct ledger l;
@@ -70,9 +70,17 @@ int watch_receipt(const char *scope, struct wsb *out, size_t *n_steps) {
             if (w->sec_len == 0 && w->n_trouble == 0) continue;
             (*n_steps)++;
             size_t len = 0;
-            char *text = w->sec_len > 0 ? ledger_section_read(&l, w, &len) : NULL;
-            if (text != NULL) {
+            char *text = w->sec_len > 0 ? ledger_section_read(&l, w, &len) : NULL, *again = NULL;
+            int r = 1;
+            if (all && text != NULL && strstr(text, "\n  git bookkeeping: ") != NULL &&    /* LN-10a */
+                (r = watch_section_all(&st, w, &again, &len)) == -1)
+                rc = -1;
+            if (again != NULL) {
+                wsb_f(out, "\n%s", again);
+            } else if (text != NULL) {
                 wsb_f(out, "\n%s", text);
+                if (r == 1 && all && strstr(text, "\n  git bookkeeping: ") != NULL)
+                    wsb_f(out, "  .git/ as recorded: checkpoint %ld's diff from %ld is no longer kept\n", w->to, w->from);
             } else {
                 char when[32];
                 const time_t t = (time_t)(w->ns / 1000000000LL);
@@ -83,6 +91,7 @@ int watch_receipt(const char *scope, struct wsb *out, size_t *n_steps) {
                 if (w->sec_len > 0) wsb_f(out, "this step's section is missing\n");     /* TL-13 */
             }
             free(text);
+            free(again);
             for (size_t k = 0; k < w->n_trouble; k++) wsb_f(out, "  %s\n", w->trouble[k]);
         }
         for (size_t i = 0; i < s.n; i++) wstep_free(&s.v[i]);
@@ -440,7 +449,7 @@ int cmd_watch(int argc, char **argv, FILE *out, FILE *err) {
         struct wsb text = { 0 };
         size_t n_steps;
         char file[PATH_MAX + 120];
-        if (watch_receipt(scope, &text, &n_steps) == -1 || text.bad) {
+        if (watch_receipt(scope, all, &text, &n_steps) == -1 || text.bad) {
             if (text.bad) belay_err_set(BELAY_ERR_NOMEM, 0, "out of memory");
             rc = cli_failed(err);
         } else if (path) {

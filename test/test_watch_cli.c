@@ -961,6 +961,38 @@ TEST(a_flagged_change_under_git_not_utf8_is_listed_in_the_receipt) {
     free(old);
 }
 
+/* LN-10a: `watch receipt --all` folds nothing under .git/; a step whose
+ * checkpoints are gone is as recorded, and says so. */
+TEST(receipt_all_lists_every_change_under_git) {
+    fresh();
+    char *old = getenv("HOME") != NULL ? strdup(getenv("HOME")) : NULL;
+    char home[500];
+    snprintf(home, sizeof home, "%s/home", g_dir);
+    sh("rm -rf '%s' && mkdir -p '%s'", home, home);
+    setenv("HOME", home, 1);
+    setenv("GIT_CONFIG_NOSYSTEM", "1", 1);
+#define G "git -c user.name=t -c user.email=t@t -c commit.gpgSign=false -c init.defaultBranch=main"
+    sh("cd '%s' && " G " init -q && printf '1\\n' > a && " G " add -A && " G " commit -qm seed", g_scope);
+    ASSERT_EQ_INT(0, step("s1", "--first-ok", NULL));
+    sh("cd '%s' && printf '2\\n' >> a && " G " add -A", g_scope);
+    ASSERT_EQ_INT(0, step("s1", NULL));
+    ASSERT_EQ_INT(0, belay("watch", "receipt", "--scope", g_scope, NULL));
+    HAS(g_out, "\n  git bookkeeping: ");
+    HAS_NOT(g_out, "\n  M .git/index\n");
+    ASSERT_EQ_INT(0, belay("watch", "receipt", "--scope", g_scope, "--all", NULL));
+    HAS_NOT(g_out, "git bookkeeping");
+    HAS(g_out, "\n  M .git/index\n");
+    HAS(g_out, "\n  M a\n");
+    sh("rm -f '%s'/scopes/*/checkpoints/2/diff-from-1.ndjson", g_state);      /* as prune would leave it */
+    ASSERT_EQ_INT(0, belay("watch", "receipt", "--scope", g_scope, "--all", NULL));
+    HAS(g_out, "\n  git bookkeeping: ");
+    HAS(g_out, "\n  .git/ as recorded: checkpoint 2's diff from 1 is no longer kept\n");
+#undef G
+    unsetenv("GIT_CONFIG_NOSYSTEM");
+    if (old != NULL) setenv("HOME", old, 1); else unsetenv("HOME");
+    free(old);
+}
+
 TEST(patterns_shows_the_lists_in_force_and_what_each_matches) {
     fresh();
     sh("printf 'src\\nnothing-here\\n' > '%s/.belay-donttouch' && echo k > '%s/.env'", g_scope, g_scope);
@@ -1418,6 +1450,7 @@ int main(void) {
     RUN(a_git_pull_leads_the_line_and_the_receipt_folds_git);
     RUN(a_flagged_change_under_git_is_listed_in_the_receipt);
     RUN(a_flagged_change_under_git_not_utf8_is_listed_in_the_receipt);
+    RUN(receipt_all_lists_every_change_under_git);
     RUN(patterns_shows_the_lists_in_force_and_what_each_matches);
     RUN(a_change_of_what_is_read_is_flagged_and_what_is_not_read_is_said_once);
     RUN(too_wide_a_directory_is_refused);

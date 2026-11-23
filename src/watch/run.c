@@ -554,8 +554,8 @@ static int git_lead(const struct state *st, long id, const struct gitlead *gl, s
 }
 
 /* The step's section of the receipt: a heading, then `belay diff --all`. */
-static int render_section(struct wctx *x, const struct wstep *s, const char *a, const char *b, const char *d,
-                          const struct named *nm, char **text, size_t *len) {
+static int render_section(struct state *st, bool system, bool fold_git, const struct wstep *s, const char *a,
+                          const char *b, const char *d, const struct named *nm, char **text, size_t *len) {
     struct cli_modes m = { 0 };
     FILE *in = fopen(d, "r"), *mem = open_memstream(text, len);
     int rc = -1;
@@ -576,10 +576,10 @@ static int render_section(struct wctx *x, const struct wstep *s, const char *a, 
     fputs("\n", mem);
     snprintf(la, sizeof la, "checkpoint %ld", s->from);
     snprintf(lb, sizeof lb, "checkpoint %ld", s->to);
-    const struct receipt_opts ro = { la, lb, true, cli_mode_of, &m, x->st.scope.docker[0] || x->q->system ? NULL : cli_classify,
-                                     x->st.scope.path, NULL, NULL, NULL,     /* --all: nothing folds, no owner asked */
+    const struct receipt_opts ro = { la, lb, true, cli_mode_of, &m, st->scope.docker[0] || system ? NULL : cli_classify,
+                                     st->scope.path, NULL, NULL, NULL,     /* --all: nothing folds, no owner asked */
                                      NULL, NULL,    /* nor the after manifest about timers and lingering */
-                                     NULL, !x->q->system && !nm->unmatched,     /* .git/ in one line (LN-10) */
+                                     NULL, fold_git,                /* .git/ in one line (LN-10) */
                                      nm->p, nm->n };            /* but what the line names */
     if (receipt_render(in, mem, &ro) == -1) goto out;
     cli_not_compared(mem, belay_manifest_header(m.side[0].r), belay_manifest_header(m.side[1].r), NULL);
@@ -591,6 +591,27 @@ out:
     belay_manifest_close(m.side[0].r);
     belay_manifest_close(m.side[1].r);
     if (rc == -1) { free(*text); *text = NULL; }
+    return rc;
+}
+
+int watch_section_all(struct state *st, const struct wstep *s, char **text, size_t *len) {
+    char d[PATH_MAX + 200];
+    snprintf(d, sizeof d, "%s/checkpoints/%ld/diff-from-%ld.ndjson", st->dir, s->to, s->from);
+    if (s->from <= 0 || access(d, R_OK) != 0 || state_check_manifest(st, s->from) == -1 ||
+        state_check_manifest(st, s->to) == -1) {
+        belay_err_clear();
+        return 1;                       /* pruned: the section as recorded */
+    }
+    struct manifest_file a = { .temporary = false }, b = { .temporary = false };
+    const struct named nm = { 0 };
+    int rc = -1;
+    if (manifest_acquire(st, s->from, &a) == 0) {
+        if (manifest_acquire(st, s->to, &b) == 0) {
+            rc = render_section(st, false, false, s, a.path, b.path, d, &nm, text, len);
+            manifest_release(&b);
+        }
+        manifest_release(&a);
+    }
     return rc;
 }
 
@@ -721,7 +742,9 @@ static int do_step(struct wctx *x, const struct wop *op, bool late) {
         if (s->changes > 0 || s->n_flags > 0 || s->roots != NULL) {
             stage(x, "rendering");
             if (nm.n > 1) qsort(nm.p, nm.n, sizeof *nm.p, named_cmp);
-            if (render_section(x, s, mf_a.path, mf_b.path, d, &nm, &p->section, &p->section_len) == -1) goto out;
+            if (render_section(&x->st, q->system, !q->system && !nm.unmatched, s, mf_a.path, mf_b.path, d, &nm,
+                               &p->section, &p->section_len) == -1)
+                goto out;
         }
     }
     /* the step is made: what it leaves in the state */
