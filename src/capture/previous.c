@@ -118,62 +118,6 @@ static int hexv(char c) { return c <= '9' ? c - '0' : c - 'a' + 10; }
 
 void prev_hex(const struct prev_rec *r, char out[65]) { hex_of(r->sha256, out); }
 
-void prev_entry(const struct prev_index *p, const struct prev_rec *r, struct belay_entry *e) {
-    memset(e, 0, sizeof *e);
-    memcpy(e->path, p->paths + r->path_off, r->path_len);
-    e->path_len = r->path_len;
-    e->type = (enum belay_entry_type)r->type;
-    e->mode = r->mode;
-    e->uid = r->uid;
-    e->gid = r->gid;
-    e->size = r->size;
-    e->mtime_ns = r->mtime_ns;
-    e->ctime_ns = r->ctime_ns;
-    e->ino = r->ino;
-    e->dev = r->dev;
-    e->nlink = r->nlink;
-    e->has_iflags = r->flags & PF_HAS_IFLAGS;
-    e->iflags = r->iflags;
-    e->has_rdev = r->flags & PF_HAS_RDEV;
-    e->rdev = r->rdev;
-    const char *t = p->paths + r->path_off + r->path_len + 1;
-    e->has_link_target = r->flags & PF_HAS_LINK;
-    e->link_target_len = r->link_len < sizeof e->link_target ? r->link_len : sizeof e->link_target - 1;
-    memcpy(e->link_target, t, e->link_target_len);
-    t += r->link_len;
-    e->has_caps = r->flags & PF_HAS_CAPS;
-    memcpy(e->caps_hex, t, r->caps_len < sizeof e->caps_hex ? r->caps_len : sizeof e->caps_hex - 1);
-    t += r->caps_len;
-    size_t rest = r->tail_len - r->link_len - r->caps_len;
-    e->has_xattrs = r->flags & PF_HAS_XATTRS;
-    if (e->has_xattrs && rest >= 64) {
-        memcpy(e->xattrs_sha256_hex, t, 64);
-        t += 64;
-        rest -= 64;
-    }
-    e->xattrs_inline = r->flags & PF_XATTRS_INLINE;
-    if (e->xattrs_inline) {
-        e->xattrs_len = rest < sizeof e->xattrs ? rest : sizeof e->xattrs - 1;
-        memcpy(e->xattrs, t, e->xattrs_len);
-    }
-    e->xattrs_unknown = r->flags & PF_XATTRS_UNKNOWN;
-    e->has_hash = r->flags & PF_HAS_HASH;
-    if (e->has_hash) hex_of(r->sha256, e->sha256_hex);
-    e->unverified = r->flags & PF_UNVERIFIED;
-    e->target_outside_scope = r->flags & PF_TARGET_OUTSIDE;
-    e->has_stored = r->flags & PF_HAS_STORED;
-    if (e->has_stored) hex_of(r->sha256, e->stored_hex);    /* `stored` equals `sha256` (manifest-v1) */
-    e->is_mount = r->flags & PF_MOUNT;
-    e->unstable = r->flags & PF_UNSTABLE;
-    e->unreadable = r->flags & PF_UNREADABLE;
-    e->raced = r->flags & PF_RACED;
-    e->writer_open = r->flags & PF_WRITER_OPEN;
-    e->not_read = r->flags & PF_NOT_READ;
-    e->partial = r->flags & PF_PARTIAL;
-    e->meta = r->flags & PF_META;
-    e->sealed = r->flags & PF_SEALED;
-}
-
 /* Times as the manifest records them (ident.c: saturated, portable). */
 bool prev_trusted(const struct prev_rec *r, const struct stat *st, int64_t reference_ns) {
     if (r == NULL) return false;
