@@ -993,6 +993,40 @@ TEST(receipt_all_lists_every_change_under_git) {
     free(old);
 }
 
+/* The runtime count is a system watch's: a directory's text says nothing of
+ * it, not even none (the JSON trailer's `runtime` is diff-fields RT-T1's). */
+#define NO_RUNTIME(o)                                                   \
+    do {                                                                \
+        HAS_NOT((o), "runtime"); HAS_NOT((o), "listening");             \
+        HAS_NOT((o), "running"); HAS_NOT((o), "listener");              \
+    } while (0)
+TEST(a_directorys_text_says_nothing_of_runtime) {
+    started("s1");
+    belay("watch", "mark", "--scope", g_scope, "--session", "s1", "--name", "p", NULL);
+    sh("echo k >> '%s/src/x.txt' && echo n > '%s/n.txt'", g_scope, g_scope);
+    ASSERT_EQ_INT(0, step("s1", NULL));
+    NO_RUNTIME(g_out);
+    belay("watch", "summary", "--scope", g_scope, "--session", "s1", "--since", "p", NULL);
+    NO_RUNTIME(g_out);
+    ASSERT_EQ_INT(0, belay("watch", "receipt", "--scope", g_scope, NULL));
+    HAS(g_out, "\n  A n.txt\n");
+    NO_RUNTIME(g_out);
+    ASSERT_EQ_INT(0, belay("watch", "receipt", "--scope", g_scope, "--all", NULL));
+    NO_RUNTIME(g_out);
+    sh("echo m >> '%s/n.txt'", g_scope);
+    ASSERT_EQ_INT(0, belay("diff", "--scope", g_scope, "--since", "1", NULL));
+    HAS(g_out, "\n  A n.txt\n");
+    NO_RUNTIME(g_out);
+    ASSERT_EQ_INT(0, belay("diff", "--scope", g_scope, "--since", "1", "--all", NULL));
+    NO_RUNTIME(g_out);
+    ASSERT_EQ_INT(0, belay("log", "--scope", g_scope, NULL));
+    HAS(g_out, "mark 1 ");
+    NO_RUNTIME(g_out);
+    ASSERT_EQ_INT(0, belay("diff", "--scope", g_scope, "--since", "1", "--json", NULL));
+    HAS(g_out, ",\"runtime\":0}");                                      /* RT-T1: the JSON keeps it */
+}
+#undef NO_RUNTIME
+
 TEST(patterns_shows_the_lists_in_force_and_what_each_matches) {
     fresh();
     sh("printf 'src\\nnothing-here\\n' > '%s/.belay-donttouch' && echo k > '%s/.env'", g_scope, g_scope);
@@ -1451,6 +1485,7 @@ int main(void) {
     RUN(a_flagged_change_under_git_is_listed_in_the_receipt);
     RUN(a_flagged_change_under_git_not_utf8_is_listed_in_the_receipt);
     RUN(receipt_all_lists_every_change_under_git);
+    RUN(a_directorys_text_says_nothing_of_runtime);
     RUN(patterns_shows_the_lists_in_force_and_what_each_matches);
     RUN(a_change_of_what_is_read_is_flagged_and_what_is_not_read_is_said_once);
     RUN(too_wide_a_directory_is_refused);
