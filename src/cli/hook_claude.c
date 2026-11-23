@@ -420,13 +420,22 @@ int hook_claude(const char *event, const char *scope_arg, FILE *in, FILE *out) {
         reply_message(out, "belay: " RED " could not record: the hook's input names no session or directory");
         goto done;
     }
-    /* too wide a directory is said at a session's start and by /belay:receipt (TL-14, TL-14a) */
+    /* too wide a directory is said at a session's start, at each Stop and by /belay:receipt (TL-14, TL-14a, TL-14b) */
     struct scope sc;
     const bool resolved = scope_resolve(scope, &sc) == 0;
     if (resolved && watch_too_wide(sc.path)) {
         if (!strcmp(event, "start")) {
             too_wide(&lines, sc.path);
             wsb_f(&lines, "\n");
+            reply_message(out, lines.bad || lines.p == NULL ? "" : lines.p);
+        } else if (!strcmp(event, "stop")) {             /* TL-14b: not silent for the rest of the session */
+            const char *home = getenv("HOME");
+            char real[PATH_MAX], *shown = NULL;
+            if (home != NULL && home[0] == '/' && realpath(home, real) != NULL && strcmp(real, sc.path) == 0)
+                wsb_f(&lines, "belay: not recording: ~ is too wide\n");
+            else if ((shown = flag_shown(sc.path, strlen(sc.path))) != NULL)
+                wsb_f(&lines, "belay: not recording: %s is too wide\n", shown);
+            free(shown);
             reply_message(out, lines.bad || lines.p == NULL ? "" : lines.p);
         }
         goto done;
