@@ -36,6 +36,8 @@ int  cli_refuse_system(const struct state *st, long id, const char *what, FILE *
  * `resolved` is the scope as resolved; `docker` not NULL: a container's. */
 int  cli_refuse_root(const char *resolved, bool system, const char *docker, FILE *err);
 #define CLI_NOT_FOR_SYSTEM "belay: refused: %s is not designed for a system watch\n"
+/* watch-system WS-0: one line, the same text everywhere */
+#define CLI_SYSTEM_EXPERIMENTAL "experimental: the system watch is new, slow on large machines, and its output may change"
 
 /* The receipt's mode lookup: a forward-only cursor on each manifest, as
  * records arrive in path order; its classifier (git on the scope as it is

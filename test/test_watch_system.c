@@ -36,6 +36,7 @@
 #include <unistd.h>
 
 #define RED "\xf0\x9f\x94\xb4"
+#define EXPERIMENTAL "experimental: the system watch is new, slow on large machines, and its output may change\n"      /* WS-0 */
 
 static char g_dir[256], g_tree[400], g_state[400];
 static char *g_out, *g_err;
@@ -109,6 +110,7 @@ static size_t count(const char *hay, const char *needle) {
 TEST(start_opens_stop_closes_and_a_second_start_is_refused) {
     fresh();
     REQUIRE_MSG(sys("start") == 0, "%s%s", g_out, g_err);
+    ASSERT_TRUE(strstr(g_err, EXPERIMENTAL) == g_err);                     /* WS-0: first, on standard error */
     ASSERT_TRUE(strstr(g_out, "could not read: nothing\n") == g_out);
     if (!g_root) {
         ASSERT_TRUE(strstr(g_out, "\n  not root: no kernel record\n") != NULL);      /* WS-R2: only what is true */
@@ -119,7 +121,7 @@ TEST(start_opens_stop_closes_and_a_second_start_is_refused) {
     ASSERT_TRUE(strstr(g_out, "belay: refused: a system watch of this scope is running since ") == g_out);
     sh("cd '%s' && printf 'auth required pam_deny.so\\n' >> etc/pam.d/sshd", g_tree);
     REQUIRE_MSG(sys("stop") == 0, "%s%s", g_out, g_err);
-    ASSERT_TRUE(strstr(g_out, "belay receipt  ") == g_out);
+    ASSERT_TRUE(strstr(g_out, EXPERIMENTAL "belay receipt  ") == g_out);
     ASSERT_TRUE(strstr(g_out, "\nend state: by a walk at ") != NULL);
     ASSERT_TRUE(strstr(g_out, "\nchanges\n") != NULL && strstr(g_out, "etc/pam.d/sshd") != NULL);
     ASSERT_TRUE(strstr(g_out, "\nnot compared: usr, var\n") != NULL);
@@ -488,6 +490,12 @@ TEST(the_receipt_is_in_sections_in_order) {
     ASSERT_TRUE(strstr(g_out, "etc/motd") != NULL && strstr(g_out, "etc/sudoers.d/90-u\n") == NULL);
     ASSERT_TRUE(strstr(g_out, "  usr: 1 change in packages' files\n") != NULL);
     /* --max-lines and --path, as watch-v1's receipt */
+    REQUIRE(belay("watch", "receipt", "--system-root", g_tree, "--max-lines", "2") == 0);
+    ASSERT_TRUE(strstr(g_out, EXPERIMENTAL "belay receipt  ") == g_out);                 /* WS-0: the receipt's first line */
+    REQUIRE(belay("help", "watch") == 0);
+    ASSERT_TRUE(strstr(g_out, EXPERIMENTAL) != NULL || strstr(g_err, EXPERIMENTAL) != NULL);
+    REQUIRE(belay("help") == 0);
+    ASSERT_TRUE(strstr(g_out, EXPERIMENTAL) != NULL || strstr(g_err, EXPERIMENTAL) != NULL);
     REQUIRE(belay("watch", "receipt", "--system-root", g_tree, "--max-lines", "2") == 0);
     ASSERT_EQ_INT(3, (int)count(g_out, "\n"));
     ASSERT_TRUE(strstr(g_out, "... the rest: belay watch receipt without --max-lines\n") != NULL);

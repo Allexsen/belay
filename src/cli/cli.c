@@ -58,6 +58,7 @@ static const char USAGE[] =
     "  --system in place of --scope DIR on check, mark, diff, log, manifest, prune and watch: the machine's /,\n"
     "    read by a fixed list of roots (docs/cli.md); baseline export and verify refuse it. With --docker\n"
     "    CONTAINER: the container's /, read the same way from its layers on the host\n"
+    "    " CLI_SYSTEM_EXPERIMENTAL "\n"
     "  --docker CONTAINER on any of these: the scope is a path inside a Docker container, read from its\n"
     "                                        layers on the host (Linux, root; export and verify: paused)\n"
     "exit codes: 0 done, 1 diff --exit-code found a change (verify: a violation), 2 usage, 3 refused, 4 failed\n";
@@ -139,6 +140,7 @@ static const struct { const char *cmd, *text; } HELP[] = {
                "            prints the receipt's opening lines; a step's walk past 45 s goes on in its own\n"
                "            process and is reported by the next step; receipt and stop take a walk with no\n"
                "            time limit and print the receipt in sections; stop ends the watch\n"
+               "            " CLI_SYSTEM_EXPERIMENTAL "\n"
                "  --docker C  with --system: the container's / instead, read from its layers on the host\n"
                "            (root; docs/cli.md)\n" },
     { "hook",  "usage: belay hook claude-code start|pre|post|batch|prompt|stop|subagent-stop|end|receipt [--scope DIR]\n"

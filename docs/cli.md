@@ -533,6 +533,11 @@ line names it (`belay receipt  / in the container C (4f1c0e8a9b7d)`), and its ke
 
 ### watch --system
 
+experimental: the system watch is new, slow on large machines, and its output may change
+
+`watch start --system` prints this line first, on standard error; `watch receipt --system` and
+`watch stop --system` print it as the receipt's first line.
+
 ```
 belay watch start    --system
 belay watch step     --system --session S [--begin ID | --finish ID] [--agent A] [--deadline SECONDS]
