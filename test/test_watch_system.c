@@ -496,6 +496,50 @@ TEST(a_walk_past_the_limit_is_reported_by_the_next_step) {
     ASSERT_EQ_INT(1, (int)count(g_out, "etc/a-file"));
 }
 
+static void stall_matching(const char *stage) {
+    if (strcmp(stage, "matching") != 0) return;
+    struct timespec ts = { (time_t)g_stall_s, (long)((g_stall_s - (double)(time_t)g_stall_s) * 1e9) };
+    nanosleep(&ts, NULL);
+}
+
+/* WS-3a: what follows the walk is the worker's too. A diff and a match
+ * longer than the limit, step after step: each step says `walking`, and the
+ * next prints the last one's line from the record, never diffing it again
+ * within its own limit; no step is killed and the watch is never stopped
+ * (TM-3 does not apply). Measured on a 22.04 runner, where the diff of two
+ * walks alone took 40 to 57 s. */
+TEST(a_slow_match_after_the_walk_is_the_workers_and_never_stops_the_watch) {
+    fresh();
+    REQUIRE(sys("start") == 0);
+    watch_stage_hook = stall_matching;
+    g_stall_s = 1.5;
+    for (int i = 0; i < 5; i++) {
+        sh("cd '%s' && printf 'x\\n' > etc/f%d", g_tree, i);
+        const int rc = step_d("1");
+        walker_done();
+        ASSERT_EQ_INT(0, rc);
+        ASSERT_TRUE(strstr(g_out, "could not record") == NULL && strstr(g_out, "not recording") == NULL);
+        ASSERT_TRUE(strstr(g_out, "belay: walking (") != NULL);
+        if (i > 0) {
+            char want[64];
+            snprintf(want, sizeof want, ": outside tool calls: 1 change: etc/f%d added\n", i - 1);
+            ASSERT_TRUE(strstr(g_out, "belay: since ") == g_out && strstr(g_out, want) != NULL);
+        }
+    }
+    watch_stage_hook = NULL;
+    REQUIRE_MSG(step() == 0, "%s", g_out);
+    ASSERT_TRUE(strstr(g_out, "belay: since ") == g_out && strstr(g_out, "etc/f4 added\n") != NULL);
+    ASSERT_EQ_INT(1, (int)count(g_out, "\n"));
+    REQUIRE(step() == 0);
+    ASSERT_EQ_STR("", g_out);
+    REQUIRE_MSG(sys("receipt") == 0, "%s", g_err);
+    for (int i = 0; i < 5; i++) {
+        char f[16];
+        snprintf(f, sizeof f, "etc/f%d", i);
+        ASSERT_EQ_INT(1, (int)count(g_out, f));
+    }
+}
+
 /* WS-3b: a worker that died leaves a lock nobody holds; the next step says
  * the last walk did not finish, and walks. */
 TEST(a_walk_whose_worker_died_is_said_and_walked_again) {
@@ -542,6 +586,7 @@ int main(void) {
     RUN(patterns_lists_the_roots_the_homes_left_out_and_the_list);
     RUN(the_receipt_is_in_sections_in_order);
     RUN(a_walk_past_the_limit_is_reported_by_the_next_step);
+    RUN(a_slow_match_after_the_walk_is_the_workers_and_never_stops_the_watch);
     RUN(a_walk_whose_worker_died_is_said_and_walked_again);
     RUN(receipt_has_no_limit_and_says_so_every_period);
     sh("chmod -R u+rwx '%s' 2>/dev/null; rm -rf '%s'", g_dir, g_dir);

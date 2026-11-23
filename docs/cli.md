@@ -568,11 +568,13 @@ needs a marker.
   belay: outside tool calls: 1 entry changed under var
   ```
 
-- **A walk longer than the step's time limit** (45 s) is not killed: it goes on in a process of its
-  own session, holding the state's lock, and the step prints
+- **A walk longer than the step's time limit** (45 s) is not killed, nor is the diff after it: both
+  go on in a process of its own session, holding the state's lock, which records the step when it
+  ends, and the step prints
   `walking (not root): not finished in 45 s; what changed will be in the next line` and exits 0.
   A step while it runs prints `walk in progress since 14:03 (not root)`. The next step prints the
-  walk's line first, `since` the checkpoint before it, then its own; each change is said once.
+  walk's line first, from the record, `since` the checkpoint before it, then its own; each change
+  is said once. No number of late steps stops a system watch.
   A walk whose process died is said (`the last walk did not finish`) and taken again. Until the
   kernel record (a later version), every capture of a system watch is a walk.
 - **receipt** and **stop** take a walk with no time limit (a line on standard error every 10 s

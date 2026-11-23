@@ -114,16 +114,11 @@ struct wctx {
     bool walk_died;             /* a walk was under way and no worker held the lock */
     bool walked;                /* this run began a walk */
     int64_t walk_began;
-    bool parked;                /* the supervisor left during the walk: its checkpoint waits for the next step */
+    int64_t walk_from_ns;       /* the time of the checkpoint its step diffs against */
+    bool parked;                /* the supervisor left: this run's step is written, its line waits for the next step */
     bool troubles_only;         /* receipt, stop: their step says only its troubles */
     struct wsb tail;            /* lines after the steps': start's opening lines, the receipt */
 };
-
-/* The supervisor left (WS-3a): it closed its end. Read without waiting. */
-static bool supervisor_gone(const struct wctx *x) {
-    struct pollfd pf = { x->from_sup, POLLIN, 0 };
-    return poll(&pf, 1, 0) > 0;
-}
 
 static void stage(struct wctx *x, const char *name) {
     x->stage = name;
@@ -511,20 +506,6 @@ static struct pending *pend(struct wctx *x, const char *type) {
     return p;
 }
 
-/* WS-3a: the walk ended after its step's limit. Its checkpoint is recorded
- * as waiting, from the state before the step, so the next step or receipt
- * reports it and nothing is said twice. Nothing else of this run is kept. */
-static int park(struct wctx *x, const struct wstate *before, const struct checkpoint *c) {
-    x->l.st = *before;
-    x->l.st.walk_ns = 0;
-    x->l.st.walk_reason[0] = '\0';
-    x->l.st.pending = c->id;
-    x->l.st.pending_ns = c->created_ns;
-    x->l.st.pending_walk_ns = x->walk_began;
-    x->parked = true;
-    return ledger_append(&x->l, "walked", x->q->session, x->now, "", NULL);
-}
-
 static int do_step(struct wctx *x, const struct wop *op, bool late) {
     const struct wreq *q = x->q;
     struct wstate *st = &x->l.st;
@@ -568,8 +549,6 @@ static int do_step(struct wctx *x, const struct wop *op, bool late) {
     }
     const struct capture_req req = { "mark", true, false, 50, 0, false, true, q->system, false };
     struct checkpoint c = { 0 };
-    static struct wstate before;
-    before = *st;
     if (late) {                         /* WS-3a: the walk an earlier step left, reported now */
         c.id = st->pending;
         c.created_ns = st->pending_ns;
@@ -580,6 +559,7 @@ static int do_step(struct wctx *x, const struct wop *op, bool late) {
         snprintf(words, sizeof words, "walking (%s)", watch_walk_reason());
         x->walked = true;
         x->walk_began = now_ns();
+        x->walk_from_ns = st->cursor_ns;
         st->walk_ns = x->walk_began;
         snprintf(st->walk_reason, sizeof st->walk_reason, "%s", watch_walk_reason());
         if (ledger_append(&x->l, "walk", q->session, x->now, "", NULL) == -1) return -1;
@@ -589,12 +569,6 @@ static int do_step(struct wctx *x, const struct wop *op, bool late) {
         if (state_capture(&x->st, &req, &c) == -1) return -1;
         st->walk_ns = 0;
         st->walk_reason[0] = '\0';
-        if (supervisor_gone(x)) {
-            x->n_pend--;
-            wstep_free(s);
-            free(s);
-            return park(x, &before, &c);
-        }
     } else {
         stage(x, "capturing");
         if (state_capture(&x->st, &req, &c) == -1) return -1;
@@ -874,26 +848,43 @@ static int commit(struct wctx *x) {
     return 0;
 }
 
+/* WS-3a: the supervisor of a system walk left at its limit, and kills
+ * nothing after that. The step is written all the same, said late: its
+ * line waits in the record, with the state saying so, for the next step or
+ * receipt to print (shown_late). Counted for WS-3c with how long it took
+ * from its walk's start. */
+static void go_alone(struct wctx *x, const struct checkpoint *walk) {
+    const long secs = (long)((now_ns() - x->walk_began + 500000000LL) / 1000000000LL);
+    for (size_t i = 0; i < x->n_pend; i++) {
+        struct pending *p = &x->pend[i];
+        if (p->step != NULL && p->step->to == walk->id && p->step->from != 0) p->step->since_ns = x->walk_from_ns;
+        struct wstate *w = &p->snap;
+        if (w->cursor != walk->id) continue;                /* before the walk's step */
+        w->pending = walk->id;
+        w->pending_ns = walk->created_ns;
+        w->pending_walk_ns = x->walk_began;
+        if (w->n_late < W_LATE_MAX) w->late[w->n_late] = secs;
+        w->n_late++;
+    }
+    x->parked = true;
+}
+
 /* What is pending, asked for and written: "go" or a kill, never both
- * (TM-2); then the steps' lines. A system watch's walk whose supervisor
- * left before the answer is parked instead (WS-3a): 1. 0, or -1. */
-static int flush(struct wctx *x, const struct wstate *before, const struct checkpoint *walk) {
+ * (TM-2); then the steps' lines. A system walk whose supervisor left
+ * before the answer is written without one (WS-3a): 1. 0, or -1. */
+static int flush(struct wctx *x, const struct checkpoint *walk) {
     if (x->n_pend == 0) return 0;
     if (watch_stage_hook != NULL) watch_stage_hook("committing");
     char go = 0;
     ssize_t k = msg(x->to_sup, 'C', "", 0) == -1 ? 0 : 1;
     while (k == 1 && (k = read(x->from_sup, &go, 1)) == -1 && errno == EINTR) {}
-    if (k != 1 || go != 'g') {          /* the supervisor is gone or said no: nothing is written */
-        if (walk == NULL) _exit(4);
-        for (size_t i = 0; i < x->n_pend; i++) {
-            if (x->pend[i].step != NULL) { wstep_free(x->pend[i].step); free(x->pend[i].step); }
-            free(x->pend[i].section);
-        }
-        x->n_pend = 0;
-        return park(x, before, walk) == -1 ? -1 : 1;
+    if (k != 1 || go != 'g') {          /* the supervisor is gone or said no */
+        if (walk == NULL) _exit(4);     /* not a walk: nothing is written */
+        go_alone(x, walk);
     }
     stage(x, "writing the record");
     if (commit(x) == -1) return -1;
+    if (x->parked) return 1;
     for (size_t i = 0; i < x->n_pend; i++) {
         struct wstep *s = x->pend[i].step;
         if (s == NULL) continue;
@@ -916,6 +907,45 @@ static void forget_pending(struct wctx *x) {
     x->found = x->l.st;
 }
 
+/* The newest step line whose checkpoint is `id` and that was written as
+ * waiting to be shown (its own state says so). */
+struct late_find { long id; struct wstep s; bool got, bad; };
+
+static int late_line(void *ctx, const struct jval *line, const char *type) {
+    struct late_find *f = ctx;
+    if (strcmp(type, "step") != 0 || jint(line, "to", 0) != f->id) return 0;
+    static struct wstate w;
+    if (!ledger_state(line, &w) || w.pending != f->id) return 0;
+    struct wstep s;
+    if (ledger_step(line, &s) == -1) return 0;
+    if (f->got) wstep_free(&f->s);
+    f->s = s;
+    f->got = true;
+    return 0;
+}
+
+/* WS-3a: the step a worker wrote after its supervisor left, printed now
+ * (its troubles only, for a receipt), and the state no longer waiting for
+ * it, on record. 1: shown; 0: no such line; -1. */
+static int shown_late(struct wctx *x) {
+    char (*days)[11] = NULL;
+    size_t n = 0;
+    struct late_find f = { .id = x->l.st.pending };
+    if (ledger_days(&x->l, &days, &n) == -1) return -1;
+    for (size_t i = n; i-- > 0 && !f.got;)
+        if (ledger_read(&x->l, days[i], 0, late_line, &f) == -1) { free(days); return -1; }
+    free(days);
+    if (!f.got) return 0;
+    if (!x->troubles_only) lines_step(&x->out, &f.s);
+    else
+        for (size_t t = 0; t < f.s.n_trouble; t++) wsb_f(&x->out, "belay: " RED " %s\n", f.s.trouble[t]);
+    wstep_free(&f.s);
+    struct wstate *st = &x->l.st;
+    st->pending = 0;
+    st->pending_ns = st->pending_walk_ns = 0;
+    return ledger_append(&x->l, "shown", x->q->session, x->now, "", NULL) == -1 ? -1 : 1;
+}
+
 static int work(struct wctx *x) {
     const struct wreq *q = x->q;
     bool summary = false, steps = false;
@@ -931,12 +961,17 @@ static int work(struct wctx *x) {
         x->l.st.walk_reason[0] = '\0';
     }
     if (q->system && steps && x->l.st.pending != 0) {
-        /* WS-3b: the walk an earlier step left is reported first, and written
-         * before this run's own walk begins, its line sent at once */
-        const struct wop late = { WOP_STEP, NULL, WSTEP_PLAIN };
-        if (do_step(x, &late, true) == -1) return -1;
-        const int f = flush(x, NULL, NULL);
-        if (f == -1) return -1;
+        /* WS-3b: the step an earlier one left is reported first, before this
+         * run's own walk begins, its line sent at once: from the record when
+         * its worker wrote it (WS-3a); diffed now when it did not (a walk
+         * parked by an earlier version) */
+        const int shown = shown_late(x);
+        if (shown == -1) return -1;
+        if (shown == 0) {
+            const struct wop late = { WOP_STEP, NULL, WSTEP_PLAIN };
+            if (do_step(x, &late, true) == -1) return -1;
+            if (flush(x, NULL) == -1) return -1;
+        }
         forget_pending(x);
         if (x->out.n > 0 && !x->out.bad) {
             msg(x->to_sup, 'O', x->out.p, x->out.n);
@@ -944,8 +979,6 @@ static int work(struct wctx *x) {
             x->out.p[0] = '\0';
         }
     }
-    static struct wstate before;
-    before = x->l.st;
     struct checkpoint walk = { 0 };
     for (size_t i = 0; i < q->n_ops; i++) {
         const struct wop *op = &q->ops[i];
@@ -1065,7 +1098,7 @@ static int work(struct wctx *x) {
         struct pending *p = pend(x, "close");
         p->snap = x->l.st;
     }
-    const int f = flush(x, &before, q->system && walk.id != 0 ? &walk : NULL);
+    const int f = flush(x, q->system && walk.id != 0 ? &walk : NULL);
     if (f == -1) return -1;
     if (f == 1) return 0;                       /* parked */
     for (size_t i = 0; q->system && i < q->n_ops; i++)     /* WS-2: start prints the receipt's opening lines */
@@ -1128,7 +1161,7 @@ static void worker(const struct wreq *q, int to_sup, int from_sup) {
             struct ledger rl;
             if (ledger_open(&ro, false, &rl) == 0) {
                 const struct wkill *k = kill_of(&rl.st, q->session, false);
-                if (k != NULL && k->n >= WATCH_BACKOFF) {
+                if (k != NULL && k->n >= WATCH_BACKOFF && !q->system) {     /* WS-3a: none for a system watch */
                     wsb_f(&x.out, "belay: " RED " not recording: capturing this directory takes longer than %ld s\n", q->deadline_s);
                     status = 4;
                 }
