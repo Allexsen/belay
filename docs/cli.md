@@ -587,7 +587,8 @@ needs a marker.
   `secret`, `trust`, `firewall`, `init`, `config`, `changes` (up to 20, then a count, and per
   `usr`-like root the records folded into packages, and how many entries were not read on either
   side with nothing compared changed), `not compared`, `not read`. A config event of
-  a file of a package installed here is counted in `config`, not listed. In this version the kernel
+  a file a package installed or upgraded here added is counted in `config`, not listed; an edit of
+  a file that was there before is listed, whatever package owns it. In this version the kernel
   record is always off: `kernel record: off: not root: a change put back is not seen`.
 - **patterns** prints the roots as the machine is now, with their classes and the entries of the
   newest checkpoint under each, the directories not read, the homes of `etc/passwd` left out and
