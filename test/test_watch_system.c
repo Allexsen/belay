@@ -185,7 +185,7 @@ TEST(a_step_flags_and_notes_by_the_system_list) {
     ASSERT_TRUE(strstr(g_out, "etc/wireguard/wg0.conf added (secret)") != NULL);
     ASSERT_TRUE(strstr(g_out, "PrivateKey") == NULL);
     /* F12: its metadata alone is counted (dpkg's lock files, after every apt-get); its content, flagged */
-    sh("cd '%s' && touch -d 2001-01-01 etc/wireguard/wg0.conf", g_tree);
+    sh("cd '%s' && touch -t 200101010000 etc/wireguard/wg0.conf", g_tree);
     REQUIRE(step() == 0);
     ASSERT_EQ_STR("belay: outside tool calls: 1 change: etc/wireguard/wg0.conf metadata changed\n", g_out);
     sh("cd '%s' && printf 'PrivateKey = y\\n' > etc/wireguard/wg0.conf", g_tree);
@@ -448,7 +448,7 @@ TEST(the_receipt_is_in_sections_in_order) {
     REQUIRE(sys("start") == 0);
     /* a user's edit of a package's file there before, the package upgraded after: listed, never folded */
     sh("cd '%s' && printf 'kernel.t = 4\\n' > etc/sysctl.d/10-tool.conf", g_tree);
-    sh("cd '%s' && touch -d 2001-01-01 etc/.pwd.lock && printf 'u ALL=(ALL) ALL\\n' > etc/sudoers.d/90-u && chmod 440 etc/sudoers.d/90-u && "
+    sh("cd '%s' && touch -t 200101010000 etc/.pwd.lock && printf 'u ALL=(ALL) ALL\\n' > etc/sudoers.d/90-u && chmod 440 etc/sudoers.d/90-u && "
        "printf 'v:x:1001:1001::/nonexistent:/bin/sh\\nw:x:1002:1002::/home/w:/bin/sh\\n' >> etc/passwd && mkdir -p home/w && "
        "printf '* * * * * root /bin/x\\n' > etc/cron.d/x && "
        "printf 'ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIOMqqnkVzrm0SdG6UOoqKLsabgH5C9okWi0dh2l9GKJl k\\n' > home/u/.ssh/authorized_keys && "
