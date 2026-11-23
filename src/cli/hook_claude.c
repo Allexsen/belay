@@ -348,7 +348,7 @@ static void receipt_event(const char *scope, FILE *out) {
     struct scope sc;
     if (scope_resolve(scope, &sc) == 0 && watch_too_wide(sc.path)) {
         too_wide(&r, sc.path);                  /* not watched, so no receipt: said so (TL-14a) */
-    } else if (watch_receipt(scope, &text, &n_steps) == -1 || text.bad) {
+    } else if (watch_receipt(scope, false, &text, &n_steps) == -1 || text.bad) {
         belay_err_clear();
         wsb_f(&r, "belay could not read its record of this directory.");
     } else if (n_steps == 0) {

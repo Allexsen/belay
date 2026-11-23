@@ -183,7 +183,7 @@ belay watch step     --scope DIR --session S [--begin ID | --finish ID] [--agent
 belay watch close    --scope DIR --session S (--id ID... | --all)
 belay watch mark     --scope DIR --session S --name NAME
 belay watch summary  --scope DIR --session S --since NAME
-belay watch receipt  --scope DIR [--max-lines N] [--path]
+belay watch receipt  --scope DIR [--all] [--max-lines N] [--path]
 belay watch patterns --scope DIR [--entries]
 ```
 
@@ -220,7 +220,8 @@ commands.
   file changed in five steps is five.
 - **receipt** prints every change of every step, newest first, each step as `belay diff --all`
   shows it, except that `.git/` folds into one line as `belay diff` folds it (`git bookkeeping: 50
-  changes under .git/`), but for what the step's line flagged or noted. `--path` writes it to a file in the state directory and prints the file's path.
+  changes under .git/`), but for what the step's line flagged or noted. `--all` lists every entry
+  under `.git/` too, as `belay diff --all` does. `--path` writes it to a file in the state directory and prints the file's path.
 - **patterns** prints the lists in force and how many current entries each pattern matches;
   `--entries` prints each entry a list covers.
 
