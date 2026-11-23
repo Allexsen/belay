@@ -38,6 +38,10 @@ struct belay_diff_opts {
      * checkpoint recorded; NULL where a capture has none. Either given:
      * the diff has a `runtime` section (RT-D1, RT-D5). Read, never written. */
     const char *runtime_before, *runtime_after;
+    /* What the trailer's before_sha256 and after_sha256 carry in place of
+     * the digest of the bytes read, for a manifest whose identity is not
+     * one (diff-fields ID-1: an event capture's); NULL: the bytes' digest. */
+    const char *before_identity, *after_identity;
 };
 
 /*

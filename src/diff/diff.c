@@ -89,6 +89,7 @@ static void sync_dir_of(const char *path) {
 }
 
 struct run {
+    const struct belay_diff_opts *opts;
     struct belay_manifest_reader *rb, *ra;
     struct belay_entry root[2];     /* [0] before, [1] after: as find_root read them */
     struct diff_ctx ctx;
@@ -355,11 +356,14 @@ static int run_pipeline(struct run *x) {
      * read the after-manifest again. */
     char sb[65], sa[65];
     if (belay_manifest_digest(x->rb, sb) == -1 || belay_manifest_digest(x->ra, sa) == -1) return -1;
+    char ib[65], ia[65];                /* diff-fields ID-1: what the trailer names them by */
+    snprintf(ib, sizeof ib, "%s", x->opts != NULL && x->opts->before_identity != NULL ? x->opts->before_identity : sb);
+    snprintf(ia, sizeof ia, "%s", x->opts != NULL && x->opts->after_identity != NULL ? x->opts->after_identity : sa);
     const struct belay_manifest_stats tb = *belay_manifest_trailer(x->rb), ta = *belay_manifest_trailer(x->ra);
     if (lookups(x, sa) == -1 || end_all(x) == -1 || emit_events(&x->em, &x->events) == -1) return -1;
     /* runtime-v1 RT-D1: the runtime section, after the events. */
     if (runtime_units(x, sa) == -1 || rtdiff_write(x->rt, x->em.f, &x->rt_records) == -1) return -1;
-    const struct diff_inputs in = { &tb, &ta, sb, sa, x->rt_records };
+    const struct diff_inputs in = { &tb, &ta, ib, ia, x->rt_records };
     return emit_trailer(&x->em, &in);
 }
 
@@ -425,6 +429,7 @@ int diff_run(const char *before, const char *after, const char *out_path,
         goto done;
     }
     x->interp = interp;
+    x->opts = opts;
     events_init(&x->events);
     lookup_init(&x->lookup, x->content);
     if (opts != NULL) {

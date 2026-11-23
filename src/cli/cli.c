@@ -849,7 +849,11 @@ static int cmd_diff(const struct opts *o, FILE *out, FILE *err) {
     const int ra = la == -1 || lb == -1 ? -1 : state_runtime(&st, from, rt_a, sizeof rt_a);
     const int rb = ra == -1 ? -1 : state_runtime(&st, to, rt_b, sizeof rt_b);
     if (la == -1 || lb == -1 || ra == -1 || rb == -1) { rc = failed(err); goto done; }
-    const struct belay_diff_opts dopts = { .store_dir = st.store, .shadow_lines_before = la == 1 ? lines_a : NULL,
+    char ida[65] = "", idb[65] = "";             /* diff-fields ID-1 */
+    if (!manifest_event_identity(&st, from, ida)) ida[0] = '\0';
+    if (!manifest_event_identity(&st, to, idb)) idb[0] = '\0';
+    const struct belay_diff_opts dopts = { .before_identity = ida[0] ? ida : NULL, .after_identity = idb[0] ? idb : NULL,
+                                           .store_dir = st.store, .shadow_lines_before = la == 1 ? lines_a : NULL,
                                            .shadow_lines_after = lb == 1 ? lines_b : NULL,
                                            .runtime_before = ra == 1 ? rt_a : NULL, .runtime_after = rb == 1 ? rt_b : NULL };
     struct belay_diff_stats ds;

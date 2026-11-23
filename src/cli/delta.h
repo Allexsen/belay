@@ -58,6 +58,16 @@ void manifest_store_delta(const struct state *st, long prev, long id);
  * false when it has no delta or that cannot be read. */
 bool manifest_recorded_sha256(const struct state *st, long id, char hex[65]);
 
+/* A manifest's identity (ST-3): the sha256 of its bytes, or for one stored as
+ * a delta of version 2 the sha256 of its base's identity and its operations'
+ * digest, each as 64 hex digits. `bytes`: whether it is the former. Read from
+ * the delta's first line when the checkpoint has one, else by hashing the
+ * whole file. 0, or -1 with belay_err. */
+int  manifest_identity(const struct state *st, long id, char hex[65], bool *bytes);
+/* True with the identity when it is not a digest of bytes (a version 2
+ * delta's, or a whole file one was made into): diff-fields ID-1. */
+bool manifest_event_identity(const struct state *st, long id, char hex[65]);
+void manifest_identity_of(const char base[65], const char ops[65], char out[65]);
 /* Makes a delta a whole file again, checked, before its base goes (PR-4). */
 int  manifest_make_whole(const struct state *st, long id);
 

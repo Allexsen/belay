@@ -1155,6 +1155,146 @@ TEST(delta_that_does_not_rebuild_is_corrupt) {
     ASSERT_TRUE(has_checkpoint(1));
 }
 
+/* ---- a delta of version 2 (ST-1, ST-3, ST-4; option A): what an event
+ * capture writes. Made here from a walk's delta, whose operations are the
+ * same grammar: its first line is rewritten, its whole file removed. ---- */
+
+/* Checkpoint `id`'s delta becomes a version 2 one over a base whose identity
+ * is `base_identity` ("" for the base_sha256 it has); its own identity is
+ * left in <g_dir>/ident.<id>. */
+static bool to_v2(int id, const char *base_identity) {
+    char path[600];
+    snprintf(path, sizeof path, "%s/v2.sh", g_dir);
+    FILE *f = fopen(path, "w");
+    if (f == NULL) return false;
+    fputs("set -e\n"
+          "H() { (sha256sum 2>/dev/null || shasum -a 256) | cut -c1-64; }\n"
+          "f=\"$1/checkpoints/$2/manifest.delta\"\n"
+          "base=$(sed -n '1s/.*\"base\":\\([0-9]*\\).*/\\1/p' \"$f\")\n"
+          "bsha=$(sed -n '1s/.*\"base_sha256\":\"\\([0-9a-f]*\\)\".*/\\1/p' \"$f\")\n"
+          "chain=$(sed -n '1s/.*\"chain\":\\([0-9]*\\).*/\\1/p' \"$f\")\n"
+          "[ -z \"$3\" ] || bsha=$3\n"
+          "tail -n +2 \"$f\" > \"$f.ops\"\n"
+          "osha=$(H < \"$f.ops\")\n"
+          "{ printf '{\"belay_delta\":2,\"base\":%s,\"base_sha256\":\"%s\",\"ops_sha256\":\"%s\",\"chain\":%s}\\n' "
+          "\"$base\" \"$bsha\" \"$osha\" \"$chain\"; cat \"$f.ops\"; } > \"$f.new\"\n"
+          "mv \"$f.new\" \"$f\"\n"
+          "rm -f \"$f.ops\" \"$1/checkpoints/$2/manifest.ndjson\"\n"
+          "printf '%s%s' \"$bsha\" \"$osha\" | H > \"$4/ident.$2\"\n", f);
+    fclose(f);
+    return holds("sh '%s/v2.sh' \"$d\" %d '%s' '%s'", g_dir, id, base_identity, g_dir);
+}
+
+static const char *identity_file(int id) {
+    static char v[80];
+    char path[600];
+    snprintf(path, sizeof path, "%s/ident.%d", g_dir, id);
+    FILE *f = fopen(path, "r");
+    v[0] = '\0';
+    if (f != NULL) {
+        if (fgets(v, sizeof v, f) == NULL) v[0] = '\0';
+        fclose(f);
+    }
+    v[strcspn(v, "\n")] = '\0';
+    return v;
+}
+
+/* 3 a version 2 delta over a walk's, 4 one over 3, 5 a walk's delta over 4. */
+static void history_with_v2(void) {
+    history_copied(6);
+    ASSERT_TRUE(to_v2(3, ""));
+    char id3[80], id4[80];
+    snprintf(id3, sizeof id3, "%s", identity_file(3));
+    ASSERT_EQ_INT(64, (int)strlen(id3));
+    ASSERT_TRUE(to_v2(4, id3));
+    snprintf(id4, sizeof id4, "%s", identity_file(4));
+    ASSERT_TRUE(holds("sed -i.bak '1s/\"base_sha256\":\"[0-9a-f]*\"/\"base_sha256\":\"%s\"/' \"$d/checkpoints/5/manifest.delta\" && "
+                      "rm \"$d/checkpoints/5/manifest.delta.bak\"", id4));
+}
+
+/* ST-3, ST-4: a version 2 delta names no digest of its result and rebuilds
+ * it all the same, over a walk's delta, over another of its kind, and under
+ * a walk's delta, which names it by its identity. */
+TEST(delta_v2_rebuilds_byte_for_byte) {
+    history_with_v2();
+    ASSERT_TRUE(holds("! sed -n 1p \"$d/checkpoints/3/manifest.delta\" | grep -q '\"sha256\"\\|\"size\"' && [ ! -f \"$d/checkpoints/4/manifest.ndjson\" ]"));
+    const int ids[] = { 2, 3, 4, 5, 6 };
+    for (size_t i = 0; i < sizeof ids / sizeof ids[0]; i++)
+        if (!same_as_written(ids[i])) BELAY_FAIL("checkpoint %d", ids[i]);
+    /* diff-fields ID-1: the trailer names such a manifest by its identity, a walk's by its bytes */
+    char id3[80], id4[80];
+    snprintf(id3, sizeof id3, "\"before_sha256\":\"%s\"", identity_file(3));
+    snprintf(id4, sizeof id4, "\"after_sha256\":\"%s\"", identity_file(4));
+    ASSERT_EQ_INT(0, belay("diff", "--scope", g_scope, "--since", "3", "--to", "4", "--json", NULL));
+    ASSERT_TRUE(strstr(g_out, id3) != NULL && strstr(g_out, id4) != NULL);
+    ASSERT_EQ_INT(0, belay("diff", "--scope", g_scope, "--since", "4", "--to", "6", "--json", NULL));
+    snprintf(id4, sizeof id4, "\"before_sha256\":\"%s\"", identity_file(4));
+    ASSERT_TRUE(strstr(g_out, id4) != NULL);
+    ASSERT_TRUE(holds("s=$( (sha256sum '%s/copies/6' 2>/dev/null || shasum -a 256 '%s/copies/6') | cut -c1-64) && "
+                      "grep -q \"\\\"after_sha256\\\":\\\"$s\\\"\" \"$d/checkpoints/6/diff-from-4.ndjson\"", g_dir, g_dir));
+    ASSERT_EQ_INT(0, belay("log", "--scope", g_scope, NULL));
+    /* a walk after it is stored against it, and both still read */
+    sh("printf 'version 7\n' > '%s/a.txt'", g_scope);
+    ASSERT_EQ_INT(0, belay("mark", "--scope", g_scope, "--full", NULL));
+    sh("printf 'version 8\n' > '%s/a.txt'", g_scope);
+    ASSERT_EQ_INT(0, belay("mark", "--scope", g_scope, "--full", NULL));
+    ASSERT_TRUE(same_as_written(4) && same_as_written(6));
+    ASSERT_EQ_INT(0, belay("manifest", "--scope", g_scope, "--id", "7", NULL));
+}
+
+/* ST-4: its operations are the bytes it names. */
+TEST(delta_v2_with_other_operations_is_corrupt) {
+    history_with_v2();
+    ASSERT_TRUE(holds("sed -i.bak '/^+{\"path\":\"a.txt\"/s/\"uid\":[0-9]*/\"uid\":424242/' \"$d/checkpoints/3/manifest.delta\" && "
+                      "rm \"$d/checkpoints/3/manifest.delta.bak\" && grep -q 424242 \"$d/checkpoints/3/manifest.delta\""));
+    ASSERT_EQ_INT(4, belay("manifest", "--scope", g_scope, "--id", "3", NULL));
+    ASSERT_EQ_STR("", g_out);
+    ASSERT_TRUE(strstr(g_err, "not what it recorded") != NULL);
+    ASSERT_EQ_INT(4, belay("manifest", "--scope", g_scope, "--id", "4", NULL));     /* what builds on it too */
+    ASSERT_TRUE(same_as_written(5));    /* a walk's delta over them: its own bytes are checked, and are right */
+}
+
+/* ST-4: its base is the bytes it was made from -- a walk's delta below it
+ * that rebuilds to other bytes is found, though the version 2 delta itself
+ * has no digest of anything rebuilt. */
+TEST(delta_v2_over_a_base_that_rebuilds_wrong_is_corrupt) {
+    history_with_v2();
+    ASSERT_TRUE(holds("sed -i.bak '/^+{\"path\":\"a.txt\"/s/\"uid\":[0-9]*/\"uid\":424242/' \"$d/checkpoints/2/manifest.delta\" && "
+                      "rm \"$d/checkpoints/2/manifest.delta.bak\" && grep -q 424242 \"$d/checkpoints/2/manifest.delta\""));
+    ASSERT_EQ_INT(4, belay("manifest", "--scope", g_scope, "--id", "3", NULL));
+    ASSERT_EQ_STR("", g_out);
+    ASSERT_EQ_INT(4, belay("manifest", "--scope", g_scope, "--id", "4", NULL));
+}
+
+/* ST-3: base_sha256 is the base's identity; another base is refused. A
+ * version 2 first line that names a sha256 is none belay wrote. */
+TEST(delta_v2_names_its_base_by_identity) {
+    history_with_v2();
+    ASSERT_TRUE(holds("sed -i.bak '1s/\"base_sha256\":\"[0-9a-f]\\{8\\}/\"base_sha256\":\"00000000/' \"$d/checkpoints/4/manifest.delta\" && "
+                      "rm \"$d/checkpoints/4/manifest.delta.bak\""));
+    ASSERT_EQ_INT(4, belay("manifest", "--scope", g_scope, "--id", "4", NULL));
+    ASSERT_TRUE(strstr(g_err, "not the one it was made from") != NULL);
+    ASSERT_TRUE(same_as_written(3));
+    ASSERT_TRUE(holds("sed -i.bak '1s/\"chain\"/\"sha256\":\"%s\",\"chain\"/' \"$d/checkpoints/3/manifest.delta\" && "
+                      "rm \"$d/checkpoints/3/manifest.delta.bak\"", identity_file(3)));
+    ASSERT_EQ_INT(4, belay("manifest", "--scope", g_scope, "--id", "3", NULL));
+    ASSERT_TRUE(strstr(g_err, "is not a delta belay wrote") != NULL);
+}
+
+/* PR-4 with ST-3: a version 2 delta whose base is pruned is made whole and
+ * keeps its first line, the only record of its identity; the delta made
+ * from it still names it and still rebuilds. */
+TEST(prune_makes_a_v2_delta_whole_and_keeps_its_identity) {
+    history_with_v2();
+    ASSERT_EQ_INT(0, belay("prune", "--scope", g_scope, "--keep-last", "3", NULL));
+    ASSERT_TRUE(!has_checkpoint(3) && has_checkpoint(4));
+    ASSERT_TRUE(holds("[ -f \"$d/checkpoints/4/manifest.ndjson\" ] && [ \"$(wc -l < \"$d/checkpoints/4/manifest.delta\" | tr -d ' ')\" = 1 ] && "
+                      "grep -q '\"belay_delta\":2' \"$d/checkpoints/4/manifest.delta\""));
+    ASSERT_TRUE(same_as_written(4) && same_as_written(5) && same_as_written(6));
+    ASSERT_EQ_INT(0, belay("prune", "--scope", g_scope, "--keep-last", "3", NULL));      /* nothing to do again */
+    ASSERT_TRUE(same_as_written(5));
+}
+
 /* ST-4, the hash alone: a delta still well formed, its operations all valid,
  * that rebuilds to the wrong bytes. Only the check against the recorded sha256
  * can tell, and nothing of it reaches a reader. */
@@ -2419,6 +2559,11 @@ int main(void) {
     RUN(delta_keeps_a_full_copy_every_256);
     RUN(delta_that_does_not_rebuild_is_corrupt);
     RUN(delta_that_rebuilds_wrong_bytes_is_refused_by_its_hash);
+    RUN(delta_v2_rebuilds_byte_for_byte);
+    RUN(delta_v2_with_other_operations_is_corrupt);
+    RUN(delta_v2_over_a_base_that_rebuilds_wrong_is_corrupt);
+    RUN(delta_v2_names_its_base_by_identity);
+    RUN(prune_makes_a_v2_delta_whole_and_keeps_its_identity);
     RUN(delta_from_another_base_is_refused);
     RUN(delta_with_no_base_or_a_link_is_corrupt);
     RUN(delta_beside_a_whole_file_uses_the_whole_file);

@@ -29,7 +29,7 @@ awaits the author's OK.
 | PR-1 | `belay prune --scope DIR [--keep-days N] [--keep-last N] [--keep-id ID]... [--keep-from ID] [--dry-run] [--json]`. At least one of `--keep-days` and `--keep-last` is required (exit 2). |
 | PR-2 | A checkpoint is removed only when it is outside both limits given: older than N days, and not among the last N. |
 | PR-3 | Never removed, whatever the limits: the newest checkpoint, a kept one (KP-1), and any from `--keep-from ID` on, which is how a pending diff is protected. |
-| PR-4 | A delta that stays and whose base would go is first rewritten, and checked by ST-4, before anything is removed. |
+| PR-4 | A delta that stays and whose base would go is first rewritten, and checked by ST-4, before anything is removed. A delta of version 2 made whole this way keeps its first line beside the whole file: it is the only record of the manifest's identity (ST-3), which the deltas made from it name. Its operations go. |
 | PR-5 | A removed checkpoint's cached diffs go with it, as does a cached diff from a removed checkpoint held by one that stays. |
 | PR-6 | The store is swept in the same run: mark and sweep from every manifest that stays, each rebuilt. An object none refers to is removed, and only such an object. |
 | PR-11 | The same run also removes `store/.tmp-*` files older than a day that no running capture holds: what a killed capture left. It holds the lock while it does, so no capture is running. |

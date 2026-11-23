@@ -37,9 +37,28 @@
 
 struct header {
     long base, chain;
-    uint64_t size;
-    char sha[65], base_sha[65];
+    int version;                /* 1: a walk's; 2: an event capture's (ST-3) */
+    uint64_t size;              /* version 1 */
+    char sha[65];               /* the manifest's identity: version 1, the sha256 of its bytes */
+    char base_sha[65], ops_sha[65];
 };
+
+static bool is_hex64(const char *s) {
+    if (strlen(s) != 64) return false;
+    for (int i = 0; i < 64; i++)
+        if (!((s[i] >= '0' && s[i] <= '9') || (s[i] >= 'a' && s[i] <= 'f'))) return false;
+    return true;
+}
+
+void manifest_identity_of(const char base[65], const char ops[65], char out[65]) {
+    struct belay_sha256 c;
+    uint8_t d[BELAY_SHA256_DIGEST_LEN];
+    belay_sha256_init(&c);
+    belay_sha256_update(&c, base, 64);
+    belay_sha256_update(&c, ops, 64);
+    belay_sha256_final(&c, d);
+    belay_hex_encode(out, d, sizeof d);
+}
 
 /* ---- lines of a file, one at a time ---- */
 
@@ -154,9 +173,17 @@ static int parse_header(const struct state *st, long id, const char *line, size_
     h->base = (long)jint(&v, "base", 0);
     h->chain = (long)jint(&v, "chain", 0);
     h->size = (uint64_t)jint(&v, "size", -1);
+    h->version = (int)jint(&v, "belay_delta", 0);
     snprintf(h->sha, sizeof h->sha, "%s", jstr(&v, "sha256"));
     snprintf(h->base_sha, sizeof h->base_sha, "%s", jstr(&v, "base_sha256"));
-    const bool ok = jint(&v, "belay_delta", 0) == 1 && h->base > 0 && h->base < id && strlen(h->sha) == 64;
+    snprintf(h->ops_sha, sizeof h->ops_sha, "%s", jstr(&v, "ops_sha256"));
+    bool ok = h->base > 0 && h->base < id && h->chain >= 0;
+    if (h->version == 1) ok = ok && strlen(h->sha) == 64;
+    else if (h->version == 2) {
+        /* no digest of the result was ever written: its identity is derived (ST-3) */
+        ok = ok && is_hex64(h->base_sha) && is_hex64(h->ops_sha) && jget(&v, "sha256") == NULL && jget(&v, "size") == NULL;
+        if (ok) manifest_identity_of(h->base_sha, h->ops_sha, h->sha);
+    } else ok = false;
     jsonr_free(&v);
     if (!ok) {
         belay_err_set(BELAY_ERR_CORRUPT, 0, "%s/checkpoints/%ld/manifest.delta is not a delta belay wrote", st->dir, id);
@@ -170,9 +197,16 @@ static int parse_header(const struct state *st, long id, const char *line, size_
 struct src {
     struct lr r;
     struct src *base;           /* NULL: a whole file */
-    struct header h;            /* a delta's */
+    struct header h;            /* a delta's; a whole file's is the delta kept beside it, if any */
     unsigned long copy;         /* lines of the base still to hand on */
     const struct state *st;
+    /* ST-4 for the base of a version 2 delta: what it hands out is hashed
+     * and, at its end, must be `want` (and `want_size` bytes, when known). */
+    bool verify, verified, ended;
+    struct belay_sha256 vsha;
+    uint64_t vbytes;
+    char want[65];
+    bool want_size;
 };
 
 static void src_free(struct src *s) {
@@ -189,8 +223,31 @@ static int does_not_apply(const struct state *st) {
     return -1;
 }
 
-/* The next line of the manifest `s` stands for: as lr_line. */
-static int src_next(struct src *s, const char **p, size_t *n) {
+static int src_next(struct src *s, const char **p, size_t *n);
+
+static int not_recorded(const struct state *st) {
+    belay_err_set(BELAY_ERR_CORRUPT, 0, "%s/checkpoints: a delta's base or its operations are not what it recorded", st->dir);
+    return -1;
+}
+
+/* A version 2 delta at its end (ST-4): its base read to its own end, so that
+ * is checked, and the bytes after the first line are those it names. */
+static int v2_end(struct src *s) {
+    if (s->ended) return 0;
+    const char *q;
+    size_t qn;
+    int b;
+    while ((b = src_next(s->base, &q, &qn)) == 1) { }
+    if (b == -1) return -1;
+    char got[65];
+    struct belay_sha256 c = s->r.sha;
+    sha_hex(&c, got);
+    if (strcmp(got, s->h.ops_sha) != 0) return not_recorded(s->st);
+    s->ended = true;
+    return 0;
+}
+
+static int src_raw(struct src *s, const char **p, size_t *n) {
     if (s->base == NULL) return lr_line(&s->r, p, n);
     for (;;) {
         if (s->copy > 0) {
@@ -202,6 +259,7 @@ static int src_next(struct src *s, const char **p, size_t *n) {
         const char *l;
         size_t ln;
         const int g = lr_line(&s->r, &l, &ln);
+        if (g == 0 && s->h.version == 2) return v2_end(s);
         if (g <= 0) return g;
         if (l[ln - 1] != '\n') return does_not_apply(s->st);
         if (l[0] == '+') {
@@ -230,6 +288,25 @@ static int src_next(struct src *s, const char **p, size_t *n) {
     }
 }
 
+/* The next line of the manifest `s` stands for: as lr_line. */
+static int src_next(struct src *s, const char **p, size_t *n) {
+    const int g = src_raw(s, p, n);
+    if (!s->verify || g == -1) return g;
+    if (g == 1) {
+        belay_sha256_update(&s->vsha, *p, *n);
+        s->vbytes += *n;
+        return 1;
+    }
+    if (!s->verified) {
+        char got[65];
+        struct belay_sha256 c = s->vsha;
+        sha_hex(&c, got);
+        if (strcmp(got, s->want) != 0 || (s->want_size && s->vbytes != s->h.size)) return not_recorded(s->st);
+        s->verified = true;
+    }
+    return 0;
+}
+
 /* A delta read from `fd` (its header line first) over `base`; both are the
  * source's from here on, whatever is returned. */
 static struct src *src_delta(const struct state *st, long id, int fd, struct src *base) {
@@ -252,8 +329,14 @@ static struct src *src_delta(const struct state *st, long id, int fd, struct src
         src_free(s);
         return NULL;
     }
+    if (s->h.version == 2) {            /* every byte after the first line, hashed (ST-4) */
+        s->r.hashing = true;
+        belay_sha256_init(&s->r.sha);
+    }
     return s;
 }
+
+static bool header_beside(const struct state *st, long id, struct header *h);
 
 static struct src *src_whole(const struct state *st, int fd) {
     struct src *s = calloc(1, sizeof *s);
@@ -272,7 +355,11 @@ static struct src *src_whole(const struct state *st, int fd) {
 static struct src *chain_open(const struct state *st, long id) {
     const int whole = open_file(st, id, "manifest.ndjson", NULL);
     if (whole == -1) return NULL;
-    if (whole >= 0) return src_whole(st, whole);
+    if (whole >= 0) {
+        struct src *w = src_whole(st, whole);
+        if (w != NULL && !header_beside(st, id, &w->h)) memset(&w->h, 0, sizeof w->h);
+        return w;
+    }
     const int d = open_file(st, id, "manifest.delta", NULL);
     if (d == -1) return NULL;
     if (d == -2) {
@@ -287,10 +374,24 @@ static struct src *chain_open(const struct state *st, long id) {
         src_free(top);
         return NULL;
     }
-    if (top->base->base != NULL && strcmp(top->h.base_sha, top->base->h.sha) != 0) {
+    struct src *b = top->base;
+    /* a base with a recorded identity must be the one named; a whole file with
+     * none is checked by its bytes (version 2) or by the result's (version 1) */
+    const bool named = b->base != NULL || (top->h.version == 2 && b->h.version != 0);
+    if (named && strcmp(top->h.base_sha, b->h.sha) != 0) {
         belay_err_set(BELAY_ERR_CORRUPT, 0, "%s/checkpoints: a delta's base is not the one it was made from", st->dir);
         src_free(top);
         return NULL;
+    }
+    if (top->h.version == 2 && !(b->base != NULL && b->h.version == 2) && !(b->base == NULL && b->h.version == 2)) {
+        /* ST-4: the base's bytes are checked as they are read -- a version 1
+         * delta's and a whole file's against the sha256 of the bytes; a
+         * version 2 base checks itself, and a whole file that was one (its
+         * first line kept beside it) was checked when it was made whole */
+        b->verify = true;
+        belay_sha256_init(&b->vsha);
+        memcpy(b->want, b->h.version == 1 ? b->h.sha : top->h.base_sha, 65);
+        b->want_size = b->base != NULL;
     }
     return top;
 }
@@ -392,7 +493,8 @@ static int rebuild(const struct state *st, long id, FILE *out) {
         belay_err_set(BELAY_ERR_IO, errno, "cannot write a temporary manifest");
         rc = -1;
     }
-    if (rc == 0 && (s->base == NULL || size != s->h.size || strcmp(sha, s->h.sha) != 0)) {
+    if (rc == 0 && (s->base == NULL || (s->h.version == 1 && (size != s->h.size || strcmp(sha, s->h.sha) != 0)) ||
+                    (s->h.version == 2 && !s->ended))) {
         belay_err_set(BELAY_ERR_CORRUPT, 0, "%s/checkpoints/%ld: the rebuilt manifest does not match what was recorded",
                       st->dir, id);
         rc = -1;
@@ -519,12 +621,17 @@ int manifest_delta_base(const struct state *st, long id, long *base, uint64_t *s
     const int rc = g == -1 ? -1 : parse_header(st, id, g == 1 ? l : "", g == 1 ? ln : 0, &h);
     lr_close(&r);
     if (rc == -1) return -1;
+    const bool alone = manifest_is_delta(st, id);
+    /* a version 2 delta made whole keeps its first line, the record of its
+     * identity (ST-3): it has no base any more */
+    if (h.version == 2 && !alone) return 0;
     *base = h.base;
-    if (manifest_is_delta(st, id)) *size = h.size;      /* no whole file beside it: one will be written */
+    if (alone && h.version == 1) *size = h.size;        /* no whole file beside it: one will be written */
     return 0;
 }
 
-bool manifest_recorded_sha256(const struct state *st, long id, char hex[65]) {
+/* The first line of the delta checkpoint `id` has, if it has one that reads. */
+static bool header_beside(const struct state *st, long id, struct header *h) {
     const int d = open_file(st, id, "manifest.delta", NULL);
     struct lr r;
     if (d < 0 || lr_open(&r, d, 0, false) == -1) {
@@ -532,17 +639,50 @@ bool manifest_recorded_sha256(const struct state *st, long id, char hex[65]) {
         belay_err_clear();
         return false;
     }
-    struct header h;
     const char *l;
     size_t ln;
-    const bool ok = lr_line(&r, &l, &ln) == 1 && parse_header(st, id, l, ln, &h) == 0;
+    const bool ok = lr_line(&r, &l, &ln) == 1 && parse_header(st, id, l, ln, h) == 0;
     lr_close(&r);
-    if (!ok) {
-        belay_err_clear();
-        return false;
-    }
+    if (!ok) belay_err_clear();
+    return ok;
+}
+
+bool manifest_recorded_sha256(const struct state *st, long id, char hex[65]) {
+    struct header h;
+    if (!header_beside(st, id, &h)) return false;
     memcpy(hex, h.sha, 65);
     return true;
+}
+
+bool manifest_event_identity(const struct state *st, long id, char hex[65]) {
+    struct header h;
+    if (!header_beside(st, id, &h) || h.version != 2) return false;
+    memcpy(hex, h.sha, 65);
+    return true;
+}
+
+int manifest_identity(const struct state *st, long id, char hex[65], bool *bytes) {
+    struct header h;
+    if (header_beside(st, id, &h)) {
+        memcpy(hex, h.sha, 65);
+        if (bytes != NULL) *bytes = h.version == 1;
+        return 0;
+    }
+    if (bytes != NULL) *bytes = true;
+    const int fd = open_file(st, id, "manifest.ndjson", NULL);
+    if (fd < 0) {
+        if (fd == -2) belay_err_set(BELAY_ERR_CORRUPT, 0, "%s/checkpoints/%ld has no manifest", st->dir, id);
+        return -1;
+    }
+    struct lr r;
+    if (lr_open(&r, fd, (size_t)1 << 20, true) == -1) { close(fd); return -1; }
+    const char *l;
+    size_t ln;
+    int g;
+    while ((g = lr_line(&r, &l, &ln)) == 1) { }
+    if (g == 0) sha_hex(&r.sha, hex);
+    lr_close(&r);
+    return g;
 }
 
 /* tmp/<name> made checkpoints/<id>/<as>, durable: 0, or -1 with belay_err. */
@@ -563,9 +703,40 @@ static int publish(const struct state *st, int tfd, const char *name, int fd, lo
     return 0;
 }
 
+/* A version 2 delta's operations go and its first line stays: the manifest's
+ * identity, which the deltas made from it name, is not a digest of the whole
+ * file's bytes and is recorded nowhere else (ST-3). */
+static int keep_identity(const struct state *st, long id) {
+    char name[64], line[512];
+    int tfd;
+    const int d = open_file(st, id, "manifest.delta", NULL);
+    if (d < 0) return -1;
+    const ssize_t k = read(d, line, sizeof line);
+    close(d);
+    const char *nl = k > 0 ? memchr(line, '\n', (size_t)k) : NULL;
+    if (nl == NULL) {
+        belay_err_set(BELAY_ERR_CORRUPT, 0, "%s/checkpoints/%ld/manifest.delta is not a delta belay wrote", st->dir, id);
+        return -1;
+    }
+    const size_t n = (size_t)(nl + 1 - line);
+    if ((size_t)k == n) return 0;           /* its first line alone already */
+    const int fd = tmp_create(st, name, &tfd);
+    if (fd == -1) return -1;
+    int rc = write(fd, line, n) == (ssize_t)n ? 0 : -1;
+    if (rc == -1) belay_err_set(BELAY_ERR_IO, errno, "cannot write %s/checkpoints/%ld/manifest.delta", st->dir, id);
+    if (rc == 0) rc = publish(st, tfd, name, fd, id, "manifest.delta");
+    if (rc == -1) unlinkat(tfd, name, 0);
+    close(fd);
+    close(tfd);
+    return rc;
+}
+
 int manifest_make_whole(const struct state *st, long id) {
+    struct header bh;
+    const bool v2 = header_beside(st, id, &bh) && bh.version == 2;
     if (!manifest_is_delta(st, id)) {       /* the newest: whole already, and its delta must not outlive its base */
         char rel[64];
+        if (v2) return keep_identity(st, id);
         snprintf(rel, sizeof rel, "%ld/manifest.delta", id);
         unlinkat(st->cp_fd, rel, 0);
         return 0;
@@ -588,7 +759,9 @@ int manifest_make_whole(const struct state *st, long id) {
         }
     }
     if (rc == 0) rc = publish(st, tfd, name, fd, id, "manifest.ndjson");
-    if (rc == 0) {
+    if (rc == 0 && v2) {
+        rc = keep_identity(st, id);
+    } else if (rc == 0) {
         snprintf(rel, sizeof rel, "%ld/manifest.delta", id);
         unlinkat(st->cp_fd, rel, 0);
     } else {
@@ -715,8 +888,13 @@ void manifest_store_delta(const struct state *st, long prev, long id) {
     FILE *ops = NULL, *out = NULL;
     struct src *check = NULL;
     if (e != NULL) e->a.fd = e->b.fd = -1;
+    struct manifest_file pm = { .temporary = false };
+    struct header ph = { 0 };
     if (e == NULL || prev == 0) goto out;
-    int fd = open_file(st, prev, "manifest.ndjson", NULL);
+    /* the base: prev's whole file, or, when prev is an event capture's and
+     * has none (ST-1), its checked rebuild */
+    if (manifest_acquire(st, prev, &pm) == -1) goto out;
+    int fd = open(pm.path, O_RDONLY | O_NOFOLLOW | O_CLOEXEC);
     if (fd < 0 || lr_open(&e->a, fd, (size_t)1 << 20, true) == -1) { if (fd >= 0) close(fd); e->a.fd = -1; goto out; }
     fd = open_file(st, id, "manifest.ndjson", NULL);
     if (fd < 0 || lr_open(&e->b, fd, (size_t)1 << 20, true) == -1) { if (fd >= 0) close(fd); e->b.fd = -1; goto out; }
@@ -731,14 +909,13 @@ void manifest_store_delta(const struct state *st, long prev, long id) {
             if (d < 0) goto out;
             struct lr r;
             if (lr_open(&r, d, 0, false) == -1) { close(d); goto out; }
-            struct header h;
             const char *l;
             size_t ln;
             const int g = lr_line(&r, &l, &ln);
-            const int rc = g == 1 ? parse_header(st, prev, l, ln, &h) : -1;
+            const int rc = g == 1 ? parse_header(st, prev, l, ln, &ph) : -1;
             lr_close(&r);
             if (rc == -1) goto out;
-            chain = h.chain;
+            chain = ph.chain;
             has = true;
         }
     }
@@ -753,6 +930,7 @@ void manifest_store_delta(const struct state *st, long prev, long id) {
         char sha[65], base_sha[65];
         sha_hex(&e->b.sha, sha);
         sha_hex(&e->a.sha, base_sha);
+        if (has && ph.version == 2) memcpy(base_sha, ph.sha, 65);      /* its identity, not its bytes' digest */
         int tfd2;
         out_fd = tmp_create(st, out_name, &tfd2);
         if (out_fd == -1) goto out;
@@ -771,7 +949,7 @@ void manifest_store_delta(const struct state *st, long prev, long id) {
         if (ferror(ops) || fflush(out) != 0) goto out;
         /* Checked before it is kept: the delta over its base is the manifest, byte for byte. */
         const int dfd = openat(tfd, out_name, O_RDONLY | O_NOFOLLOW | O_CLOEXEC);
-        const int bfd = dfd == -1 ? -1 : open_file(st, prev, "manifest.ndjson", NULL);
+        const int bfd = dfd == -1 ? -1 : open(pm.path, O_RDONLY | O_NOFOLLOW | O_CLOEXEC);
         if (bfd < 0) { if (dfd != -1) close(dfd); goto out; }
         struct src *base = src_whole(st, bfd);
         if (base == NULL) { close(dfd); goto out; }
@@ -783,14 +961,16 @@ void manifest_store_delta(const struct state *st, long prev, long id) {
         if (publish(st, tfd, out_name, out_fd, id, "manifest.delta") == -1) goto out;
         out_name[0] = '\0';
     }
-    /* prev's own delta was checked when it was written: its whole file can go. */
-    if (has) {
+    /* prev's own delta was checked when it was written: its whole file can go
+     * (not one a version 2 delta was made whole into: its operations are gone). */
+    if (has && !pm.temporary && !(ph.version == 2)) {
         char rel[64];
         snprintf(rel, sizeof rel, "%ld/manifest.ndjson", prev);
         unlinkat(st->cp_fd, rel, 0);
     }
 out:
     belay_err_clear();
+    manifest_release(&pm);
     src_free(check);
     if (ops != NULL) fclose(ops);
     if (out != NULL) fclose(out);
