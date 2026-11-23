@@ -499,7 +499,8 @@ int ledger_append_step(struct ledger *l, struct wstep *s) {
     if (s->git != NULL) {                       /* LN-10 */
         wsb_f(&rest, "\"git\":[");
         wsb_json(&rest, s->git);
-        wsb_f(&rest, ",%llu],", (unsigned long long)s->tree);
+        for (int i = 0; i < WATCH_OUTCOMES; i++) wsb_f(&rest, ",%llu", (unsigned long long)s->tree[i]);
+        wsb_f(&rest, "],");
     }
     if (s->since_ns || s->quiet || s->by_installed || s->roots != NULL) {     /* a system watch's step */
         wsb_f(&rest, "\"sys\":[%lld,%llu,", (long long)s->since_ns, (unsigned long long)s->quiet);
@@ -742,9 +743,11 @@ int ledger_step(const struct jval *line, struct wstep *s) {
         memcpy(s->quiet_under, y->kids[2].s, y->kids[2].s_len + 1);
     }
     const struct jval *g = jget(line, "git");
-    if (g != NULL && (g->t != J_ARR || g->n != 2 || g->kids[0].t != J_STR || !u64_at(g, 1, &s->tree) ||
-                      (s->git = strdup(g->kids[0].s)) == NULL))
+    if (g != NULL && (g->t != J_ARR || g->n != 1 + WATCH_OUTCOMES || g->kids[0].t != J_STR))
         goto bad;
+    for (int k = 0; g != NULL && k < WATCH_OUTCOMES; k++)
+        if (!u64_at(g, 1 + (size_t)k, &s->tree[k])) goto bad;
+    if (g != NULL && (s->git = strdup(g->kids[0].s)) == NULL) goto bad;
     snprintf(s->sec_file, sizeof s->sec_file, "%s", a->kids[0].s);
     snprintf(s->sec_sha, sizeof s->sec_sha, "%s", a->kids[3].s);
     s->sec_off = (long)off;

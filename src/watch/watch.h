@@ -51,7 +51,7 @@ struct wstep {
     char *under;                        /* the top-level directory most of them are under, shown; NULL: none */
     uint64_t n_under;
     char *git;                          /* LN-10: "git pull: main moved to 9c5d2f2 (fast-forward)"; NULL: none */
-    uint64_t tree;                      /* LN-10: of `counts`, those outside .git/ */
+    uint64_t tree[WATCH_OUTCOMES];      /* LN-10: of `counts`, those outside .git/ */
     char **trouble;                     /* lines of "The record could not be kept", without the prefix */
     size_t n_trouble;
     /* a system watch's step (watch-system.md): */

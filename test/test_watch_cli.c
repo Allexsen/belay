@@ -836,15 +836,16 @@ TEST(a_git_pull_leads_the_line_and_the_receipt_folds_git) {
     setenv("HOME", home, 1);
     setenv("GIT_CONFIG_NOSYSTEM", "1", 1);
 #define G "git -c user.name=t -c user.email=t@t -c commit.gpgSign=false -c init.defaultBranch=main"
-    sh("cd '%s' && rm -rf proj && mkdir up && cd up && " G " init -q && printf '1\\n' > a && printf 'o\\n' > old && " G " add -A && "
+    sh("cd '%s' && rm -rf proj && mkdir up && cd up && " G " init -q && printf '1\\n' > a && printf 'o\\n' > old && printf 'b\\n' > b && printf 'c\\n' > c && " G " add -A && "
        G " commit -qm seed && cd .. && " G " clone -q up proj 2>/dev/null && cd up && printf '2\\n' >> a && printf 'n\\n' > n && "
        G " add -A && " G " commit -qm one && " G " rm -q old && " G " commit -qm two", g_dir);
     ASSERT_EQ_INT(0, step("s1", "--first-ok", NULL));
-    sh("cd '%s' && " G " pull -q --no-rebase >/dev/null 2>&1", g_scope);
+    sh("cd '%s' && " G " pull -q --no-rebase >/dev/null 2>&1 && rm b c", g_scope);     /* review S1: and other edits */
     ASSERT_EQ_INT(0, step("s1", NULL));
     const char *id = out_of("cd '%s' && git rev-parse --short=7 HEAD | tr -d '\\n'", g_scope);
     char want[200];
-    snprintf(want, sizeof want, "belay: outside tool calls: git pull: main moved to %s (fast-forward) \xc2\xb7 3 files in the tree\n", id);
+    snprintf(want, sizeof want, "belay: outside tool calls: git pull: main moved to %s (fast-forward) \xc2\xb7 5 changes in the tree: "
+             "1 added, 3 removed, 1 modified\n", id);
     ASSERT_EQ_STR(want, g_out);
     belay("watch", "receipt", "--scope", g_scope, NULL);
     HAS(g_out, "\n  git bookkeeping: ");
@@ -858,7 +859,7 @@ TEST(a_git_pull_leads_the_line_and_the_receipt_folds_git) {
     sh("cd '%s' && " G " pull -q --no-rebase >/dev/null 2>&1", g_scope);
     ASSERT_EQ_INT(0, step("s1", NULL));
     id = out_of("cd '%s' && git rev-parse --short=7 HEAD | tr -d '\\n'", g_scope);
-    snprintf(want, sizeof want, "belay: outside tool calls: git pull: main moved to %s (merge) \xc2\xb7 1 file in the tree\n", id);
+    snprintf(want, sizeof want, "belay: outside tool calls: git pull: main moved to %s (merge) \xc2\xb7 1 change in the tree: 1 modified\n", id);
     ASSERT_EQ_STR(want, g_out);
     /* a commit of the agent's own is not a pull: the line is as before */
     sh("cd '%s' && printf 'm\\n' > m && " G " add -A && " G " commit -qm mine", g_scope);

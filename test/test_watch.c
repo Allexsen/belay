@@ -513,8 +513,9 @@ TEST(a_steps_line_is_the_pins) {
                   "; and 19 more flagged: 19 git hooks and config \xc2\xb7 1 more: 1 modified\n", step_line(&s));
 
     s = (struct wstep){ .calls = call, .n_calls = 1, .changes = 67, .counts = { 49, 2, 16 }, .under = ".git", .n_under = 50,
-                        .git = "git pull: main moved to 9c5d2f2 (fast-forward)", .tree = 17 };       /* LN-10 */
-    ASSERT_EQ_STR("belay: git pull: main moved to 9c5d2f2 (fast-forward) \xc2\xb7 17 files in the tree\n", step_line(&s));
+                        .git = "git pull: main moved to 9c5d2f2 (fast-forward)", .tree = { 3, 2, 12 } };     /* LN-10 */
+    ASSERT_EQ_STR("belay: git pull: main moved to 9c5d2f2 (fast-forward) \xc2\xb7 17 changes in the tree: 3 added, 2 removed, 12 modified\n",
+                  step_line(&s));
 
     char *trouble[] = { "could not record in 45 s: capturing" };
     s = (struct wstep){ .trouble = trouble, .n_trouble = 1 };
@@ -544,8 +545,8 @@ TEST(a_steps_line_counts_every_entry_once) {
     ASSERT_EQ_STR("belay: " RED " f1; n2; n1; and 1 more noted: 1 git hooks and config\n", step_line(&s));
     /* LN-10: what is flagged follows the pull, and the tree is what is neither */
     struct wflag cred[] = { fl(WK_CRED, false, ".env added (credentials)") };
-    s = (struct wstep){ .changes = 4, .flags = cred, .n_flags = 1, .counts = { 1, 0, 2 }, .git = "git merge: main moved to b4e0fc1 (merge)", .tree = 1 };
-    ASSERT_EQ_STR("belay: " RED " outside tool calls: git merge: main moved to b4e0fc1 (merge); .env added (credentials) \xc2\xb7 1 file in the tree\n",
+    s = (struct wstep){ .changes = 4, .flags = cred, .n_flags = 1, .counts = { 1, 0, 2 }, .git = "git merge: main moved to b4e0fc1 (merge)", .tree = { 1 } };
+    ASSERT_EQ_STR("belay: " RED " outside tool calls: git merge: main moved to b4e0fc1 (merge); .env added (credentials) \xc2\xb7 1 change in the tree: 1 added\n",
                   step_line(&s));
     /* notes alone: no red circle */
     struct wflag notes[] = { fl(WK_AGENT, true, ".claude/settings.local.json added (agent permissions)") };
