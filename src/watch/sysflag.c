@@ -190,6 +190,7 @@ struct sx {
     struct sset asks;           /* paths whose owner is asked */
     struct owners *own[2];      /* by the before and the after manifest; NULL: not asked */
     struct sset taken;          /* paths a flagged, noted or counted event names */
+    struct sset standing;       /* paths whose record says only that a side could not be read (WS-L2) */
 };
 
 static int nomem(void) {
@@ -340,8 +341,9 @@ static int collect(struct sx *x, FILE *in) {
             if (rc == 0 && (pl = exe_path(jstr(&v, "exe"), &p)) > 0) rc = sset_add(&x->asks, p, pl);
         } else if (jget(&v, "outcome") != NULL) {
             size_t len, rl;
-            if (receipt_record_path(&v, path, sizeof path, &len) == 0 && meta_root_of(x, path, len, &rl) != NULL &&
-                meta_paths.n < BELAY_OWNER_ASKS)
+            const bool got = receipt_record_path(&v, path, sizeof path, &len) == 0;
+            if (got && receipt_standing(&v)) rc = sset_add(&x->standing, path, len);
+            else if (got && meta_root_of(x, path, len, &rl) != NULL && meta_paths.n < BELAY_OWNER_ASKS)
                 rc = sset_add(&meta_paths, path, len);
             belay_err_clear();
         }
@@ -355,7 +357,7 @@ static int collect(struct sx *x, FILE *in) {
         if (sset_add(&x->asks, meta_paths.v[i], meta_paths.len[i]) == -1) rc = nomem();
     sset_free(&meta_paths);
     if (rc == 0 && (sset_sort(&x->asks) == -1 || sset_sort(&x->pkgs) == -1 || sset_sort(&x->pkgs_installed) == -1 ||
-                    sset_sort(&x->homes) == -1 || sset_sort(&x->meta) == -1))
+                    sset_sort(&x->homes) == -1 || sset_sort(&x->meta) == -1 || sset_sort(&x->standing) == -1))
         rc = nomem();
     return rc;
 }
@@ -452,6 +454,11 @@ static bool sshd_file(const struct sx *x, const char *path, size_t len) {
 /* WS-F17: a could_not_interpret on a file whose events WS-F1, F2, F3, F6,
  * F16 flag. */
 static int not_interpreted(const struct sx *x, const struct jval *e, const char *interp, enum wkind *kind) {
+    const struct jval *ps = jget(e, "paths");           /* of files not read either side, as they were: none */
+    bool standing = ps != NULL && ps->t == J_ARR && ps->n > 0;
+    for (size_t i = 0; standing && i < ps->n; i++)
+        standing = ps->kids[i].t == J_STR && sset_has(&x->standing, ps->kids[i].s, ps->kids[i].s_len);
+    if (standing) return SF_NONE;
     if (any_path(e, in_user_units, x)) { *kind = WK_SERVICE; return SF_FLAG; }
     if (!strcmp(interp, "sudoers")) { *kind = WK_SUDO; return SF_FLAG; }
     if (!strcmp(interp, "sshkeys")) { *kind = WK_SSH; return SF_FLAG; }
@@ -811,6 +818,7 @@ out:
     sset_free(&x.pkgs_installed);
     sset_free(&x.asks);
     sset_free(&x.taken);
+    sset_free(&x.standing);
     return rc;
 }
 

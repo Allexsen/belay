@@ -385,7 +385,9 @@ struct ctx {
     struct lines s[RS_COUNT], core;
     char **taken, **folded;
     size_t n_taken, cap_taken, n_folded, cap_folded, config_folded;
-    size_t standing;            /* WS-R5: records of WS-L2, counted */
+    size_t standing;            /* WS-R5: records of WS-L2, counted; their paths, sorted at the first event */
+    char **stand;
+    size_t n_stand, cap_stand;
     size_t *meta_folded;
     bool folded_sorted;
 };
@@ -581,6 +583,10 @@ static int record(const struct jval *r, struct ctx *x, const struct receipt_opts
     if (x->sec != NULL && !o->all && receipt_standing(r)) {             /* WS-R5: counted on one line */
         free(why.p);
         x->standing++;
+        if (memchr(path, '\0', plen) == NULL && str_add(&x->stand, &x->n_stand, &x->cap_stand, path, plen) == -1) {
+            belay_err_set(BELAY_ERR_NOMEM, 0, "receipt: out of memory");
+            return -1;
+        }
         return 0;
     }
 
@@ -841,7 +847,15 @@ static int event(const struct jval *e, struct ctx *x, struct lines *ev, const st
     const int sec = x->sec != NULL ? event_section(e) : -1;
     if (x->sec != NULL && !x->folded_sorted) {               /* the records are all read: they precede the events */
         if (x->n_folded > 1) qsort(x->folded, x->n_folded, sizeof *x->folded, str_cmp);
+        if (x->n_stand > 1) qsort(x->stand, x->n_stand, sizeof *x->stand, str_cmp);
         x->folded_sorted = true;
+    }
+    if (x->sec != NULL && !o->all && x->n_stand > 0 && strcmp(k, "could_not_interpret") == 0) {
+        /* WS-F17: of files not read on either side, as they were: no finding */
+        const struct jval *ps = jget(e, "paths");
+        bool all = ps != NULL && ps->t == J_ARR && ps->n > 0;
+        for (size_t i = 0; all && i < ps->n; i++) all = ps->kids[i].t == J_STR && str_in(x->stand, x->n_stand, ps->kids[i].s);
+        if (all) return 0;
     }
     if (sec == RS_CONFIG && !o->all && x->n_folded > 0) {      /* a file of a package installed or upgraded here */
         const char *p = jstr(e, "path");
@@ -1349,6 +1363,8 @@ out:
     free(x.taken);
     for (size_t i = 0; i < x.n_folded; i++) free(x.folded[i]);
     free(x.folded);
+    for (size_t i = 0; i < x.n_stand; i++) free(x.stand[i]);
+    free(x.stand);
     free(x.meta_folded);
     tallies_free(&x.ign);
     tallies_free(&x.ignu);

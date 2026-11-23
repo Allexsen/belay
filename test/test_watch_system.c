@@ -279,6 +279,24 @@ TEST(a_record_that_says_only_a_side_was_not_read_is_no_change) {
                                      : "\n  2 not read on either side, and nothing compared changed (--all lists them)\n") != NULL);
     ASSERT_TRUE(strstr(g_out, "? usr/local/bin/big") == NULL);
     sh("cd '%s' && truncate -s 66M usr/local/bin/big", g_tree);
+    /* WS-F17: nor is a file of sudoers that could not be read either side, as it was, a finding (measured, not
+     * root: etc/sudoers on every step); once it changes, it is */
+    REQUIRE(sys("stop") == 0);
+    sh("cd '%s' && truncate -s 65M etc/sudoers.d/big", g_tree);
+    settle();
+    REQUIRE(sys("start") == 0);
+    REQUIRE_MSG(step() == 0, "%s", g_out);
+    REQUIRE_MSG(strcmp(g_out, "") == 0, "%s", g_out);
+    REQUIRE_MSG(sys("receipt") == 0, "%s", g_err);
+    REQUIRE_MSG(strstr(g_out, "\nsudo\n") == NULL && strstr(g_out, "sudoers.d/big") == NULL, "%s", g_out);
+    sh("cd '%s' && truncate -s 66M etc/sudoers.d/big", g_tree);
+    REQUIRE(step() == 0);
+    REQUIRE_MSG(strstr(g_out, "belay: " RED " outside tool calls: could not interpret: etc/sudoers.d/big (sudo)") == g_out, "%s", g_out);
+    REQUIRE(sys("stop") == 0);
+    fresh();
+    sh("cd '%s' && mkdir -p usr/local/bin && truncate -s 65M usr/local/bin/big", g_tree);
+    REQUIRE(sys("start") == 0);
+    sh("cd '%s' && truncate -s 66M usr/local/bin/big", g_tree);
     REQUIRE(step() == 0);
     REQUIRE_MSG(strstr(g_out, "belay: outside tool calls: 1 change: usr/local/bin/big modified\n") == g_out, "%s", g_out);
     REQUIRE(sys("stop") == 0);
