@@ -76,7 +76,7 @@ Rows are matched against events and paths as watch-v1's are (WD-1 to WD-4). No `
 | id | rule |
 |---|---|
 | WS-L1 | A step's line is watch-v1's (LN-1 to LN-3): flagged events first, then noted ones, then a count of everything else. Records under metadata roots owned by a package of the diff, and any record under `var` with no event, never make a line by themselves: they are in the count. A step with only those prints `N entries changed under usr, var` and no more. |
-| WS-L2 | A step with nothing prints nothing (LN-1). Under a kernel record that is a step with an empty dirty set and no runtime change. |
+| WS-L2 | A step with nothing prints nothing (LN-1). Under a kernel record that is a step with an empty dirty set and no runtime change. A record that says only that a side could not be read is not a change: `unknown`, no field in `changed`, and its reasons only `unverified`, `unreadable` or `mount` (a file past the hash limit, a file or directory others cannot read, as it was). A step does not count it and names nothing for it; the receipt counts it (WS-R5). Measured: every idle step on a 24.04 runner printed `51 changes: 51 not compared`, 48 files over 64 MiB under `usr/local` and 3 under `etc/skel`; not root, 98. |
 
 ## The receipt
 
@@ -86,7 +86,7 @@ Rows are matched against events and paths as watch-v1's are (WD-1 to WD-4). No `
 | WS-R2 | `could not read` lists every entry with `unreadable`, once, by path, up to 20 and then a count; `nothing` when none. Not root, it is followed by `not root: no sudoers, no user crontabs, no other users' keys, no holders of ports, no kernel record`, each part only if true of this run. |
 | WS-R3 | `kernel record` is one of: `on since <time>, whole`, followed by `; walked every time: <path> (<type>)` for each entered filesystem not on kernel-record K2a's list; `on since <time>, with a gap from <time> to <time> (<reason>)`; `off: <the kernel's message or "not root">: a change put back is not seen`. With `iflags_events` false it adds `; inode flags as of the last walk`. |
 | WS-R4 | `end state` is `by a walk at <time>` (kernel-record K12). |
-| WS-R5 | `changes` lists records no section and no package took, up to 20, then `N more (--all lists them)`; then per metadata root a count of the records folded into packages. `not compared` names the metadata roots; `not read` names the not-read directories. |
+| WS-R5 | `changes` lists records no section and no package took, up to 20, then `N more (--all lists them)`; then per metadata root a count of the records folded into packages; then the records of WS-L2 that say only that a side could not be read, counted on one line: `51 not read on either side, and nothing compared changed (--all lists them)`. `not compared` names the metadata roots; `not read` names the not-read directories. |
 | WS-R6 | Every section line is an event's or a runtime record's text (system-interpreters.md, runtime-v1.md, system-config.md). The receipt adds no words of its own about what a change means. |
 
 ## Measured (owed, WS-M)
