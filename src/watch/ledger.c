@@ -496,6 +496,11 @@ int ledger_append_step(struct ledger *l, struct wstep *s) {
     wsb_f(&rest, "],\"trouble\":[");
     for (size_t i = 0; i < s->n_trouble; i++) { wsb_f(&rest, "%s", i ? "," : ""); wsb_json(&rest, s->trouble[i]); }
     wsb_f(&rest, "],\"sec\":[\"%s\",%ld,%ld,\"%s\"],", s->sec_file, s->sec_off, s->sec_len, s->sec_sha);
+    if (s->git != NULL) {                       /* LN-10 */
+        wsb_f(&rest, "\"git\":[");
+        wsb_json(&rest, s->git);
+        wsb_f(&rest, ",%llu],", (unsigned long long)s->tree);
+    }
     if (s->since_ns || s->quiet || s->by_installed || s->roots != NULL) {     /* a system watch's step */
         wsb_f(&rest, "\"sys\":[%lld,%llu,", (long long)s->since_ns, (unsigned long long)s->quiet);
         wsb_json(&rest, s->quiet_under);
@@ -736,6 +741,10 @@ int ledger_step(const struct jval *line, struct wstep *s) {
         s->since_ns = v;
         memcpy(s->quiet_under, y->kids[2].s, y->kids[2].s_len + 1);
     }
+    const struct jval *g = jget(line, "git");
+    if (g != NULL && (g->t != J_ARR || g->n != 2 || g->kids[0].t != J_STR || !u64_at(g, 1, &s->tree) ||
+                      (s->git = strdup(g->kids[0].s)) == NULL))
+        goto bad;
     snprintf(s->sec_file, sizeof s->sec_file, "%s", a->kids[0].s);
     snprintf(s->sec_sha, sizeof s->sec_sha, "%s", a->kids[3].s);
     s->sec_off = (long)off;

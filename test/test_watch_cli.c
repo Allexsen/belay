@@ -824,6 +824,53 @@ TEST(the_receipt_is_every_step_newest_first) {
     HAS(g_out, "nothing recorded for this directory yet\n");
 }
 
+/* LN-10: a real pull, fast-forward then merge, under a fake home: the line
+ * leads with it and counts the tree apart from .git/, which the receipt
+ * folds into one line. */
+TEST(a_git_pull_leads_the_line_and_the_receipt_folds_git) {
+    fresh();
+    char *old = getenv("HOME") != NULL ? strdup(getenv("HOME")) : NULL;
+    char home[500];
+    snprintf(home, sizeof home, "%s/home", g_dir);
+    sh("rm -rf '%s' '%s/up' && mkdir -p '%s'", home, g_dir, home);
+    setenv("HOME", home, 1);
+    setenv("GIT_CONFIG_NOSYSTEM", "1", 1);
+#define G "git -c user.name=t -c user.email=t@t -c commit.gpgSign=false -c init.defaultBranch=main"
+    sh("cd '%s' && rm -rf proj && mkdir up && cd up && " G " init -q && printf '1\\n' > a && printf 'o\\n' > old && " G " add -A && "
+       G " commit -qm seed && cd .. && " G " clone -q up proj 2>/dev/null && cd up && printf '2\\n' >> a && printf 'n\\n' > n && "
+       G " add -A && " G " commit -qm one && " G " rm -q old && " G " commit -qm two", g_dir);
+    ASSERT_EQ_INT(0, step("s1", "--first-ok", NULL));
+    sh("cd '%s' && " G " pull -q --no-rebase >/dev/null 2>&1", g_scope);
+    ASSERT_EQ_INT(0, step("s1", NULL));
+    const char *id = out_of("cd '%s' && git rev-parse --short=7 HEAD | tr -d '\\n'", g_scope);
+    char want[200];
+    snprintf(want, sizeof want, "belay: outside tool calls: git pull: main moved to %s (fast-forward) \xc2\xb7 3 files in the tree\n", id);
+    ASSERT_EQ_STR(want, g_out);
+    belay("watch", "receipt", "--scope", g_scope, NULL);
+    HAS(g_out, "\n  git bookkeeping: ");
+    HAS(g_out, " changes under .git/\n");
+    HAS_NOT(g_out, "  M .git/index");
+    HAS(g_out, "  A n\n");
+    /* a merge: the local branch has a commit of its own */
+    sh("cd '%s' && printf 'l\\n' > l && " G " add -A && " G " commit -qm local && cd ../up && printf '3\\n' >> a && " G " commit -qam three",
+       g_scope);
+    step("s1", NULL);
+    sh("cd '%s' && " G " pull -q --no-rebase >/dev/null 2>&1", g_scope);
+    ASSERT_EQ_INT(0, step("s1", NULL));
+    id = out_of("cd '%s' && git rev-parse --short=7 HEAD | tr -d '\\n'", g_scope);
+    snprintf(want, sizeof want, "belay: outside tool calls: git pull: main moved to %s (merge) \xc2\xb7 1 file in the tree\n", id);
+    ASSERT_EQ_STR(want, g_out);
+    /* a commit of the agent's own is not a pull: the line is as before */
+    sh("cd '%s' && printf 'm\\n' > m && " G " add -A && " G " commit -qm mine", g_scope);
+    ASSERT_EQ_INT(0, step("s1", NULL));
+    HAS_NOT(g_out, "git ");
+    HAS(g_out, " changes: ");
+#undef G
+    unsetenv("GIT_CONFIG_NOSYSTEM");
+    if (old != NULL) setenv("HOME", old, 1); else unsetenv("HOME");
+    free(old);
+}
+
 TEST(patterns_shows_the_lists_in_force_and_what_each_matches) {
     fresh();
     sh("printf 'src\\nnothing-here\\n' > '%s/.belay-donttouch' && echo k > '%s/.env'", g_scope, g_scope);
@@ -1254,6 +1301,7 @@ int main(void) {
     RUN(a_session_that_fired_without_writing_a_line_keeps_its_marker);
     RUN(a_step_whose_line_fails_is_said_lost_and_the_state_is_as_it_was);
     RUN(the_receipt_is_every_step_newest_first);
+    RUN(a_git_pull_leads_the_line_and_the_receipt_folds_git);
     RUN(patterns_shows_the_lists_in_force_and_what_each_matches);
     RUN(a_change_of_what_is_read_is_flagged_and_what_is_not_read_is_said_once);
     RUN(too_wide_a_directory_is_refused);

@@ -22,6 +22,7 @@
 #include "cli/delta.h"
 #include "cli/receipt.h"
 #include "cli/state.h"
+#include "interp/gitfmt.h"
 #include "watch/ledger.h"
 #include "watch/sysflag.h"
 #include "watch/sysreceipt.h"
@@ -196,10 +197,12 @@ static struct wkill *kill_of(struct wstate *s, const char *session, bool make) {
 
 enum { DT_NONE, DT_OK, DT_UNREADABLE, DT_TOO_LARGE };
 
-/* The file's stored copy at checkpoint `id`: DT_OK with its bytes
- * (malloc'd), DT_NONE when the checkpoint has no such file, DT_UNREADABLE
- * with `why`. -1 with belay_err when the manifest cannot be read. */
-static int donttouch_read(const struct state *st, long id, char **bytes, size_t *len, char *why, size_t cap) {
+/* The stored copy of the file `name` (nl bytes) at checkpoint `id`, at
+ * most `max` bytes: DT_OK with its bytes (malloc'd), DT_NONE when the
+ * checkpoint has no such file, DT_UNREADABLE or DT_TOO_LARGE with `why`.
+ * -1 with belay_err when the manifest cannot be read. */
+static int stored_copy(const struct state *st, long id, const char *name, size_t nl, size_t max, char **bytes,
+                       size_t *len, char *why, size_t cap) {
     struct manifest_file mf;
     struct belay_manifest_reader *r = NULL;
     if (manifest_acquire(st, id, &mf) == -1) return -1;
@@ -210,25 +213,25 @@ static int donttouch_read(const struct state *st, long id, char **bytes, size_t 
     int rc = DT_NONE;
     const struct belay_manifest_header *h = belay_manifest_header(r);
     for (size_t i = 0; i < h->n_excluded; i++)
-        if (h->excluded[i].path_len == 16 && memcmp(h->excluded[i].path, ".belay-donttouch", 16) == 0) {
+        if (h->excluded[i].path_len == nl && memcmp(h->excluded[i].path, name, nl) == 0) {
             snprintf(why, cap, "it is excluded");
             rc = DT_UNREADABLE;
         }
     static struct belay_entry e;
     int got;
     while (rc == DT_NONE && (got = belay_manifest_next(r, &e)) == 1) {
-        const int c = memcmp(e.path, ".belay-donttouch", e.path_len < 16 ? e.path_len : 16);
-        if (c > 0 || (c == 0 && e.path_len > 16)) {
+        const int c = memcmp(e.path, name, e.path_len < nl ? e.path_len : nl);
+        if (c > 0 || (c == 0 && e.path_len > nl)) {
             /* past it in path order -- unless it is one of its own children, which a file has none of */
-            if (!(c == 0 && e.path[16] == '/')) break;
+            if (!(c == 0 && e.path[nl] == '/')) break;
             continue;
         }
-        if (c < 0 || e.path_len != 16) continue;
+        if (c < 0 || e.path_len != nl) continue;
         if (e.type != BELAY_T_REG) {
             snprintf(why, cap, "it is not a regular file");
             rc = DT_UNREADABLE;
-        } else if (e.size > DT_FILE_MAX) {      /* DT-4: a limit passed is an invalid file, not an unreadable one */
-            snprintf(why, cap, "the file is over %u bytes", DT_FILE_MAX);
+        } else if (e.size > max) {      /* DT-4: a limit passed is an invalid file, not an unreadable one */
+            snprintf(why, cap, "the file is over %zu bytes", max);
             rc = DT_TOO_LARGE;
         } else if (!e.has_stored) {
             snprintf(why, cap, e.writer_open ? "a writer has it open" : "no stored copy");
@@ -240,7 +243,7 @@ static int donttouch_read(const struct state *st, long id, char **bytes, size_t 
             struct stat fs;
             char *p = NULL;
             size_t n = 0;
-            if (fd != -1 && fstat(fd, &fs) == 0 && S_ISREG(fs.st_mode) && fs.st_size <= (off_t)DT_FILE_MAX &&
+            if (fd != -1 && fstat(fd, &fs) == 0 && S_ISREG(fs.st_mode) && fs.st_size <= (off_t)max &&
                 (p = malloc((size_t)fs.st_size + 1)) != NULL) {
                 while (n < (size_t)fs.st_size) {
                     const ssize_t k = read(fd, p + n, (size_t)fs.st_size - n);
@@ -280,6 +283,10 @@ static int donttouch_read(const struct state *st, long id, char **bytes, size_t 
     manifest_release(&mf);
     belay_err_clear();
     return rc;
+}
+
+static int donttouch_read(const struct state *st, long id, char **bytes, size_t *len, char *why, size_t cap) {
+    return stored_copy(st, id, ".belay-donttouch", 16, DT_FILE_MAX, bytes, len, why, cap);
 }
 
 /* The list in force by the ledger's state into *list; false when there is
@@ -353,9 +360,13 @@ static int nomem(void) {
     return -1;
 }
 
+/* LN-10: a git_commits_added event without a count for the repository at
+ * the top, kept until its branch's reflog is read. */
+struct gitlead { char branch[GIT_NAME_MAX + 1], to[65]; bool have; };
+
 /* The diff at `d` read once: every record flagged, noted or counted into
  * the step; a change of what is read flagged too (CV-1). */
-static int match_diff(struct wctx *x, const char *d, struct flagctx *fx, struct wstep *s) {
+static int match_diff(struct wctx *x, const char *d, struct flagctx *fx, struct wstep *s, struct gitlead *gl) {
     FILE *in = fopen(d, "r");
     if (in == NULL) {
         belay_err_set(BELAY_ERR_IO, errno, "cannot read %s", d);
@@ -398,6 +409,13 @@ static int match_diff(struct wctx *x, const char *d, struct flagctx *fx, struct 
                 }
             }
         } else if (jget(&v, "event") != NULL) {
+            const char *br = jstr(&v, "branch"), *to = jstr(&v, "to");
+            if (!gl->have && strcmp(jstr(&v, "event"), "git_commits_added") == 0 && jget(&v, "count") == NULL &&
+                strcmp(jstr(&v, "repo"), ".git") == 0 && strlen(br) < sizeof gl->branch && strlen(to) < sizeof gl->to) {
+                memcpy(gl->branch, br, strlen(br) + 1);
+                memcpy(gl->to, to, strlen(to) + 1);
+                gl->have = true;
+            }
             const int r = flag_event(&v, &f);
             if (r == -1 || (r == 1 && add_flag(s, &f) == -1)) { free(r == 1 ? f.text : NULL); rc = nomem(); }
         } else if (jget(&v, "outcome") != NULL) {
@@ -414,6 +432,7 @@ static int match_diff(struct wctx *x, const char *d, struct flagctx *fx, struct 
                     rc = nomem();
                 } else if (r == 0) {
                     s->counts[watch_outcome_index(word)]++;
+                    if (!(len >= 4 && memcmp(path, ".git", 4) == 0 && (len == 4 || path[4] == '/'))) s->tree++;
                     if (unflagged < 3) {                    /* named when three or fewer (LN-5) */
                         char *shown = flag_shown(path, len);
                         const size_t nc = (shown != NULL ? strlen(shown) : 0) + 24;
@@ -460,6 +479,43 @@ static int match_diff(struct wctx *x, const char *d, struct flagctx *fx, struct 
     return rc;
 }
 
+/* LN-10: the line leads with a pull or a merge when the branch's reflog,
+ * as checkpoint `id` keeps it, ends in one that led to the event's commit.
+ * Whatever cannot be read leaves the line as it was: 0, or -1 (memory). */
+#define W_REFLOG_MAX (4u << 20)
+static int last_entry(const struct git_reflog_entry *e, void *ctx) {
+    *(struct git_reflog_entry *)ctx = *e;
+    return 0;
+}
+static int git_lead(const struct state *st, long id, const struct gitlead *gl, struct wstep *s) {
+    static char name[GIT_NAME_MAX + 32];
+    char why[96], *bytes = NULL;
+    size_t len = 0;
+    const int nl = snprintf(name, sizeof name, ".git/logs/refs/heads/%s", gl->branch);
+    if (stored_copy(st, id, name, (size_t)nl, W_REFLOG_MAX, &bytes, &len, why, sizeof why) != DT_OK) {
+        belay_err_clear();
+        return 0;
+    }
+    struct git_reflog_entry e = { 0 };
+    git_reflog_each(bytes, len, last_entry, &e, NULL);
+    size_t w = 0;
+    while (w < e.operation_len && e.operation[w] != ' ') w++;
+    const bool pull = w == 4 && memcmp(e.operation, "pull", 4) == 0, merge = w == 5 && memcmp(e.operation, "merge", 5) == 0;
+    static const char FF[] = ": Fast-forward";
+    const size_t fl = sizeof FF - 1;
+    int rc = 0;
+    if ((pull || merge) && e.new_oid != NULL && e.oid_len == strlen(gl->to) && memcmp(e.new_oid, gl->to, e.oid_len) == 0) {
+        const bool ff = e.message_len >= fl && memcmp(e.message + e.message_len - fl, FF, fl) == 0;
+        char *shown = flag_shown(gl->branch, strlen(gl->branch));
+        const size_t cap = (shown != NULL ? strlen(shown) : 0) + 64;
+        if (shown == NULL || (s->git = malloc(cap)) == NULL) rc = nomem();
+        else snprintf(s->git, cap, "git %s: %s moved to %.7s (%s)", pull ? "pull" : "merge", shown, gl->to, ff ? "fast-forward" : "merge");
+        free(shown);
+    }
+    free(bytes);
+    return rc;
+}
+
 /* The step's section of the receipt: a heading, then `belay diff --all`. */
 static int render_section(struct wctx *x, const struct wstep *s, const char *a, const char *b, const char *d,
                           char **text, size_t *len) {
@@ -485,7 +541,8 @@ static int render_section(struct wctx *x, const struct wstep *s, const char *a, 
     snprintf(lb, sizeof lb, "checkpoint %ld", s->to);
     const struct receipt_opts ro = { la, lb, true, cli_mode_of, &m, x->st.scope.docker[0] || x->q->system ? NULL : cli_classify,
                                      x->st.scope.path, NULL, NULL, NULL,     /* --all: nothing folds, no owner asked */
-                                     NULL, NULL };  /* nor the after manifest about timers and lingering */
+                                     NULL, NULL,    /* nor the after manifest about timers and lingering */
+                                     NULL, !x->q->system };     /* .git/ in one line (LN-10) */
     if (receipt_render(in, mem, &ro) == -1) goto out;
     cli_not_compared(mem, belay_manifest_header(m.side[0].r), belay_manifest_header(m.side[1].r), NULL);
     fputs("\n", mem);
@@ -608,13 +665,16 @@ static int do_step(struct wctx *x, const struct wop *op, bool late) {
         if (belay_diff(mf_a.path, mf_b.path, d, &dopts, &ds) == -1) goto out;
         stage(x, "matching");
         struct cli_modes m = { 0 };
+        static struct gitlead gl;
+        gl.have = false;
         struct flagctx fx = { .lists = { have_old ? &old : NULL, have_fresh ? &fresh : NULL }, .mode = cli_mode_of, .mode_ctx = &m };
         int mr = -1;
         if (belay_manifest_open(mf_a.path, &m.side[0].r) == 0 && belay_manifest_open(mf_b.path, &m.side[1].r) == 0) {
             for (int sd = 0; sd < 2; sd++) m.side[sd].got = belay_manifest_next(m.side[sd].r, &m.side[sd].e);
             mr = q->system ? sysflag_step(d, mf_a.path, mf_b.path, x->st.store, cli_mode_of, &m, s)     /* WS-F, WS-N */
-                           : match_diff(x, d, &fx, s);
+                           : match_diff(x, d, &fx, s, &gl);
         }
+        if (mr == 0 && gl.have) mr = git_lead(&x->st, c.id, &gl, s);
         belay_manifest_close(m.side[0].r);
         belay_manifest_close(m.side[1].r);
         flagctx_free(&fx);
