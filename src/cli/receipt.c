@@ -398,6 +398,14 @@ static bool str_in(char **v, size_t n, const char *s) {
     return n > 0 && bsearch(&s, v, n, sizeof *v, str_cmp) != NULL;
 }
 
+/* Whether the watch's line names this path (LN-10). path: room for a NUL. */
+static bool listed(const struct receipt_opts *o, char *path, size_t cap, size_t plen) {
+    if (o->n_listed == 0 || plen >= cap || memchr(path, '\0', plen) != NULL) return false;
+    path[plen] = '\0';
+    const char *k = path;
+    return bsearch(&k, o->listed, o->n_listed, sizeof *o->listed, str_cmp) != NULL;
+}
+
 static int str_add(char ***v, size_t *n, size_t *cap, const char *s, size_t len) {
     if (*n == *cap) {
         const size_t c = *cap ? *cap * 2 : 64;
@@ -732,7 +740,7 @@ static int record(const struct jval *r, struct ctx *x, const struct receipt_opts
         const size_t rl = plen - (size_t)gp - 4;
         const bool hooks = (rl >= 6 && memcmp(rest, "/hooks", 6) == 0 && (rl == 6 || rest[6] == '/'));
         const struct jval *f = jget(r, "findings");
-        if ((o->all && !o->fold_git) || unknown || named || hooks || !(x->git_events || !any_git(f) || only_in_place(f)))
+        if ((o->all && (!o->fold_git || listed(o, path, sizeof path, plen))) || unknown || named || hooks || !(x->git_events || !any_git(f) || only_in_place(f)))
             return keep(&x->gitvis, b.p, false, o->all);
         free(b.p);
         struct tally *t = tally(&x->git, path, (size_t)gp);

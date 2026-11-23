@@ -117,6 +117,8 @@ struct receipt_opts {
     void *system_ctx;
     const struct receipt_sections *sections;    /* NULL: a diff's receipt, as before */
     bool fold_git;              /* with `all`: .git/ folds all the same, as without it (watch-v1 LN-10) */
+    char *const *listed;        /* with fold_git: the paths that stay listed, sorted (the line names them) */
+    size_t n_listed;
 };
 
 /* Reads diff.v1 from `diff`, writes the receipt to `out`. 0; -1 with
