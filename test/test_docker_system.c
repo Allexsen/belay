@@ -225,9 +225,11 @@ TEST(watch_start_step_stop_of_a_container) {
     REQUIRE_MSG(belay("watch", "mark", "--system", "--docker", "c", "--session", "s1", "--name", "m") == 0, "%s", g_out);
     REQUIRE_MSG(belay("watch", "summary", "--system", "--docker", "c", "--session", "s1", "--since", "m") == 0, "%s", g_err);
     REQUIRE_MSG(belay("watch", "receipt", "--system", "--docker", "c") == 0, "%s%s", g_out, g_err);
-    REQUIRE_MSG(strstr(g_out, "belay receipt  / in the container c (4f1c0e8a9b7d)\n") == g_out, "%s", g_out);
+    REQUIRE_MSG(strstr(g_out, "experimental: the system watch is new, slow on large machines, and its output may change\n"
+                       "belay receipt  / in the container c (4f1c0e8a9b7d)\n") == g_out, "%s", g_out);
     REQUIRE_MSG(belay("watch", "stop", "--system", "--docker", "c") == 0, "%s%s", g_out, g_err);
-    ASSERT_TRUE(strstr(g_out, "belay receipt  / in the container c (4f1c0e8a9b7d)\n") == g_out);
+    ASSERT_TRUE(strstr(g_out, "experimental: the system watch is new, slow on large machines, and its output may change\n"
+                       "belay receipt  / in the container c (4f1c0e8a9b7d)\n") == g_out);
     ASSERT_TRUE(strstr(g_out, "\nend state: by a walk at ") != NULL);
     REQUIRE_MSG(belay("watch", "patterns", "--system", "--docker", "c") == 0, "%s", g_err);
     ASSERT_TRUE(strstr(g_out, "srv/app/.ssh") != NULL);

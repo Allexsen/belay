@@ -403,10 +403,15 @@ int cmd_watch(int argc, char **argv, FILE *out, FILE *err) {
         struct wreq q = { .scope = scope, .session = session != NULL ? session : "system", .agent = "", .first_ok = true,
                           .deadline_s = 0, .words = { "call", "", "" }, .system = true, .progress = err,
                           .docker = docker, .all = all };
-        if (is_start) q.ops[q.n_ops++] = (struct wop){ WOP_START, NULL, 0 };
+        if (is_start) {
+            fputs(CLI_SYSTEM_EXPERIMENTAL "\n", err);          /* WS-0: the first line printed */
+            fflush(err);
+            q.ops[q.n_ops++] = (struct wop){ WOP_START, NULL, 0 };
+        }
         q.ops[q.n_ops++] = (struct wop){ WOP_STEP, NULL, WSTEP_PLAIN };
         if (!is_start) q.ops[q.n_ops++] = (struct wop){ WOP_RECEIPT, NULL, is_stop ? 1 : 0 };
         struct wsb text = { 0 };
+        if (!is_start) wsb_f(&text, CLI_SYSTEM_EXPERIMENTAL "\n");      /* WS-0: the receipt's first line */
         const int wr = watch_run(&q, &text);
         char file[PATH_MAX + 120];
         if (text.bad) {
