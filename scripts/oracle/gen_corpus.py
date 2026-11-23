@@ -4209,6 +4209,32 @@ def git_events(w, rng):
             lambda rng, msgs=msgs: moved(rng, lambda c: (
                 [(c[i], c[i + 1], m) for i, m in enumerate(msgs)], len(msgs))),
             ev(['history rewritten by ' + trigger]))
+    # E12 (amended): rebase is an operation's first word `rebase`, or `pull`
+    # with a last word that is a parenthesised step; a merge's arguments are
+    # none; `forced-update` only as a message's end, not a commit's; and
+    # `Fast-forward` only as a message's end.
+    for op in ['pull --rebase origin main (finish)', 'pull -r (finish)', 'pull (finish)',
+               'rebase -i (finish)']:
+        one('git: history rewritten by rebase, operation %s' % op,
+            lambda rng, op=op: moved(rng, lambda c: (
+                [(c[0], c[1], op + ': returning to refs/heads/main')], 1)),
+            ev(['history rewritten by rebase']))
+    one('git: a merge whose arguments say rebase is a merge',
+        lambda rng: moved(rng, lambda c: ([(c[0], c[1], "pull --no-rebase: Merge made by the "
+                                                        "'ort' strategy.")], 1))
+        + moved(rng, lambda c: ([(c[0], c[1], "merge rebase-fix: Merge made by the 'ort' "
+                                              "strategy.")], 1), b'dev'),
+        ev(['commits added, not counted']))
+    one('git: a commit whose subject ends in forced-update is a commit',
+        lambda rng: moved(rng, lambda c: ([(c[0], c[1], 'commit: handle forced-update'),
+                                           (c[1], c[2], 'commit: forced-update')], 2)),
+        ev(['commits added, counted']))
+    one('git: forced-update not at the message end is no rewrite',
+        lambda rng: moved(rng, lambda c: ([(c[0], c[1], 'fetch origin: forced-update now')], 1)),
+        ev(['a branch moved, its reflog gained none']))
+    one('git: Fast-forward not at the message end is no fast-forward',
+        lambda rng: moved(rng, lambda c: ([(c[0], c[1], 'checkout: Fast-forward kept')], 1)),
+        ev(['a branch moved, its reflog gained none']))
     one('git: history rewritten by several operations',
         lambda rng: moved(rng, lambda c: ([(c[0], c[1], 'commit: one'),
                                            (c[1], c[2], 'reset: moving to HEAD~2'),
