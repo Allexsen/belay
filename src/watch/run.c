@@ -364,9 +364,32 @@ static int nomem(void) {
  * the top, kept until its branch's reflog is read. */
 struct gitlead { char branch[GIT_NAME_MAX + 1], to[65]; bool have; };
 
+/* The paths a flag row or a flagged event names: listed in the receipt
+ * even under .git/ (LN-10). Sorted before the receipt is made. */
+struct named { char **p; size_t n, cap; };
+
+static int named_add(struct named *v, const char *s, size_t len) {
+    if (v->n == v->cap) {
+        const size_t c = v->cap ? v->cap * 2 : 16;
+        char **q = realloc(v->p, c * sizeof *q);
+        if (q == NULL) return -1;
+        v->p = q;
+        v->cap = c;
+    }
+    char *d = malloc(len + 1);
+    if (d == NULL) return -1;
+    memcpy(d, s, len);
+    d[len] = '\0';
+    v->p[v->n++] = d;
+    return 0;
+}
+
+static int named_cmp(const void *a, const void *b) { return strcmp(*(char *const *)a, *(char *const *)b); }
+
 /* The diff at `d` read once: every record flagged, noted or counted into
  * the step; a change of what is read flagged too (CV-1). */
-static int match_diff(struct wctx *x, const char *d, struct flagctx *fx, struct wstep *s, struct gitlead *gl) {
+static int match_diff(struct wctx *x, const char *d, struct flagctx *fx, struct wstep *s, struct gitlead *gl,
+                      struct named *nm) {
     FILE *in = fopen(d, "r");
     if (in == NULL) {
         belay_err_set(BELAY_ERR_IO, errno, "cannot read %s", d);
@@ -418,6 +441,9 @@ static int match_diff(struct wctx *x, const char *d, struct flagctx *fx, struct 
             }
             const int r = flag_event(&v, &f);
             if (r == -1 || (r == 1 && add_flag(s, &f) == -1)) { free(r == 1 ? f.text : NULL); rc = nomem(); }
+            const struct jval *ps = jget(&v, "paths");
+            for (size_t i = 0; r == 1 && rc == 0 && ps != NULL && ps->t == J_ARR && i < ps->n; i++)
+                if (ps->kids[i].t == J_STR && named_add(nm, ps->kids[i].s, ps->kids[i].s_len) == -1) rc = nomem();
         } else if (jget(&v, "outcome") != NULL) {
             size_t len;
             const char *word;
@@ -427,7 +453,7 @@ static int match_diff(struct wctx *x, const char *d, struct flagctx *fx, struct 
             } else {
                 s->changes++;
                 const int r = flag_record(fx, &v, path, len, &f, &word);
-                if (r == -1 || (r == 1 && add_flag(s, &f) == -1)) {
+                if (r == -1 || (r == 1 && (add_flag(s, &f) == -1 || named_add(nm, path, len) == -1))) {
                     free(r == 1 ? f.text : NULL);
                     rc = nomem();
                 } else if (r == 0) {
@@ -518,7 +544,7 @@ static int git_lead(const struct state *st, long id, const struct gitlead *gl, s
 
 /* The step's section of the receipt: a heading, then `belay diff --all`. */
 static int render_section(struct wctx *x, const struct wstep *s, const char *a, const char *b, const char *d,
-                          char **text, size_t *len) {
+                          const struct named *nm, char **text, size_t *len) {
     struct cli_modes m = { 0 };
     FILE *in = fopen(d, "r"), *mem = open_memstream(text, len);
     int rc = -1;
@@ -542,7 +568,8 @@ static int render_section(struct wctx *x, const struct wstep *s, const char *a, 
     const struct receipt_opts ro = { la, lb, true, cli_mode_of, &m, x->st.scope.docker[0] || x->q->system ? NULL : cli_classify,
                                      x->st.scope.path, NULL, NULL, NULL,     /* --all: nothing folds, no owner asked */
                                      NULL, NULL,    /* nor the after manifest about timers and lingering */
-                                     NULL, !x->q->system };     /* .git/ in one line (LN-10) */
+                                     NULL, !x->q->system,       /* .git/ in one line (LN-10) */
+                                     nm->p, nm->n };            /* but what the line names */
     if (receipt_render(in, mem, &ro) == -1) goto out;
     cli_not_compared(mem, belay_manifest_header(m.side[0].r), belay_manifest_header(m.side[1].r), NULL);
     fputs("\n", mem);
@@ -637,6 +664,7 @@ static int do_step(struct wctx *x, const struct wop *op, bool late) {
     bool have_old = list_in_force(&x->l, &old), have_fresh = false;
     int rc = -1;
     struct manifest_file mf_a = { .temporary = false }, mf_b = { .temporary = false };
+    struct named nm = { 0 };
     if (!q->system && donttouch_step(x, c.id, s, have_old, &fresh, &have_fresh) == -1) goto out;
     if (!have) {
         /* nothing to diff against: a first step, or the record was interrupted */
@@ -672,7 +700,7 @@ static int do_step(struct wctx *x, const struct wop *op, bool late) {
         if (belay_manifest_open(mf_a.path, &m.side[0].r) == 0 && belay_manifest_open(mf_b.path, &m.side[1].r) == 0) {
             for (int sd = 0; sd < 2; sd++) m.side[sd].got = belay_manifest_next(m.side[sd].r, &m.side[sd].e);
             mr = q->system ? sysflag_step(d, mf_a.path, mf_b.path, x->st.store, cli_mode_of, &m, s)     /* WS-F, WS-N */
-                           : match_diff(x, d, &fx, s, &gl);
+                           : match_diff(x, d, &fx, s, &gl, &nm);
         }
         if (mr == 0 && gl.have) mr = git_lead(&x->st, c.id, &gl, s);
         belay_manifest_close(m.side[0].r);
@@ -681,7 +709,8 @@ static int do_step(struct wctx *x, const struct wop *op, bool late) {
         if (mr == -1) goto out;
         if (s->changes > 0 || s->n_flags > 0 || s->roots != NULL) {
             stage(x, "rendering");
-            if (render_section(x, s, mf_a.path, mf_b.path, d, &p->section, &p->section_len) == -1) goto out;
+            if (nm.n > 1) qsort(nm.p, nm.n, sizeof *nm.p, named_cmp);
+            if (render_section(x, s, mf_a.path, mf_b.path, d, &nm, &p->section, &p->section_len) == -1) goto out;
         }
     }
     /* the step is made: what it leaves in the state */
@@ -719,6 +748,8 @@ static int do_step(struct wctx *x, const struct wop *op, bool late) {
     x->dirty = false;
     rc = 0;
 out:
+    for (size_t i = 0; i < nm.n; i++) free(nm.p[i]);
+    free(nm.p);
     manifest_release(&mf_a);
     manifest_release(&mf_b);
     if (have_old) dtlist_free(&old);

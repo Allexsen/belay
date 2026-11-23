@@ -871,6 +871,34 @@ TEST(a_git_pull_leads_the_line_and_the_receipt_folds_git) {
     free(old);
 }
 
+/* LN-10, review M1: what the line flags or notes under .git/ is listed in
+ * the receipt, not folded into git's bookkeeping. */
+TEST(a_flagged_change_under_git_is_listed_in_the_receipt) {
+    fresh();
+    char *old = getenv("HOME") != NULL ? strdup(getenv("HOME")) : NULL;
+    char home[500];
+    snprintf(home, sizeof home, "%s/home", g_dir);
+    sh("rm -rf '%s' && mkdir -p '%s'", home, home);
+    setenv("HOME", home, 1);
+    setenv("GIT_CONFIG_NOSYSTEM", "1", 1);
+#define G "git -c user.name=t -c user.email=t@t -c commit.gpgSign=false -c init.defaultBranch=main"
+    sh("cd '%s' && " G " init -q && printf '1\\n' > a && " G " add -A && " G " commit -qm seed", g_scope);
+    ASSERT_EQ_INT(0, step("s1", "--first-ok", NULL));
+    sh("cd '%s' && printf '2\\n' >> a && " G " add -A && git config core.fsmonitor x && mkdir -p .git/info && "
+       "echo '* filter=x' > .git/info/attributes", g_scope);
+    ASSERT_EQ_INT(0, step("s1", NULL));
+    HAS(g_out, ".git/info/attributes added (git attributes)");
+    HAS(g_out, ".git/config modified (git config)");
+    belay("watch", "receipt", "--scope", g_scope, NULL);
+    HAS(g_out, "\n  M .git/config\n");
+    HAS(g_out, "\n  A .git/info/attributes\n");
+    HAS(g_out, "\n  git bookkeeping: ");                                /* the index, the objects */
+#undef G
+    unsetenv("GIT_CONFIG_NOSYSTEM");
+    if (old != NULL) setenv("HOME", old, 1); else unsetenv("HOME");
+    free(old);
+}
+
 TEST(patterns_shows_the_lists_in_force_and_what_each_matches) {
     fresh();
     sh("printf 'src\\nnothing-here\\n' > '%s/.belay-donttouch' && echo k > '%s/.env'", g_scope, g_scope);
@@ -1314,6 +1342,7 @@ int main(void) {
     RUN(a_step_whose_line_fails_is_said_lost_and_the_state_is_as_it_was);
     RUN(the_receipt_is_every_step_newest_first);
     RUN(a_git_pull_leads_the_line_and_the_receipt_folds_git);
+    RUN(a_flagged_change_under_git_is_listed_in_the_receipt);
     RUN(patterns_shows_the_lists_in_force_and_what_each_matches);
     RUN(a_change_of_what_is_read_is_flagged_and_what_is_not_read_is_said_once);
     RUN(too_wide_a_directory_is_refused);
