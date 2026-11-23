@@ -42,9 +42,10 @@ const struct sysrow *sysflag_row_of(const char *path, size_t len);
 
 /* "+a, -b": the roots of `after` that `before` does not list, then the
  * reverse, by path and class; NULL in *out when they are the same (WS-10).
- * 0, or -1 (memory). */
+ * Those of one home added or removed together are one item, "+home/v (14
+ * paths)", unless `all`. 0, or -1 (memory). */
 struct belay_manifest_header;
-int sysflag_roots_changed(const struct belay_manifest_header *before, const struct belay_manifest_header *after,
+int sysflag_roots_changed(const struct belay_manifest_header *before, const struct belay_manifest_header *after, bool all,
                           char **out);
 
 #endif

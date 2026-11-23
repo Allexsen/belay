@@ -402,7 +402,7 @@ int cmd_watch(int argc, char **argv, FILE *out, FILE *err) {
         if (session != NULL && !ledger_id_valid(session)) { rc = cli_usage(err, "--session needs an id: printable, no spaces, at most 96 bytes"); goto done; }
         struct wreq q = { .scope = scope, .session = session != NULL ? session : "system", .agent = "", .first_ok = true,
                           .deadline_s = 0, .words = { "call", "", "" }, .system = true, .progress = err,
-                          .docker = docker };
+                          .docker = docker, .all = all };
         if (is_start) q.ops[q.n_ops++] = (struct wop){ WOP_START, NULL, 0 };
         q.ops[q.n_ops++] = (struct wop){ WOP_STEP, NULL, WSTEP_PLAIN };
         if (!is_start) q.ops[q.n_ops++] = (struct wop){ WOP_RECEIPT, NULL, is_stop ? 1 : 0 };

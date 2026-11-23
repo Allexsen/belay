@@ -790,7 +790,7 @@ int sysflag_step(const char *diff, const char *before, const char *after, const 
         nomem();
         goto out;
     }
-    if (sysflag_roots_changed(belay_manifest_header(r[0]), belay_manifest_header(r[1]), &s->roots) == -1) goto out;
+    if (sysflag_roots_changed(belay_manifest_header(r[0]), belay_manifest_header(r[1]), false, &s->roots) == -1) goto out;
     if ((in = fopen(diff, "r")) == NULL) {
         belay_err_set(BELAY_ERR_IO, errno, "cannot read %s", diff);
         goto out;
@@ -822,19 +822,42 @@ out:
     return rc;
 }
 
-int sysflag_roots_changed(const struct belay_manifest_header *before, const struct belay_manifest_header *after,
+/* The home a root is of (WS-6): the home of a `.ssh` root of `h` it lies
+ * under; its length, or 0. */
+static size_t home_of(const struct belay_manifest_header *h, const char *p) {
+    for (size_t i = 0; i < h->n_roots; i++) {
+        const char *r = h->roots[i].path;
+        const size_t n = strlen(r);
+        if (n > 5 && memcmp(r + n - 5, "/.ssh", 5) == 0 && strncmp(p, r, n - 4) == 0) return n - 5;
+    }
+    return 0;
+}
+
+static bool only_mine(const struct belay_manifest_header *mine, const struct belay_manifest_header *other, size_t i) {
+    for (size_t j = 0; j < other->n_roots; j++)
+        if (strcmp(mine->roots[i].path, other->roots[j].path) == 0 && mine->roots[i].cls == other->roots[j].cls) return false;
+    return true;
+}
+
+int sysflag_roots_changed(const struct belay_manifest_header *before, const struct belay_manifest_header *after, bool all,
                           char **out) {
     *out = NULL;
     struct wsb b = { 0 };
     for (int side = 1; side >= 0; side--) {
         const struct belay_manifest_header *mine = side ? after : before, *other = side ? before : after;
         for (size_t i = 0; i < mine->n_roots; i++) {
-            bool both = false;
-            for (size_t j = 0; j < other->n_roots && !both; j++)
-                both = strcmp(mine->roots[i].path, other->roots[j].path) == 0 && mine->roots[i].cls == other->roots[j].cls;
-            if (both) continue;
-            char *e = receipt_escaped(mine->roots[i].path, strlen(mine->roots[i].path));
+            if (!only_mine(mine, other, i)) continue;
+            const char *p = mine->roots[i].path;
+            const size_t hl = all ? 0 : home_of(mine, p);
+            size_t n = 0, first = i;
+            for (size_t k = 0; hl > 0 && k < mine->n_roots; k++)        /* its home's, changed with it */
+                if (strncmp(mine->roots[k].path, p, hl) == 0 && mine->roots[k].path[hl] == '/' && only_mine(mine, other, k)) {
+                    if (n++ == 0) first = k;
+                }
+            if (n > 1 && first != i) continue;                          /* said with the first */
+            char *e = receipt_escaped(p, n > 1 ? hl : strlen(p));
             wsb_f(&b, "%s%c%s", b.n ? ", " : "", side ? '+' : '-', e != NULL ? e : "?");
+            if (n > 1) wsb_f(&b, " (%zu paths)", n);
             b.bad |= e == NULL;
             free(e);
         }

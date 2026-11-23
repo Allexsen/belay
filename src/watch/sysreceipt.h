@@ -34,7 +34,8 @@ const char *watch_walk_reason(void);
  * the `not root:` line under it when it is true) and `kernel record`. */
 int sysreceipt_head(const struct state *st, long cp, const struct wstate *w, struct wsb *out);
 
-/* The whole receipt, `from` to `to` (`to` made at `to_ns` by a walk). 0, or -1 with belay_err. */
-int sysreceipt(const struct state *st, const struct wstate *w, long from, long to, int64_t to_ns, struct wsb *out);
+/* The whole receipt, `from` to `to` (`to` made at `to_ns` by a walk); `all`:
+ * every record and every root named (WS-10, WS-R5). 0, or -1 with belay_err. */
+int sysreceipt(const struct state *st, const struct wstate *w, long from, long to, int64_t to_ns, bool all, struct wsb *out);
 
 #endif
