@@ -26,7 +26,7 @@ S='"session_id":"plug-1","cwd":"/nowhere"'
 hook() { printf '%s' "$2" | BELAY_BIN=$BIN sh "$HOOK" "$1"; }
 
 # ---- with a binary given: the event and the input go through ----
-is "a session's start prints nothing" "" "$(hook start "{$S,\"source\":\"startup\"}")"
+is "a session's start says what it records" "{\"systemMessage\":\"belay: recording $(cd "$T/proj" && pwd -P)\"}" "$(hook start "{$S,\"source\":\"startup\"}")"
 hook prompt "{$S,\"prompt\":\"go\"}" >/dev/null
 hook pre "{$S,\"tool_use_id\":\"toolu_1\"}" >/dev/null
 echo x > "$T/proj/a.txt"
@@ -93,7 +93,7 @@ if [ -n "$target" ]; then
     has "a platform the pin has no binary for is said" "not recording: belay vtest has no binary for " "$(pinned start "{$S,\"source\":\"startup\"}")"
 
     printf '# a comment\nversion vtest\n%s %s\n' "$target" "$(sum "$BIN")" > "$T/pin"
-    is "the pinned binary is fetched at a session's start, and run" "" "$(pinned start "{$S,\"source\":\"resume\"}")"
+    is "the pinned binary is fetched at a session's start, and run" "{\"systemMessage\":\"belay: recording $(cd "$T/proj" && pwd -P)\"}" "$(pinned start "{$S,\"source\":\"resume\"}")"
     is "kept under its version" "belay-vtest" "$(ls "$T/data/bin")"
     echo y > "$T/proj/b.txt"
     rm -rf "$T/rel"
@@ -104,7 +104,7 @@ if [ -n "$target" ]; then
     head -c 5000 /dev/urandom > "$T/data/bin/belay-vtest"
     has "a fetched binary that no longer runs is a line" "belay: $RED not recording: belay could not run" "$(pinned stop "{$S}" 2>/dev/null)"
     is "and it is removed, being no longer the pinned one" "" "$(ls "$T/data/bin")"
-    is "the next start fetches it again, and it runs" "" "$(pinned start "{$S,\"source\":\"resume\"}" 2>/dev/null)"
+    is "the next start fetches it again, and it runs" "{\"systemMessage\":\"belay: recording $(cd "$T/proj" && pwd -P)\"}" "$(pinned start "{$S,\"source\":\"resume\"}" 2>/dev/null)"
     is "kept again" "belay-vtest" "$(ls "$T/data/bin")"
     echo z > "$T/proj/c.txt"
     has "and records" 'c.txt added' "$(pinned pre "{$S,\"tool_use_id\":\"toolu_3\"}")"

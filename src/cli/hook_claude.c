@@ -327,6 +327,19 @@ static void too_wide(struct wsb *w, const char *path) {
     wsb_f(w, ". Start Claude Code in a project directory to record it.");
 }
 
+/* LN-11's line: the directory a start records, $HOME at its start as ~ */
+static void recording(struct wsb *w, const char *path) {
+    const char *home = getenv("HOME");
+    char real[PATH_MAX];
+    size_t hl = 0;
+    if (home != NULL && home[0] == '/' && realpath(home, real) != NULL) hl = strlen(real);
+    const bool under = hl > 1 && strncmp(path, real, hl) == 0 && path[hl] == '/';
+    const char *p = under ? path + hl + 1 : path;
+    char *shown = flag_shown(p, strlen(p));
+    wsb_f(w, "belay: recording %s%s\n", under ? "~/" : "", shown != NULL ? shown : "this directory");
+    free(shown);
+}
+
 static void receipt_event(const char *scope, FILE *out) {
     struct wsb text = { 0 }, r = { 0 };
     size_t n_steps = 0;
@@ -409,7 +422,8 @@ int hook_claude(const char *event, const char *scope_arg, FILE *in, FILE *out) {
     }
     /* too wide a directory is said at a session's start and by /belay:receipt (TL-14, TL-14a) */
     struct scope sc;
-    if (scope_resolve(scope, &sc) == 0 && watch_too_wide(sc.path)) {
+    const bool resolved = scope_resolve(scope, &sc) == 0;
+    if (resolved && watch_too_wide(sc.path)) {
         if (!strcmp(event, "start")) {
             too_wide(&lines, sc.path);
             wsb_f(&lines, "\n");
@@ -424,6 +438,7 @@ int hook_claude(const char *event, const char *scope_arg, FILE *in, FILE *out) {
     if (agent) q.agent = h.agent;
     if (!strcmp(event, "start")) {
         q.first_ok = strcmp(h.source, "startup") == 0;
+        recording(&lines, resolved ? sc.path : scope);
         q.ops[q.n_ops++] = (struct wop){ WOP_STEP, NULL, WSTEP_PLAIN };
     } else if (!strcmp(event, "pre")) {
         q.ops[q.n_ops++] = (struct wop){ WOP_STEP, call ? h.call : NULL, call ? WSTEP_BEGIN : WSTEP_PLAIN };
