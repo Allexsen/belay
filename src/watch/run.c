@@ -1013,7 +1013,7 @@ static int work(struct wctx *x) {
                 from = n > 0 ? list[0].id : snap->cursor;
                 free(list);
             }
-            if (snap->cursor == 0 || sysreceipt(&x->st, snap, from, snap->cursor, snap->cursor_ns, &x->tail) == -1) {
+            if (snap->cursor == 0 || sysreceipt(&x->st, snap, from, snap->cursor, snap->cursor_ns, q->all, &x->tail) == -1) {
                 if (snap->cursor == 0) belay_err_set(BELAY_ERR_IO, 0, "no checkpoint to end the receipt with");
                 return -1;
             }

@@ -43,6 +43,7 @@ struct wreq {
     bool system;                /* the scope is a machine's `/` (watch-system.md) */
     const char *docker;         /* with system: the container whose `/` it is (WS-1); NULL: the host */
     FILE *progress;             /* with no deadline: a line every watch_progress_ms (WS-3); NULL: none */
+    bool all;                   /* a system receipt's: every record and root named (WS-10) */
 };
 
 /* Runs the event. Its lines, each ending in '\n', are appended to `out`:

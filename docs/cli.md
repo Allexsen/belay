@@ -531,8 +531,8 @@ line names it (`belay receipt  / in the container C (4f1c0e8a9b7d)`), and its ke
 ```
 belay watch start    --system
 belay watch step     --system --session S [--begin ID | --finish ID] [--agent A] [--deadline SECONDS]
-belay watch receipt  --system [--max-lines N] [--path]
-belay watch stop     --system [--max-lines N] [--path]
+belay watch receipt  --system [--all] [--max-lines N] [--path]
+belay watch stop     --system [--all] [--max-lines N] [--path]
 belay watch summary  --system --session S --since NAME
 belay watch mark     --system --session S --name NAME
 belay watch close    --system --session S (--id ID... | --all)
@@ -563,7 +563,8 @@ needs a marker.
   else says `12 entries changed under usr, var`. A file past the hash limit or one belay cannot
   read, whose size, mtime, mode and owner are as they were, is no change: a step with only those says
   nothing. When the roots differ from the step before (a home added), the line ends
-  `roots changed: +home/v/.ssh, ...`.
+  `roots changed: +home/v (14 paths)`, a home's roots one item; `receipt --all` names each root
+  and lists every record.
 
   ```
   belay: 🔴 outside tool calls: sudo rule added in etc/sudoers.d/90-u: u ALL=(ALL) NOPASSWD: ALL (sudo)

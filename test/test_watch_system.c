@@ -165,7 +165,7 @@ TEST(a_step_flags_and_notes_by_the_system_list) {
     sh("cd '%s' && printf 'v:x:1001:1001::/home/v:/bin/sh\\n' >> etc/passwd", g_tree);
     REQUIRE(step() == 0);
     ASSERT_TRUE(strstr(g_out, "belay: outside tool calls: user v added: uid 1001, home /home/v, shell /bin/sh (accounts)") == g_out);
-    ASSERT_TRUE(strstr(g_out, " · roots changed: +home/v/.bash_login, ") != NULL);
+    REQUIRE_MSG(strstr(g_out, " · roots changed: +home/v (14 paths)\n") != NULL, "%s", g_out);     /* one item a home */
     /* F4 */
     sh("cd '%s' && printf 'root:x:0:\\nsudo:x:27:u\\n' > etc/group", g_tree);
     REQUIRE(step() == 0);
@@ -449,7 +449,7 @@ TEST(the_receipt_is_in_sections_in_order) {
     /* a user's edit of a package's file there before, the package upgraded after: listed, never folded */
     sh("cd '%s' && printf 'kernel.t = 4\\n' > etc/sysctl.d/10-tool.conf", g_tree);
     sh("cd '%s' && touch -d 2001-01-01 etc/.pwd.lock && printf 'u ALL=(ALL) ALL\\n' > etc/sudoers.d/90-u && chmod 440 etc/sudoers.d/90-u && "
-       "printf 'v:x:1001:1001::/nonexistent:/bin/sh\\n' >> etc/passwd && "
+       "printf 'v:x:1001:1001::/nonexistent:/bin/sh\\nw:x:1002:1002::/home/w:/bin/sh\\n' >> etc/passwd && mkdir -p home/w && "
        "printf '* * * * * root /bin/x\\n' > etc/cron.d/x && "
        "printf 'ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIOMqqnkVzrm0SdG6UOoqKLsabgH5C9okWi0dh2l9GKJl k\\n' > home/u/.ssh/authorized_keys && "
        "printf 's\\n' > usr/bin/su2 && chmod 4755 usr/bin/su2 && "
@@ -477,6 +477,7 @@ TEST(the_receipt_is_in_sections_in_order) {
     }
     ASSERT_TRUE(strstr(g_out, "\nsudo\n  sudo rule added in etc/sudoers.d/90-u: u ALL=(ALL) ALL\n") != NULL);   /* WS-R6 */
     ASSERT_TRUE(strstr(g_out, "\nsecret\n  etc/wireguard/wg0.conf added\n") != NULL);
+    ASSERT_TRUE(strstr(g_out, "\nchanges\n  roots changed: +home/w (14 paths)\n") != NULL);              /* WS-10 */
     ASSERT_TRUE(strstr(g_out, ".pwd.lock") != NULL && strstr(g_out, ".pwd.lock") > strstr(g_out, "\nchanges\n"));   /* F12: metadata alone */
     ASSERT_TRUE(strstr(g_out, "PrivateKey") == NULL);
     ASSERT_TRUE(strstr(g_out, "\nconfig\n  etc/sysctl.conf: \xe2\x80\xba net.ipv4.ip_forward added: 1\n"
@@ -490,6 +491,9 @@ TEST(the_receipt_is_in_sections_in_order) {
     REQUIRE(belay("watch", "receipt", "--system-root", g_tree, "--max-lines", "2") == 0);
     ASSERT_EQ_INT(3, (int)count(g_out, "\n"));
     ASSERT_TRUE(strstr(g_out, "... the rest: belay watch receipt without --max-lines\n") != NULL);
+    REQUIRE(belay("watch", "receipt", "--system-root", g_tree, "--all") == 0);                        /* each root */
+    ASSERT_TRUE(strstr(g_out, "\n  roots changed: +home/w/.bash_login, ") != NULL && strstr(g_out, "+home/w/.ssh") != NULL);
+    ASSERT_TRUE(strstr(g_out, "99-new.conf") != NULL);                                               /* and every record */
     REQUIRE(belay("watch", "receipt", "--system-root", g_tree, "--path") == 0);
     ASSERT_TRUE(strstr(g_out, "/receipt.txt\n") != NULL);
 }

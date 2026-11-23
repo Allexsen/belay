@@ -122,7 +122,7 @@ static const struct { const char *cmd, *text; } HELP[] = {
                "       belay watch summary  --scope DIR --session S --since NAME\n"
                "       belay watch receipt  --scope DIR [--max-lines N] [--path]\n"
                "       belay watch patterns --scope DIR [--entries]\n"
-               "       belay watch start|receipt|stop --system [--max-lines N] [--path]\n"
+               "       belay watch start|receipt|stop --system [--all] [--max-lines N] [--path]\n"
                "       belay watch step|summary|patterns --system ...   as with --scope\n"
                "  A running record of DIR while an agent works in it (test/expect/watch-v1.md).\n"
                "  step      records what changed since the last step and prints one line: anything in\n"

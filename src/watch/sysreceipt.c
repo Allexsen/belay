@@ -160,7 +160,7 @@ static int section_of(void *ctx, const char *path, size_t len, bool dir) {
     return -1;
 }
 
-int sysreceipt(const struct state *st, const struct wstate *w, long from, long to, int64_t to_ns, struct wsb *out) {
+int sysreceipt(const struct state *st, const struct wstate *w, long from, long to, int64_t to_ns, bool all, struct wsb *out) {
     struct manifest_file mf_a = { .temporary = false }, mf_b = { .temporary = false };
     struct cli_modes m = { 0 };
     struct wsb head = { 0 }, tail = { 0 };
@@ -185,7 +185,7 @@ int sysreceipt(const struct state *st, const struct wstate *w, long from, long t
     if (belay_diff(mf_a.path, mf_b.path, d, &dopts, &ds) == -1) goto out;
     if (belay_manifest_open(mf_a.path, &m.side[0].r) == -1 || belay_manifest_open(mf_b.path, &m.side[1].r) == -1) goto out;
     const struct belay_manifest_header *ha = belay_manifest_header(m.side[0].r), *hb = belay_manifest_header(m.side[1].r);
-    if (sysflag_roots_changed(ha, hb, &roots) == -1) goto out;
+    if (sysflag_roots_changed(ha, hb, all, &roots) == -1) goto out;
     if ((homes = calloc(hb->n_roots + 1, sizeof *homes)) == NULL || (meta = calloc(hb->n_roots + 1, sizeof *meta)) == NULL) {
         nomem();
         goto out;
@@ -235,7 +235,7 @@ int sysreceipt(const struct state *st, const struct wstate *w, long from, long t
     const struct receipt_sections sec = { head.p, roots, NULL /* put back: step 7 */, tail.p, section_of, &sx, meta, n_meta };
     struct cli_owners own = { { mf_a.path, mf_b.path }, st->store };
     struct cli_system sys = { mf_b.path, st->store };
-    const struct receipt_opts ro = { .from = NULL, .to = NULL, .all = false, .mode = cli_mode_of, .mode_ctx = &m,
+    const struct receipt_opts ro = { .from = NULL, .to = NULL, .all = all, .mode = cli_mode_of, .mode_ctx = &m,
                                      .owner = cli_owner_of, .owner_ctx = &own, .system = cli_system_of,
                                      .system_ctx = &sys, .sections = &sec };
     if ((in = fopen(d, "r")) == NULL) {
