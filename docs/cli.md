@@ -559,8 +559,10 @@ needs a marker.
   ending `, in no package`, and those of a package installed in the same step are counted (`and 6
   others by packages installed here`). The files of the step's packages under `usr`, `var`, `opt`,
   `srv`, `boot`, and anything under `var` no event names, are only counted: a step with nothing
-  else says `12 entries changed under usr, var`. When the roots differ from the step before (a
-  home added), the line ends `roots changed: +home/v/.ssh, ...`.
+  else says `12 entries changed under usr, var`. A file past the hash limit or one belay cannot
+  read, whose size, times and owner are as they were, is no change: a step with only those says
+  nothing. When the roots differ from the step before (a home added), the line ends
+  `roots changed: +home/v/.ssh, ...`.
 
   ```
   belay: 🔴 outside tool calls: sudo rule added in etc/sudoers.d/90-u: u ALL=(ALL) NOPASSWD: ALL (sudo)
@@ -582,7 +584,8 @@ needs a marker.
   `could not read` (and, not root, what that leaves out), `kernel record`, `end state`, then
   `installed`, `services`, `running`, `listening`, `user`, `cron`, `sudo`, `ssh`, `setuid`,
   `secret`, `trust`, `firewall`, `init`, `config`, `changes` (up to 20, then a count, and per
-  `usr`-like root the records folded into packages), `not compared`, `not read`. A config event of
+  `usr`-like root the records folded into packages, and how many entries were not read on either
+  side with nothing compared changed), `not compared`, `not read`. A config event of
   a file of a package installed here is counted in `config`, not listed. In this version the kernel
   record is always off: `kernel record: off: not root: a change put back is not seen`.
 - **patterns** prints the roots as the machine is now, with their classes and the entries of the

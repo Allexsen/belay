@@ -137,4 +137,10 @@ char *receipt_escaped(const char *s, size_t len);
 int   receipt_record_path(const struct jval *r, char *buf, size_t cap, size_t *len);
 char *receipt_privilege_words(const struct jval *r, const char *path, size_t len, receipt_mode_fn mode, void *ctx);
 
+/* watch-system WS-L2: a record that says only that a side could not be
+ * read -- `unknown`, no field changed, its reasons only `unverified`,
+ * `unreadable` or `mount`: a file past the hash limit, or one others cannot
+ * read, as it was. No change of a system watch's step. */
+bool receipt_standing(const struct jval *r);
+
 #endif
