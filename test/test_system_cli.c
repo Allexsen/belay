@@ -222,17 +222,17 @@ TEST(a_checkpoint_keeps_the_digests_of_shadow_lines) {
     sh("cd '%s' && printf 'root:SHADOWSECRET2:2::::::\\nsiteuser:!:3::::::\\n' > etc/shadow", g_tree);
     REQUIRE_MSG(belay("diff", "--system-root", g_tree, "--since", "1", "--json", NULL) == 0, "%s", g_err);
     ASSERT_TRUE(strstr(g_out, "{\"event\":\"password_entry_changed\",\"interp\":\"accounts\",\"file\":\"etc/shadow\",\"name\":\"root\","
-                              "\"text\":\"password database: entry changed for root\",\"paths\":[\"etc/shadow\"]}\n"
+                              "\"text\":\"etc/shadow: password entry changed for root\",\"paths\":[\"etc/shadow\"]}\n"
                               "{\"event\":\"password_entry_removed\",\"interp\":\"accounts\",\"file\":\"etc/shadow\",\"name\":\"daemon\","
-                              "\"text\":\"password database: entry removed for daemon\",\"paths\":[\"etc/shadow\"]}\n"
+                              "\"text\":\"etc/shadow: password entry removed for daemon\",\"paths\":[\"etc/shadow\"]}\n"
                               "{\"event\":\"password_entry_added\",\"interp\":\"accounts\",\"file\":\"etc/shadow\",\"name\":\"siteuser\","
-                              "\"text\":\"password database: entry added for siteuser\",\"paths\":[\"etc/shadow\"]}\n") != NULL);
+                              "\"text\":\"etc/shadow: password entry added for siteuser\",\"paths\":[\"etc/shadow\"]}\n") != NULL);
     ASSERT_TRUE(strstr(g_out, "etc/gshadow\",\"name") == NULL);            /* gshadow did not change */
     ASSERT_TRUE(strstr(g_out, "SHADOWSECRET") == NULL);
     ASSERT_EQ_STR("", sh_line("grep -r -l 'SHADOWSECRET' '%s'", g_state));
     /* the receipt says them too, among the events */
     REQUIRE(belay("diff", "--system-root", g_tree, "--since", "1", "--to", "2", NULL) == 0);
-    ASSERT_TRUE(strstr(g_out, "password database: entry added for siteuser") != NULL);
+    ASSERT_TRUE(strstr(g_out, "etc/shadow: password entry added for siteuser") != NULL);
     ASSERT_TRUE(strstr(g_out, "SHADOWSECRET") == NULL);
     /* log prints each checkpoint's */
     REQUIRE(belay("log", "--system-root", g_tree, "--json", NULL) == 0);

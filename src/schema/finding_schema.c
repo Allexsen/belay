@@ -191,17 +191,17 @@ const struct finding_kind_def FINDING_KINDS[FK_COUNT] = {
         "those only before, each sorted bytewise." },
     [FK_PASSWORD_ENTRY_ADDED] = { "password_entry_added", I_ACCOUNTS, LV_EVENT,
         { S("file"), S("name") },
-        "password database: entry added for {name}",
+        "{file}: password entry added for {name}",
         "A line of `shadow` or `gshadow` (`file`: its path), by its first field, whose keyed "
         "digest is in the after capture's per-line digests and not in the before's (SA-6). Only "
         "when both captures kept digests under one sealing key." },
     [FK_PASSWORD_ENTRY_REMOVED] = { "password_entry_removed", I_ACCOUNTS, LV_EVENT,
         { S("file"), S("name") },
-        "password database: entry removed for {name}",
+        "{file}: password entry removed for {name}",
         "The reverse." },
     [FK_PASSWORD_ENTRY_CHANGED] = { "password_entry_changed", I_ACCOUNTS, LV_EVENT,
         { S("file"), S("name") },
-        "password database: entry changed for {name}",
+        "{file}: password entry changed for {name}",
         "A first field on both sides whose line's keyed digest differs. No other part of the line "
         "is known to belay." },
     [FK_SUDO_RULE_ADDED] = { "sudo_rule_added", I_SUDOERS, LV_EVENT,
