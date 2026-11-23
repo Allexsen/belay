@@ -1973,12 +1973,17 @@ def load_event_rules():
                 'reflog gained in this diff, when they lead from its value before to its value '
                 'after (each entry\'s old id the previous one\'s new, the first\'s old the value '
                 'before, the last\'s new the value after): any `reset`, `commit (amend)`, '
-                'operation containing `rebase`, message starting `branch: Reset to`, or message '
-                'containing `forced-update` -- `git_history_rewritten`; else only commits '
-                '(`commit`, `commit (merge)`, `cherry-pick`, `revert`, `am`) and fast-forwards '
-                'or merges (a message containing `Fast-forward`; an operation starting with '
-                '`merge` or `pull`) -- `git_commits_added`; else, or with no such entries, '
-                '`git_branch_moved`.',
+                'rebase (an operation whose first word is `rebase`, or whose first word is '
+                '`pull` and whose last word is a rebase step in parentheses, as git writes '
+                '`pull --rebase origin main (finish)`, `pull -r (finish)` and, under '
+                '`pull.rebase`, `pull (finish)`; a word of a merge\'s arguments is none, as in '
+                '`pull --no-rebase` or `merge rebase-fix`), message starting `branch: Reset to`, '
+                'or message ending `: forced-update` whose operation is not a commit\'s (those '
+                'below: their message ends in the author\'s subject) -- `git_history_rewritten`; '
+                'else only commits (`commit`, `commit (merge)`, `cherry-pick`, `revert`, `am`) '
+                'and fast-forwards or merges (a message ending `: Fast-forward`; an operation '
+                'whose first word is `merge` or `pull`) -- `git_commits_added`; else, or with no '
+                'such entries, `git_branch_moved`.',
                 '`HEAD` naming another branch, or detaching or attaching: `git_head_switched`; '
                 '`HEAD` detached on both sides at different commits is the branch `HEAD`, '
                 'decided by `logs/HEAD` as above.',
@@ -3229,20 +3234,44 @@ def short_branch(v):
 REWRITES = ('reset', 'commit (amend)', 'rebase', 'branch: Reset to', 'forced-update')
 
 
+def first_word(op):
+    w = op.split()
+    return w[0] if w else b''
+
+
+def is_rebase(op):
+    """E12: "an operation whose first word is `rebase`, or whose first word is
+    `pull` and whose last word is a rebase step in parentheses"; a word of a
+    merge's arguments is none."""
+    w = op.split()
+    if not w:
+        return False
+    if w[0] == b'rebase':
+        return True
+    return w[0] == b'pull' and len(w) > 1 and len(w[-1]) > 2 and w[-1][:1] == b'(' \
+        and w[-1][-1:] == b')'
+
+
+def is_commit_op(op):
+    """"whose operation is not a commit's": `commit`, `commit (amend)`,
+    `commit (merge)`, `commit (initial)`, `cherry-pick`, `revert`, `am`."""
+    return first_word(op) in (b'commit', b'cherry-pick', b'revert', b'am')
+
+
 def rewrite_trigger(e):
     """Which of E12's rewrites an entry is, or None: "any `reset`, `commit
     (amend)`, operation containing `rebase`, message starting `branch: Reset
-    to`, or message containing `forced-update`"."""
+    to`, or message ending `: forced-update` whose operation is not a commit's"."""
     old, new, msg, op = e
     if op == b'reset':
         return 'reset'
     if op == b'commit (amend)':
         return 'commit (amend)'
-    if b'rebase' in op:
+    if is_rebase(op):
         return 'rebase'
     if msg.startswith(b'branch: Reset to'):
         return 'branch: Reset to'
-    if b'forced-update' in msg:
+    if msg.endswith(b': forced-update') and not is_commit_op(op):
         return 'forced-update'
     return None
 
@@ -3254,8 +3283,8 @@ def adds(e):
     """"only commits (`commit`, `commit (merge)`, `cherry-pick`, `revert`,
     `am`) and fast-forwards or merges (a message containing `Fast-forward`;
     an operation starting with `merge` or `pull`)"."""
-    return e[3] in COMMITS or b'Fast-forward' in e[2] or e[3].startswith(b'merge') or \
-        e[3].startswith(b'pull')
+    return e[3] in COMMITS or e[2].endswith(b': Fast-forward') or \
+        first_word(e[3]) in (b'merge', b'pull')
 
 
 def reflog_unread(G):
