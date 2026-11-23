@@ -1160,6 +1160,18 @@ TEST(a_list_file_no_remaining_line_names_is_removed_and_the_one_in_force_never) 
 
 /* ---- the Claude Code adapter's events ---- */
 
+/* LN-11: a start that could not record says that alone, not that it records */
+TEST(a_start_that_could_not_record_does_not_say_it_records) {
+    fresh();
+    unsetenv("CLAUDE_CODE_ENTRYPOINT");
+    ledger_fail_at = 1;
+    const char *r = hook("start", "{" S1 ",\"source\":\"startup\"}");
+    ledger_fail_at = 0;
+    HAS(r, "belay: " RED " could not record: ");
+    HAS_NOT(r, "recording");
+    HAS(hook("start", "{" S1 ",\"source\":\"startup\"}"), "belay: recording ");
+}
+
 TEST(the_claude_code_hook_maps_its_events_to_steps_calls_and_a_summary) {
     fresh();
     unsetenv("CLAUDE_CODE_ENTRYPOINT");
@@ -1355,6 +1367,7 @@ int main(void) {
     RUN(a_record_prune_cannot_read_is_left_whole_and_said);
     RUN(prune_killed_between_a_days_two_files_leaves_valid_state_and_finishes_when_run_again);
     RUN(a_list_file_no_remaining_line_names_is_removed_and_the_one_in_force_never);
+    RUN(a_start_that_could_not_record_does_not_say_it_records);
     RUN(the_claude_code_hook_maps_its_events_to_steps_calls_and_a_summary);
     RUN(what_is_not_read_is_said_once_a_session_at_a_stop);
     RUN(the_hook_always_exits_0_and_never_stays_silent_about_a_failure);

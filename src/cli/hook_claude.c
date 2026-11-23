@@ -447,7 +447,6 @@ int hook_claude(const char *event, const char *scope_arg, FILE *in, FILE *out) {
     if (agent) q.agent = h.agent;
     if (!strcmp(event, "start")) {
         q.first_ok = strcmp(h.source, "startup") == 0;
-        recording(&lines, resolved ? sc.path : scope);
         q.ops[q.n_ops++] = (struct wop){ WOP_STEP, NULL, WSTEP_PLAIN };
     } else if (!strcmp(event, "pre")) {
         q.ops[q.n_ops++] = (struct wop){ WOP_STEP, call ? h.call : NULL, call ? WSTEP_BEGIN : WSTEP_PLAIN };
@@ -473,7 +472,11 @@ int hook_claude(const char *event, const char *scope_arg, FILE *in, FILE *out) {
         q.ops[q.n_ops++] = (struct wop){ WOP_STEP, NULL, WSTEP_PLAIN };
         q.ops[q.n_ops++] = (struct wop){ WOP_FORGET, NULL, 0 };
     }
-    watch_run(&q, &lines);
+    struct wsb ran = { 0 };
+    if (watch_run(&q, &ran) == 0 && !strcmp(event, "start")) recording(&lines, resolved ? sc.path : scope);   /* LN-11 */
+    wsb_f(&lines, "%s", ran.p != NULL ? ran.p : "");
+    lines.bad |= ran.bad;
+    free(ran.p);
     if (!strcmp(event, "stop")) {
         const int dfd = watch_dir(scope);
         if (dfd != -1) {
