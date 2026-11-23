@@ -553,6 +553,7 @@ static struct pk *owner_pk(struct ctx *x, size_t ri) {
     return NULL;
 }
 
+/* WS-L2: `xattrs_unknown` is the platform's (macOS has no descriptor for a file it could not open), not a change. */
 bool receipt_standing(const struct jval *r) {
     if (strcmp(jstr(r, "outcome"), "unknown") != 0) return false;
     const struct jval *ch = jget(r, "changed"), *u = jget(r, "unknown");
@@ -560,7 +561,8 @@ bool receipt_standing(const struct jval *r) {
     if (u == NULL || u->t != J_ARR || u->n == 0) return false;
     for (size_t i = 0; i < u->n; i++) {
         const struct jval *k = &u->kids[i];
-        if (k->t != J_STR || (strcmp(k->s, "unverified") != 0 && strcmp(k->s, "unreadable") != 0 && strcmp(k->s, "mount") != 0))
+        if (k->t != J_STR || (strcmp(k->s, "unverified") != 0 && strcmp(k->s, "unreadable") != 0 && strcmp(k->s, "mount") != 0 &&
+            strcmp(k->s, "xattrs_unknown") != 0))
             return false;
     }
     return true;
