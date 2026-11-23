@@ -720,7 +720,8 @@ static int pass_records(struct sx *x, FILE *in, struct wstep *s) {
             } else {
                 rc = named(s, kind, path, len, word, label);
             }
-        } else if (!under_home(x, path, len) && strcmp(jstr(&v, "type"), "dir") != 0 && sealed_side(x, path, len)) {
+        } else if (strcmp(outcome, "metadata_only") != 0 && !under_home(x, path, len) && strcmp(jstr(&v, "type"), "dir") != 0 &&
+                   sealed_side(x, path, len)) {                                  /* its metadata alone: counted */
             rc = named(s, WK_SECRET, path, len, !strcmp(outcome, "modified") ? "changed" : word, "secret");   /* F12 */
         } else {
             s->counts[watch_outcome_index(word)]++;
