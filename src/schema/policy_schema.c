@@ -32,9 +32,10 @@ const struct policy_kind_def POLICY_KINDS[PK_COUNT] = {
         { BY("path"), S("outcome") }, "{path}: test file {outcome}", 0 },
     [PK_TESTS_WEAKENED] = { "tests_weakened", PL_SIGNAL,
         { BY("path"), S("language"), I("assertions_before"), I("assertions_after"), I("tests_before"),
-          I("tests_after"), SS("markers_added") },
+          I("tests_after"), SS("markers_added"), SO("gone") },
+        "{path}: {gone}",
         "{path}: assertions {assertions_before} -> {assertions_after}, tests {tests_before} -> {tests_after}, "
-        "markers added: {markers_added}", 0 },
+        "markers added: {markers_added}" },
     [PK_EDITS_CI_CONFIG] = { "edits_ci_config", PL_SIGNAL,
         { BY("path"), S("outcome") }, "{path}: CI configuration {outcome}", 0 },
     [PK_PYTEST_CONFIG_CHANGED] = { "pytest_config_changed", PL_SIGNAL,

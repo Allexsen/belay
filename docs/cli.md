@@ -303,6 +303,13 @@ history rewritten, new executables on PATH, privilege changes, and with `--docke
 written and left the same). diff.v1 and the manifest are unchanged: judgement is apart from
 description.
 
+A Python test file -- below a test directory, named `test_*.py` or `*_test.py`, or named exactly
+`test.py` or `tests.py` -- that is deleted or emptied (left with only whitespace and comments) is
+`tests_weakened` with a text that says which: `test.py: deleted`, `tests/test_app.py: emptied (was
+41 lines)`. Otherwise the signal counts `assert` statements, assertion calls, `def test_*` and skip
+markers; a runner rewritten so it can no longer fail, a comparison changed, or a runner that does
+not run the code under test needs judgement and is not looked for.
+
 The bundle is read only when its bytes hash to `--baseline-sha256` (exit 3 otherwise, or without
 it), and only for the scope it describes. verify's capture leaves out what the bundle's did --
 its manifest's excludes, never the scope's configured ones, which are state a policy could have
