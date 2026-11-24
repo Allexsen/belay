@@ -41,6 +41,100 @@ static int step_line(void *ctx, const struct jval *line, const char *type) {
     return 0;
 }
 
+/* LN-14: the files put back and still as at their session's start in the
+ * newest checkpoint, each once, by its newest put back */
+struct putitem { char session[WATCH_ID_MAX + 1]; struct wput u; long num; };
+
+static int pcmp(const char *a, size_t al, const char *b, size_t bl) {
+    const int c = memcmp(a, b, al < bl ? al : bl);
+    return c ? c : (al > bl) - (al < bl);
+}
+
+static int put_cmp(const void *a, const void *b) {
+    const struct putitem *x = a, *y = b;
+    return pcmp(x->u.path, x->u.len, y->u.path, y->u.len);
+}
+
+static int put_back_section(struct state *st, const struct ledger *l, char (*days)[11], size_t n_days, struct wsb *out) {
+    struct putitem *v = NULL;
+    size_t n = 0;
+    struct wsb cut = { 0 };
+    int rc = 0;
+    for (size_t d = 0; d < n_days && rc == 0; d++) {         /* oldest first: the newest put back stays */
+        struct steps s = { 0 };
+        if (ledger_read(l, days[d], 0, step_line, &s) != 0 || s.bad) rc = -1;
+        for (size_t i = 0; i < s.n && rc == 0; i++) {
+            const struct wstep *w = &s.v[i];
+            if (w->puts_cut > 0)
+                wsb_f(&cut, "  and %llu more put back at step %ld\n", (unsigned long long)w->puts_cut, w->num);
+            for (size_t j = 0; j < w->n_puts && rc == 0; j++) {
+                size_t k = 0;
+                while (k < n && !(strcmp(v[k].session, w->session) == 0 && v[k].u.len == w->puts[j].len &&
+                                  memcmp(v[k].u.path, w->puts[j].path, w->puts[j].len) == 0))
+                    k++;
+                if (k == n) {
+                    struct putitem *q = realloc(v, (n + 1) * sizeof *q);
+                    if (q == NULL) { rc = -1; break; }
+                    v = q;
+                    n++;
+                } else {
+                    free(v[k].u.path);
+                }
+                snprintf(v[k].session, sizeof v[k].session, "%s", w->session);
+                v[k].u = w->puts[j];
+                v[k].num = w->num;
+                if ((v[k].u.path = malloc(w->puts[j].len)) == NULL) { v[k].u.len = 0; rc = -1; break; }
+                memcpy(v[k].u.path, w->puts[j].path, w->puts[j].len);
+            }
+        }
+        for (size_t i = 0; i < s.n; i++) wstep_free(&s.v[i]);
+        free(s.v);
+    }
+    if (rc == -1) belay_err_set(BELAY_ERR_NOMEM, 0, "out of memory");
+    /* the newest checkpoint, when it is still the one the record names; else nothing is said */
+    struct checkpoint *list = NULL;
+    size_t nl = 0;
+    bool kept = false;
+    if (rc == 0 && (n > 0 || cut.n > 0) && l->st.cursor > 0 && state_list(st, &list, &nl) == 0)
+        for (size_t i = 0; i < nl; i++) kept |= list[i].id == l->st.cursor && list[i].created_ns == l->st.cursor_ns;
+    free(list);
+    struct manifest_file mf = { .temporary = false };
+    struct belay_manifest_reader *r = NULL;
+    if (kept && state_check_manifest(st, l->st.cursor) == 0 && manifest_acquire(st, l->st.cursor, &mf) == 0 &&
+        belay_manifest_open(mf.path, &r) == 0) {
+        bool many = false;
+        for (size_t i = 1; i < n; i++) many |= strcmp(v[i].session, v[0].session) != 0;
+        qsort(v, n, sizeof *v, put_cmp);
+        struct wsb lines = { 0 };
+        static struct belay_entry e;
+        int got = belay_manifest_next(r, &e);
+        for (size_t i = 0; i < n; i++) {
+            const struct putitem *p = &v[i];
+            while (got == 1 && pcmp(e.path, e.path_len, p->u.path, p->u.len) < 0) got = belay_manifest_next(r, &e);
+            const bool same = got == 1 && e.path_len == p->u.len && memcmp(e.path, p->u.path, p->u.len) == 0 &&
+                              e.type == BELAY_T_REG && e.has_hash && !e.unverified && !e.unstable && !e.writer_open &&
+                              e.size == p->u.size && strcmp(e.sha256_hex, p->u.sha) == 0;
+            if (!same) continue;                /* changed again: an ordinary change by the end */
+            char *shown = receipt_escaped(p->u.path, p->u.len);
+            if (p->u.k > 0) wsb_f(&lines, "  %s: changed at step %ld, as at the start again at step %ld", shown ? shown : "?", p->u.k, p->num);
+            else wsb_f(&lines, "  %s: as at the start again at step %ld", shown ? shown : "?", p->num);
+            if (many) wsb_f(&lines, " in session %s", p->session);
+            wsb_f(&lines, "\n");
+            free(shown);
+        }
+        if (lines.n > 0 || cut.n > 0) wsb_f(out, "\nput back\n%s%s", lines.p != NULL ? lines.p : "", cut.p != NULL ? cut.p : "");
+        out->bad |= lines.bad || cut.bad;
+        free(lines.p);
+    }
+    belay_err_clear();
+    belay_manifest_close(r);
+    manifest_release(&mf);
+    for (size_t i = 0; i < n; i++) free(v[i].u.path);
+    free(v);
+    free(cut.p);
+    return rc;
+}
+
 int watch_receipt(const char *scope, bool all, struct wsb *out, size_t *n_steps) {
     struct scope sc;
     struct state st;
@@ -58,7 +152,7 @@ int watch_receipt(const char *scope, bool all, struct wsb *out, size_t *n_steps)
     wsb_f(out, "belay receipt  %s\n", shown != NULL ? shown : "");
     free(shown);
     const size_t head = out->n;
-    rc = 0;
+    rc = put_back_section(&st, &l, days, n_days, out);
     for (size_t d = n_days; d-- > 0 && rc == 0;) {
         struct steps s = { 0 };
         if (ledger_read(&l, days[d], 0, step_line, &s) != 0 || s.bad) {

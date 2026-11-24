@@ -34,6 +34,11 @@ struct wsb { char *p; size_t n, cap; bool bad; };
 void wsb_f(struct wsb *b, const char *fmt, ...) __attribute__((format(printf, 2, 3)));
 void wsb_json(struct wsb *b, const char *s);        /* s as a JSON string, quotes included; not UTF-8: "?" */
 
+/* A file put back (LN-12), as the receipt reads it (LN-14): its path, the
+ * step that took it from its start content (0: not known), that content */
+struct wput { char *path; size_t len; long k; uint64_t size; char sha[65]; };
+#define WATCH_PUT_MAX 16384     /* bytes of paths a step's line keeps for the receipt (LN-14) */
+
 /* One step, as its ledger line holds it. */
 struct wstep {
     char session[WATCH_ID_MAX + 1];
@@ -60,6 +65,10 @@ struct wstep {
     char quiet_under[64];               /* the top-level directories they are under, "usr, var" */
     uint64_t by_installed;              /* noted events of packages installed here, counted (WS-N5) */
     char *roots;                        /* "+var/lib/postgresql/.ssh": the roots changed (WS-10); NULL: they did not */
+    long num;                           /* its number in its session (LN-13); 0: it changed nothing */
+    struct wput *puts;                  /* the files it put back that its line keeps (LN-14) */
+    size_t n_puts;
+    uint64_t puts_cut;                  /* and those past WATCH_PUT_MAX */
     char sec_file[40];                  /* its section of the receipt: file, offset, length, sha256 */
     long sec_off, sec_len;
     char sec_sha[65];

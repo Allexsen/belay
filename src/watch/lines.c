@@ -47,6 +47,8 @@ void wstep_free(struct wstep *s) {
     for (size_t i = 0; i < s->n_trouble; i++) free(s->trouble[i]);
     free(s->trouble);
     free(s->roots);
+    for (size_t i = 0; i < s->n_puts; i++) free(s->puts[i].path);
+    free(s->puts);
     memset(s, 0, sizeof *s);
 }
 
@@ -83,7 +85,8 @@ static size_t choose(const struct wstep *steps, size_t n, bool note, bool own, s
     for (int k = 0; k < WK_COUNT; k++) *total += have[k] + rest[k];
     for (size_t round = 0; named < room; round++) {
         bool any = false;
-        for (int k = 0; k < WK_COUNT && named < room; k++) {
+        for (int o = 0; o < WK_COUNT && named < room; o++) {
+            const int k = (int)wkind_order(o);
             if (have[k] <= round) continue;
             any = true;
             size_t seen = 0;            /* the round-th flag of this kind, in the steps' order */
@@ -107,7 +110,8 @@ static void more(struct wsb *out, const char *what, const uint64_t rest[WK_COUNT
     if (n == 0) return;
     wsb_f(out, "; and %llu more %s: ", (unsigned long long)n, what);
     bool first = true;
-    for (int k = 0; k < WK_COUNT; k++) {
+    for (int o = 0; o < WK_COUNT; o++) {
+        const int k = (int)wkind_order(o);
         if (rest[k] == 0) continue;
         wsb_f(out, "%s%llu %s", first ? "" : ", ", (unsigned long long)rest[k], wkind_name((enum wkind)k));
         first = false;
@@ -257,6 +261,12 @@ void lines_summary(struct wsb *out, const struct wstep *steps, size_t n, const c
         else return;                    /* "could not record" is said; "nothing changed" would not be known */
     } else {
         wsb_f(out, "belay: %llu changed %s", (unsigned long long)total, w->span);
+        uint64_t put = 0;                   /* SM-8: the span's LN-12 items, among the total */
+        for (size_t s = 0; s < n; s++) {
+            for (size_t i = 0; i < steps[s].n_flags; i++) put += steps[s].flags[i].kind == WK_PUTBACK;
+            put += steps[s].cut_flag[WK_PUTBACK] + steps[s].cut_note[WK_PUTBACK];
+        }
+        if (put > 0) wsb_f(out, ", %llu put back%s", (unsigned long long)put, outside == 0 || in_calls == 0 ? "," : "");
         if (outside == 0)
             wsb_f(out, " in %zu %s%s", n_calls, w->call, n_calls == 1 ? "" : "s");
         else if (in_calls == 0)

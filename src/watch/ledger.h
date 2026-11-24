@@ -25,12 +25,17 @@
 #define W_KILL_MAX 16
 #define W_TOLD_MAX 32
 #define W_LATE_MAX 16
+#define W_SESS_MAX 16
 #define W_LATE_SHOWN 3          /* WS-3c: the receipt names three, then counts */
 
 struct wcall { char id[WATCH_ID_MAX + 1], session[WATCH_ID_MAX + 1], agent[WATCH_ID_MAX + 1]; int64_t ns; };
 /* ns: when the marker was set; seen_ns: when its session last fired (TM-4) */
 struct wmark { char session[WATCH_ID_MAX + 1], name[WATCH_ID_MAX + 1], day[11]; long off; int64_t ns, seen_ns; };
 struct wkill { char session[WATCH_ID_MAX + 1]; long n; };
+/* A session's start (LN-12, LN-13): the checkpoint its first step wrote, where
+ * that step's line begins, how many of its steps changed something, and when
+ * it last fired (the least recently seen gives way when the table is full) */
+struct wsess { char session[WATCH_ID_MAX + 1], day[11]; long start, off, n; int64_t start_ns, seen_ns; };
 
 struct wstate {
     long cursor;                        /* WR-2: the checkpoint the next step diffs against; 0: none */
@@ -45,6 +50,8 @@ struct wstate {
     size_t n_kills;
     char told[W_TOLD_MAX][WATCH_ID_MAX + 1];    /* sessions told what is not read (CV-2) */
     size_t n_told;
+    struct wsess sess[W_SESS_MAX];
+    size_t n_sess;
     /* A system watch's own (watch-system.md WS-2, WS-3a to WS-3c), written
      * only when one of them is not zero: */
     int64_t sys_started_ns;             /* `watch start`: when; 0: not started, or stopped */
