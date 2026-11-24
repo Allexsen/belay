@@ -261,12 +261,18 @@ void lines_summary(struct wsb *out, const struct wstep *steps, size_t n, const c
         else return;                    /* "could not record" is said; "nothing changed" would not be known */
     } else {
         wsb_f(out, "belay: %llu changed %s", (unsigned long long)total, w->span);
-        uint64_t put = 0;                   /* SM-8: the span's LN-12 items, among the total */
+        uint64_t put = 0, touch = 0;        /* SM-8, SM-9: the span's LN-12 and LN-15 items, among the total */
         for (size_t s = 0; s < n; s++) {
-            for (size_t i = 0; i < steps[s].n_flags; i++) put += steps[s].flags[i].kind == WK_PUTBACK;
+            for (size_t i = 0; i < steps[s].n_flags; i++) {
+                put += steps[s].flags[i].kind == WK_PUTBACK;
+                touch += steps[s].flags[i].kind == WK_TOUCHED;
+            }
             put += steps[s].cut_flag[WK_PUTBACK] + steps[s].cut_note[WK_PUTBACK];
+            touch += steps[s].cut_flag[WK_TOUCHED];
         }
-        if (put > 0) wsb_f(out, ", %llu put back%s", (unsigned long long)put, outside == 0 || in_calls == 0 ? "," : "");
+        if (put > 0) wsb_f(out, ", %llu put back", (unsigned long long)put);
+        if (touch > 0) wsb_f(out, ", %llu touched", (unsigned long long)touch);
+        if ((put > 0 || touch > 0) && (outside == 0 || in_calls == 0)) wsb_f(out, ",");
         if (outside == 0)
             wsb_f(out, " in %zu %s%s", n_calls, w->call, n_calls == 1 ? "" : "s");
         else if (in_calls == 0)

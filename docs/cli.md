@@ -215,17 +215,24 @@ commands.
   A file whose content is again what it was at the session's first checkpoint, after a step in
   between changed it, is *put back*, an item of its own: `belay: 🔴 tests/test_app.py put back (as
   before step 2)`, flagged for a test file or a listed path and noted otherwise. A session's steps
-  that changed something are numbered, and the receipt heads each with its number. A change made
-  and put back between two steps (inside one tool call) is not seen, and only content is compared:
-  metadata put back is not considered. When the session's first checkpoint is no longer kept,
-  nothing is said.
+  that changed something are numbered, and the receipt heads each with its number. Only content
+  is compared: metadata put back is not considered. When the session's first checkpoint is no
+  longer kept, nothing is said.
+  A test file or a flagged path changed and put back inside one step (one tool call) is
+  *touched*, flagged, an item of its own, and listed after its step's heading in the receipt:
+  `belay: 🔴 tests/test_app.py touched (content as before)`. It proves that the file or its inode
+  record changed during the step (its ctime moved, which only root can set back, or another inode
+  took its name) and that its content, mode and owner at the step's end are as at its start; it
+  does not say what the content was in between, and a copy of the tests edited elsewhere is not
+  seen at all. Its ordinary causes are `touch`, a save with no change, a checkout away and back,
+  and `chmod` and back; any other file says `metadata changed` as before.
 - A step's changes belong to the *calls* open while it ran. `--begin ID` opens one after the step,
   `--finish ID` closes one; with none open the line says `outside tool calls`. **close** closes
   calls that will never finish, without a capture.
 - **mark** sets a named marker for the session, and **summary** prints what was flagged and noted
   and how many entries changed in the steps since it. The total is the sum of the steps' counts: a
-  file changed in five steps is five. Files put back are counted beside it: `5 changed this turn,
-  1 put back, in 5 tool calls`.
+  file changed in five steps is five. Files put back or touched are counted beside it: `5 changed
+  this turn, 1 put back, 1 touched, in 5 tool calls`.
 - **receipt** prints every change of every step, newest first, each step as `belay diff --all`
   shows it, except that `.git/` folds into one line as `belay diff` folds it (`git bookkeeping: 50
   changes under .git/`), but for what the step's line flagged or noted. `--all` lists every entry

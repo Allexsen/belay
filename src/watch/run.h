@@ -62,6 +62,13 @@ int watch_summary(const struct wreq *q, const char *name, struct wsb *out);
 struct state;
 int watch_section_all(struct state *st, const struct wstep *s, char **text, size_t *len);
 
+/* LN-15: whether a regular file's two entries of one step prove it was
+ * touched within it, its content as before: content, type, mode, owner,
+ * links, inode flags and attributes as before, each side with a ctime
+ * recorded, and the ctime moved or the inode another on the same device. */
+struct belay_entry;
+bool watch_touched(const struct belay_entry *before, const struct belay_entry *after);
+
 /* Whether a resolved directory is too wide to watch (TL-14): "/", $HOME,
  * or one $HOME is inside. */
 bool watch_too_wide(const char *resolved);
