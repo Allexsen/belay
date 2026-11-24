@@ -562,6 +562,22 @@ def scenarios():
     add(S("tw-added-with-skip", BASE, [("file", "tests/test_new.py", b"import pytest\n\n@pytest.mark.skip\ndef test_x():\n    assert 0\n")],
           tags=["P13"]))
     add(S("tw-more-asserts", BASE, [("write", "tests/test_api.py", TEST_API + b"\n\ndef test_four():\n    assert 4\n")]))
+    T2 = b"def test_a():\n    assert 1\n    assert 2\n"
+    add(S("tw-root-test-py-emptied", BASE + [("file", "test.py", T2)], [("write", "test.py", b"")], tags=["P13"]))
+    add(S("tw-root-test-py-deleted", BASE + [("file", "test.py", T2)], [("rm", "test.py")], tags=["P13"]))
+    add(S("tw-tests-py-fewer", BASE + [("file", "tests.py", T2)], [("write", "tests.py", b"def test_a():\n    assert 1\n")],
+          tags=["P13"]))
+    add(S("tw-tests-py-added", BASE, [("file", "tests.py", T2)], tags=["P13"]))
+    add(S("tw-not-test-name", BASE + [("file", "mytest.py", T2)], [("write", "mytest.py", b"")], tags=["P13"]))
+    add(S("tw-emptied-ws-comments", BASE, [("write", "tests/test_api.py", b"\n  \t\n# gone\n   # x\n")], tags=["P13"]))
+    add(S("tw-emptied-one-line", BASE + [("file", "test.py", b"assert 1")], [("write", "test.py", b"\n")], tags=["P13"]))
+    add(S("tw-empty-stays-empty", BASE + [("file", "tests/test_e.py", b"")], [("write", "tests/test_e.py", b"")], tags=["P13"]))
+    add(S("tw-ws-to-empty", BASE + [("file", "tests/test_e.py", b"\n\n")], [("write", "tests/test_e.py", b"")], tags=["P13"]))
+    add(S("tw-comment-only-to-empty", BASE + [("file", "tests/test_e.py", b"# todo\n")], [("write", "tests/test_e.py", b"")],
+          tags=["P13"]))
+    add(S("tw-comment-only-to-ws", BASE + [("file", "tests/test_e.py", b"# todo\n")], [("write", "tests/test_e.py", b"\n")],
+          tags=["P13"]))
+    add(S("tw-type-change-no-gone", BASE, [("rm", "tests/test_api.py"), ("dir", "tests/test_api.py")], tags=["P13"]))
     add(S("tw-conftest-not-counted", BASE, [("write", "tests/conftest.py", b"")]))
     add(S("tw-names", BASE + [("file", "src/app_test.py", b"def test_a():\n    assert 1\n    assert 2\n"),
                               ("file", "src/web.test.py", b"def test_b():\n    assert 1\n"),

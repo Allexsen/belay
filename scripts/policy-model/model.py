@@ -1697,7 +1697,7 @@ TEST_DIRS = (b"test", b"tests", b"spec", b"__tests__")
 NOT_TEST_DIRS = (b"build", b"dist", b"out", b"target", b"_build", b".build", b"obj", b"node_modules",
                  b"__pycache__", b"docs", b"doc")                                    # decision 175
 _JS = (b"js", b"jsx", b"ts", b"tsx", b"mjs", b"cjs")
-TEST_NAMES = ((b"test_*.py", b"*_test.py")                                           # Python
+TEST_NAMES = ((b"test_*.py", b"*_test.py", b"test.py", b"tests.py")                                           # Python
               + tuple(b"*.test." + e for e in _JS) + tuple(b"*.spec." + e for e in _JS)
               + (b"*_test.go",                                                         # Go
                  b"*Test.java", b"*Tests.java", b"*Test.kt", b"*Tests.kt",             # Java, Kotlin
@@ -1707,6 +1707,8 @@ TEST_NAMES = ((b"test_*.py", b"*_test.py")                                      
 
 def fn_glob(pat, name):
     parts = pat.split(b"*")
+    if len(parts) == 1:
+        return name == pat
     if not name.startswith(parts[0]):
         return False
     pos = len(parts[0])
@@ -1733,6 +1735,14 @@ def is_test_file(p):
 def is_counted(p):
     n = _name(p)
     return is_test_file(p) and n.endswith(b".py") and n != b"conftest.py"
+
+
+def is_blank(data):
+    """tests_weakened `gone`: no bytes, or only whitespace and comments (`#` to the end of a line)."""
+    for ln in lines_of(data):
+        if ln.split(b"#", 1)[0].strip(b" \t\r\n\f\v"):
+            return False
+    return True
 
 
 def lines_of(data):
@@ -2225,15 +2235,22 @@ def other_flags(ctx, recs, B, A, events):
                 ab, tb = count_python(xb)
                 aa, ta = count_python(xa)
                 mk = markers_added(xb, xa)
-                emptied = (a is not None and a["type"] == "reg" and a["size"] == 0
-                           and b is not None and b["type"] == "reg" and b["size"] > 0)
-                gone = (b is not None and b["type"] == "reg"                          # V4-S3
-                        and (a is None or a["type"] != "reg"))
-                if gone or emptied or aa < ab or ta < tb or mk:
-                    flags.append(Flag("tests_weakened", "signal",
-                                      [("path", p), ("language", "python"), ("assertions_before", ab),
-                                       ("assertions_after", aa), ("tests_before", tb), ("tests_after", ta),
-                                       ("markers_added", mk)],
+                gone = None
+                if b is not None and b["type"] == "reg":                              # V4-S3
+                    if a is None:
+                        gone = "deleted"
+                    elif a["type"] == "reg" and is_blank(xa) and not is_blank(xb):
+                        n = len(lines_of(xb))
+                        gone = "emptied (was %d line%s)" % (n, "" if n == 1 else "s")
+                flat = (b is not None and b["type"] == "reg" and a is not None and a["type"] != "reg")
+                if gone or flat or aa < ab or ta < tb or mk:
+                    fl = [("path", p), ("language", "python"), ("assertions_before", ab),
+                          ("assertions_after", aa), ("tests_before", tb), ("tests_after", ta),
+                          ("markers_added", mk)]
+                    if gone:
+                        fl.append(("gone", gone))
+                    flags.append(Flag("tests_weakened", "signal", fl,
+                                      "%s: %s" % (show(p), gone) if gone else
                                       "%s: assertions %d -> %d, tests %d -> %d, markers added: %s"
                                       % (show(p), ab, aa, tb, ta, joined(mk)), [p], prov))
         if is_ci(p):
