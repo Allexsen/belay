@@ -142,6 +142,13 @@ static void state_json(struct wsb *b, const struct wstate *s) {
     wsb_f(b, "],\"told\":[");
     for (size_t i = 0; i < s->n_told; i++) wsb_f(b, "%s\"%s\"", i ? "," : "", s->told[i]);
     wsb_f(b, "]");
+    if (s->n_sess > 0) {
+        wsb_f(b, ",\"sessions\":[");
+        for (size_t i = 0; i < s->n_sess; i++)
+            wsb_f(b, "%s[\"%s\",%ld,%lld,\"%s\",%ld,%ld,%lld]", i ? "," : "", s->sess[i].session, s->sess[i].start,
+                  (long long)s->sess[i].start_ns, s->sess[i].day, s->sess[i].off, s->sess[i].n, (long long)s->sess[i].seen_ns);
+        wsb_f(b, "]");
+    }
     if (s->sys_started_ns || s->sys_start || s->walk_ns || s->pending || s->n_late) {
         wsb_f(b, ",\"system\":{\"started_ns\":%lld,\"start\":%ld,\"walk\":[%lld,", (long long)s->sys_started_ns,
               s->sys_start, (long long)s->walk_ns);
@@ -222,6 +229,22 @@ static bool state_parse(const struct jval *line, struct wstate *s) {
     if (a == NULL || a->t != J_ARR || a->n > W_TOLD_MAX) return false;
     for (size_t i = 0; i < a->n; i++)
         if (!id_at(a, i, s->told[s->n_told++])) return false;
+    a = jget(v, "sessions");                    /* LN-12; absent: a line written before it */
+    if (a != NULL && (a->t != J_ARR || a->n > W_SESS_MAX)) return false;
+    for (size_t i = 0; a != NULL && i < a->n; i++) {
+        struct wsess *e = &s->sess[s->n_sess++];
+        char day[WATCH_ID_MAX + 1];
+        int64_t start, off, n;
+        if (!id_at(&a->kids[i], 0, e->session) || !int_at(&a->kids[i], 1, &start) || !int_at(&a->kids[i], 2, &e->start_ns) ||
+            !id_at(&a->kids[i], 3, day) || !int_at(&a->kids[i], 4, &off) || !int_at(&a->kids[i], 5, &n) ||
+            !int_at(&a->kids[i], 6, &e->seen_ns) || strlen(day) != 10 || !is_day(day) || e->session[0] == '\0' ||
+            start <= 0 || start > 999999999L || off < 0 || n < 0)
+            return false;
+        memcpy(e->day, day, 11);
+        e->start = (long)start;
+        e->off = (long)off;
+        e->n = (long)n;
+    }
     const struct jval *y = jget(v, "system");         /* a system watch's, when there is one */
     if (y == NULL) return true;
     int64_t n;
@@ -496,6 +519,19 @@ int ledger_append_step(struct ledger *l, struct wstep *s) {
     wsb_f(&rest, "],\"trouble\":[");
     for (size_t i = 0; i < s->n_trouble; i++) { wsb_f(&rest, "%s", i ? "," : ""); wsb_json(&rest, s->trouble[i]); }
     wsb_f(&rest, "],\"sec\":[\"%s\",%ld,%ld,\"%s\"],", s->sec_file, s->sec_off, s->sec_len, s->sec_sha);
+    if (s->num > 0) wsb_f(&rest, "\"num\":%ld,", s->num);         /* LN-13 */
+    if (s->n_puts > 0 || s->puts_cut > 0) {     /* LN-14 */
+        wsb_f(&rest, "\"put_back\":[");
+        for (size_t i = 0; i < s->n_puts; i++) {
+            const struct wput *u = &s->puts[i];
+            const size_t cap = (u->len + 2) / 3 * 4 + 1;
+            char *b64 = malloc(cap);
+            if (b64 == NULL || belay_base64_encode(b64, cap, u->path, u->len) < 0) rest.bad = true;
+            else wsb_f(&rest, "%s[\"%s\",%ld,%llu,\"%s\"]", i ? "," : "", b64, u->k, (unsigned long long)u->size, u->sha);
+            free(b64);
+        }
+        wsb_f(&rest, "],\"put_back_cut\":%llu,", (unsigned long long)s->puts_cut);
+    }
     if (s->git != NULL) {                       /* LN-10 */
         wsb_f(&rest, "\"git\":[");
         wsb_json(&rest, s->git);
@@ -748,6 +784,29 @@ int ledger_step(const struct jval *line, struct wstep *s) {
     for (int k = 0; g != NULL && k < WATCH_OUTCOMES; k++)
         if (!u64_at(g, 1 + (size_t)k, &s->tree[k])) goto bad;
     if (g != NULL && (s->git = strdup(g->kids[0].s)) == NULL) goto bad;
+    s->num = (long)jint(line, "num", 0);
+    const struct jval *pb = jget(line, "put_back");
+    if (pb != NULL && pb->t == J_ARR && pb->n > 0) {
+        if ((s->puts = calloc(pb->n, sizeof *s->puts)) == NULL) goto bad;
+        for (size_t i = 0; i < pb->n; i++) {
+            const struct jval *u = &pb->kids[i];
+            int64_t k, size;
+            struct wput *w = &s->puts[s->n_puts];
+            if (u->t != J_ARR || u->n != 4 || u->kids[0].t != J_STR || !int_at(u, 1, &k) || !int_at(u, 2, &size) ||
+                u->kids[3].t != J_STR || u->kids[3].s_len != 64 || (w->path = malloc(u->kids[0].s_len + 1)) == NULL)
+                goto bad;
+            if (belay_base64_decode(w->path, u->kids[0].s_len + 1, &w->len, u->kids[0].s) == -1 || w->len == 0) {
+                free(w->path);
+                belay_err_clear();
+                goto bad;
+            }
+            w->k = (long)k;
+            w->size = (uint64_t)size;
+            memcpy(w->sha, u->kids[3].s, 65);
+            s->n_puts++;
+        }
+    }
+    s->puts_cut = (uint64_t)jint(line, "put_back_cut", 0);
     snprintf(s->sec_file, sizeof s->sec_file, "%s", a->kids[0].s);
     snprintf(s->sec_sha, sizeof s->sec_sha, "%s", a->kids[3].s);
     s->sec_off = (long)off;

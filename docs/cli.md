@@ -212,16 +212,26 @@ commands.
   counted apart from `.git/`: `belay: git pull: main moved to 9c5d2f2 (fast-forward) · 17 changes
   in the tree: 3 added, 2 removed, 12 modified` (`(merge)` for a merge). The commits are not counted: that needs git's objects, which
   belay does not read.
+  A file whose content is again what it was at the session's first checkpoint, after a step in
+  between changed it, is *put back*, an item of its own: `belay: 🔴 tests/test_app.py put back (as
+  before step 2)`, flagged for a test file or a listed path and noted otherwise. A session's steps
+  that changed something are numbered, and the receipt heads each with its number. A change made
+  and put back between two steps (inside one tool call) is not seen, and only content is compared:
+  metadata put back is not considered. When the session's first checkpoint is no longer kept,
+  nothing is said.
 - A step's changes belong to the *calls* open while it ran. `--begin ID` opens one after the step,
   `--finish ID` closes one; with none open the line says `outside tool calls`. **close** closes
   calls that will never finish, without a capture.
 - **mark** sets a named marker for the session, and **summary** prints what was flagged and noted
   and how many entries changed in the steps since it. The total is the sum of the steps' counts: a
-  file changed in five steps is five.
+  file changed in five steps is five. Files put back are counted beside it: `5 changed this turn,
+  1 put back, in 5 tool calls`.
 - **receipt** prints every change of every step, newest first, each step as `belay diff --all`
   shows it, except that `.git/` folds into one line as `belay diff` folds it (`git bookkeeping: 50
   changes under .git/`), but for what the step's line flagged or noted. `--all` lists every entry
-  under `.git/` too, as `belay diff --all` does. `--path` writes it to a file in the state directory and prints the file's path.
+  under `.git/` too, as `belay diff --all` does. Before the steps, `put back` lists each file put
+  back and still so in the newest checkpoint: `tests/test_app.py: changed at step 2, as at the
+  start again at step 4`. `--path` writes it to a file in the state directory and prints the file's path.
 - **patterns** prints the lists in force and how many current entries each pattern matches;
   `--entries` prints each entry a list covers.
 

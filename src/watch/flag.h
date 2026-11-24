@@ -19,9 +19,13 @@ enum wkind {
     WK_DONTTOUCH, WK_GIT, WK_AGENT, WK_PRIVILEGE, WK_LOAD, WK_PKG, WK_CI, WK_CRED,
     WK_SYMLINK, WK_HISTORY, WK_UNREAD, WK_COVERAGE,
     WK_SUDO, WK_SSH, WK_ACCOUNT, WK_AUTH, WK_SERVICE, WK_SCHEDULE, WK_SECRET, WK_LISTEN, WK_TRUST,
-    WK_FIREWALL, WK_DPKG, WK_COUNT
+    WK_FIREWALL, WK_DPKG,
+    WK_PUTBACK,         /* FK-0: last in the record's numbering, named first (wkind_order) */
+    WK_COUNT
 };
 const char *wkind_name(enum wkind k);
+/* The i-th kind in FK's order, for naming and counting (LN-4): WK_PUTBACK first. */
+enum wkind wkind_order(int i);
 
 /* limits of a built-in row (BR-L1 to BR-L6) */
 #define BR_FILE     1u      /* not a directory */

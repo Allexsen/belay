@@ -787,6 +787,56 @@ TEST(a_step_whose_line_fails_is_said_lost_and_the_state_is_as_it_was) {
     ASSERT_EQ_INT(1, (int)count(receipt(), "A f1"));
 }
 
+/* LN-12 to LN-14, SM-8, FK-0: a file whose content is its session's start
+ * content again says so, in the step's line, the receipt and the summary */
+TEST(a_file_put_back_says_so_in_its_line_the_receipt_and_the_summary) {
+    fresh();
+    sh("mkdir -p '%s/tests' && printf 'def test_a():\\n    assert 1\\n    assert 2\\n    assert 3\\n' > '%s/tests/test_app.py'"
+       " && cp '%s/tests/test_app.py' '%s/../keep.py' && cp '%s/src/x.txt' '%s/../keep.txt'",
+       g_scope, g_scope, g_scope, g_scope, g_scope, g_scope);
+    step("s1", "--first-ok", NULL);
+    belay("watch", "mark", "--scope", g_scope, "--session", "s1", "--name", "prompt", NULL);
+#define CALL(id, cmd, ...) do { step("s1", "--begin", id, NULL); sh(cmd, __VA_ARGS__); step("s1", "--finish", id, NULL); } while (0)
+    CALL("c1", "echo c >> '%s/src/x.txt'", g_scope);
+    ASSERT_EQ_STR("belay: 1 change: src/x.txt modified\n", g_out);
+    CALL("c2", "printf 'def test_a():\\n    pass\\n' > '%s/tests/test_app.py'", g_scope);
+    ASSERT_EQ_STR("belay: 1 change: tests/test_app.py modified\n", g_out);
+    CALL("c3", "true %s", "");
+    ASSERT_EQ_STR("", g_out);
+    CALL("c4", "cp '%s/../keep.py' '%s/tests/test_app.py'", g_scope, g_scope);
+    ASSERT_EQ_STR("belay: " RED " tests/test_app.py put back (as before step 2)\n", g_out);
+    CALL("c5", "echo d >> '%s/src/x.txt'", g_scope);
+    ASSERT_EQ_STR("belay: 1 change: src/x.txt modified\n", g_out);
+    /* not a test file, nor on a list: noted; then changed again, so not in the receipt's */
+    CALL("c6", "cp '%s/../keep.txt' '%s/src/x.txt'", g_scope, g_scope);
+    ASSERT_EQ_STR("belay: src/x.txt put back (as before step 1)\n", g_out);
+    CALL("c7", "echo e >> '%s/src/x.txt'", g_scope);
+    /* removed and made again with its start content is put back too */
+    CALL("c8", "rm '%s/tests/test_app.py'", g_scope);
+    CALL("c9", "cp '%s/../keep.py' '%s/tests/test_app.py'", g_scope, g_scope);
+    ASSERT_EQ_STR("belay: " RED " tests/test_app.py put back (as before step 7)\n", g_out);
+    belay("watch", "summary", "--scope", g_scope, "--session", "s1", "--since", "prompt", NULL);
+    ASSERT_EQ_STR("belay: " RED " 2 flagged: tests/test_app.py put back (as before step 2); tests/test_app.py put back (as before step 7)\n"
+                  "belay: 1 noted: src/x.txt put back (as before step 1)\n"
+                  "belay: 8 changed since prompt, 3 put back, in 8 calls\n", g_out);
+    const char *r = receipt();
+    HAS(r, "\n\nput back\n  tests/test_app.py: changed at step 7, as at the start again at step 8\n\n==== ");
+    HAS_NOT(r, "src/x.txt: ");
+    HAS(r, "  session s1  step 3  call c4\n");
+    /* the start checkpoint gone: nothing is said */
+    fresh();
+    sh("printf 'v1\\n' > '%s/a.txt'", g_scope);
+    step("s1", "--first-ok", NULL);
+    sh("printf 'v2\\n' > '%s/a.txt'", g_scope);
+    step("s1", NULL);
+    ASSERT_EQ_INT(0, belay("prune", "--scope", g_scope, "--keep-last", "1", NULL));
+    sh("printf 'v1\\n' > '%s/a.txt'", g_scope);
+    step("s1", NULL);
+    ASSERT_EQ_STR("belay: outside tool calls: 1 change: a.txt modified\n", g_out);
+    HAS_NOT(receipt(), "put back");
+#undef CALL
+}
+
 /* ---- the receipt, and patterns ---- */
 
 TEST(the_receipt_is_every_step_newest_first) {
@@ -801,8 +851,8 @@ TEST(the_receipt_is_every_step_newest_first) {
     const char *a = strstr(g_out, "A first.txt"), *b = strstr(g_out, "A second.txt");
     REQUIRE(a != NULL && b != NULL);
     ASSERT_TRUE(b < a);
-    HAS(g_out, "  session s1  outside tool calls\n");
-    HAS(g_out, "  session s1  call c1\n");
+    HAS(g_out, "  session s1  step 2  outside tool calls\n");     /* LN-13 */
+    HAS(g_out, "  session s1  step 1  call c1\n");
     /* --max-lines says there is more; --path is a file whose second line is its own path */
     ASSERT_EQ_INT(0, belay("watch", "receipt", "--scope", g_scope, "--max-lines", "3", NULL));
     ASSERT_EQ_INT(4, (int)count(g_out, "\n"));
@@ -1483,6 +1533,7 @@ int main(void) {
     RUN(the_receipt_is_every_step_newest_first);
     RUN(a_git_pull_leads_the_line_and_the_receipt_folds_git);
     RUN(a_flagged_change_under_git_is_listed_in_the_receipt);
+    RUN(a_file_put_back_says_so_in_its_line_the_receipt_and_the_summary);
     RUN(a_flagged_change_under_git_not_utf8_is_listed_in_the_receipt);
     RUN(receipt_all_lists_every_change_under_git);
     RUN(a_directorys_text_says_nothing_of_runtime);

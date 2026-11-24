@@ -24,6 +24,7 @@
 #include "cli/receipt.h"
 #include "cli/state.h"
 #include "interp/gitfmt.h"
+#include "policy/pytests.h"
 #include "watch/ledger.h"
 #include "watch/sysflag.h"
 #include "watch/sysreceipt.h"
@@ -165,6 +166,16 @@ static void drop_stale(struct wctx *x) {
         } else if (x->now - s->open[i].ns > NS_PER_DAY) {
             open_remove(s, i);
             x->dropped++;
+            x->dirty = true;
+        }
+    }
+    for (size_t i = s->n_sess; i-- > 0;) {        /* LN-12's starts likewise */
+        if (strcmp(s->sess[i].session, me) == 0) {
+            if (x->now - s->sess[i].seen_ns > NS_PER_DAY / 24) x->dirty = true;
+            s->sess[i].seen_ns = x->now;
+        } else if (x->now - s->sess[i].seen_ns > NS_PER_DAY) {
+            memmove(&s->sess[i], &s->sess[i + 1], (s->n_sess - i - 1) * sizeof s->sess[0]);
+            s->n_sess--;
             x->dirty = true;
         }
     }
@@ -389,16 +400,159 @@ static int named_add(struct named *v, const char *s, size_t len) {
 
 static int named_cmp(const void *a, const void *b) { return strcmp(*(char *const *)a, *(char *const *)b); }
 
+/* ---- put back (LN-12 to LN-14) ---- */
+
+struct span { struct wstep *steps; size_t n, cap; bool bad; };
+static int span_line(void *ctx, const struct jval *line, const char *type);
+
+/* A step's look at its session's start: that checkpoint's entries and the
+ * step's after entries, both read forward as the diff's records arrive */
+struct putctx {
+    bool on;
+    const struct wsess *e;
+    struct cli_cursor start, after;
+    size_t kept;                        /* bytes of paths the line keeps (WATCH_PUT_MAX) */
+};
+
+static int pcmp(const char *a, size_t al, const char *b, size_t bl) {
+    const int c = memcmp(a, b, al < bl ? al : bl);
+    return c ? c : (al > bl) - (al < bl);
+}
+
+static const struct belay_entry *seek(struct cli_cursor *c, const char *p, size_t n) {
+    while (c->got == 1 && pcmp(c->e.path, c->e.path_len, p, n) < 0) c->got = belay_manifest_next(c->r, &c->e);
+    return c->got == 1 && c->e.path_len == n && memcmp(c->e.path, p, n) == 0 ? &c->e : NULL;
+}
+
+/* The same content: regular files, each read whole and stable, the same size and sha256 */
+static bool same_content(const struct belay_entry *a, const struct belay_entry *b) {
+    return a->type == BELAY_T_REG && b->type == BELAY_T_REG && a->has_hash && b->has_hash && !a->unverified &&
+           !b->unverified && !a->unstable && !b->unstable && !a->writer_open && !b->writer_open &&
+           a->sealed == b->sealed && a->size == b->size && strcmp(a->sha256_hex, b->sha256_hex) == 0;
+}
+
+/* Whether checkpoint `id`'s entry for the path has the content of `start`:
+ * 1 or 0; -1 when that checkpoint can no longer be read. */
+static int entry_was(struct wctx *x, long id, const char *p, size_t n, const struct belay_entry *start) {
+    struct manifest_file mf = { .temporary = false };
+    struct cli_cursor c = { 0 };
+    int rc = -1;
+    if (state_check_manifest(&x->st, id) == 0 && manifest_acquire(&x->st, id, &mf) == 0) {
+        if (belay_manifest_open(mf.path, &c.r) == 0) {
+            c.got = belay_manifest_next(c.r, &c.e);
+            const struct belay_entry *e = seek(&c, p, n);
+            rc = e != NULL && same_content(e, start);
+            belay_manifest_close(c.r);
+        }
+        manifest_release(&mf);
+    }
+    belay_err_clear();
+    return rc;
+}
+
+/* LN-12's K: the number of the session's newest step whose diff took the
+ * path from its start content; 0 when that diff is gone or no step did. */
+static long left_at(struct wctx *x, const struct wsess *e, const char *p, size_t n, const struct belay_entry *start) {
+    char (*days)[11];
+    size_t n_days;
+    if (ledger_days(&x->l, &days, &n_days) == -1) { belay_err_clear(); return 0; }
+    struct span sp = { 0 };
+    int rc = 0;
+    for (size_t i = 0; i < n_days && rc == 0; i++) {
+        const int c = strcmp(days[i], e->day);
+        if (c >= 0) rc = ledger_read(&x->l, days[i], c == 0 ? e->off : 0, span_line, &sp);
+    }
+    free(days);
+    long k = 0;
+    static char path[4096];
+    for (size_t i = sp.n; rc == 0 && !sp.bad && i-- > 0 && k == 0;) {
+        const struct wstep *w = &sp.steps[i];
+        if (strcmp(w->session, x->q->session) != 0 || w->num <= 0 || w->from <= 0) continue;
+        char d[PATH_MAX + 200];
+        snprintf(d, sizeof d, "%s/checkpoints/%ld/diff-from-%ld.ndjson", x->st.dir, w->to, w->from);
+        FILE *in = fopen(d, "r");
+        if (in == NULL) break;                  /* gone: not known */
+        char *line = NULL;
+        size_t cap = 0, len;
+        ssize_t got;
+        bool found = false, gone = false;
+        while (!found && (got = getline(&line, &cap, in)) > 0) {
+            struct jval v;
+            if (jsonr_parse(line, (size_t)got, &v) == -1) { belay_err_clear(); continue; }
+            if (v.t == J_OBJ && jget(&v, "outcome") != NULL && receipt_record_path(&v, path, sizeof path, &len) == 0 &&
+                len == n && memcmp(path, p, n) == 0) {
+                found = true;
+                const struct jval *b = jget(&v, "before");
+                if (b != NULL && b->t == J_OBJ && jget(b, "sha256") != NULL) {
+                    if (strcmp(jstr(b, "sha256"), start->sha256_hex) == 0 && jint(b, "size", -1) == (int64_t)start->size)
+                        k = w->num;
+                } else {                        /* a record with no before (removed): its checkpoint's entry */
+                    const int e = entry_was(x, w->from, p, n, start);
+                    if (e == -1) gone = true;
+                    else if (e == 1) k = w->num;
+                }
+            }
+            jsonr_free(&v);
+        }
+        free(line);
+        fclose(in);
+        if (gone) break;
+    }
+    belay_err_clear();
+    for (size_t i = 0; i < sp.n; i++) wstep_free(&sp.steps[i]);
+    free(sp.steps);
+    return k;
+}
+
+/* A record of a step whose after content is its session's start content
+ * again: the flag `*f` becomes LN-12's (1), and the file is kept for the
+ * receipt. `r` is flag_record's answer; FK-4's flag stays (0 or 1 as it was). */
+static int put_back(struct wctx *x, struct putctx *pc, struct wstep *s, const char *p, size_t n, const char *word,
+                    int r, struct wflag *f) {
+    if (!pc->on || (r == 1 && f->kind == WK_PRIVILEGE) ||
+        (strcmp(word, "added") != 0 && strcmp(word, "modified") != 0 && strcmp(word, "type changed") != 0))
+        return r;
+    const struct belay_entry *st = seek(&pc->start, p, n), *af = seek(&pc->after, p, n);
+    if (st == NULL || af == NULL || !same_content(st, af)) return r;
+    const long k = left_at(x, pc->e, p, n, st);
+    char *shown = flag_shown(p, n);
+    const size_t tc = (shown != NULL ? strlen(shown) : 0) + 64;
+    char *text = shown != NULL ? malloc(tc) : NULL;
+    if (text == NULL) { free(shown); return -1; }
+    if (k > 0) snprintf(text, tc, "%s put back (as before step %ld)", shown, k);
+    else snprintf(text, tc, "%s put back (as at the start)", shown);
+    free(shown);
+    const bool red = r == 1 || test_file(p, n);
+    if (r == 1) free(f->text);
+    *f = (struct wflag){ .kind = WK_PUTBACK, .note = !red, .text = text };
+    if (pc->kept + n > WATCH_PUT_MAX) {
+        s->puts_cut++;
+        return 1;
+    }
+    struct wput *q = realloc(s->puts, (s->n_puts + 1) * sizeof *q);
+    if (q == NULL) return -1;
+    s->puts = q;
+    struct wput *u = &s->puts[s->n_puts];
+    if ((u->path = malloc(n)) == NULL) return -1;
+    memcpy(u->path, p, n);
+    u->len = n;
+    u->k = k;
+    u->size = st->size;
+    memcpy(u->sha, st->sha256_hex, 65);
+    s->n_puts++;
+    pc->kept += n;
+    return 1;
+}
+
 /* The diff at `d` read once: every record flagged, noted or counted into
  * the step; a change of what is read flagged too (CV-1). */
 static int match_diff(struct wctx *x, const char *d, struct flagctx *fx, struct wstep *s, struct gitlead *gl,
-                      struct named *nm) {
+                      struct named *nm, struct putctx *pc) {
     FILE *in = fopen(d, "r");
     if (in == NULL) {
         belay_err_set(BELAY_ERR_IO, errno, "cannot read %s", d);
         return -1;
     }
-    (void)x;
     char *line = NULL, top[256] = "", best[256] = "";
     size_t cap = 0, run = 0, best_n = 0, unflagged = 0;
     ssize_t n;
@@ -463,7 +617,8 @@ static int match_diff(struct wctx *x, const char *d, struct flagctx *fx, struct 
                 rc = -1;
             } else {
                 s->changes++;
-                const int r = flag_record(fx, &v, path, len, &f, &word);
+                int r = flag_record(fx, &v, path, len, &f, &word);
+                if (r != -1) r = put_back(x, pc, s, path, len, word, r, &f);
                 if (r == -1 || (r == 1 && (add_flag(s, &f) == -1 || named_add(nm, path, len) == -1))) {
                     free(r == 1 ? f.text : NULL);
                     rc = nomem();
@@ -571,6 +726,7 @@ static int render_section(struct state *st, bool system, bool fold_git, const st
     gmtime_r(&t, &tm);
     strftime(when, sizeof when, "%Y-%m-%dT%H:%M:%SZ", &tm);
     fprintf(mem, "==== %s  session %s  ", when, s->session);
+    if (s->num > 0) fprintf(mem, "step %ld  ", s->num);           /* LN-13 */
     if (s->n_calls == 0) fputs("outside tool calls", mem);
     for (size_t i = 0; i < s->n_calls; i++) fprintf(mem, "%s%s", i ? ", " : "call ", s->calls[i]);
     fputs("\n", mem);
@@ -647,7 +803,13 @@ static int do_step(struct wctx *x, const struct wop *op, bool late) {
         return nomem();
     x->dropped = 0;
     /* an attempt, so a step that does not finish is known to have begun */
-    if (ledger_append(&x->l, "attempt", q->session, x->now, "", NULL) == -1) return -1;
+    long att_off = 0;
+    if (ledger_append(&x->l, "attempt", q->session, x->now, "", &att_off) == -1) return -1;
+    char att_day[11];
+    ledger_day(&x->l, x->now, att_day);
+    struct wsess *se = NULL;            /* LN-12, LN-13: the session's start, for a directory's watch */
+    for (size_t i = 0; !q->system && i < st->n_sess; i++)
+        if (strcmp(st->sess[i].session, q->session) == 0) se = &st->sess[i];
 
     /* the cursor's checkpoint, looked for before the capture: once it is
      * gone its id is free, and the capture below could take it */
@@ -697,6 +859,8 @@ static int do_step(struct wctx *x, const struct wop *op, bool late) {
     int rc = -1;
     struct manifest_file mf_a = { .temporary = false }, mf_b = { .temporary = false };
     struct named nm = { 0 };
+    struct manifest_file mf_s = { .temporary = false };
+    struct putctx pc = { .e = se };
     if (!q->system && donttouch_step(x, c.id, s, have_old, &fresh, &have_fresh) == -1) goto out;
     if (!have) {
         /* nothing to diff against: a first step, or the record was interrupted */
@@ -728,18 +892,38 @@ static int do_step(struct wctx *x, const struct wop *op, bool late) {
         static struct gitlead gl;
         gl.have = false;
         struct flagctx fx = { .lists = { have_old ? &old : NULL, have_fresh ? &fresh : NULL }, .mode = cli_mode_of, .mode_ctx = &m };
+        /* LN-12: the session's start checkpoint, when it is still the one it was; else nothing is said */
+        if (se != NULL && state_checkpoint_exists(&x->st, se->start) == 1 && state_check_manifest(&x->st, se->start) == 0) {
+            struct checkpoint *list = NULL;
+            size_t n = 0;
+            bool same = false;
+            if (state_list(&x->st, &list, &n) == 0)
+                for (size_t i = 0; i < n; i++) same |= list[i].id == se->start && list[i].created_ns == se->start_ns;
+            free(list);
+            pc.on = same && manifest_acquire(&x->st, se->start, &mf_s) == 0 &&
+                    belay_manifest_open(mf_s.path, &pc.start.r) == 0 && belay_manifest_open(mf_b.path, &pc.after.r) == 0;
+            if (pc.on) {
+                pc.start.got = belay_manifest_next(pc.start.r, &pc.start.e);
+                pc.after.got = belay_manifest_next(pc.after.r, &pc.after.e);
+            }
+        }
+        belay_err_clear();
         int mr = -1;
         if (belay_manifest_open(mf_a.path, &m.side[0].r) == 0 && belay_manifest_open(mf_b.path, &m.side[1].r) == 0) {
             for (int sd = 0; sd < 2; sd++) m.side[sd].got = belay_manifest_next(m.side[sd].r, &m.side[sd].e);
             mr = q->system ? sysflag_step(d, mf_a.path, mf_b.path, x->st.store, cli_mode_of, &m, s)     /* WS-F, WS-N */
-                           : match_diff(x, d, &fx, s, &gl, &nm);
+                           : match_diff(x, d, &fx, s, &gl, &nm, &pc);
         }
+        belay_manifest_close(pc.start.r);
+        belay_manifest_close(pc.after.r);
+        pc.start.r = pc.after.r = NULL;
         if (mr == 0 && gl.have) mr = git_lead(&x->st, c.id, &gl, s);
         belay_manifest_close(m.side[0].r);
         belay_manifest_close(m.side[1].r);
         flagctx_free(&fx);
         if (mr == -1) goto out;
         if (s->changes > 0 || s->n_flags > 0 || s->roots != NULL) {
+            if (!q->system) s->num = (se != NULL ? se->n : 0) + 1;                 /* LN-13 */
             stage(x, "rendering");
             if (nm.n > 1) qsort(nm.p, nm.n, sizeof *nm.p, named_cmp);
             if (render_section(&x->st, q->system, !q->system && !nm.unmatched, s, mf_a.path, mf_b.path, d, &nm,
@@ -755,6 +939,26 @@ static int do_step(struct wctx *x, const struct wop *op, bool late) {
         st->n_late++;
         st->pending = 0;
         st->pending_ns = st->pending_walk_ns = 0;
+    }
+    if (!q->system) {                   /* LN-12, LN-13: the session's start, its steps' numbers */
+        if (se == NULL) {
+            if (st->n_sess == W_SESS_MAX) {     /* the least recently seen gives way */
+                size_t old = 0;
+                for (size_t i = 1; i < st->n_sess; i++)
+                    if (st->sess[i].seen_ns < st->sess[old].seen_ns) old = i;
+                memmove(&st->sess[old], &st->sess[old + 1], (st->n_sess - old - 1) * sizeof st->sess[0]);
+                st->n_sess--;
+            }
+            se = &st->sess[st->n_sess++];
+            memset(se, 0, sizeof *se);
+            snprintf(se->session, sizeof se->session, "%s", q->session);
+            se->start = c.id;
+            se->start_ns = c.created_ns;
+            memcpy(se->day, att_day, sizeof se->day);
+            se->off = att_off;
+        }
+        if (s->num > 0) se->n = s->num;
+        se->seen_ns = x->now;
     }
     if (x->starting) {                  /* WS-2: the watch's first checkpoint */
         st->sys_started_ns = x->now;
@@ -786,14 +990,13 @@ out:
     free(nm.p);
     manifest_release(&mf_a);
     manifest_release(&mf_b);
+    manifest_release(&mf_s);
     if (have_old) dtlist_free(&old);
     if (have_fresh) dtlist_free(&fresh);
     return rc;
 }
 
 /* ---- a summary ---- */
-
-struct span { struct wstep *steps; size_t n, cap; bool bad; };
 
 static int span_line(void *ctx, const struct jval *line, const char *type) {
     struct span *sp = ctx;
