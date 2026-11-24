@@ -828,6 +828,18 @@ static void privilege(struct state *s, const char *p, size_t n, const struct bel
     }
 }
 
+/* Nothing but whitespace and comments (`#` to the end of a line) */
+static bool blank_py(const unsigned char *t, size_t n) {
+    for (size_t i = 0; i < n; i++) {
+        if (t[i] == '#') {
+            while (i < n && t[i] != '\n') i++;
+        } else if (t[i] != ' ' && t[i] != '\t' && t[i] != '\n' && t[i] != '\r' && t[i] != '\f' && t[i] != '\v') {
+            return false;
+        }
+    }
+    return true;
+}
+
 static int tests_weakened(struct state *s, const char *p, size_t n, const struct belay_entry *b,
                           const struct belay_entry *a, bool prov) {
     if (!py_test_file(p, n)) return 0;
@@ -848,7 +860,8 @@ static int tests_weakened(struct state *s, const char *p, size_t n, const struct
         const char *added[POLICY_STRINGS_MAX];
         const size_t na = pymarkers_added(&cb, &ca, added, POLICY_STRINGS_MAX);
         const bool b_reg = b != NULL && b->type == BELAY_T_REG, a_reg = a != NULL && a->type == BELAY_T_REG;
-        const bool removed = b_reg && !a_reg, emptied = b_reg && bl > 0 && a_reg && al == 0;
+        const bool removed = b_reg && !a_reg;
+        const bool emptied = b_reg && a_reg && !blank_py(bb, bl) && blank_py(ab, al);       /* gone: emptied */
         if (removed || emptied || ca.assertions < cb.assertions || ca.tests < cb.tests || na > 0) {
             struct ctx *c = s->c;
             struct flag *f = add(c, PK_TESTS_WEAKENED, prov);
@@ -859,6 +872,15 @@ static int tests_weakened(struct state *s, const char *p, size_t n, const struct
             fint(f, "tests_before", cb.tests);
             fint(f, "tests_after", ca.tests);
             fstrings(c, f, "markers_added", added, na);
+            if (a == NULL || emptied) {         /* gone: deleted, or emptied with its lines before */
+                char g[64];
+                size_t lines = 0;
+                for (size_t i = 0; i < bl; i++) lines += bb[i] == '\n';
+                if (bl > 0 && bb[bl - 1] != '\n') lines++;
+                if (a == NULL) snprintf(g, sizeof g, "deleted");
+                else snprintf(g, sizeof g, "emptied (was %zu line%s)", lines, lines == 1 ? "" : "s");
+                fstr(c, f, "gone", g);
+            }
             fpath(c, f, p, n);
         }
         pycount_free(&cb);

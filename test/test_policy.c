@@ -505,6 +505,27 @@ TEST(test_files_touched_and_weakened) {
     NONE("touches_tests", "src/main.py");
 }
 
+/* tests_weakened's gone: a counted test file deleted, or emptied to nothing
+ * but whitespace and comments, says which; test.py and tests.py are test files */
+TEST(a_test_file_emptied_or_deleted_says_which) {
+    fresh(NULL);
+    sh("mkdir -p tests && printf 'import subprocess, sys\\nr = subprocess.run([sys.executable, \"-m\", \"pytest\"])\\nsys.exit(r.returncode)\\n' > test.py && "
+       "printf 'x = 1\\n' > tests.py && printf 'def test_a():\\n    assert 1\\n    assert 2\\n    assert 3\\n\\n' > tests/test_app.py && "
+       "printf 'assert 1' > tests/test_one.py && printf '# only this\\n' > tests/test_c.py && printf 'def test_t():\\n    assert 1\\n' > tests/test_t.py");
+    REQUIRE(export_(false) == EXIT_DONE);
+    sh(": > test.py && rm tests.py && printf '  \\n# nothing here\\n\\n\\t\\n' > tests/test_app.py && : > tests/test_one.py && "
+       ": > tests/test_c.py && printf 'def test_t():\\n    assert 1 # kept\\n    pass\\n' > tests/test_t.py");
+    ASSERT_EQ_INT(EXIT_DONE, verify_(false));
+    HAS("tests_weakened", "test.py", ",\"markers_added\":[],\"gone\":\"emptied (was 3 lines)\",\"text\":\"test.py: emptied (was 3 lines)\"");
+    HAS("tests_weakened", "tests.py", ",\"gone\":\"deleted\",\"text\":\"tests.py: deleted\"");
+    HAS("tests_weakened", "tests/test_app.py", ",\"assertions_before\":3,\"assertions_after\":0,\"tests_before\":1,\"tests_after\":0,"
+        "\"markers_added\":[],\"gone\":\"emptied (was 5 lines)\",\"text\":\"tests/test_app.py: emptied (was 5 lines)\"");
+    HAS("tests_weakened", "tests/test_one.py", ",\"gone\":\"emptied (was 1 line)\",");
+    HAS("touches_tests", "test.py", ",\"outcome\":\"modified\",");
+    NONE("tests_weakened", "tests/test_c.py");                  /* it had nothing but a comment */
+    NONE("tests_weakened", "tests/test_t.py");                  /* no fewer: not emptied, and no gone */
+}
+
 TEST(ci_pytest_config_and_conftest) {
     fresh(NULL);
     sh("mkdir -p .github/workflows .circleci a other/workflows && printf 'o\\n' > other/workflows/x.yml && printf 'w\\n' > .github/workflows/ci.yml && printf 'c\\n' > .circleci/config.yml && "
@@ -1149,10 +1170,10 @@ TEST(the_test_file_rule_keeps_to_tests) {
     fresh(NULL);
     const char *yes[] = { "tests/data/fixture.json", "pkg/test/helpers.go", "web/__tests__/a.js", "lib/spec/x_spec.rb",
                           "src/foo_test.go", "src/FooTest.java", "src/BarTests.kt", "ui/a.spec.ts", "ui/b.test.jsx",
-                          "lib/test_util.c", "lib/x_test.cpp", "py/test_api.py", "py/api_test.py", "lib/test_.py", NULL };
+                          "lib/test_util.c", "lib/x_test.cpp", "py/test_api.py", "py/api_test.py", "lib/test_.py", "test.py", "pkg/tests.py", NULL };
     const char *no[] = { "build/test/test_policy", "build/san/test/x", "docs/spec/diff-v1.md", "docs/tests/test_a.py",
                          "node_modules/a/test/x.js", "dist/tests/t.py", "src/latest.py", "src/contest.go",
-                         "notes/testing.md", "src/attest.rb", NULL };
+                         "notes/testing.md", "src/attest.rb", "src/mytest.py", "src/test.pyc", "src/tests.py.bak", NULL };
     char cmd[8192] = "true";
     for (int k = 0; k < 2; k++)
         for (const char *const *p = k ? no : yes; *p != NULL; p++) {
@@ -1363,6 +1384,7 @@ int main(void) {
     RUN(verify_leaves_out_what_the_bundle_left_out);
     RUN(packages_frozen_or_not);
     RUN(test_files_touched_and_weakened);
+    RUN(a_test_file_emptied_or_deleted_says_which);
     RUN(ci_pytest_config_and_conftest);
     RUN(startup_hooks_git_hooks_and_history);
     RUN(no_write_forbids_deleting_and_no_delete_alone_allows_writing);

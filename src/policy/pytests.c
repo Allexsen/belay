@@ -43,6 +43,7 @@ bool test_file(const char *path, size_t n) {
     if (in_tests) return true;
     size_t nl;
     const char *nm = name_of(path, n, &nl);
+    if ((nl == 7 && memcmp(nm, "test.py", 7) == 0) || (nl == 8 && memcmp(nm, "tests.py", 8) == 0)) return true;
     static const char *const JS[] = { "js", "jsx", "ts", "tsx", "mjs", "cjs", NULL };
     for (const char *const *x = JS; *x != NULL; x++) {
         char t[16], sp[16];
