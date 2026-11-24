@@ -99,7 +99,7 @@ So a list written to be slow, in a directory holding paths near the system's lim
 | id | rule |
 |---|---|
 | FL-1 | **Flagged**: the line carries the red circle and names the entry first. Every kind below is flagged unless FL-2 says otherwise. |
-| FL-2 | **Noted**, the quiet level: the entry is named at the front of the line, after anything flagged, with its reason, and brings no red circle. Only a built-in row can note, and only where its limit says so (BR-L5, BR-L6). Reading a file's keys to flag the dangerous ones is not in this version. |
+| FL-2 | **Noted**, the quiet level: the entry is named at the front of the line, after anything flagged, with its reason, and brings no red circle. Only a built-in row can note, and only where its limit says so (BR-L5, BR-L6), and FK-0. Reading a file's keys to flag the dangerous ones is not in this version. |
 | FL-3 | A user's pattern always flags. Every line of "The record could not be kept", below, is flagged. |
 
 A flag or a note has a kind and a reason. They are named in this order of kind, one of each kind
@@ -107,6 +107,7 @@ before a second of any (LN-4).
 
 | id | kind | when | the reason shown |
 |---|---|---|---|
+| FK-0 | put back | LN-12: a file's content as at the session's start again. Flagged when the path is a test file (policy-v1.md, "Test file") or a kind below flags or notes it; noted otherwise. A change FK-4 flags stays FK-4's. | `put back` |
 | FK-1 | don't-touch | The path matches the list in force (DT-1), or is `.belay-donttouch` at the top. | `don't-touch` |
 | FK-2 | git hooks and config | A built-in row of that kind matches. | the row's label |
 | FK-3 | agent rules | likewise | the row's label |
@@ -304,6 +305,9 @@ place. A line with notes only has none. Examples are in the last section.
 | LN-10 | **A git pull or merge leads the line.** When the step's diff has a `git_commits_added` event without a count for the repository `.git` at the directory's top, and that branch's reflog, as the step's checkpoint keeps it, ends in an entry whose operation's first word is `pull` or `merge`: after LN-2's words, `git WORD: BRANCH moved to ID (fast-forward)`, `(merge)` when the entry's message does not end `: Fast-forward`; WORD that first word, ID the event's `to` cut to seven. Then the flagged and noted as LN-3 and LN-4, after `; `, then ` · N change(s) in the tree`: N the entries neither flagged nor noted outside `.git/`, and when N is not 0, `: ` and their counts as LN-6 counts, without its ` (N under DIR/)` (`17 changes in the tree: 3 added, 2 removed, 12 modified`); those under `.git/` are the lead's (LN-9). No commit count: a fast-forward's or a merge's entry gives none, and git's objects are not read. A history rewrite stays LN-3's flag. In `watch receipt`, a step's entries under `.git/` fold into one line as `belay diff`'s receipt folds them: `git bookkeeping: N changes under .git/`; an entry the step's line flags or notes, or a flagged event names, is listed as `belay diff --all` lists it (`M .git/config`), the paths compared as bytes (one not UTF-8 included, however the event carries it); when a flagged event names a path that cannot be read back, or cuts its list, nothing under `.git/` folds in that step's section. |
 | LN-10a | **`watch receipt --all` folds nothing.** With `--all`, a step's section lists every entry under `.git/` as `belay diff --all` does, rendered again from the step's diff; nothing is folded or cut. A step whose diff or checkpoints are no longer kept prints its section as recorded, then `  .git/ as recorded: checkpoint N's diff from M is no longer kept`. `/belay:receipt` stays as LN-10 says. |
 | LN-11 | **A start says what is recorded.** The Claude Code adapter, at each session start in a directory it records, prints `belay: recording DIR` first, DIR the directory with `$HOME` at its start as `~` (`belay: recording ~/code/webapp`). Only when the start's step was recorded: a start that could not record says that alone. Nothing else is added. |
+| LN-12 | **A file put back says so.** A change in a step whose after entry is a regular file with the content -- sha256 and size, each side read whole, stable, with no writer open -- of the same path's entry in the session's start checkpoint (the checkpoint the session's first step wrote), its before entry not: named as `PATH put back (as before step K)` (FK-0), an item of its own and never in a count. K is the number (LN-13) of the session's newest earlier step whose diff took the path from that content; `(as at the start)` when that step's diff is no longer kept, or no step of the session's in the record did. Content only: metadata put back is not considered. Nothing is said when the start checkpoint is no longer kept, or the session's start is not in the record. A change made and put back within one step is not seen. |
+| LN-13 | **A session's steps are numbered.** A step that changed something takes the next number of its session, from 1, and its section of the receipt is headed `==== TIME  session S  step N  call C` (`step N` after the session, before the calls). |
+| LN-14 | **The receipt's `put back`.** After its first line and before the steps' sections: `put back`, then for each file of LN-12 whose content in the newest checkpoint is still that of its session's start, once, by its newest put back: `  PATH: changed at step K, as at the start again at step N` (`  PATH: as at the start again at step N` when LN-12 says `as at the start`), followed by ` in session S` when more than one session put back files. A step's record keeps its put back files for this up to 16 KiB of paths; past it, `  and N more put back at step M`. None when the newest checkpoint is no longer kept. A file changed, put back and changed again is not in it. |
 
 **A summary** (the Claude Code adapter prints it at a Stop, for the steps since the user's last message):
 
@@ -316,6 +320,7 @@ place. A line with notes only has none. Examples are in the last section.
 | SM-4 | **N is the sum of the steps' counts.** A file changed in five steps is five. Nothing is recomputed from a diff across the span, so nothing made and undone across steps is hidden. |
 | SM-5 | When another session's steps are among them, the totals line says ` (with another session's steps)`. A summary whose span began in a day file that has been pruned says ` (the record before DATE is gone)`. |
 | SM-6 | The words `tool call`, `this turn` and the receipt command are the Claude Code adapter's. The agent-neutral commands take the word for a call from their caller. |
+| SM-8 | **Put back counted.** When steps of the span put back files (LN-12), `, P put back` follows `this turn` in SM-3's totals: `belay: 5 changed this turn, 1 put back, in 5 tool calls`. P counts the span's LN-12 items, which are among the N. |
 
 ## The record could not be kept
 
@@ -368,10 +373,12 @@ belay: 🔴 bin/tool setuid added (mode 0755 -> 4755) (privilege)
 belay: 🔴 feature rewritten by commit (amend): c38c0d4 -> e487650 (history) · 6 more: 2 added, 4 modified
 belay: git pull: main moved to 9c5d2f2 (fast-forward) · 17 files in the tree
 belay: 🔴 could not record in 45 s: capturing
+belay: 🔴 tests/test_app.py put back (as before step 2)
 
 belay: 🔴 1 flagged: .git/hooks/pre-push added (git hook)
 belay: 1 noted: .git/config modified (git config)
 belay: 8 changed this turn in 1 tool call · full receipt: /belay:receipt
+belay: 5 changed this turn, 1 put back, in 5 tool calls · full receipt: /belay:receipt
 belay: 42 changed this turn: 40 in 15 tool calls, 2 outside tool calls · full receipt: /belay:receipt
 belay: nothing changed this turn
 ```
