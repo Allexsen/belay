@@ -504,6 +504,38 @@ static long left_at(struct wctx *x, const struct wsess *e, const char *p, size_t
     return k;
 }
 
+bool watch_touched(const struct belay_entry *b, const struct belay_entry *a) {
+    if (!same_content(b, a) || b->raced || a->raced || b->mode != a->mode || b->uid != a->uid || b->gid != a->gid ||
+        b->nlink != a->nlink || b->dev != a->dev || b->has_iflags != a->has_iflags ||
+        (b->has_iflags && b->iflags != a->iflags) || b->xattrs_unknown || a->xattrs_unknown ||
+        b->has_caps != a->has_caps || (b->has_caps && strcmp(b->caps_hex, a->caps_hex) != 0) ||
+        b->has_xattrs != a->has_xattrs || (b->has_xattrs && strcmp(b->xattrs_sha256_hex, a->xattrs_sha256_hex) != 0) ||
+        b->ctime_ns == 0 || a->ctime_ns == 0)           /* no ctime recorded: nothing is said */
+        return false;
+    return b->ctime_ns != a->ctime_ns || b->ino != a->ino;
+}
+
+/* LN-15: a metadata change of a test file, or of a path a kind flags (not
+ * only notes), that the step's two entries prove a touch: the flag `*f`
+ * becomes FK-0a's (1). `r` is flag_record's answer. FK-4 flags no entry
+ * watch_touched passes: its mode, flags and capabilities are as before. */
+static int touched(struct cli_modes *m, const char *p, size_t n, const char *word, int r, struct wflag *f) {
+    if (strcmp(word, "metadata changed") != 0 || (r == 1 && f->note) ||
+        (r == 0 && !test_file(p, n)))
+        return r;
+    const struct belay_entry *b = seek(&m->side[0], p, n), *a = seek(&m->side[1], p, n);
+    if (b == NULL || a == NULL || !watch_touched(b, a)) return r;
+    char *shown = flag_shown(p, n);
+    const size_t tc = (shown != NULL ? strlen(shown) : 0) + 32;
+    char *text = shown != NULL ? malloc(tc) : NULL;
+    if (text == NULL) { free(shown); return -1; }
+    snprintf(text, tc, "%s touched (content as before)", shown);
+    free(shown);
+    if (r == 1) free(f->text);
+    *f = (struct wflag){ .kind = WK_TOUCHED, .note = false, .text = text };
+    return 1;
+}
+
 /* A record of a step whose after content is its session's start content
  * again: the flag `*f` becomes LN-12's (1), and the file is kept for the
  * receipt. `r` is flag_record's answer; FK-4's flag stays (0 or 1 as it was). */
@@ -619,6 +651,7 @@ static int match_diff(struct wctx *x, const char *d, struct flagctx *fx, struct 
                 s->changes++;
                 int r = flag_record(fx, &v, path, len, &f, &word);
                 if (r != -1) r = put_back(x, pc, s, path, len, word, r, &f);
+                if (r != -1) r = touched(fx->mode_ctx, path, len, word, r, &f);
                 if (r == -1 || (r == 1 && (add_flag(s, &f) == -1 || named_add(nm, path, len) == -1))) {
                     free(r == 1 ? f.text : NULL);
                     rc = nomem();
@@ -730,6 +763,9 @@ static int render_section(struct state *st, bool system, bool fold_git, const st
     if (s->n_calls == 0) fputs("outside tool calls", mem);
     for (size_t i = 0; i < s->n_calls; i++) fprintf(mem, "%s%s", i ? ", " : "call ", s->calls[i]);
     fputs("\n", mem);
+    for (size_t i = 0; !system && i < s->n_flags; i++)           /* LN-15 */
+        if (s->flags[i].kind == WK_TOUCHED) fprintf(mem, "  %s\n", s->flags[i].text);
+    if (!system && s->cut_flag[WK_TOUCHED] > 0) fprintf(mem, "  and %llu more touched\n", (unsigned long long)s->cut_flag[WK_TOUCHED]);
     snprintf(la, sizeof la, "checkpoint %ld", s->from);
     snprintf(lb, sizeof lb, "checkpoint %ld", s->to);
     const struct receipt_opts ro = { la, lb, true, cli_mode_of, &m, st->scope.docker[0] || system ? NULL : cli_classify,

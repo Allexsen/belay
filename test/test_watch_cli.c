@@ -13,6 +13,7 @@
 #include "cli/state.h"
 #include "watch/ledger.h"
 #include "watch/run.h"
+#include "belay/manifest.h"
 
 #include <errno.h>
 #include <fcntl.h>
@@ -837,6 +838,166 @@ TEST(a_file_put_back_says_so_in_its_line_the_receipt_and_the_summary) {
 #undef CALL
 }
 
+/* A file's ctime in nanoseconds; 0 when it cannot be stat'ed. */
+static int64_t ctime_ns(const char *p) {
+    struct stat st;
+    if (stat(p, &st) != 0) return 0;
+#ifdef __APPLE__
+    return (int64_t)st.st_ctimespec.tv_sec * 1000000000LL + st.st_ctimespec.tv_nsec;
+#else
+    return (int64_t)st.st_ctim.tv_sec * 1000000000LL + st.st_ctim.tv_nsec;
+#endif
+}
+
+/* Waits until a file written now gets a ctime past `p`'s, so that a change
+ * of `p` after this moves its ctime whatever the filesystem's tick. */
+static void past_ctime(const char *p) {
+    char probe[600];
+    snprintf(probe, sizeof probe, "%s/tick", g_dir);
+    const int64_t c = ctime_ns(p);
+    for (int i = 0; i < 5000; i++) {
+        FILE *f = fopen(probe, "w");
+        if (f != NULL) { fputc('x', f); fclose(f); }
+        if (ctime_ns(probe) > c) return;
+        usleep(1000);
+    }
+}
+
+/* LN-15, SM-9, FK-0a: a test file or a flagged path whose content, type,
+ * mode and owner are as before the step, its ctime or inode moved within
+ * it, says it was touched; every other file says what it said before */
+TEST(a_file_touched_within_a_step_says_so_in_its_line_the_receipt_and_the_summary) {
+    fresh();
+    char t[600], ci[600], x[600], perm[600];
+    snprintf(t, sizeof t, "%s/tests/test_app.py", g_scope);
+    snprintf(ci, sizeof ci, "%s/.github/workflows/ci.yml", g_scope);
+    snprintf(x, sizeof x, "%s/src/x.txt", g_scope);
+    snprintf(perm, sizeof perm, "%s/.claude/settings.local.json", g_scope);
+    sh("mkdir -p '%s/tests' '%s/.github/workflows' '%s/.claude' && printf 'def test_a():\\n    assert 1\\n' > '%s'"
+       " && printf 'on: push\\n' > '%s' && printf '{}\\n' > '%s' && rm -f '%s/keep.py' '%s/ref' && cp '%s' '%s/keep.py'",
+       g_scope, g_scope, g_scope, t, ci, perm, g_dir, g_dir, t, g_dir);
+    step("s1", "--first-ok", NULL);
+    belay("watch", "mark", "--scope", g_scope, "--session", "s1", "--name", "prompt", NULL);
+#define CALL(id, cmd, ...) do { step("s1", "--begin", id, NULL); sh(cmd, __VA_ARGS__); step("s1", "--finish", id, NULL); } while (0)
+#define TOUCHED "belay: " RED " tests/test_app.py touched (content as before)\n"
+    /* overwritten and written back */
+    past_ctime(t);
+    CALL("c1", "printf 'x\\n' > '%s' && cat '%s/keep.py' > '%s'", t, g_dir, t);
+    ASSERT_EQ_STR(TOUCHED, g_out);
+    /* replaced by a rename: another inode, whatever the tick */
+    CALL("c2", "cp '%s/keep.py' '%s/new.py' && mv '%s/new.py' '%s'", g_dir, g_dir, g_dir, t);
+    ASSERT_EQ_STR(TOUCHED, g_out);
+    /* written back and its mtime set back */
+    past_ctime(t);
+    CALL("c3", "cp -p '%s' '%s/ref' && printf 'x\\n' > '%s' && cat '%s/keep.py' > '%s' && touch -r '%s/ref' '%s'",
+         t, g_dir, t, g_dir, t, g_dir, t);
+    ASSERT_EQ_STR(TOUCHED, g_out);
+    /* chmod and back; touch alone */
+    past_ctime(t);
+    CALL("c4", "chmod +x '%s' && chmod -x '%s'", t, t);
+    ASSERT_EQ_STR(TOUCHED, g_out);
+    past_ctime(t);
+    CALL("c5", "touch '%s'", t);
+    ASSERT_EQ_STR(TOUCHED, g_out);
+    /* a flagged path; named before a kind below */
+    past_ctime(ci);
+    CALL("c6", "touch '%s' && printf 'on: pull\\n' > '%s/.github/workflows/z.yml'", ci, g_scope);
+    ASSERT_EQ_STR("belay: " RED " .github/workflows/ci.yml touched (content as before); .github/workflows/z.yml added (CI)\n", g_out);
+    /* a noted path, and any other file: as before */
+    past_ctime(perm);
+    CALL("c7", "touch '%s'", perm);
+    ASSERT_EQ_STR("belay: .claude/settings.local.json metadata changed (agent permissions)\n", g_out);
+    past_ctime(x);
+    CALL("c8", "touch '%s'", x);
+    ASSERT_EQ_STR("belay: 1 change: src/x.txt metadata changed\n", g_out);
+    /* its mode, or its links, not as before: an ordinary change; its content changed: likewise */
+    CALL("c9", "chmod +x '%s'", t);
+    ASSERT_EQ_STR("belay: 1 change: tests/test_app.py metadata changed\n", g_out);
+    CALL("c10", "chmod -x '%s' && ln '%s' '%s/link.py'", t, t, g_dir);
+    ASSERT_EQ_STR("belay: 1 change: tests/test_app.py metadata changed\n", g_out);
+    CALL("c11", "rm '%s/link.py' && printf 'x\\n' > '%s'", g_dir, t);
+    ASSERT_EQ_STR("belay: 1 change: tests/test_app.py modified\n", g_out);
+    belay("watch", "summary", "--scope", g_scope, "--session", "s1", "--since", "prompt", NULL);
+    ASSERT_EQ_STR("belay: " RED " 7 flagged: tests/test_app.py touched (content as before); .github/workflows/z.yml added (CI);"
+                  " tests/test_app.py touched (content as before); and 4 more flagged: 4 touched\n"
+                  "belay: 1 noted: .claude/settings.local.json metadata changed (agent permissions)\n"
+                  "belay: 12 changed since prompt, 6 touched, in 11 calls\n", g_out);
+    const char *r = receipt();
+    HAS(r, "  session s1  step 1  call c1\n  tests/test_app.py touched (content as before)\nbelay diff  ");
+    HAS(r, "  session s1  step 6  call c6\n  .github/workflows/ci.yml touched (content as before)\nbelay diff  ");
+    HAS(r, "  session s1  step 8  call c8\nbelay diff  ");
+    ASSERT_EQ_INT(5, (int)count(r, "tests/test_app.py touched"));
+#undef TOUCHED
+#undef CALL
+}
+
+/* LN-15, LN-8: more touched than a step's line keeps: its section names
+ * every one; rendered again from the line (--all), it counts those cut */
+TEST(a_step_touching_more_than_its_line_keeps_counts_the_rest_when_rendered_again) {
+    fresh();
+    char *old = getenv("HOME") != NULL ? strdup(getenv("HOME")) : NULL;
+    char home[500], last[700];
+    snprintf(home, sizeof home, "%s/home", g_dir);
+    sh("rm -rf '%s' && mkdir -p '%s'", home, home);
+    setenv("HOME", home, 1);
+    setenv("GIT_CONFIG_NOSYSTEM", "1", 1);
+#define G "git -c user.name=t -c user.email=t@t -c commit.gpgSign=false -c init.defaultBranch=main"
+#define NAME "test_a_long_name_that_the_line_cuts_in_its_middle_past_eighty_characters_to_fit_"
+    sh("cd '%s' && " G " init -q && mkdir tests && cd tests && for i in $(seq 1 900); do printf 'x\\n' > " NAME "$i.py; done",
+       g_scope);
+    step("s1", "--first-ok", NULL);
+    snprintf(last, sizeof last, "%s/tests/" NAME "900.py", g_scope);
+    past_ctime(last);
+    step("s1", "--begin", "c1", NULL);
+    sh("cd '%s' && touch tests/*.py && " G " add -A", g_scope);
+    step("s1", "--finish", "c1", NULL);
+    HAS(g_out, "and 897 more flagged: 897 touched");
+    ASSERT_EQ_INT(900, (int)count(receipt(), " touched (content as before)\n"));
+    ASSERT_EQ_INT(0, belay("watch", "receipt", "--scope", g_scope, "--all", NULL));
+    const size_t kept = count(g_out, " touched (content as before)\n");
+    REQUIRE(kept > 0 && kept < 900);
+    char want[64];
+    snprintf(want, sizeof want, "  and %zu more touched\n", 900 - kept);
+    HAS(g_out, want);
+#undef NAME
+#undef G
+    unsetenv("GIT_CONFIG_NOSYSTEM");
+    if (old != NULL) setenv("HOME", old, 1); else unsetenv("HOME");
+    free(old);
+}
+
+/* LN-15: what proves a touch, entry by entry */
+TEST(a_touch_is_proved_by_the_ctime_or_the_inode_and_nothing_else_differing) {
+    static struct belay_entry b, a;
+    memset(&b, 0, sizeof b);
+    b.type = BELAY_T_REG;
+    b.mode = 0100644;
+    b.size = 3;
+    b.has_hash = true;
+    memset(b.sha256_hex, 'a', 64);
+    b.ctime_ns = b.mtime_ns = 100;
+    b.ino = 5;
+    b.dev = 1;
+    b.nlink = 1;
+#define AS(want, change) do { a = b; change; ASSERT_EQ_INT(want, (int)watch_touched(&b, &a)); } while (0)
+    AS(0, (void)0);                             /* nothing moved */
+    AS(1, a.ctime_ns = 200);
+    AS(1, a.ino = 6);
+    AS(0, a.mtime_ns = 200);                    /* the mtime alone proves nothing */
+    AS(0, (a.ino = 6, a.dev = 2));              /* an inode number of another device */
+    AS(0, (a.ctime_ns = 200, a.dev = 2));
+    AS(0, (a.ctime_ns = 200, a.mode = 0100755));
+    AS(0, (a.ctime_ns = 200, a.uid = 1));
+    AS(0, (a.ctime_ns = 200, a.nlink = 2));
+    AS(0, (a.ctime_ns = 200, a.has_xattrs = true));
+    AS(0, (a.ctime_ns = 200, a.sha256_hex[0] = 'b'));
+    AS(0, (a.ctime_ns = 200, a.writer_open = true));
+    AS(0, (a.ctime_ns = 200, a.type = BELAY_T_LNK));
+    AS(0, a.ctime_ns = 0);                      /* no ctime recorded: nothing said */
+    AS(0, (a.ino = 6, a.ctime_ns = 0));
+#undef AS
+}
+
 /* ---- the receipt, and patterns ---- */
 
 TEST(the_receipt_is_every_step_newest_first) {
@@ -1534,6 +1695,9 @@ int main(void) {
     RUN(a_git_pull_leads_the_line_and_the_receipt_folds_git);
     RUN(a_flagged_change_under_git_is_listed_in_the_receipt);
     RUN(a_file_put_back_says_so_in_its_line_the_receipt_and_the_summary);
+    RUN(a_file_touched_within_a_step_says_so_in_its_line_the_receipt_and_the_summary);
+    RUN(a_touch_is_proved_by_the_ctime_or_the_inode_and_nothing_else_differing);
+    RUN(a_step_touching_more_than_its_line_keeps_counts_the_rest_when_rendered_again);
     RUN(a_flagged_change_under_git_not_utf8_is_listed_in_the_receipt);
     RUN(receipt_all_lists_every_change_under_git);
     RUN(a_directorys_text_says_nothing_of_runtime);

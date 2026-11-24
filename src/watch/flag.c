@@ -11,10 +11,10 @@ static const char *const KIND[WK_COUNT] = {
     "don't-touch", "git hooks and config", "agent rules", "privilege", "loads on its own", "package source",
     "CI", "credentials", "replaced by a symlink", "history", "could not be read", "coverage",
     "sudo", "ssh", "accounts", "authentication", "services", "scheduled", "secret", "listening", "trust store",
-    "firewall", "packages", "put back",
+    "firewall", "packages", "put back", "touched",
 };
 const char *wkind_name(enum wkind k) { return (unsigned)k < WK_COUNT ? KIND[k] : "?"; }
-enum wkind wkind_order(int i) { return i == 0 ? WK_PUTBACK : (enum wkind)(i - 1); }
+enum wkind wkind_order(int i) { return i == 0 ? WK_PUTBACK : i == 1 ? WK_TOUCHED : (enum wkind)(i - 2); }
 
 /* The built-in list: test/expect/watch-v1.md, BR-1 on, in the pin's order.
  * A test reads the pin and compares it with this table, row by row. */
