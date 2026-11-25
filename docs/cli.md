@@ -51,7 +51,7 @@ A checkpoint id is a decimal number without a leading zero, at most 9 digits. Id
 | code | meaning |
 |---|---|
 | 0 | done -- for `diff`, whatever it found, unless `--exit-code` |
-| 1 | `diff --exit-code`: some path is not unchanged (`unknown` counts) |
+| 1 | `diff --exit-code`: some path is not unchanged (`unknown` counts); `verify --exit-code`: some record is a `violation` (`protected_path_unverifiable` included; signals never) |
 | 2 | usage: an unknown option or command, a missing or malformed argument, a checkpoint that does not exist |
 | 3 | refused: the scope cannot be resolved, is not a directory, changed while it was resolved, or is the state directory or inside it; no state directory can be named; the state directory, or a directory above it, belongs to another user or others can write it |
 | 4 | failed: an I/O error (writing the output included), corrupt state, out of memory |
