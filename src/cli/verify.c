@@ -366,12 +366,14 @@ int cmd_verify(int argc, char **argv, FILE *out, FILE *err) {
 
     /* V5-R4: refused for a scope whose manifest has roots -- its latest
      * checkpoint's, in the scope's own state (read, never written here), or
-     * the one --to names. Before the bundle is read or anything is made. */
-    if (docker == NULL) {
+     * the one --to names. Before the bundle is read or anything is made.
+     * With no state root named at all the scope has no checkpoint to read,
+     * and verify needs none of its own: nothing to refuse. */
+    if (docker == NULL && (to_id != 0 || !state_root_unnamed())) {
         struct state own;
-        if (cli_open_scope(sc.path, NULL, false, false, &own, err) != 0) {
+        if ((rc = cli_open_scope(sc.path, NULL, false, false, &own, err)) != 0) {
             protect_free(&spec);
-            return EXIT_FAILED;
+            return rc;
         }
         rc = cli_refuse_system(&own, 0, "verify", err);
         if (rc == 0 && to_id != 0 && state_checkpoint_exists(&own, to_id) == 1) rc = cli_refuse_system(&own, to_id, "verify", err);

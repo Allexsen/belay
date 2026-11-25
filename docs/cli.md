@@ -327,6 +327,8 @@ record is a violation; signals never fail a run.
 
 `--to ID` judges checkpoint `ID` of the scope's own state instead of capturing now; with a spec,
 only a checkpoint that read every file (a `check`, or `mark --full`: its trailer's `trusted` is 0).
+Without `--to`, verify needs no state directory of the scope's own: with none of `HOME`,
+`XDG_STATE_HOME` and `BELAY_STATE_DIR` set it still runs.
 
 ## --docker: a container, read from the host
 
