@@ -132,6 +132,33 @@ else
     ok "the fetch is not tested on $(uname -s) $(uname -m): the plugin has no binary for it"
 fi
 
+# ---- a macOS older than the pinned release needs (TL-17): an Apple silicon Mac faked on PATH ----
+mkdir -p "$T/mac/fake" "$T/mac/rel"
+printf '#!/bin/sh\ncase $1 in -m) echo arm64 ;; *) echo Darwin ;; esac\n' > "$T/mac/fake/uname"
+printf '#!/bin/sh\n[ "$1" = -productVersion ] && [ -n "$FAKE_MACOS" ] && echo "$FAKE_MACOS"\n' > "$T/mac/fake/sw_vers"
+chmod 755 "$T/mac/fake/uname" "$T/mac/fake/sw_vers"
+printf 'version vtest\nmacos-arm64 %s\nmacos-min 15.0\n' 0000000000000000000000000000000000000000000000000000000000000000 > "$T/mac/pin"
+mac() { printf '%s' "$3" | FAKE_MACOS=$1 PATH="$T/mac/fake:$PATH" CLAUDE_PLUGIN_DATA="$T/mac/data" \
+    BELAY_PIN="${MACPIN:-$T/mac/pin}" BELAY_RELEASE_URL="file://$T/mac/rel" sh "$HOOK" "$2"; }
+is "on macOS 14.6, a release that needs 15.0 is said once at a session's start, and not fetched" \
+    "{\"systemMessage\":\"belay: $RED not recording: belay vtest needs macOS 15 or later (this is 14.6); build from source or update macOS\"}" \
+    "$(mac 14.6 start "{$S,\"source\":\"startup\"}")"
+is "and nothing is fetched" "" "$(ls "$T/mac/data/bin" 2>/dev/null)"
+is "a turn's end then says nothing" "" "$(mac 14.6 stop "{$S}")"
+is "nor does a tool call" "" "$(mac 14.6 pre "{$S,\"tool_use_id\":\"t\"}")"
+mac 14.6 start "{$S}" >/dev/null 2>&1; is "exit 0: a macOS too old" 0 $?
+mkdir -p "$T/mac/data/bin" && printf '#!/bin/sh\necho ran\n' > "$T/mac/data/bin/belay-vtest" && chmod 755 "$T/mac/data/bin/belay-vtest"
+has "a binary already fetched is not run on it either" "needs macOS 15 or later (this is 14.6)" "$(mac 14.6 start "{$S}")"
+rm -rf "$T/mac/data"
+has "macOS 15.0 itself is not too old: the fetch goes ahead" "could not fetch belay vtest" "$(mac 15.0 start "{$S}")"
+has "nor is 26.1" "could not fetch belay vtest" "$(mac 26.1 start "{$S}")"
+has "with no answer from sw_vers there is no check" "could not fetch belay vtest" "$(mac '' start "{$S}")"
+sed '/^macos-min/d' "$T/mac/pin" > "$T/mac/pin.nomin"
+has "with no macos-min in the pin there is no check" "could not fetch belay vtest" "$(MACPIN=$T/mac/pin.nomin mac 14.6 start "{$S}")"
+printf 'version vtest\nmacos-arm64 0\nmacos-min 13.3\n' > "$T/mac/pin.13"
+has "a minimum of 13.3 is said as 13.3, and 13.2.1 is older" "needs macOS 13.3 or later (this is 13.2.1)" "$(MACPIN=$T/mac/pin.13 mac 13.2.1 start "{$S}")"
+has "and 13.10 is not" "could not fetch belay vtest" "$(MACPIN=$T/mac/pin.13 mac 13.10 start "{$S}")"
+
 # ---- the manifests name what exists ----
 for arg in $(sed -n 's/.*belay-hook\\" \([a-z-]*\)".*/\1/p' "$HERE/hooks/hooks.json"); do
     printf '{}' | "$BIN" hook claude-code "$arg" >/dev/null 2>&1; rc=$?
