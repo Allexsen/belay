@@ -139,6 +139,14 @@ static int state_root(char *buf, size_t cap) {
     return 0;
 }
 
+bool state_root_unnamed(void) {
+    char buf[PATH_MAX];
+    if (state_root(buf, sizeof buf) == 0) return false;
+    const char *d = state_root_override != NULL ? state_root_override : getenv("BELAY_STATE_DIR");
+    belay_err_clear();
+    return d == NULL || d[0] == '\0';           /* else: set, not absolute, or too long */
+}
+
 /* The directory `name` under `pfd`, made first when `create`; never through
  * a symlink. The fd, or -1: errno ENOENT when it is not there and not made,
  * else belay_err. */

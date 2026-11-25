@@ -616,6 +616,36 @@ TEST(a_version_1_spec_is_refused_and_says_why) {
     ASSERT_EQ_INT(EXIT_DONE, verify_(false));
 }
 
+/* verify works in a state directory it makes in $TMPDIR (docs/cli.md): with no
+ * state directory nameable for the scope (no HOME, XDG_STATE_HOME or
+ * BELAY_STATE_DIR, as in a stripped CI environment) the scope has no checkpoint
+ * of its own, so nothing is refused and the run is judged. `--to` needs the
+ * scope's own state: refused (exit 3), as every command without one is. */
+TEST(verify_needs_no_state_directory_of_the_scope_s_own) {
+    fresh("{\"belay_protect\":2,\"protect\":[{\"path\":\"k\",\"mode\":[\"no_write\"]}]}");
+    sh("printf 'a\\n' > k");
+    REQUIRE_MSG(export_(true) == EXIT_DONE, "%s", g_err);
+    const char *home = getenv("HOME"), *xdg = getenv("XDG_STATE_HOME");
+    char *h = home != NULL ? strdup(home) : NULL, *x = xdg != NULL ? strdup(xdg) : NULL;
+    unsetenv("HOME");
+    unsetenv("XDG_STATE_HOME");
+    unsetenv("BELAY_STATE_DIR");
+    int rc = verify_(true);
+    if (rc != EXIT_DONE) BELAY_FAIL("verify: %d, %s", rc, g_err != NULL ? g_err : "");
+    ASSERT_TRUE(g_out != NULL && strstr(g_out, "{\"belay_policy\":1,") == g_out);
+    sh("printf 'b\\n' > k");
+    rc = verify_(true);
+    if (rc != EXIT_CHANGES) BELAY_FAIL("verify, k written: %d, %s", rc, g_err != NULL ? g_err : "");
+    ASSERT_EQ_INT(EXIT_REFUSED, belay("verify", "--scope", g_scope, "--baseline", g_bundle, "--baseline-sha256", g_sha,
+                                      "--protect", g_spec, "--to", "1", NULL));
+    ASSERT_TRUE(g_err != NULL && strstr(g_err, "no state directory") != NULL);
+    if (h != NULL) setenv("HOME", h, 1);
+    if (x != NULL) setenv("XDG_STATE_HOME", x, 1);
+    free(h);
+    free(x);
+    setenv("BELAY_STATE_DIR", g_state, 1);
+}
+
 TEST(a_marked_hash_is_no_hash_and_a_mode_still_speaks) {
 #ifndef __linux__
     SKIP("no lease facility here");
@@ -1389,6 +1419,7 @@ int main(void) {
     RUN(startup_hooks_git_hooks_and_history);
     RUN(no_write_forbids_deleting_and_no_delete_alone_allows_writing);
     RUN(a_version_1_spec_is_refused_and_says_why);
+    RUN(verify_needs_no_state_directory_of_the_scope_s_own);
     RUN(a_marked_hash_is_no_hash_and_a_mode_still_speaks);
     RUN(executables_on_path_and_privilege);
     RUN(a_long_text_is_cut_at_1024_bytes);

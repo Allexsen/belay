@@ -53,6 +53,12 @@ int scope_resolve_in(const char *docker, const char *path, struct scope *out);
  * policy prepared is ever read (structure §6, 4). */
 extern const char *state_root_override;
 
+/* True when the environment names no state root at all: no override, no
+ * BELAY_STATE_DIR, no absolute XDG_STATE_HOME or HOME (state_open then fails,
+ * "no state directory"). A BELAY_STATE_DIR that is set but not absolute is
+ * named, wrongly: false. */
+bool state_root_unnamed(void);
+
 /* Test hook: called between realpath() and the open that checks it, so a
  * test can swap a component in the window. NULL in the binary. */
 extern void (*scope_resolve_hook)(const char *resolved);
