@@ -33,6 +33,6 @@ it is and what a claim rests on. They are not documentation: for how belay behav
 | `walk-consistency-review-brief.md` | The request for a design review of walk consistency, with the torn-read measurements behind it. |
 | `reviews/` | Adversarial reviews by separate agents, by phase and by pull request; several carry the dispositions of their findings. |
 | `s3-phase4/`, `s3-phase5/` | Canary (mutation) runs for phases 4 and 5: the mutants, and which test killed each. |
-| `measurements/` | Dated measurements with their scripts and raw data: base rates of races under load, installer write patterns, the mark prefilter's timing, a stale NFS listing, a mutation rerun, and what the 146 EvilGenie test changes were. |
+| `measurements/` | Dated measurements with their scripts and raw data: base rates of races under load, installer write patterns, the mark prefilter's timing, a stale NFS listing, a mutation rerun, what the 146 EvilGenie test changes were, which EvilGenie runs changed a test file and put it back, and the runs that tried to undo a test change with git. |
 | `dogfood/fp-table.md` | How often each would-be flag fired on ordinary work. |
 | `dogfood/2026-11-04-setup-outside-scope.md` | A case where a receipt showed changes that the agent's own report left out. |
