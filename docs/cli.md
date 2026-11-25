@@ -12,6 +12,7 @@ belay exclude --scope DIR [--add PATH | --remove PATH]
 belay baseline export --scope DIR --out FILE [--protect SPEC] [--json]
 belay verify --scope DIR --baseline FILE --baseline-sha256 HEX [--protect SPEC] [--to ID] [--exit-code]
 belay watch step|close|mark|summary|receipt|patterns --scope DIR ...   (below)
+belay watch start|step|receipt|stop|summary|patterns --system ...   (below)
 belay hook claude-code EVENT
 belay help [command]  |  belay <command> --help  |  belay --version
 ```
@@ -87,7 +88,7 @@ as `unknown`, `not_captured`, never as removed or added, and derives no package 
 control character; at most 31 per scope, each once, and no more than a manifest's header line can
 name (64 KiB, every number at its widest): `--add` refuses one past that, and a capture refuses to
 write a header it could not read back (exit 4); an `excludes` file that is not what belay
-writes is corrupt state (exit 4). Protected paths (a later milestone) will never be excludable.
+writes is corrupt state (exit 4). An exclude that covers a protected pattern is refused (exit 3; see `--protect SPEC` below).
 
 ## The state directory
 

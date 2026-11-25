@@ -21,5 +21,5 @@ anything exploitable.
 
 Include what you did, what happened, and what you expected. A reproduction case helps most.
 
-Since belay is pre-alpha with no releases, there is no supported-versions table yet and no fixed
-response window. Reports will be read and answered.
+Since belay is pre-alpha and only pre-releases exist, the latest pre-release is the only one that gets
+fixes; there is no supported-versions table and no fixed response window. Reports will be read and answered.
