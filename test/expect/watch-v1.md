@@ -350,6 +350,7 @@ lasts.
 | TL-14b | TL-14, in the Claude Code adapter (its session-start line and TL-14a's answer) | `not watching DIR: too wide. Start Claude Code in a project directory to record it.`, DIR `~ (your home directory)` when it is `$HOME`; `belay watch`'s own line stays TL-14's. At each Stop, the whole line `belay: not recording: DIR is too wide`, with no red circle, DIR `~` when it is `$HOME`, else the path |
 | TL-15 | Calls or markers older than a day were dropped | `N calls of a session that ended without saying so were closed` |
 | TL-16 | What an event did after its step was written failed (its marker's line, its summary) | after the step's own line: `this step is recorded; what came after it failed: ` and belay's message. The step is not said to be lost, and the next step does not record it again |
+| TL-17 | The Claude Code plugin's wrapper on Apple silicon, where `sw_vers -productVersion` is older than the pin's `macos-min` | at a session's start only, said by the wrapper (the binary is neither fetched nor run, and no other event says anything): `not recording: belay VERSION needs macOS MIN or later (this is OS); build from source or update macOS`, MIN without a trailing `.0`. No `macos-min` line, or no `sw_vers` answer: no check |
 
 The stages are `waiting for the lock`, `capturing`, `matching`, `rendering`.
 
