@@ -24,6 +24,7 @@ macos-portable | actions/checkout@v5 | setup
 macos-portable | uname -m | setup
 macos-portable | platform summary | setup
 macos-portable | build + test | check
+macos-portable | the binary starts on macOS 11.0 (its minos) | check
 asan-ubsan | actions/checkout@v5 | setup
 asan-ubsan | uname -m | setup
 asan-ubsan | platform summary | setup
