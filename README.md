@@ -50,7 +50,7 @@ Tested against 2,115 published agent runs: [results](bench/replay/RESULTS.md).
   [version 4](test/expect/manifest-v4.md), [version 2](docs/spec/manifest-v2.md) and
   [version 1](docs/spec/manifest-v1.md); belay still reads versions 1 to 4) and the diff format
   (diff.v1, a draft).
-- Tests on Linux (x86_64, arm64), on macOS, and inside a Docker container as an unprivileged user,
+- Tests on Linux (x86_64, arm64), on macOS 15 or later (Apple silicon), and inside a Docker container as an unprivileged user,
   in CI on every change.
 
 ## What does not exist

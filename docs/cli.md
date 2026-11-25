@@ -386,6 +386,11 @@ walk inside the container would write. The scope is a path in the container, and
   replacing it (deleting and recreating, or renaming another file over it) still shows. It is
   also not said for a directory, for anything on a volume or bind mount, or without `--docker`:
   the header's `not_emitted` then names it.
+- **Tested on, and not.** `--docker` is tested in CI on rootful Docker on Linux x86_64, with the overlay2
+  and containerd image stores, on running and paused containers. It refuses rootless Docker, podman,
+  btrfs, zfs and vfs storage, and Docker Desktop, each with a message. It has not been run with
+  user-namespace remapping (`userns-remap`), on Kubernetes or containerd without Docker, or on arm64
+  hosts.
 - **Mounts inside the scope** (volumes, bind mounts, the files Docker binds) are recorded as
   boundaries, with nothing below them read.
 
