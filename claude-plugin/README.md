@@ -110,7 +110,9 @@ prints it: nothing filtered, git-ignored files included, and `.git` folded into 
 The first session fetches one file: the belay binary for your platform, of the release named in
 [hooks/pin](hooks/pin), from this repository's GitHub releases. The wrapper runs it only if its
 sha256 is the one in that file. Nothing else is fetched, then or later, and belay itself makes no
-network calls. Linux x86_64 and arm64, and macOS 15 or later on Apple silicon only. The wrapper needs `sh`,
+network calls. Linux x86_64 and arm64, and macOS on Apple silicon only, from the version the
+pin's `macos-min` names (macOS 15 for this release): on an older macOS nothing is fetched, and a
+session's start says so. The wrapper needs `sh`,
 `curl` and `sha256sum` or `shasum`. The binary is kept under `~/.claude/plugins/data/belay-belay/bin/`
 (under `~/.local/share/belay-claude-code/bin/` when `CLAUDE_PLUGIN_DATA` is not set), and is fetched
 at the first session start.
