@@ -29,6 +29,15 @@ PLATFORM_SRC	= src/platform/fsops_posix.c src/platform/fsops_linux.c
 else
 PLATFORM_SRC	= src/platform/fsops_posix.c src/platform/fsops_macos.c
 endif
+# macOS: the oldest release the binary starts on (its LC_BUILD_VERSION minos).
+# Apple silicon begins at 11.0, and every call belay makes is older (the
+# alpha.11 binary's imports, 2026-11-25). Exported, so every compile and link
+# here gets it; an API newer than it, used without a check, fails the build.
+ifeq ($(UNAME_S),Darwin)
+MACOS_MIN	?= 11.0
+export MACOSX_DEPLOYMENT_TARGET := $(MACOS_MIN)
+WARN	+= -Werror=unguarded-availability
+endif
 CORE_SRC	= $(wildcard src/util/*.c src/schema/*.c src/capture/*.c src/diff/*.c src/interp/*.c src/policy/*.c) $(PLATFORM_SRC)
 CORE_OBJ	= $(CORE_SRC:src/%.c=$(BUILD)/%.o)
 SAN_CORE_OBJ	= $(CORE_SRC:src/%.c=$(SAN_BUILD)/%.o)
@@ -71,6 +80,7 @@ all: $(BIN) $(SESSION_OBJ)
 # Prints what this platform will build. Useful in CI logs.
 platform:
 	@echo "uname -s : $(UNAME_S)"
+	@$(if $(filter Darwin,$(UNAME_S)),echo "macOS    : $(MACOS_MIN) or later (MACOSX_DEPLOYMENT_TARGET)",true)
 	@echo "core     : $(words $(CORE_SRC)) file(s)"
 	@echo "session  : $(words $(SESSION_SRC)) file(s) $(if $(filter Linux,$(UNAME_S)),(built),(skipped: not Linux))"
 	@echo "tests    : $(words $(TEST_SRC)) file(s)"

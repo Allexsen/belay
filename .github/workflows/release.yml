@@ -33,6 +33,13 @@ on:
 permissions:
   contents: read
 
+# The oldest macOS the macOS binary starts on: the Makefile builds with it as
+# MACOSX_DEPLOYMENT_TARGET, the build checks the binary's minos is it, and the
+# wheel that vendors the binary is tagged for it. The plugin's pin says it as
+# `macos-min`.
+env:
+  MACOS_MIN: '11.0'
+
 jobs:
   build:
     name: build ${{ matrix.target }}
@@ -65,6 +72,13 @@ jobs:
           mkdir dist
           cp bin/belay "dist/belay-${GITHUB_REF_NAME}-${{ matrix.target }}"
           file "dist/belay-${GITHUB_REF_NAME}-${{ matrix.target }}"
+      - name: the macOS binary starts on macOS ${{ env.MACOS_MIN }} (its minos)
+        if: runner.os == 'macOS'
+        run: |
+          f="dist/belay-${GITHUB_REF_NAME}-${{ matrix.target }}"
+          otool -l "$f" | grep -A4 LC_BUILD_VERSION
+          got=$(otool -l "$f" | awk '$2 == "LC_BUILD_VERSION" { b = 1 } b && $1 == "minos" { print $2; exit }')
+          [ "$got" = "$MACOS_MIN" ] || { echo "$f has minos ${got:-none}, not $MACOS_MIN" >&2; exit 1; }
       - uses: actions/attest-build-provenance@v2
         with:
           subject-path: dist/*
@@ -129,6 +143,16 @@ jobs:
           sort released/SHA256SUMS > want
           diff want got
           for f in dist/belay-*; do gh attestation verify "$f" --repo "$GITHUB_REPOSITORY"; done
+      - name: the macOS wheel's tag is its binary's minos
+        run: |
+          minos=$(python3 -I -c 'import struct, sys
+          d = open(sys.argv[1], "rb").read(); o = 32
+          for _ in range(struct.unpack_from("<I", d, 16)[0]):
+              c, n = struct.unpack_from("<II", d, o)
+              if c == 0x32: v = struct.unpack_from("<I", d, o + 12)[0]; print(f"{v >> 16}.{(v >> 8) & 255}"); break
+              o += n' "dist/belay-${GITHUB_REF_NAME}-macos-arm64")
+          [ "$minos" = "$MACOS_MIN" ] || { echo "the macOS binary's minos is ${minos:-none}, not $MACOS_MIN" >&2; exit 1; }
+          echo "MACOS_TAG=macosx_$(printf %s "$minos" | tr . _)_arm64" >> "$GITHUB_ENV"
       - name: build the wheels
         run: |
           python3 -m pip install -q build wheel
@@ -136,7 +160,7 @@ jobs:
           keys="dist/belay-${GITHUB_REF_NAME}-linux-x86_64"
           for t in linux-x86_64:manylinux_2_17_x86_64.musllinux_1_1_x86_64 \
                    linux-arm64:manylinux_2_17_aarch64.musllinux_1_1_aarch64 \
-                   macos-arm64:macosx_15_0_arm64; do
+                   "macos-arm64:$MACOS_TAG"; do
             # Each wheel carries the Linux binaries it doesn't vendor, for sandboxes (PY-D4).
             python3 python/build_keys.py "$keys" "dist/belay-${GITHUB_REF_NAME}-${t%%:*}" \
               "dist/belay-${GITHUB_REF_NAME}-linux-x86_64" "dist/belay-${GITHUB_REF_NAME}-linux-arm64"
@@ -145,6 +169,7 @@ jobs:
             python3 -m wheel tags --remove --python-tag py3 --abi-tag none --platform-tag "${t#*:}" "wheels-${t%%:*}"/*.whl
           done
           mkdir wheels && mv wheels-*/*.whl wheels/
+          ls wheels/*-py3-none-"$MACOS_TAG".whl
           (cd wheels && sha256sum *.whl > WHEELS-SHA256SUMS && cat WHEELS-SHA256SUMS)
       - uses: actions/attest-build-provenance@v2
         with:

@@ -101,6 +101,13 @@ jobs:
       # builds, links and tests here.
       - name: build + test
         run: make check
+      # Built for macOS 11.0 (the Makefile's MACOS_MIN), tested here on 15:
+      # no runner older than 15 is left to start it on.
+      - name: the binary starts on macOS 11.0 (its minos)
+        run: |
+          otool -l bin/belay | grep -A4 LC_BUILD_VERSION
+          got=$(otool -l bin/belay | awk '$2 == "LC_BUILD_VERSION" { b = 1 } b && $1 == "minos" { print $2; exit }')
+          [ "$got" = 11.0 ] || { echo "bin/belay has minos ${got:-none}, not 11.0" >&2; exit 1; }
 
   sanitizers:
     name: asan-ubsan
