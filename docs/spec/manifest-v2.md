@@ -1,6 +1,6 @@
 # belay manifest format, version 2
 
-Status: the format belay writes from v0.1.0-alpha on. Pinned in `test/expect/manifest-v2.md`.
+Status: written by v0.1.0-alpha to v0.1.0-alpha.2; superseded by later versions (see the release notes), and still read. Pinned in `test/expect/manifest-v2.md`.
 
 A version 2 manifest is a [version 1 manifest](manifest-v1.md) -- every rule of that document and
 of its addendum (`test/expect/manifest-v1-addendum.md`), byte for byte: the canonical encoding,

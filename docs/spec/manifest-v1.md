@@ -1,6 +1,6 @@
 # belay manifest format, version 1
 
-Status: draft. Stable once M1 ships; `diff.v1` (the public diff schema) is a separate document.
+Status: stable, and only read now (see [version 2](manifest-v2.md) onward); `diff.v1` (the public diff schema) is a separate document.
 
 A manifest is the record of what a scope looked like at one instant. `belay check` writes one;
 `belay diff --since <id>` compares two.
@@ -197,7 +197,7 @@ A reader rejects a key this version does not define, so the format grows **only 
 bump**, which older readers refuse: a field an older reader skipped would be read as absent, and
 absence means something for most fields (as it would have for `unreadable`, `unstable` and
 `rdev`). `unreadable`, `unstable`, `rdev`, `raced` and the trailer counts `mounts` and `raced` are
-part of version 1 because version 1 has not shipped.
+part of version 1 because version 1 had not shipped when they were added.
 
 ## Trailer
 
@@ -412,7 +412,7 @@ POSIX paths are **bytes**, not text. They may contain anything except `/` and NU
 Sorting is on the **raw path bytes** either way, so an entry's encoding does not affect its position.
 
 **Entry paths are relative to the scope root and must stay inside it.** A reader MUST reject an
-absolute path and any path containing a `..` component. M1 only reads, but the moment anything
+absolute path and any path containing a `..` component. belay only reads a version 1 manifest, but the moment anything
 restores from a manifest an accepted `../../etc/passwd` is an arbitrary write. This is the same
 hidden-traversal risk the NUL rule above exists to prevent.
 

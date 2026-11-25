@@ -45,16 +45,23 @@ same place.
 - **When a session starts, one line** naming the directory it records: `belay: recording
   ~/code/webapp`.
 - **After a tool call that changed something, one line.** What is flagged comes first, with why;
-  the rest is counted, and named when there are three or fewer.
+  the rest is counted, and named when there are three or fewer. A `git pull` or `git merge` that
+  added commits leads the line: `belay: git pull: main moved to 9c5d2f2 (fast-forward) · 17 changes
+  in the tree: 3 added, 2 removed, 12 modified`.
+- **A file put back, or touched.** A file whose content is again what it was when the session
+  started is named `belay: 🔴 tests/test_app.py put back (as before step 2)`; a test file or flagged
+  path written within one call, its content as before, `belay: 🔴 tests/test_app.py touched
+  (content as before)`. Each is an item of its own.
 - **`belay: outside tool calls:`** the same line, for what changed between calls: a background
   process, another program, or you.
 - **When the agent stops:** a line for what the turn flagged, a line for what it noted, then how
-  many entries changed in how many calls, ending in `full receipt: /belay:receipt`. A turn that
+  many entries changed in how many calls, ending in `full receipt: /belay:receipt`; files put back
+  or touched are counted beside it (`6 changed this turn, 1 put back, 1 touched, in 6 tool calls`). A turn that
   changed nothing says `belay: nothing changed this turn`.
 - **When belay could not record,** a line says so and why (`belay: 🔴 could not record in 45 s:
   capturing`), and the turn's end repeats it. It is never silent about a step it lost.
 
-Every changed entry is counted in exactly one line. The lines go to you, as Claude Code's
+Every changed entry is counted in exactly one line, except a file put back or touched, which is an item of its own and also counted in the turn's total. The lines go to you, as Claude Code's
 `systemMessage`; the hook adds nothing to the model's context. Claude Code puts its own label
 before every line of a hook's message (`PostToolUse:Bash says:`), and a hook cannot change it.
 

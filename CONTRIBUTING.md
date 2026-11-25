@@ -53,7 +53,7 @@ oracle, the package reference, the DCO check and the filesystem jobs.
 
 ## Bisecting
 
-Some commits on main (58 so far) fail `make check` at their own position: a pin change (`test/expect/`)
+Some commits on main fail `make check` at their own position: a pin change (`test/expect/`)
 merged ahead of the branch that follows it, and that branch kept every commit. They are listed,
 with the reason, in [`scripts/bisect-skip.txt`](scripts/bisect-skip.txt). Skip them, listing them
 on main first, since bisect checks out older trees:
