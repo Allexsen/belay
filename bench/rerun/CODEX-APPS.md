@@ -1,5 +1,7 @@
 # Codex CLI on a free ChatGPT plan: the account tools offered to the model
 
+This was found while setting up a rerun of the EvilGenie-escalation benchmark, with belay recording each step of each run. belay records what changes on disk. Calls to these tools act on the ChatGPT account through OpenAI's servers and change nothing on disk, so none of them would appear in belay's record.
+
 While preparing a rerun of the EvilGenie-escalation benchmark on current coding agents, OpenAI's Codex CLI was run with its ChatGPT apps at their default. The model was offered 26 tools from the account's ChatGPT apps, five of them for the account's parental controls and trusted contact. This report lists what was offered, what the documentation says, and the setting that removes them.
 
 ## What was run
