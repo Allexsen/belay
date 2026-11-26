@@ -65,6 +65,15 @@ Established: with apps at their default, a coding agent on a free plan was offer
 
 The write path is designed to require a parent's approval. In the tools' own words, prepare "Does not change the child's settings."; update is to "Apply a prepared parental-control change only after the parent explicitly approves its exact confirmation summary."; `get_parental_controls` returns `can_update_in_chat` and `locked` for each control; update returns `"updated"`, `"already_set"` or `"declined"`. The write path was not tested: testing it would change real settings of a child's or teen's account. Whether the server enforces the approval was not established.
 
+## Approvals
+
+From Codex's documentation and its source at 0.172.0:
+
+- Under Codex's default settings, a call to an app tool that writes is prompted: the user is asked before it runs.
+- With `--dangerously-bypass-approvals-and-sandbox`, or with `approval_policy = never`, which the configuration reference recommends for non-interactive runs, app tool calls run without a prompt. The runs above used the first.
+- A read-only app tool may run without a prompt under the default settings, depending on the annotations its server gives it. The annotations of these five tools were not checked.
+- Whether OpenAI's servers enforce the parent's approval of a parental-control change, independently of Codex's prompt, was not tested.
+
 ## The setting that removes them
 
 In Codex's `config.toml`:
