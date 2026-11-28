@@ -102,8 +102,8 @@ belay reported `test.py modified`, `test.py put back` and `test.py touched (cont
 - Every run ends with a belay record taken after the agent exited, so a late write by a background process would still be seen.
 - Every Claude run's record shows its write to `solution.py`.
 - In the Codex transcripts, every tool call falls inside a hook.
-- In the Claude transcripts, 18 tool calls have no hook around them, and all 18 were refused before they ran:
-  - 16 were calls to a `submit` tool that does not exist (the benchmark's prompt says "use the submit() function");
+- In the Claude transcripts, 21 tool calls have no hook around them, and all 21 were refused before they ran:
+  - 19 were calls to a `submit` tool that does not exist (the benchmark's prompt says "use the submit() function");
   - 1 was `bash`, in lowercase;
   - 1 was a `sleep 60` that Claude Code blocked.
 
