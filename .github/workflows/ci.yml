@@ -8,7 +8,8 @@ on:
 permissions:
   contents: read
 
-# BELAY_DESIGN.md §9.1 test matrix. Every job here is a required check of
+# BELAY_DESIGN.md §9.1 test matrix. A change of prose only runs dco alone (see dco).
+# Every job here is a required check of
 # main's branch protection (test/accounting/required-checks.txt), every platform
 # runs the full `make check`, and scripts/check-ci.py fails the build if a job
 # or step could go red without failing (continue-on-error, if:, || true).
@@ -24,6 +25,8 @@ permissions:
 jobs:
   build-linux-x86_64:
     name: linux-x86_64
+    needs: dco
+    if: ${{ needs.dco.outputs.code == 'true' }}
     runs-on: ubuntu-24.04
     env:
       BELAY_SKIP_PROFILE: linux-x86_64
@@ -57,6 +60,8 @@ jobs:
 
   build-linux-arm64:
     name: linux-arm64
+    needs: dco
+    if: ${{ needs.dco.outputs.code == 'true' }}
     runs-on: ubuntu-24.04-arm
     env:
       BELAY_SKIP_PROFILE: linux-arm64
@@ -83,6 +88,8 @@ jobs:
 
   test-macos:
     name: macos-portable
+    needs: dco
+    if: ${{ needs.dco.outputs.code == 'true' }}
     # macos-14 is retired on 2026-11-02 and failed in GitHub's scheduled
     # brownouts before that (actions/runner-images#13518).
     runs-on: macos-15
@@ -111,6 +118,8 @@ jobs:
 
   sanitizers:
     name: asan-ubsan
+    needs: dco
+    if: ${{ needs.dco.outputs.code == 'true' }}
     runs-on: ubuntu-24.04
     env:
       BELAY_SKIP_PROFILE: asan-ubsan
@@ -129,6 +138,8 @@ jobs:
 
   fuzz:
     name: fuzz
+    needs: dco
+    if: ${{ needs.dco.outputs.code == 'true' }}
     runs-on: ubuntu-24.04
     # §0.4c: fuzz targets for the path utilities and the manifest reader --
     # the two places untrusted input meets parsing. Short runs gate PRs.
@@ -140,6 +151,12 @@ jobs:
   dco:
     name: dco
     runs-on: ubuntu-24.04
+    # It also decides the docs-only path: when every changed file is prose no build
+    # or test reads (test/accounting/docs-only.txt), the other jobs are skipped, and
+    # a job skipped by its condition reports success (scripts/ci-changes.sh,
+    # check-ci.py rule 5). Anything it cannot decide runs every job.
+    outputs:
+      code: ${{ steps.classify.outputs.code }}
     # §4.5: Apache-2.0 + DCO sign-off, enforced from 2026-10-20 forward.
     # Comparing base..head means pre-cutoff commits are never examined, so the
     # no-backfill decision is structural rather than a hardcoded date. On a
@@ -159,9 +176,17 @@ jobs:
           BASE: ${{ github.event.pull_request.base.sha || github.event.before }}
           HEAD: ${{ github.event.pull_request.head.sha || github.sha }}
         run: ./scripts/check-addendum.sh "$BASE" "$HEAD"
+      - name: classify the change (docs only?)
+        id: classify
+        env:
+          BASE: ${{ github.event.pull_request.base.sha || github.event.before }}
+          HEAD: ${{ github.event.pull_request.head.sha || github.sha }}
+        run: ./scripts/ci-changes.sh "$BASE" "$HEAD" >> "$GITHUB_OUTPUT"
 
   docker:
     name: docker
+    needs: dco
+    if: ${{ needs.dco.outputs.code == 'true' }}
     runs-on: ubuntu-24.04
     # M1 done-criterion, gap (a): the portable engine inside a container, and
     # /usr-in-Docker timing. The image's /usr sits on overlayfs, so this also
@@ -212,6 +237,8 @@ jobs:
 
   filesystems:
     name: filesystems
+    needs: dco
+    if: ${{ needs.dco.outputs.code == 'true' }}
     runs-on: ubuntu-24.04
     # Gap (b): every HIGH review finding was about a change during the walk on
     # filesystems other than local ext4 -- NFS, coarse timestamps, btrfs

@@ -35,6 +35,7 @@ fuzz | fuzz (clang/libFuzzer) | check
 dco | actions/checkout@v5 | setup
 dco | check Signed-off-by on new commits | check
 dco | the manifest addendum is append-only | check
+dco | classify the change (docs only?) | setup
 docker | actions/checkout@v5 | setup
 docker | build + test + /usr timing inside ubuntu:24.04 | check
 docker | host reader, static build | setup
