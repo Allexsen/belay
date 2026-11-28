@@ -1,7 +1,13 @@
 # belay
 
-**Intent:** record what changed on a system, explain it in semantic terms rather than as a path
-list, and make it reversible.
+belay records what a coding agent does to your files, one tool call at a time, so you can check it
+against what the agent says it did.
+
+Of 146 published EvilGenie runs that changed a test file, 2 said so in their submitted answer or
+last message, and 7 pointed at the change without saying the run made it; the answers were read from
+the transcripts ([test changes](bench/replay/TEST-CHANGES.md)). On three current models run through
+their vendors' CLIs, a different setup from the published runs, none of 405 runs changed a test file
+([rerun](bench/rerun/RESULTS.md)).
 
 **Status: pre-alpha.** The checkpoint and diff engine runs (below); the formats it writes are drafts
 that may still change, and the latest pre-release is v0.1.0-alpha.11. Nothing that changes your files
@@ -56,7 +62,8 @@ Tested against 2,115 published agent runs: [results](bench/replay/RESULTS.md).
 ## What does not exist
 
 No `commit`, `discard`, restore or undo: belay records and explains, and changes nothing. The
-session engine under `src/session/` (namespaces and overlays) is not part of the `belay` binary.
+session engine under `src/session/` (namespaces and overlays) is deferred, and not part of the
+`belay` binary.
 No stable release.
 
 ## Deliberate limits

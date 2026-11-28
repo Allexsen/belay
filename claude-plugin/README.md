@@ -14,6 +14,9 @@ two when the agent stops, with the turn's totals. And a full receipt, with nothi
      belay: 8 changed this turn in 1 tool call · full receipt: /belay:receipt
 ```
 
+A real Claude Code session, on a demo project built for it: its vendored package `tiny-slug` adds a
+git hook when installed.
+
 The plugin is a thin wrapper: everything it says and records is done by the belay binary
 (`belay hook claude-code`, `belay watch`), which behaves the same in a terminal, in the VS Code
 extension and by hand. What a line says, and when, is pinned in
