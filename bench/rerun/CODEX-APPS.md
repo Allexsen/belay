@@ -85,11 +85,48 @@ apps = false
 
 The five runs made with this setting (the same problem, conditions A to E, started on 2026-11-26 between 07:47 and 07:52 UTC) hold no `mcp__codex_apps__` name in any of their logs.
 
+## Plugins: three downloads at startup, with apps off
+
+With `apps = false`, Codex still tried to download three plugin bundles at the start of every run. This was found afterwards, in the proxy log of the benchmark rerun.
+
+**What the log shows.** The rerun's 135 `gpt-6-luna` runs had network access only to `chatgpt.com` and `auth.openai.com`, through an allowlist proxy. In each run, within 2 seconds of the start and before the model's first tool call, the proxy refused exactly three connections to port 443 of two hosts: two to `sdmntprsouthcentralus.oaiusercontent.com` and one to `sdmntprcentralus.oaiusercontent.com`. The runs went on normally.
+
+**What the source says** (the `rust-v0.172.0` tag, `codex-rs/`):
+
+- At startup, `codex exec` starts a background sync of the account's installed remote plugins (`core-plugins/src/manager.rs`, `maybe_start_plugin_startup_tasks_for_config`).
+- The sync asks the ChatGPT backend for the installed plugins with their download URLs, then fetches each plugin's bundle from the URL the server gave (`core-plugins/src/remote/remote_installed_plugin_sync.rs`, `core-plugins/src/remote_bundle.rs`). The host is the server's choice: no `oaiusercontent` name is in the source.
+- A failed download is logged as a warning and the run continues. The warning goes to Codex's trace log, not to stderr at its default level.
+- The sync runs when plugins are enabled and the CLI is signed in. `features.plugins` is on by default.
+
+**Checked** on 2026-11-28, with the same version, account, container and proxy, by one trivial `codex exec` call per setting (`RUST_LOG=warn,codex_core_plugins=debug`):
+
+| `[features]` | refused connections | Codex's log |
+|---|---|---|
+| `apps = false` (the runs' setting) | 3, to the two `oaiusercontent.com` hosts | three lines `failed to download remote installed plugin bundle`, for the plugins `work-pets`, `plugin-management` and `visualize` of the marketplace `openai-curated-remote` |
+| `apps = false`, `plugins = false` | 0 | no plugin line |
+| `apps = false`, `remote_plugin = false` | 5: the same 3, and one each to `api.github.com` and `files.openai.com` | the same three lines, and `failed to sync curated plugins repo` |
+
+So `plugins = false` stops the downloads. `remote_plugin = false` does not, and adds a sync of a curated plugins repository.
+
+```toml
+[features]
+apps = false
+plugins = false
+```
+
+**What else `plugins = false` changed.** Nothing that this check could see: `codex features list` differs in that one line, the call completed, and the developer messages the model received have the same lengths and headings, the "Plugins and Apps" heading included. The check was one trivial call and did not compare the tools offered.
+
+**Not established:**
+
+- What the three bundles contain. No download succeeded here, so what a plugin's bundle adds to a run was not observed.
+- Whether the three plugins are installed for every account or for this one.
+
 ## Limits
 
 - One account, one plan (free), one Codex version (0.172.0), one model (`gpt-6-luna`), one day. What is offered may differ by plan, account, version or model.
 - No account tool was called, so what the read tools return was not observed.
 - The write path was not tested, and whether the server enforces the parent's approval was not established.
+- The plugins check was one call per setting, on 2026-11-28.
 - The session logs are not published: they hold account identifiers.
 
 ## Reproduction
