@@ -17,6 +17,10 @@ Rules:
      `check` or as `setup`, and every listed check exists: a check step cannot
      disappear unnoticed.
   4. Hermetic harnesses (R10): no script links "every .o found".
+  5. The one exception to rule 1: a job may carry exactly `if: ${{ needs.dco.outputs.code == 'true' }}`,
+     the docs-only path (scripts/ci-changes.sh, run by dco: false only when every changed
+     file is on test/accounting/docs-only.txt). A job skipped that way reports success, so
+     the list must hold only prose: no build or test file may name a path on it.
 The workflow is parsed by indentation (no YAML library: the docker and macOS
 jobs run this without one); it understands the subset ci.yml uses.
 """
@@ -30,6 +34,11 @@ ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 WORKFLOW = os.path.join(ROOT, '.github', 'workflows', 'ci.yml')
 REQUIRED = os.path.join(ROOT, 'test', 'accounting', 'required-checks.txt')
 CHECKS = os.path.join(ROOT, 'test', 'accounting', 'checks.txt')
+DOCS_ONLY = os.path.join(ROOT, 'test', 'accounting', 'docs-only.txt')
+# The only job condition allowed (rule 5).
+GATE = "${{ needs.dco.outputs.code == 'true' }}"
+# Where a build or test would name a file it reads.
+READERS = ('Makefile', 'test', 'scripts', 'src', 'python', 'claude-plugin', '.github', 'bench')
 
 
 def parse(text):
@@ -62,7 +71,9 @@ def parse(text):
             key = s.split(':', 1)[0]
             if key == 'name':
                 job['name'] = s.split(':', 1)[1].strip()
-            if key in ('if', 'continue-on-error'):
+            if key == 'if' and s.split(':', 1)[1].strip() == GATE:
+                job['gated'] = True
+            elif key in ('if', 'continue-on-error'):
                 job['flags'].add(key)
             continue
         if ind == 6 and s.startswith('- '):
@@ -90,7 +101,7 @@ def parse(text):
         for st in j['steps']:
             label = st['name'] or (st['run'].strip().split('\n')[0] if st['run'] else st['uses'])
             steps.append((label, st['run'], st['flags']))
-        out[j['name']] = {'flags': j['flags'], 'steps': steps}
+        out[j['name']] = {'flags': j['flags'], 'steps': steps, 'gated': j.get('gated', False)}
     return out
 
 
@@ -98,9 +109,16 @@ def lines(path):
     return [l.strip() for l in open(path) if l.strip() and not l.lstrip().startswith('#')]
 
 
-def check(text, required, checks, scripts):
+def check(text, required, checks, scripts, docs_only=(), readers=()):
     errs = []
     jobs = parse(text)
+    for e in docs_only:
+        if '/' not in e.rstrip('/'):
+            continue                                # root README.md: by hand (docs-only.txt)
+        for name, text_ in readers:
+            listed = any(name == d or (d.endswith('/') and name.startswith(d)) for d in docs_only)
+            if not listed and re.search(r'(?<![\w./-])' + re.escape(e), text_):
+                errs.append('docs-only.txt lists %s, but %s names it: a job skipped for it would not test that' % (e, name))
     for jn, j in jobs.items():
         for f in sorted(j['flags']):
             errs.append('job %s: `%s` (a job that can be skipped or fail softly gates nothing)' % (jn, f))
@@ -136,6 +154,22 @@ def check(text, required, checks, scripts):
     return errs
 
 
+def readers_text():
+    out = []
+    for top in READERS:
+        p0 = os.path.join(ROOT, top)
+        paths = [p0] if os.path.isfile(p0) else [os.path.join(dp, f) for dp, _, fs in os.walk(p0) for f in fs]
+        for p in paths:
+            rel = os.path.relpath(p, ROOT)
+            if rel in ('scripts/check-ci.py', 'test/accounting/docs-only.txt'):
+                continue                            # the rule and its list, not readers
+            try:
+                out.append((rel, open(p, encoding='utf-8').read()))
+            except (UnicodeDecodeError, OSError):
+                continue
+    return out
+
+
 def scripts_text():
     out = []
     for dp, _, fs in os.walk(os.path.join(ROOT, 'scripts')):
@@ -161,6 +195,9 @@ def selftest():
         ('rejects continue-on-error', good.replace('        run: make check', '        run: make check\n        continue-on-error: true'), req, chk, [], True),
         ('rejects a step if:', good.replace('      - name: build', '      - name: build\n        if: false'), req, chk, [], True),
         ('rejects a job if:', good.replace('    name: one', '    name: one\n    if: false'), req, chk, [], True),
+        ('accepts the docs-only gate on a job', good.replace('    name: one', '    name: one\n    if: ' + GATE), req, chk, [], False),
+        ('rejects another condition on a job', good.replace('    name: one', '    name: one\n    if: ' + GATE.replace('true', 'false')), req, chk, [], True),
+        ('rejects the gate on a step', good.replace('      - name: build', '      - name: build\n        if: ' + GATE), req, chk, [], True),
         ('rejects || true', good.replace('make check', 'make check || true'), req, chk, [], True),
         ('rejects a job not required', good, [], chk, [], True),
         ('rejects a required check with no job', good, req + ['two'], chk, [], True),
@@ -174,6 +211,13 @@ def selftest():
     for name, text, r, c, s, want_err in cases:
         got = bool(check(text, r, c, s))
         if got != want_err:
+            print('check-ci selftest FAILED: %s' % name)
+            bad = 1
+    for name, docs, readers, want_err in (
+            ('accepts a docs-only path nothing names', ['bench/x/REPORT.md'], [('Makefile', 'all:')], False),
+            ('rejects a docs-only path a build file names', ['bench/x/REPORT.md'], [('Makefile', 'x: bench/x/REPORT.md')], True),
+            ('rejects a docs-only directory a test names', ['docs/notes/'], [('test/t.sh', 'cat docs/notes/a.md')], True)):
+        if bool(check(good, req, chk, [], docs, readers)) != want_err:
             print('check-ci selftest FAILED: %s' % name)
             bad = 1
     return bad
@@ -202,7 +246,8 @@ def main():
     if selftest():
         print('check-ci: its own selftest failed; no verdict')
         return 1
-    errs = check(open(WORKFLOW).read(), lines(REQUIRED), lines(CHECKS), scripts_text())
+    errs = check(open(WORKFLOW).read(), lines(REQUIRED), lines(CHECKS), scripts_text(),
+                 lines(DOCS_ONLY), readers_text())
     if '--protection' in sys.argv:
         errs += protection()
     for e in errs:

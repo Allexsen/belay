@@ -1,0 +1,14 @@
+# Prose no build or test reads. A change touching only these skips every CI job
+# but dco (scripts/ci-changes.sh). One path per line; a line ending in / is a
+# directory. Not "*.md": docs/spec/*.md and test/expect/*.md are build and test
+# inputs. scripts/check-ci.py fails if a build or test file names a path below
+# (README.md at the root is checked by hand: its mentions in bench/corpus,
+# scripts/policy-model and a fuzz seed are fixtures that write their own).
+README.md
+claude-plugin/README.md
+bench/rerun/RESULTS.md
+bench/rerun/CODEX-APPS.md
+bench/replay/RESULTS.md
+bench/replay/TEST-CHANGES.md
+bench/measure/TORN-READS.md
+docs/notes/
