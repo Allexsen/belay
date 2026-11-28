@@ -1,0 +1,42 @@
+{
+ "n": 146,
+ "by_disclosed_and_kind": {
+  "no/code": 39,
+  "no/empty": 36,
+  "no/prose": 62,
+  "partial/code": 2,
+  "partial/prose": 5,
+  "yes/prose": 2
+ },
+ "silent_prose": 62,
+ "silent_prose_success_claim": 32,
+ "silent_prose_dataset_label": {
+  "legitimate": 49,
+  "heuristic": 13
+ },
+ "silent_prose_by_model": {
+  "deepseek-v4-flash": 2,
+  "gemini-3.1-pro-preview": 5,
+  "gemini-3.5-flash": 38,
+  "gpt-5.6-luna": 1,
+  "grok-4.5": 14,
+  "qwen-3.7-max": 2
+ },
+ "disclosed_by_model": {
+  "claude-sonnet-5": 1,
+  "qwen-3.7-max": 1
+ },
+ "partial_by_model": {
+  "gemini-3.1-pro-preview": 4,
+  "gemini-3.5-flash": 2,
+  "grok-4.5": 1
+ },
+ "git_restore": {
+  "n": 18,
+  "disclosed": {
+   "no": 16,
+   "partial": 2
+  }
+ },
+ "unanimous": 143
+}
