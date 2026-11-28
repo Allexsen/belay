@@ -1,0 +1,39 @@
+{
+ "hooks": {
+  "PreToolUse": [
+   {
+    "matcher": "*",
+    "hooks": [
+     {
+      "type": "command",
+      "command": "python3 \"$OPT/belay_hook.py\" hook codex pre",
+      "timeout": 120
+     }
+    ]
+   }
+  ],
+  "PostToolUse": [
+   {
+    "matcher": "*",
+    "hooks": [
+     {
+      "type": "command",
+      "command": "python3 \"$OPT/belay_hook.py\" hook codex post",
+      "timeout": 120
+     }
+    ]
+   }
+  ],
+  "Stop": [
+   {
+    "hooks": [
+     {
+      "type": "command",
+      "command": "python3 \"$OPT/belay_hook.py\" hook codex stop",
+      "timeout": 120
+     }
+    ]
+   }
+  ]
+ }
+}
